@@ -1,0 +1,14889 @@
+﻿// ===== PWA install prompt =====
+// Chrome/Android fires beforeinstallprompt and lets a page defer + replay it later on a real
+// user gesture (a button click) -- must be captured this early (top-level, not inside a
+// function) since the event can fire before the rest of the app has initialized. iOS Safari
+// never fires this event at all and has no programmatic install API of any kind (Apple platform
+// restriction, not something a website can work around) -- renderInstallAppButton() below
+// detects iOS separately and shows manual instructions instead of a real install trigger.
+let _deferredInstallPrompt = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  _deferredInstallPrompt = e;
+  if (typeof currentPage !== 'undefined' && currentPage === 'settings' && typeof renderSettingsPage === 'function') renderSettingsPage();
+});
+window.addEventListener('appinstalled', () => {
+  _deferredInstallPrompt = null;
+  if (typeof currentPage !== 'undefined' && currentPage === 'settings' && typeof renderSettingsPage === 'function') renderSettingsPage();
+});
+function isIOSDevice() { return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream; }
+function isStandaloneApp() { return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true; }
+// Firefox dropped desktop PWA install (Site Specific Browser) support in Firefox 87 (2021) --
+// no beforeinstallprompt, no address-bar install icon, nothing a web page can trigger. Detected
+// separately so the Settings page can explain *why* no install button/badge is showing instead
+// of silently rendering nothing, which reads as a bug rather than a browser limitation.
+function isFirefoxBrowser() { return /firefox/i.test(navigator.userAgent) && !/seamonkey/i.test(navigator.userAgent); }
+
+// ===== i18n =====
+let currentLang = localStorage.getItem('ta_lang') || 'th';
+document.documentElement.lang = currentLang === 'en' ? 'en' : currentLang === 'ja' ? 'ja' : 'th';
+
+// ===== System account (superadmin) helpers =====
+function isEmployeeRecord(u) { return !!(u && !u.isSystemAccount); }
+function isSuperAdmin() { return !!(currentUser && currentUser.role === 'superadmin' && currentUser.isSystemAccount); }
+let previewRole = localStorage.getItem('ta_preview_role') || '';
+function effectiveRole() {
+  if (!isSuperAdmin()) return currentUser?.role || 'user';
+  return previewRole || 'superadmin';
+}
+function isPayrollLockDisabled() { return isSuperAdmin(); }
+function canViewOtherEmployees() {
+  // Superadmin always keeps the employee picker, even while role-previewing as Staff/Driver.
+  // Otherwise "ดูเป็น Staff" shows the system account's empty timesheet and every request
+  // button disappears — the account exists specifically to inspect those buttons.
+  if (isSuperAdmin()) return true;
+  const role = effectiveRole();
+  return role === 'md' || role === 'accounting';
+}
+
+// Superadmin inspecting another employee's timesheet: show that person's request buttons
+// (or the preview role's button set) so QA can see/click them. MD/Accounting preview stays
+// read-only, matching those real roles. Submits are still rejected server-side.
+function qaAttendanceInspectUser(targetUser) {
+  if (!isSuperAdmin() || !targetUser || targetUser.id === currentUser.id) return currentUser;
+  const preview = previewRole || '';
+  if (preview && !['user', 'driver', 'manager', 'marketing'].includes(preview)) return currentUser;
+  return { ...targetUser, role: preview || targetUser.role };
+}
+function qaAttendanceActionsEnabled(targetUser) {
+  if (!isSuperAdmin() || !targetUser || targetUser.id === currentUser.id) return false;
+  const preview = previewRole || '';
+  return !preview || ['user', 'driver', 'manager', 'marketing'].includes(preview);
+}
+function isMdAccountingView() {
+  const r = effectiveRole();
+  return r === 'md' || r === 'accounting' || r === 'superadmin';
+}
+function isMdView() {
+  const r = effectiveRole();
+  return r === 'md' || r === 'superadmin';
+}
+function isAccountingView() {
+  const r = effectiveRole();
+  return r === 'accounting' || r === 'superadmin';
+}
+function actingRoles() {
+  const r = effectiveRole();
+  if (r === 'superadmin') return ['md', 'accounting', 'manager'];
+  return [r];
+}
+async function requireSuperAdminConfirm(actionLabel) {
+  if (!isSuperAdmin()) return true;
+  const typed = prompt(L(`System account — type CONFIRM to ${actionLabel}`, `บัญชีระบบ — พิมพ์ CONFIRM เพื่อ${actionLabel}`));
+  return typed === 'CONFIRM';
+}
+function updateSystemAccountUI() {
+  const banner = document.getElementById('system-account-banner');
+  const preview = document.getElementById('role-preview-wrap');
+  if (banner) banner.style.display = isSuperAdmin() ? 'flex' : 'none';
+  if (preview) preview.style.display = isSuperAdmin() ? 'flex' : 'none';
+  const sel = document.getElementById('role-preview-select');
+  if (sel && isSuperAdmin()) sel.value = previewRole || '';
+  const userBtn = document.querySelector('.topbar-user-btn');
+  if (userBtn) userBtn.onclick = () => navigateTo(isSuperAdmin() ? 'dashboard' : 'checkin');
+}
+function onRolePreviewChange(val) {
+  previewRole = val || '';
+  if (previewRole) localStorage.setItem('ta_preview_role', previewRole);
+  else localStorage.removeItem('ta_preview_role');
+  applyRolePermissions();
+  updateUserUI();
+  if (currentPage) navigateTo(currentPage);
+}
+
+const i18n = {
+  th: {
+    // nav sections
+    ns_overview:'ภาพรวม', ns_personal:'ข้อมูลส่วนตัวและเวลา', ns_manager:'สำหรับผู้จัดการ',
+    ns_calendar:'ปฏิทิน', ns_finance:'การเงิน & รายงาน',
+    // nav items
+    nav_checkin:'ลงเวลาทำงาน', nav_dashboard:'แดชบอร์ด', nav_profile:'โปรไฟล์ของฉัน',
+    nav_attendance:'ตารางเวลาทำงาน', nav_myattendance:'รายการเข้า-ออกประตู',
+    nav_leave:'การจัดการวันลา', nav_myrequests:'ตรวจสอบสถานะคำขอ',
+    nav_employees:'ข้อมูลพนักงาน', nav_approval:'จัดการคำขอ',
+    nav_calendar:'ปฏิทินวันหยุด', nav_holidays:'จัดการวันหยุดประจำปี',
+    nav_payslip:'ใบเงินเดือน', nav_mypayslip:'สลิปเงินเดือน', nav_finalize:'Finalize Payroll', nav_reports:'รายงานสรุปวันทำงาน',
+    // page titles
+    pt_dashboard:'แดชบอร์ด', ps_dashboard:'ภาพรวมระบบลงเวลา',
+    pt_checkin:'ลงเวลาทำงาน', ps_checkin:'บันทึกเวลาเข้า-ออกงาน',
+    pt_attendance:'ตารางเวลาทำงาน', ps_attendance:'',
+    pt_myattendance:'รายการเข้า-ออกประตู', ps_myattendance:'บันทึกการสแกนเข้า-ออกอุปกรณ์ Hikvision',
+    pt_leave:'การจัดการวันลา', ps_leave:'ยื่นคำขอและตรวจสอบวันลา',
+    pt_myrequests:'ตรวจสอบสถานะคำขอ', ps_myrequests:'ติดตามคำขอแก้ไขเวลา แจ้งกลับดึก และอื่นๆ',
+    pt_approval:'จัดการคำขอ',
+    pt_employees:'ข้อมูลพนักงาน', ps_employees:'จัดการข้อมูลพนักงานทั้งหมด',
+    pt_payslip:'ใบเงินเดือน', ps_payslip:'คำนวณและออกใบเงินเดือน',
+    pt_finalize:'Finalize Payroll', ps_finalize:'กรอกภาษีหัก ณ ที่จ่ายจริงและยืนยันเงินเดือน',
+    pt_reports:'รายงานสรุป', ps_reports:'สรุปข้อมูลประจำเดือน',
+    pt_profile:'โปรไฟล์ของฉัน',
+    pt_calendar:'ปฏิทินวันหยุด', ps_calendar:'วันหยุดประจำปีและวันหยุดสาธารณะ',
+    pt_holidays:'จัดการวันหยุดประจำปี', ps_holidays:'กำหนดวันหยุดราชการและวันหยุดบริษัท',
+    // roles
+    role_md:'Managing Director', role_manager:'Manager', role_accounting:'Accounting',
+    role_user:'Staff', role_driver:'Driver', role_marketing:'Marketing', role_superadmin:'System Admin',
+    // checkin page
+    checkin_title:'บันทึกเวลาเข้างาน', checkin_sub:'กดปุ่มเพื่อบันทึกเวลาเข้า-ออกงาน',
+    btn_checkin:'เข้างาน', btn_checkout:'ออกงาน', btn_scanning:'กำลังสแกน...',
+    checkin_status_in:'เข้างานแล้ว', checkin_status_out:'ยังไม่ได้เข้างาน',
+    checkin_gps_ok:'GPS พร้อม', checkin_gps_searching:'กำลังค้นหาตำแหน่ง...',
+    checkin_gps_off:'ไม่สามารถระบุตำแหน่งได้',
+    today_log:'บันทึกวันนี้', no_log:'ยังไม่มีบันทึก',
+    // dashboard
+    dash_today_checkin:'เช็คอินวันนี้', dash_on_leave:'ลาวันนี้', dash_late:'มาสาย',
+    dash_ot:'OT วันนี้', dash_pending:'รอ Approve', dash_events_today:'กิจกรรมวันนี้',
+    // attendance table
+    att_date:'วันที่', att_day:'วัน', att_status:'สถานะ', att_checkin:'เวลาเข้า',
+    att_checkout:'เวลาออก', att_early_late:'Early Morning / Late Night / OT', att_actions:'',
+    att_period:'รอบ:', att_employee:'พนักงาน:',
+    btn_details:'รายละเอียด', btn_edit_time:'✏️ แก้เวลา', btn_ot:'⏱️',
+    btn_late_out:'🌙', btn_upcountry:'🗺️',
+    // leave
+    leave_annual:'ลาพักร้อน', leave_sick:'ลาป่วย', leave_business:'ลากิจ',
+    leave_upcountry:'Upcountry', leave_lateout:'แจ้งกลับดึก',
+    leave_ot:'ขอ OT', leave_comp:'วันหยุดชดเชย', leave_timecor:'แก้ไขเวลา',
+    leave_remaining:'วันลาคงเหลือ', leave_annual_lbl:'พักร้อน', leave_sick_lbl:'ป่วย',
+    leave_biz_lbl:'กิจ', btn_request_leave:'ขอวันลา', btn_request_upcountry:'Upcountry',
+    btn_request_lateout:'แจ้งกลับดึก', btn_request_ot:'ขอ OT', btn_request_comp:'ขอวันหยุดชดเชย',
+    btn_request_timecor:'ขอแก้ไขเวลา',
+    // statuses
+    status_pending:'รออนุมัติ (Manager)', status_pending_md:'รออนุมัติ (Managing Director)',
+    status_approved:'อนุมัติแล้ว', status_rejected:'ไม่อนุมัติ',
+    // approval
+    appr_all:'ทั้งหมด', appr_lateout:'กลับดึก', appr_ot:'OT', appr_leave:'วันลา',
+    appr_upcountry:'Upcountry', appr_timecor:'แก้ไขเวลา', appr_comp:'วันหยุดชดเชย', appr_longdistance:'Long Distance', appr_personalcar:'รถส่วนตัว', appr_clearattachments:'ล้างไฟล์แนบ',
+    btn_approve:'✓ อนุมัติ', btn_reject:'✕ ไม่อนุมัติ', btn_delete:'ลบ',
+    appr_empty:'ไม่มีคำขอ', appr_note:'หมายเหตุ:',
+    // employees
+    emp_name:'ชื่อ-นามสกุล', emp_position:'ตำแหน่ง', emp_role:'บทบาท',
+    emp_rights:'สิทธิ์', emp_salary:'เงินเดือน', emp_status:'สถานะ', emp_actions:'',
+    btn_add_emp:'+ เพิ่มพนักงาน', emp_active:'ทำงานอยู่', emp_inactive:'ลาออกแล้ว',
+    // reports
+    rpt_name:'ชื่อ', rpt_workdays:'วันทำงาน', rpt_late:'มาสาย', rpt_annual:'พักร้อน',
+    rpt_sick:'ป่วย', rpt_upcountry:'Upcountry', rpt_early:'Early Morning',
+    rpt_latenight:'Late Night', rpt_ot:'OT', rpt_payslip:'ใบเงินเดือน',
+    rpt_title:'สรุปรายเดือนพนักงานทุกคน',
+    // payslip
+    pay_income:'รายได้', pay_deduct:'รายการหัก', pay_net:'เงินเดือนสุทธิ',
+    pay_base:'เงินเดือนพื้นฐาน', pay_transport:'ค่าเดินทาง',
+    pay_pos_allow:'ค่าตำแหน่ง', pay_housing:'ค่าที่พัก',
+    pay_ot15:'OT ×1.5 (วันธรรมดา)', pay_ot20:'OT ×2.0', pay_ot30:'OT ×3.0 (วันหยุด)',
+    pay_upcountry:'Allowance 1 — Upcountry', pay_early_late:'Allowance 2 — Early/Late',
+    pay_phone:'Allowance 3 — ค่าโทรศัพท์',
+    pay_ssf:'ประกันสังคม (SSF)', pay_pvd:'กองทุนสำรองเลี้ยงชีพ (PVD)',
+    pay_pit:'ภาษีเงินได้บุคคล (PIT)', pay_total_deduct:'รวมหัก',
+    pay_employee:'พนักงาน:', pay_period_lbl:'รอบเงินเดือน:',
+    pay_created:'วันที่สร้าง:', pay_pay_date:'วันจ่าย:',
+    pay_ssf_detail:'5% สูงสุด ฿875 (ขั้นต่ำเงินเดือน ฿1,650)',
+    pay_pit_detail:'หัก ณ ที่จ่าย', pay_times:'ครั้ง', pay_total_hrs:'รวม',
+    // finalize
+    fin_title:'Finalize Payroll', fin_sub:'กรอกยอดภาษีหัก ณ ที่จ่ายจริง แล้วกด ✓ ยืนยัน ทีละคน',
+    fin_gross:'รวมรับ (฿)', fin_diligence:'เบี้ยขยันรอบนี้', fin_ssf:'SSF (฿)', fin_pvd:'PVD (฿)',
+    fin_tax:'ภาษี ณ ที่จ่าย (฿)', fin_net:'สุทธิ (฿)', fin_status:'สถานะ',
+    btn_confirm:'✓ ยืนยัน', btn_edit:'✏️ แก้ไข',
+    // profile
+    prof_title:'โปรไฟล์ของฉัน', prof_personal:'ข้อมูลส่วนตัว', prof_finance:'การเงิน',
+    prof_leave_quota:'โควต้าวันลา',
+    // common
+    btn_save:'บันทึก', btn_cancel:'ยกเลิก', btn_close:'ปิด', btn_print:'🖨️ พิมพ์',
+    btn_export:'📥 Export', btn_prev:'◀ ก่อนหน้า', btn_next:'ถัดไป ▶',
+    loading:'กำลังโหลด...', no_data:'ไม่มีข้อมูล', current_period:'← รอบปัจจุบัน',
+    day_mon:'จันทร์', day_tue:'อังคาร', day_wed:'พุธ', day_thu:'พฤหัสบดี',
+    day_fri:'ศุกร์', day_sat:'เสาร์', day_sun:'อาทิตย์',
+    // calendar/holidays
+    cal_title:'ปฏิทินวันหยุด', hol_title:'จัดการวันหยุดประจำปี',
+    hol_date:'วันที่', hol_name:'ชื่อวันหยุด', btn_add_hol:'+ เพิ่มวันหยุด',
+    hol_no_data:'ยังไม่มีวันหยุดที่กำหนด',
+    // misc
+    toast_no_permission:'⛔ ไม่มีสิทธิ์', ws_connected:'สแกนเนอร์: เชื่อมต่อแล้ว',
+    ws_offline:'สแกนเนอร์: ไม่ได้เชื่อมต่อ',
+    period_current:'รอบปัจจุบัน',
+  },
+  en: {
+    // nav sections
+    ns_overview:'Overview', ns_personal:'Personal & Time', ns_manager:'Management',
+    ns_calendar:'Calendar', ns_finance:'Finance & Reports',
+    // nav items
+    nav_checkin:'Check In', nav_dashboard:'Dashboard', nav_profile:'My Profile',
+    nav_attendance:'Attendance Table', nav_myattendance:'Door Events',
+    nav_leave:'Leave Management', nav_myrequests:'My Requests',
+    nav_employees:'Employees', nav_approval:'Manage Requests',
+    nav_calendar:'Holiday Calendar', nav_holidays:'Manage Holidays',
+    nav_payslip:'Payslip', nav_mypayslip:'My Payslip', nav_finalize:'Finalize Payroll', nav_reports:'Work Days Summary',
+    // page titles
+    pt_dashboard:'Dashboard', ps_dashboard:'Attendance System Overview',
+    pt_checkin:'Check In', ps_checkin:'Record your check-in / check-out time',
+    pt_attendance:'Attendance Table', ps_attendance:'',
+    pt_myattendance:'Door Events', ps_myattendance:'Hikvision scan records',
+    pt_leave:'Leave Management', ps_leave:'Submit and track leave requests',
+    pt_myrequests:'My Requests', ps_myrequests:'Track time corrections, late-out, and other requests',
+    pt_approval:'Manage Requests',
+    pt_employees:'Employees', ps_employees:'Manage all employee records',
+    pt_payslip:'Payslip', ps_payslip:'Calculate and issue payslips',
+    pt_finalize:'Finalize Payroll', ps_finalize:'Enter actual withholding tax and confirm payroll',
+    pt_reports:'Reports', ps_reports:'Monthly summary report',
+    pt_profile:'My Profile',
+    pt_calendar:'Holiday Calendar', ps_calendar:'Annual holidays and public holidays',
+    pt_holidays:'Manage Holidays', ps_holidays:'Set public and company holidays',
+    // roles
+    role_md:'Managing Director', role_manager:'Manager', role_accounting:'Accounting',
+    role_user:'Staff', role_driver:'Driver', role_marketing:'Marketing', role_superadmin:'System Admin',
+    // checkin page
+    checkin_title:'Check In / Check Out', checkin_sub:'Tap the button to record your time',
+    btn_checkin:'Check In', btn_checkout:'Check Out', btn_scanning:'Scanning...',
+    checkin_status_in:'Checked In', checkin_status_out:'Not Checked In',
+    checkin_gps_ok:'GPS Ready', checkin_gps_searching:'Locating...',
+    checkin_gps_off:'Location unavailable',
+    today_log:"Today's Log", no_log:'No records yet',
+    // dashboard
+    dash_today_checkin:"Today's Check-ins", dash_on_leave:'On Leave', dash_late:'Late',
+    dash_ot:'OT Today', dash_pending:'Pending Approval', dash_events_today:"Today's Events",
+    // attendance table
+    att_date:'Date', att_day:'Day', att_status:'Status', att_checkin:'Check In',
+    att_checkout:'Check Out', att_early_late:'Early Morning / Late Night / OT', att_actions:'',
+    att_period:'Period:', att_employee:'Employee:',
+    btn_details:'Details', btn_edit_time:'✏️ Edit Time', btn_ot:'⏱️',
+    btn_late_out:'🌙', btn_upcountry:'🗺️',
+    // leave
+    leave_annual:'Annual Leave', leave_sick:'Sick Leave', leave_business:'Business Leave',
+    leave_upcountry:'Upcountry', leave_lateout:'Late Night Out',
+    leave_ot:'Request OT', leave_comp:'Compensatory Day', leave_timecor:'Time Correction',
+    leave_remaining:'Leave Balance', leave_annual_lbl:'Annual', leave_sick_lbl:'Sick',
+    leave_biz_lbl:'Business', btn_request_leave:'Request Leave', btn_request_upcountry:'Upcountry',
+    btn_request_lateout:'Late Night Out', btn_request_ot:'Request OT', btn_request_comp:'Compensatory Day',
+    btn_request_timecor:'Time Correction',
+    // statuses
+    status_pending:'Pending (Manager)', status_pending_md:'Pending (Managing Director)',
+    status_approved:'Approved', status_rejected:'Rejected',
+    // approval
+    appr_all:'All', appr_lateout:'Late Night', appr_ot:'OT', appr_leave:'Leave',
+    appr_upcountry:'Upcountry', appr_timecor:'Time Edit', appr_comp:'Compensatory Day', appr_longdistance:'Long Distance', appr_personalcar:'Personal Car', appr_clearattachments:'Clear Attachments',
+    btn_approve:'✓ Approve', btn_reject:'✕ Reject', btn_delete:'Delete',
+    appr_empty:'No requests', appr_note:'Note:',
+    // employees
+    emp_name:'Full Name', emp_position:'Position', emp_role:'Role',
+    emp_rights:'Rights', emp_salary:'Salary', emp_status:'Status', emp_actions:'',
+    btn_add_emp:'+ Add Employee', emp_active:'Active', emp_inactive:'Resigned',
+    // reports
+    rpt_name:'Name', rpt_workdays:'Work Days', rpt_late:'Late', rpt_annual:'Annual',
+    rpt_sick:'Sick', rpt_upcountry:'Upcountry', rpt_early:'Early Morning',
+    rpt_latenight:'Late Night', rpt_ot:'OT', rpt_payslip:'Payslip',
+    rpt_title:'Monthly Employee Summary',
+    // payslip
+    pay_income:'Income', pay_deduct:'Deductions', pay_net:'Net Salary',
+    pay_base:'Base Salary', pay_transport:'Transport Allowance',
+    pay_pos_allow:'Position Allowance', pay_housing:'Housing Allowance',
+    pay_ot15:'OT ×1.5 (Weekday)', pay_ot20:'OT ×2.0', pay_ot30:'OT ×3.0 (Holiday)',
+    pay_upcountry:'Allowance 1 — Upcountry', pay_early_late:'Allowance 2 — Early/Late',
+    pay_phone:'Allowance 3 — Phone',
+    pay_ssf:'Social Security Fund (SSF)', pay_pvd:'Provident Fund (PVD)',
+    pay_pit:'Personal Income Tax (PIT)', pay_total_deduct:'Total Deductions',
+    pay_employee:'Employee:', pay_period_lbl:'Pay Period:',
+    pay_created:'Created:', pay_pay_date:'Pay Date:',
+    pay_ssf_detail:'5% max ฿875 (min salary ฿1,650)',
+    pay_pit_detail:'Withheld at source', pay_times:'times', pay_total_hrs:'total',
+    // finalize
+    fin_title:'Finalize Payroll', fin_sub:'Enter actual withholding tax, then click ✓ Confirm per employee',
+    fin_gross:'Gross (฿)', fin_diligence:'Diligence (this period)', fin_ssf:'SSF (฿)', fin_pvd:'PVD (฿)',
+    fin_tax:'Withholding Tax (฿)', fin_net:'Net (฿)', fin_status:'Status',
+    btn_confirm:'✓ Confirm', btn_edit:'✏️ Edit',
+    // profile
+    prof_title:'My Profile', prof_personal:'Personal Info', prof_finance:'Finance',
+    prof_leave_quota:'Leave Quota',
+    // common
+    btn_save:'Save', btn_cancel:'Cancel', btn_close:'Close', btn_print:'🖨️ Print',
+    btn_export:'📥 Export', btn_prev:'◀ Previous', btn_next:'Next ▶',
+    loading:'Loading...', no_data:'No data', current_period:'← Current Period',
+    day_mon:'Mon', day_tue:'Tue', day_wed:'Wed', day_thu:'Thu',
+    day_fri:'Fri', day_sat:'Sat', day_sun:'Sun',
+    // calendar/holidays
+    cal_title:'Holiday Calendar', hol_title:'Manage Holidays',
+    hol_date:'Date', hol_name:'Holiday Name', btn_add_hol:'+ Add Holiday',
+    hol_no_data:'No holidays defined yet',
+    // misc
+    toast_no_permission:'⛔ Access Denied', ws_connected:'Scanner: Connected',
+    ws_offline:'Scanner: Disconnected',
+    period_current:'Current Period',
+  }  ,ja: {
+    ns_overview:'概要', ns_personal:'個人情報・勤怠', ns_manager:'管理',
+    ns_calendar:'カレンダー', ns_finance:'財務 & レポート',
+    nav_checkin:'出退勤打刻', nav_dashboard:'ダッシュボード', nav_profile:'マイプロフィール',
+    nav_attendance:'勤怠表', nav_myattendance:'入退室記録',
+    nav_leave:'休暇管理', nav_myrequests:'申請状況',
+    nav_employees:'社員情報', nav_approval:'申請管理',
+    nav_calendar:'祝日カレンダー', nav_holidays:'祝日管理',
+    nav_payslip:'給与明細', nav_mypayslip:'自分の給与明細', nav_finalize:'給与確定', nav_reports:'出勤日数サマリー',
+    nav_tawi50:'源泉徴収票', nav_archive:'退職社員', nav_audit:'活動ログ', nav_settings:'設定',
+    nav_payroll_history:'給与履歴',
+    pt_dashboard:'ダッシュボード', ps_dashboard:'勤怠管理システム概要',
+    pt_checkin:'出退勤打刻', ps_checkin:'出退勤時刻を記録する',
+    pt_attendance:'勤怠表', ps_attendance:'',
+    pt_myattendance:'入退室記録', ps_myattendance:'Hikvisionスキャン記録',
+    pt_leave:'休暇管理', ps_leave:'休暇申請と確認',
+    pt_myrequests:'申請状況', ps_myrequests:'時刻修正・深夜残業などの申請を確認',
+    pt_approval:'申請管理',
+    pt_employees:'社員情報', ps_employees:'全社員情報の管理',
+    pt_payslip:'給与明細', ps_payslip:'給与明細の計算と発行',
+    pt_finalize:'給与確定', ps_finalize:'実際の源泉徴収税を入力して給与を確定',
+    pt_reports:'レポート', ps_reports:'月次サマリーレポート',
+    pt_profile:'マイプロフィール',
+    pt_calendar:'祝日カレンダー', ps_calendar:'年間祝日と祝祭日',
+    pt_holidays:'祝日管理', ps_holidays:'会社と法定の祝日を設定',
+    role_md:'専務取締役', role_manager:'マネージャー', role_accounting:'経理',
+    role_user:'スタッフ', role_driver:'ドライバー', role_marketing:'マーケティング', role_superadmin:'システム管理者',
+    checkin_title:'出退勤打刻', checkin_sub:'ボタンをタップして時刻を記録',
+    btn_checkin:'出勤', btn_checkout:'退勤', btn_scanning:'スキャン中...',
+    checkin_status_in:'出勤済み', checkin_status_out:'未出勤',
+    checkin_gps_ok:'GPS準備完了', checkin_gps_searching:'位置情報取得中...',
+    checkin_gps_off:'位置情報が利用できません',
+    today_log:'本日のログ', no_log:'記録はまだありません',
+    dash_today_checkin:'本日のチェックイン', dash_on_leave:'休暇中', dash_late:'遅刻',
+    dash_ot:'本日の残業', dash_pending:'承認待ち', dash_events_today:'本日のイベント',
+    att_date:'日付', att_day:'曜日', att_status:'状態', att_checkin:'チェックイン',
+    att_checkout:'チェックアウト', att_early_late:'早出 / 深夜 / 残業', att_actions:'',
+    att_period:'期間：', att_employee:'社員：',
+    btn_details:'詳細', btn_edit_time:'✏️ 時刻編集', btn_ot:'⏱️',
+    btn_late_out:'🌙', btn_upcountry:'🗺️',
+    leave_annual:'有給休暇', leave_sick:'病気休暇', leave_business:'業務休暇',
+    leave_upcountry:'出張', leave_lateout:'深夜残業',
+    leave_ot:'残業申請', leave_comp:'振替休日', leave_timecor:'時刻修正',
+    leave_remaining:'休暇残日数', leave_annual_lbl:'有給', leave_sick_lbl:'病気',
+    leave_biz_lbl:'業務', btn_request_leave:'休暇申請', btn_request_upcountry:'出張',
+    btn_request_lateout:'深夜残業', btn_request_ot:'残業申請', btn_request_comp:'振替休日',
+    btn_request_timecor:'時刻修正',
+    status_pending:'承認待ち（マネージャー）', status_pending_md:'承認待ち（専務）',
+    status_approved:'承認済み', status_rejected:'却下',
+    appr_all:'全て', appr_lateout:'深夜残業', appr_ot:'残業', appr_leave:'休暇',
+    appr_upcountry:'出張', appr_timecor:'時刻修正', appr_comp:'振替休日', appr_longdistance:'長距離', appr_personalcar:'自家用車', appr_clearattachments:'添付削除',
+    btn_approve:'✓ 承認', btn_reject:'✕ 却下', btn_delete:'削除',
+    appr_empty:'申請はありません', appr_note:'メモ：',
+    emp_name:'氏名', emp_position:'役職', emp_role:'役割',
+    emp_rights:'権限', emp_salary:'給与', emp_status:'状態', emp_actions:'',
+    btn_add_emp:'+ 社員追加', emp_active:'在職中', emp_inactive:'退職',
+    rpt_name:'名前', rpt_workdays:'出勤日数', rpt_late:'遅刻', rpt_annual:'有給',
+    rpt_sick:'病気', rpt_upcountry:'出張', rpt_early:'早出',
+    rpt_latenight:'深夜残業', rpt_ot:'残業', rpt_payslip:'給与明細',
+    rpt_title:'月次社員サマリー',
+    pay_income:'収入', pay_deduct:'控除', pay_net:'手取り給与',
+    pay_base:'基本給', pay_transport:'交通費',
+    pay_pos_allow:'役職手当', pay_housing:'住宅手当',
+    pay_ot15:'残業 ×1.5（平日）', pay_ot20:'残業 ×2.0', pay_ot30:'残業 ×3.0（休日）',
+    pay_upcountry:'手当1 — 出張', pay_early_late:'手当2 — 早出/深夜',
+    pay_phone:'手当3 — 携帯',
+    pay_ssf:'社会保険（SSO）', pay_pvd:'積立年金（PVD）',
+    pay_pit:'所得税（PIT）', pay_total_deduct:'控除合計',
+    pay_employee:'社員：', pay_period_lbl:'給与期間：',
+    pay_created:'作成日：', pay_pay_date:'支払日：',
+    pay_ssf_detail:'5%・上限875バーツ（最低賃金1,650バーツ）',
+    pay_pit_detail:'源泉徴収', pay_times:'回', pay_total_hrs:'合計',
+    fin_title:'給与確定', fin_sub:'実際の源泉徴収税を入力し、社員ごとに ✓ 確認 をクリック',
+    fin_gross:'総支給（バーツ）', fin_diligence:'精勤手当（今期）', fin_ssf:'SSF（バーツ）', fin_pvd:'PVD（バーツ）',
+    fin_tax:'源泉徴収税（バーツ）', fin_net:'手取り（バーツ）', fin_status:'状態',
+    btn_confirm:'✓ 確認', btn_edit:'✏️ 編集',
+    prof_title:'マイプロフィール', prof_personal:'個人情報', prof_finance:'財務情報',
+    prof_leave_quota:'休暇割当',
+    btn_save:'保存', btn_cancel:'キャンセル', btn_close:'閉じる', btn_print:'🖨️ 印刷',
+    btn_export:'📥 エクスポート', btn_prev:'◀ 前へ', btn_next:'次へ ▶',
+    loading:'読み込み中...', no_data:'データなし', current_period:'← 今期',
+    day_mon:'月', day_tue:'火', day_wed:'水', day_thu:'木',
+    day_fri:'金', day_sat:'土', day_sun:'日',
+    cal_title:'祝日カレンダー', hol_title:'祝日管理',
+    hol_date:'日付', hol_name:'祝日名', btn_add_hol:'+ 祝日追加',
+    hol_no_data:'祝日が設定されていません',
+    toast_no_permission:'⛔ アクセス拒否', ws_connected:'スキャナー：接続済み',
+    ws_offline:'スキャナー：切断',
+    period_current:'今期',
+  }
+};
+function t(key) { return (i18n[currentLang] || i18n.th)[key] || key; }
+function L(en, th) { if (currentLang === 'ja') { return (window.LANG_JA && window.LANG_JA[en]) || en; } return currentLang === 'en' ? en : th; }
+// F-03: user-typed free text (leave reason, name/position/contact fields, etc.) gets interpolated
+// straight into innerHTML all over this file with no escaping — wrap any such value with this
+// before it goes into a template literal destined for innerHTML (textContent/value via DOM APIs
+// don't need it, only string-built HTML does).
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+// For building inline event-handler attributes with an interpolated string argument, e.g.
+// onclick="fn('${escapeJsAttr(s)}')" -- escapeHtml() alone is NOT enough here: the browser decodes
+// HTML entities in an attribute's text (turning &#39; back into ') before handing it to the JS
+// engine as the event-handler source, so an escapeHtml()-only string can still break out of the
+// single-quoted JS argument. Escape JS-string-special chars first so they survive that decode step
+// as literal backslash-escapes, then escapeHtml() the result for the surrounding HTML attribute.
+function escapeJsAttr(s) {
+  return escapeHtml(String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
+}
+// emergencyRelation is stored as the Thai option value itself (dropdown), so read-only displays
+// need this to translate it — falls back to the raw value for old free-text data entered before
+// this field became a dropdown.
+function relationLabel(val) {
+  const map = { 'บิดา':['Father','บิดา'], 'มารดา':['Mother','มารดา'], 'คู่สมรส':['Spouse','คู่สมรส'], 'บุตร':['Child','บุตร'], 'พี่น้อง':['Sibling','พี่น้อง'], 'ญาติ':['Relative','ญาติ'], 'เพื่อน':['Friend','เพื่อน'], 'อื่นๆ':['Other','อื่นๆ'] };
+  const pair = map[val];
+  return pair ? L(pair[0], pair[1]) : (val || '');
+}
+// 2026-08-17: the value set here must match server.js's NAME_PREFIX_VALUES exactly -- add a
+// value in both places together, plus BOTH <option> lists in index.html (#emp-name-prefix,
+// #emp-name-prefix-th).
+// User decision (2026-08-17): no Japanese equivalent for a Thai civil-registration prefix --
+// deliberately NOT added to LANG_JA, so JA mode falls back to the English Mr./Mrs./Miss via
+// L()'s own fallback (see L() at line 333) rather than a THA transliteration or a made-up JA term.
+function namePrefixLabel(val) {
+  const map = { mr: ['Mr.', 'นาย'], mrs: ['Mrs.', 'นาง'], ms: ['Miss', 'นางสาว'] };
+  const pair = map[val];
+  return pair ? L(pair[0], pair[1]) : '';
+}
+// 2026-08-17: #emp-name-prefix (always-English options, paired with the English name row) and
+// #emp-name-prefix-th (always-Thai options, paired with the Thai name row) are two separate
+// <select> controls for the SAME underlying `namePrefix` value, shown twice by user request
+// rather than a single select with data-en-swapped option text -- keeps them in sync on every
+// change. `openEditEmployee()`'s populate step and `emp-form.reset()` (native, both selects are
+// plain form fields) are the other two places a value gets INTO both selects; this is the only
+// place a value moves BETWEEN them after that.
+function syncNamePrefix(source) {
+  const otherId = source.id === 'emp-name-prefix' ? 'emp-name-prefix-th' : 'emp-name-prefix';
+  const other = document.getElementById(otherId);
+  if (other) other.value = source.value;
+}
+// 2026-08-17: shared by both read-only profile views (openEmployeeProfile(), renderMyProfile())
+// so the idcard/passport/tax_id 3-way label + display-formatting logic isn't duplicated -- the
+// EDIT-side equivalent (onEmpIdTypeChange()/onMyProfileIdTypeChange()) stays separate since it
+// also touches maxlength/placeholder, not just display text.
+function idCardFieldLabel(idType) {
+  if (idType === 'passport') return '🛂 Passport No.';
+  if (idType === 'tax_id') return '🪪 ' + L('Tax ID Number', 'เลขประจำตัวผู้เสียภาษีอากร');
+  return '🪪 ' + L('National ID', 'เลขบัตรประชาชน');
+}
+function formatIdCardValue(idType, idCard) {
+  if (!idCard) return '—';
+  // Only a Thai national ID has the fixed 13-digit grouping -- passport and foreign tax ID
+  // numbers vary in length/format, so show them verbatim instead of forcing the Thai pattern.
+  if (idType === 'passport' || idType === 'tax_id') return idCard;
+  return idCard.replace(/(\d)(\d{4})(\d{5})(\d{2})(\d)/, '$1 $2 $3 $4 $5');
+}
+// flatpickr overrides the native <input type="date">/<input type="time"> popup so the picker
+// itself follows currentLang (Chrome's native pickers ignore the `lang` attribute entirely) —
+// dateFormat/time storage format stays ISO so .value keeps matching what the rest of the app
+// already expects from these inputs. flatpickr rewrites the input's type to "text" (class
+// "flatpickr-input") the first time it initializes — so on every call AFTER the first, a plain
+// `input[type="date"]`/`input[type="time"]` selector alone matches nothing and the locale would
+// silently stop updating. Match both the not-yet-initialized and already-initialized shape so
+// every subsequent call (language toggle, page nav, modal open) still finds and re-locales them.
+// Safe to call repeatedly/liberally — destroys any existing instance on a given input first.
+function initDatePickers() {
+  if (typeof flatpickr === 'undefined') return;
+  const locale = currentLang === 'ja' ? 'ja' : currentLang === 'th' ? 'th' : 'default';
+  // Display order must actually follow the language, not just the calendar's month/weekday
+  // names — ญี่ปุ่น alone is genuinely year-month-day (年月日) by convention; Thai and English
+  // here both read day-month-year. `dateFormat` stays ISO (Y-m-d) regardless, since that's what
+  // every other .value read/write in this app already assumes — `altInput`+`altFormat` is
+  // flatpickr's built-in way to show one format to the user while an input the app already reads
+  // by the same `id` silently keeps holding the ISO string underneath, so no other code needs
+  // to change to understand a locale-formatted display value.
+  const altFormat = currentLang === 'ja' ? 'Y年m月d日' : 'd/m/Y';
+  const datePlaceholder = currentLang === 'ja' ? 'YYYY年MM月DD日' : 'DD/MM/YYYY';
+  document.querySelectorAll('input[type="date"], input.flatpickr-input:not(.flatpickr-time-input)').forEach(inp => {
+    if (inp._flatpickr) inp._flatpickr.destroy();
+    // flatpickr, unlike the native <input type="date"> it replaces, shows nothing at all when
+    // empty instead of a "mm/dd/yyyy"-style hint. flatpickr has no `placeholder` config option
+    // of its own (it was silently ignored here at first) — it just inherits whatever real
+    // `placeholder` HTML attribute the input already has (and copies it onto the altInput it
+    // creates below), so set that directly beforehand.
+    inp.setAttribute('placeholder', datePlaceholder);
+    flatpickr(inp, { locale, dateFormat: 'Y-m-d', altInput: true, altFormat, allowInput: true });
+  });
+  // Time inputs get the same locale-aware treatment — 24h clock for th/ja (the norm in both),
+  // 12h AM/PM for en. Tagged with .flatpickr-time-input so the date-input selector above (which
+  // also matches already-initialized `input.flatpickr-input`) never mistakes one for the other.
+  document.querySelectorAll('input[type="time"], input.flatpickr-time-input').forEach(inp => {
+    if (inp._flatpickr) inp._flatpickr.destroy();
+    inp.classList.add('flatpickr-time-input');
+    inp.setAttribute('placeholder', 'HH:MM');
+    // 24h clock for every language, including English — user explicitly asked English to stay
+    // 24h too rather than switching to 12h AM/PM (an earlier version of this fix did that).
+    flatpickr(inp, {
+      locale, enableTime: true, noCalendar: true, dateFormat: 'H:i', time_24hr: true, allowInput: true,
+      // 2026-08-06: user asked for an explicit confirm affordance on the time popup instead of
+      // having to click elsewhere to dismiss it -- flatpickr has no built-in OK button in
+      // noCalendar/time-only mode, so append one directly onto the popup each time it opens.
+      onReady: (selectedDates, dateStr, fp) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'flatpickr-time-ok-btn';
+        btn.textContent = L('✓ Done', '✓ ตกลง');
+        btn.onclick = () => fp.close();
+        fp.calendarContainer.appendChild(btn);
+      },
+    });
+  });
+}
+function toggleLang() {
+  currentLang = currentLang === 'th' ? 'en' : currentLang === 'en' ? 'ja' : 'th';
+  localStorage.setItem('ta_lang', currentLang);
+  const btn = document.getElementById('lang-toggle-btn');
+  if (btn) btn.textContent = currentLang === 'th' ? 'EN' : currentLang === 'en' ? 'JP' : 'ไทย';
+  applyLanguage();
+}
+function applyLanguage() {
+  try {
+    document.documentElement.lang = currentLang === 'en' ? 'en' : currentLang === 'ja' ? 'ja' : 'th';
+    const _dLang = currentLang === 'en' ? 'en' : currentLang === 'ja' ? 'ja' : 'th';
+    document.querySelectorAll('input[type="date"]').forEach(inp => inp.setAttribute('lang', _dLang));
+    const btn = document.getElementById('lang-toggle-btn');
+    if (btn) btn.textContent = currentLang === 'th' ? 'EN' : currentLang === 'en' ? 'JP' : 'ไทย';
+    fixStaticText();
+    applyStaticI18n();
+    // applyStaticI18n() just reset the WS status dot's tooltip back to its cached initial
+    // ("Disconnected") text via data-en-title — re-derive it from the actual live connection
+    // state so it doesn't lie about a connected scanner right after a language toggle.
+    updateWsStatus(hikvisionWs && hikvisionWs.readyState === 1 ? 'online' : 'offline');
+    // Dark mode toggle label ("โหมดมืด"/"Dark Mode") is built from currentLang at the time
+    // applyDarkMode() last ran — re-run it here so switching language actually updates the text
+    // instead of leaving it frozen in whatever language was active on page load.
+    applyDarkMode(document.documentElement.getAttribute('data-theme') === 'dark');
+    initDatePickers();
+    if (currentUser) { applyRolePermissions(); updateUserUI(); }
+    if (currentPage && currentUser) navigateTo(currentPage);
+    // Employee Profile modal is built from a JS template (L() baked in at render time, not
+    // data-en attributes), so it doesn't self-heal like the rest of the static UI — rebuild it
+    // in place if it's currently open, keeping whichever tab was active.
+    if (profileModalUserId && document.getElementById('profile-modal').classList.contains('show')) {
+      const tabs = document.querySelectorAll('#profile-modal-content .profile-tab');
+      const activeIndex = Array.from(tabs).findIndex(t => t.classList.contains('active'));
+      openEmployeeProfile(profileModalUserId);
+      const newTabs = document.querySelectorAll('#profile-modal-content .profile-tab');
+      if (activeIndex > 0 && newTabs[activeIndex]) newTabs[activeIndex].click();
+    }
+  } catch(e) { console.error('[applyLanguage]', e); }
+}
+
+// ===== BACKEND =====
+const _isHttps  = window.location.protocol === 'https:';
+const _nasHost  = '192.168.100.100';
+const _isLan    = window.location.hostname === _nasHost || window.location.hostname === 'localhost';
+const NAS_BACKEND = _isLan
+  ? (_isHttps ? `https://${_nasHost}:3443` : `http://${_nasHost}:3000`)
+  : `${window.location.protocol}//${window.location.host}`;
+
+// ===== JWT AUTH TOKEN =====
+let AUTH_TOKEN = null;
+let REMEMBER_ME = false; // set at login from the "Remember me for 30 days" checkbox; extends both the JWT (server-side) and the inactivity timeout (client-side) from the 8h defaults to 30 days
+// 2026-08-09: a page load fires several apiFetch() calls in parallel (holidays, settings, leaves,
+// users, ...) -- if the token is expired/invalid, EVERY one of them independently 401s and used to
+// each show its own "Session expired" toast, stacking up a wall of duplicate notifications (user
+// report: 6 identical toasts at once). Guarded to fire at most once per session.
+// 2026-08-09 (Opus audit finding 6.1): originally reset inside saveSession(), which turned out to
+// fire on almost every user action (page navigation, check-in/out, profile save), not only on a
+// fresh login/token refresh -- reset explicitly at the two actual token-issuing points instead
+// (login()'s success path, submitPasswordChange()'s reissued token) so the invariant this comment
+// describes is the one the code actually has.
+let _sessionExpiredShown = false;
+// 2026-08-09 (Opus audit finding 6.3): setTimeout(logout, ...) handles from both trigger sites
+// (below, and startSessionTimer()) were never captured/cleared -- a fast re-login within the
+// 800ms/1500ms window could still get logged straight back out by a stale queued call. Both sites
+// now stash their handle here; login() clears it before it can fire.
+let _pendingLogoutTimer = null;
+
+async function apiFetch(path, opts = {}) {
+  const headers = { ...(opts.headers || {}) };
+  if (AUTH_TOKEN) headers['Authorization'] = `Bearer ${AUTH_TOKEN}`;
+  const res = await fetch(`${NAS_BACKEND}${path}`, { ...opts, headers });
+  if (res.status === 401 && !_sessionExpiredShown) {
+    _sessionExpiredShown = true;
+    showToast(L('⏰ Session expired — please log in again', '⏰ หมดเวลาล็อกอิน — กรุณาเข้าสู่ระบบใหม่'), 'warning');
+    clearTimeout(_pendingLogoutTimer);
+    _pendingLogoutTimer = setTimeout(logout, 800);
+  }
+  return res;
+}
+
+// ===== APP SETTINGS (configurable by Accounting/MD via Settings page) =====
+let APP_SETTINGS = {
+  company: { name: 'Tozai Boeki Kaisha (Thailand) Ltd.', nameTh: '', address: '', addressTh: '', taxId: '', bankName: 'Bangkok Bank', bankCode: '002', pvdLicenseNo: '', ssoEmployerAccountNo: '' },
+  payroll: { periodStartDay: 21 },
+  sso: { rate: 5, minSalary: 1650, maxSalary: 17500, maxAmount: 875 },
+  allowances: {
+    upcountry: 240,
+    earlyMorning1: 240, earlyMorning2: 480,
+    earlyThreshold1Min: 450, earlyThreshold2Min: 390,
+    lateNight1: 240, lateNight2: 480, lateNightThreshold1Hour: 19, lateNightThreshold2Hour: 20,
+    // 2026-07-31: centralized from per-employee fields -- see server.js DEFAULT_APP_SETTINGS.
+    diligence: 200, longDistance: 150, longDistanceThresholdKm: 250, personalCar: 1000, phone: 1000
+  },
+  workSchedule: { standardStartHour: 8, standardStartMinute: 30 },
+  leave: { carryForwardMax: 5, carryForwardExpiryMonth: 3, carryForwardExpiryDay: 31, carryForwardNotifyDays: 30 },
+  allowanceTypes: [],
+  lateDeductPolicy: {
+    enabled: false,
+    effectiveFromPeriod: '',
+    tiers: [
+      { fromMin: 1,  toMin: 10, deductMin: 10 },
+      { fromMin: 11, toMin: 20, deductMin: 20 }
+    ]
+  },
+  tax: {
+    personalAllowanceAnnual: 60000,
+    brackets: [
+      { upTo: 150000, rate: 0 },
+      { upTo: 300000, rate: 5 },
+      { upTo: 500000, rate: 10 },
+      { upTo: 750000, rate: 15 },
+      { upTo: 1000000, rate: 20 },
+      { upTo: 2000000, rate: 25 },
+      { upTo: 5000000, rate: 30 },
+      { upTo: Infinity, rate: 35 }
+    ]
+  },
+  allowanceEligibility: {
+    diligence:    ['driver'],
+    longDistance: ['driver'],
+    personalCar:  ['user', 'manager'],
+    upcountry:    ['md', 'manager', 'user', 'driver'],
+    earlyLate:    ['md', 'manager', 'user', 'driver'],
+    ot:           ['md', 'manager', 'user', 'driver'],
+    phone:        ['md', 'manager', 'accounting', 'user', 'marketing', 'driver'],
+  }
+};
+
+// 2026-07-31: optimistic-concurrency stamp for appSettings -- set from GET /api/settings's
+// appSettings.updatedAt, echoed back on save so the server can detect a concurrent edit.
+let APP_SETTINGS_UPDATED_AT = null;
+// Loaded from backend; keyed by YYYYMMDD of period start — { locked, lockedAt, lockedBy }
+let PERIOD_LOCKS = {};
+// Carry-forward annual leave — keyed by "YYYY_userId" → days (number)
+let LEAVE_CARRY_FORWARD = {};
+// 50 ทวิ Accounting overrides — keyed by "YYYY_userId" → { grossOverride, pitOverride }
+let TAWI50_OVERRIDES = {};
+
+// ===== ALLOWANCE ELIGIBILITY (DUAL-SYNC BLOCK v1) =====
+// Must stay byte-identical between Z:\attendance\js\app.js and
+// Z:\attendance-server\backend\server.js. Verify with a diff of this block before deploying
+// either file. 2026-07-31: replaces hardcoded role checks (user.role === 'driver', isAcctMkt,
+// etc.) scattered across computePayroll()/renderPayslip()/payslipXlsx.js/the Finalize Payroll
+// page with a single settings-driven eligibility table, so "who gets this allowance" is a
+// config edit instead of a code change requiring both engines to be touched in lockstep.
+const ALLOWANCE_KEYS = ['diligence', 'longDistance', 'personalCar', 'upcountry', 'earlyLate', 'ot', 'phone'];
+const ROLE_KEYS = ['md', 'manager', 'accounting', 'user', 'marketing', 'driver'];
+const DEFAULT_ALLOWANCE_ELIGIBILITY = {
+  diligence:    ['driver'],
+  longDistance: ['driver'],
+  personalCar:  ['user', 'manager'],
+  upcountry:    ['md', 'manager', 'user', 'driver'],
+  earlyLate:    ['md', 'manager', 'user', 'driver'],
+  ot:           ['md', 'manager', 'user', 'driver'],
+  // 2026-07-31: phone allowance has zero real correlation with role (only 1 of 4 'user'-role
+  // employees ever had it) -- this default is intentionally permissive since the actual gate is
+  // the per-employee user.phoneAllowanceEligible flag (see computePayroll), same pattern as
+  // personalCar. A missing key here would throw in isAllowanceEligible() below, not just be over-permissive.
+  phone:        ['md', 'manager', 'accounting', 'user', 'marketing', 'driver'],
+};
+// allowanceEligibilityConfig: the `allowanceEligibility` sub-object of appSettings (may be
+// missing entirely, or missing individual keys -- per-key fallback so a partially written
+// config can never silently zero out an unrelated allowance).
+function isAllowanceEligible(allowanceEligibilityConfig, role, key) {
+  const list = allowanceEligibilityConfig && allowanceEligibilityConfig[key];
+  return Array.isArray(list) ? list.includes(role) : DEFAULT_ALLOWANCE_ELIGIBILITY[key].includes(role);
+}
+// 2026-08-27: Early Morning / Late Night money is tied to a face-scanner event, not a web
+// Check In / Check Out button. Missing source (time-correction overlay with no scan) must not
+// count as a device scan. Must stay identical in app.js and server.js.
+function isDeviceScanSource(source) {
+  return source === 'device';
+}
+// ===== END DUAL-SYNC BLOCK =====
+
+function calcAnnualTax(taxableIncome) {
+  let tax = 0, prev = 0;
+  for (const b of APP_SETTINGS.tax.brackets) {
+    if (taxableIncome <= prev) break;
+    tax += (Math.min(taxableIncome, b.upTo === Infinity ? taxableIncome : b.upTo) - prev) * b.rate / 100;
+    if (b.upTo === Infinity || taxableIncome <= b.upTo) break;
+    prev = b.upTo;
+  }
+  return Math.round(tax);
+}
+
+// Loaded from backend at startup — do not hardcode
+let DATA_USERS = [];
+let nextUserId = 1;
+
+async function loadUsersFromBackend() {
+  try {
+    const res = await apiFetch(`/api/users`);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const users = await res.json();
+    DATA_USERS.length = 0;
+    users.sort((a, b) => parseInt(a.employeeNo) - parseInt(b.employeeNo)).forEach(u => DATA_USERS.push(u));
+    nextUserId = DATA_USERS.length > 0 ? Math.max(...DATA_USERS.map(u => u.id)) + 1 : 1;
+    console.log('[APP] Loaded', DATA_USERS.length, 'users from backend');
+    return true;
+  } catch(e) {
+    console.error('[APP] Failed to load users:', e.message);
+    return false;
+  }
+}
+
+async function syncHikvisionEmployees(silent = false) {
+  if (currentUser?.isObserver) return; // silent skip — this also auto-fires on every login
+  // Backend now role-gates this endpoint to md/accounting/manager (F-01) since it mutates
+  // the user list — skip the call entirely for other roles instead of firing it and eating
+  // a 403 on every login (this also auto-fires silently on startup, see call sites below).
+  if (!actingRoles().some(r => ['md', 'accounting', 'manager'].includes(r))) return;
+  const btn = document.getElementById('btn-sync-hikvision');
+  if (btn) { btn.disabled = true; btn.textContent = L('⏳ Syncing...', '⏳ กำลัง Sync...'); }
+  try {
+    const res  = await apiFetch(`/api/users/sync-hikvision`, { method:'POST' });
+    const data = await res.json();
+    if (data.success) {
+      if (data.added > 0) {
+        await loadUsersFromBackend();
+        await loadAttendanceFromBackend();
+        if (currentPage === 'employees') renderEmployeesTable();
+        renderDashboard();
+        if (data.partial) {
+          // LOW fix 2026-08-04 (retrospective Opus audit): the backend's 60s batch watchdog can
+          // now return added>0 with partial:true (some device responses never came back) -- this
+          // used to be indistinguishable from a clean full success, surfacing as the same ✅
+          // toast even though a real sync failure happened.
+          showToast(currentLang === 'ja' ? `⚠️ 同期タイムアウト — タイムアウト前に従業員${data.added}名を追加` : L(`⚠️ Sync timed out — added ${data.added} employee(s) before timing out`, `⚠️ Sync หมดเวลา — เพิ่มพนักงานได้ ${data.added} คนก่อนหมดเวลา`), 'warning');
+        } else {
+          showToast(currentLang === 'ja' ? `✅ 同期完了 — 新規従業員${data.added}名を追加` : L(`✅ Sync complete — added ${data.added} new employee(s)`, `✅ Sync สำเร็จ — เพิ่มพนักงานใหม่ ${data.added} คน`), 'success');
+        }
+      } else if (data.partial) {
+        if (!silent) showToast(currentLang === 'ja' ? '⚠️ 同期がタイムアウトしました — もう一度お試しください' : L('⚠️ Sync timed out before finishing — please try again', '⚠️ Sync หมดเวลาก่อนเสร็จสิ้น — กรุณาลองใหม่อีกครั้ง'), 'warning');
+      } else if (!silent) {
+        showToast(L('ℹ️ No new employees from Hikvision', 'ℹ️ ไม่มีพนักงานใหม่จาก Hikvision'), 'info');
+      }
+    } else if (!silent) {
+      showToast(L('❌ Sync failed: ', '❌ Sync ไม่สำเร็จ: ') + data.message, 'danger');
+    }
+  } catch(e) {
+    if (!silent) showToast(L('❌ Cannot connect to backend: ', '❌ เชื่อมต่อ backend ไม่ได้: ') + e.message, 'danger');
+  }
+  if (btn) { btn.disabled = false; btn.textContent = L('🔄 Sync from Hikvision', '🔄 Sync จาก Hikvision'); }
+  // After sync, check if there are still unrecognized scans
+  checkUnknownScans();
+}
+
+// Check events.json for employeeNos not in DATA_USERS — show warning on employees page
+async function checkUnknownScans() {
+  try {
+    const res = await apiFetch(`/api/events?limit=5000`);
+    const evs = await res.json();
+    const knownNos = new Set(DATA_USERS.map(u => String(u.employeeNo)).filter(Boolean));
+    const unknownNos = [...new Set(evs.map(e => String(e.employeeNo)).filter(n => n && !knownNos.has(n)))];
+    const banner = document.getElementById('unknown-scan-banner');
+    if (banner) {
+      if (unknownNos.length > 0) {
+        banner.style.display = '';
+        banner.innerHTML = `⚠️ ${L('Detected scans from Hikvision ID', 'พบการสแกนจาก Hikvision ID')} <b>${escapeHtml(unknownNos.join(', '))}</b> ${L('not yet in the system', 'ที่ยังไม่มีในระบบ')}
+          &nbsp;<button class="btn btn-sm" style="background:#f59e0b;color:#fff;border:none;padding:4px 12px;border-radius:6px;cursor:pointer" onclick="syncHikvisionEmployees()">${L('🔄 Auto-sync', '🔄 Sync เพิ่มอัตโนมัติ')}</button>`;
+      } else {
+        banner.style.display = 'none';
+      }
+    }
+  } catch(e) {}
+}
+
+// 2026-08-06 (round 4 of the door-access re-audit chain): now takes the whole user object instead
+// of just employeeNo, and routes to /api/users/id/:id/role when there's no employeeNo to address
+// the record by (see PUT /api/users/id/:id's comment on server.js for why that can happen) --
+// previously a role change for such an employee was silently never attempted at all (the caller
+// gated the whole call on `u.employeeNo`), with no error shown anywhere.
+async function updateUserRoleBackend(u, role) {
+  if (blockIfObserver()) return { success:false, message:'Observer accounts are read-only' };
+  try {
+    const url = u.employeeNo ? `/api/users/${encodeURIComponent(u.employeeNo)}/role` : `/api/users/id/${u.id}/role`;
+    const res  = await apiFetch(url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role })
+    });
+    return await res.json();
+  } catch(e) {
+    return { success:false, message:e.message };
+  }
+}
+
+let DATA_LEAVES = [];
+let nextLeaveId = 1;
+
+let DATA_HOLIDAYS = [];
+
+async function loadHolidaysFromBackend() {
+  try {
+    const res = await apiFetch(`/api/holidays`);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    DATA_HOLIDAYS.length = 0;
+    (data.holidays || []).forEach(h => DATA_HOLIDAYS.push(h));
+    console.log('[APP] Loaded', DATA_HOLIDAYS.length, 'holidays from backend');
+    return true;
+  } catch(e) {
+    console.error('[APP] Failed to load holidays:', e.message);
+    return false;
+  }
+}
+
+function isPublicHoliday(dateStr) {
+  return DATA_HOLIDAYS.some(h => h.date === dateStr);
+}
+
+// Company Trip: employees still scan in/out (to collect belongings) but the day earns none of
+// the usual pay-affecting bonuses (early/late/OT/upcountry) — see generatePeriodDays().
+let DATA_COMPANY_TRIP_DATES = [];
+function isCompanyTripDay(dateStr) {
+  return DATA_COMPANY_TRIP_DATES.includes(dateStr);
+}
+
+// Last working day of the month — moves back if Saturday, Sunday, or company holiday
+function getPayDay(periodEnd) {
+  const d = new Date(periodEnd.getFullYear(), periodEnd.getMonth() + 1, 0); // last day of month
+  while (d.getDay() === 0 || d.getDay() === 6 || isPublicHoliday(localDateStr(d))) {
+    d.setDate(d.getDate() - 1);
+  }
+  return d;
+}
+
+// Earliest pay period the app has data for — hides older periods from all dropdowns so users
+// don't see empty/irrelevant periods for months before the system launched.
+const APP_FIRST_PERIOD_START = new Date(2026, 5, 21); // 21 June 2026
+
+// ===== APPROVAL ROUTING CONFIG =====
+// false = MD อนุมัติโดยตรง (Manager เห็นข้อมูลอย่างเดียว) ← นโยบายปัจจุบัน
+// true  = Manager อนุมัติก่อน → MD ยืนยัน (เปิดใช้ได้อนาคต)
+// MD สามารถเปลี่ยนค่าได้จากหน้า ⚙️ ตั้งค่าการอนุมัติ — เก็บบน NAS (data/settings.json)
+// Each type maps to an ORDERED route: an array of roles that must approve in sequence.
+// e.g. ['manager','md'] = Manager approves first, then MD. ['accounting'] = Accounting only (final).
+const APPROVAL_ROUTING_DEFAULT = {
+  annual:             ['md'],
+  sick:               ['md'],
+  business:           ['md'],
+  upcountry:            ['md'],
+  'late-out':         ['md'],
+  'time-correction':  ['md'],
+  ot:                 ['md'],
+  comp:               ['md'],
+  'driver-ot':        ['accounting'],
+  'long-distance':    ['accounting'],
+  'personal-car':     ['md'],
+  'clear-attachments':['md'],
+};
+let APPROVAL_ROUTING = { ...APPROVAL_ROUTING_DEFAULT };
+
+// ===== APPROVAL DELEGATE-TO-ACCOUNTING CONFIG =====
+// Auto-on from the 21st of every month through pay day of the just-closed period (in case
+// Manager/MD isn't around to review): Accounting can stand in for whichever role a request
+// TYPE's route currently says should approve it. Per-type, not one global switch — whoever
+// actually holds authority over a type's route can turn its delegation off for that period:
+// MD can turn off any type; Manager can only turn off types where Manager is in that type's
+// route (some types MD may deliberately never hand to Manager, so Manager still needs their
+// own on/off for the ones they DO own). Nothing here touches Payslip/Payroll approval — that
+// always stays MD-only, no exceptions (see mdApprovePayrollForEmployee()).
+let APPROVAL_DELEGATE_OVERRIDES = {};       // { [type]: boolean } manual per-type on/off
+let APPROVAL_DELEGATE_OVERRIDE_PERIOD = null; // which period (YYYYMMDD of periodEnd) the overrides above belong to
+
+// Window is calendar-based off today's date AND the configured Payroll Period Start Day
+// (Settings -> Period Start Day, APP_SETTINGS.payroll.periodStartDay, default 21) — the
+// just-closed period always ends the day before that start day, in the current month, once
+// today has reached the start day; otherwise no period is "in window" yet. Previously this
+// hardcoded "21"/"20" regardless of the configured start day, so changing the period start day
+// in Settings silently left this window opening on the wrong dates.
+function isApprovalDelegationWindowOpen() {
+  const startDay = APP_SETTINGS.payroll.periodStartDay || 21;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  if (today.getDate() < startDay) return false;
+  const periodEnd = new Date(today.getFullYear(), today.getMonth(), startDay - 1);
+  const payDay = getPayDay(periodEnd); payDay.setHours(0, 0, 0, 0);
+  return today <= payDay;
+}
+
+// Identifies "which period's window" the delegation setting is currently about — the day
+// before the configured period start day, in the current calendar month, whether or not that
+// window has actually opened yet, so MD/Manager can pre-set a type's on/off ahead of time too.
+function currentApprovalDelegationPeriodKey() {
+  const startDay = APP_SETTINGS.payroll.periodStartDay || 21;
+  const today = new Date();
+  const periodEnd = new Date(today.getFullYear(), today.getMonth(), startDay - 1);
+  const pad2 = n => String(n).padStart(2, '0');
+  return `${periodEnd.getFullYear()}${pad2(periodEnd.getMonth() + 1)}${pad2(periodEnd.getDate())}`;
+}
+
+// Effective on/off for a given type, ignoring stale overrides left over from a previous period
+// — a fresh period with nothing touched yet always defaults to ON (the "auto-on" behavior).
+function isDelegationEnabledForType(type) {
+  if (APPROVAL_DELEGATE_OVERRIDE_PERIOD !== currentApprovalDelegationPeriodKey()) return true;
+  return APPROVAL_DELEGATE_OVERRIDES[type] !== false;
+}
+
+function isApprovalDelegationActiveForType(type) {
+  return isApprovalDelegationWindowOpen() && isDelegationEnabledForType(type);
+}
+
+// Who may flip a given type's delegation switch: MD always; Manager only for types where
+// Manager currently appears in that type's own configured route (their own scope of authority).
+function canToggleApprovalDelegationForType(type) {
+  if (!currentUser) return false;
+  if (isMdView()) return true;
+  if (effectiveRole() === 'manager') return getApprovalRoute(type).includes('manager');
+  return false;
+}
+
+// Single source of truth for "can this role act on this leave right now" — extends the existing
+// STATUS_TO_ROLE/getApprovalRoute turn-check with the Accounting stand-in case. Whichever role
+// (manager/md) the route currently says is up never changes — Accounting is just additionally
+// allowed to press the same button, standing in for that role, not replacing the route itself.
+function isMyTurnOrDelegate(l, role, routeType) {
+  const type = routeType || l.type;
+  const turnRole = STATUS_TO_ROLE[l.status];
+  if (!turnRole) return false;
+  // 2026-08-10 (Opus audit, F1): prefer the record's OWN stored approvalRoute (set server-side at
+  // submit/approval time) over re-deriving it from the LIVE config -- mirrors server.js:2641's own
+  // precedence. Without this, changing Approval Settings after a request was created could make the
+  // client disagree with what the server already committed the record to, hiding a request from
+  // every role's approval list with no way to act on it through the UI.
+  const route = (Array.isArray(l.approvalRoute) && l.approvalRoute.length) ? l.approvalRoute : getApprovalRoute(type);
+  if (turnRole === role && route.includes(role)) return true;
+  if (role === 'accounting' && turnRole !== 'accounting' && isApprovalDelegationActiveForType(type)) return true;
+  return false;
+}
+function isMyTurnNow(l, routeType) {
+  return actingRoles().some(role => isMyTurnOrDelegate(l, role, routeType || effectiveRouteType(l)));
+}
+
+async function saveApprovalDelegationSetting() {
+  if (blockIfObserver()) return;
+  try {
+    await apiFetch(`/api/settings`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        approvalDelegateOverrides: APPROVAL_DELEGATE_OVERRIDES,
+        approvalDelegateOverridePeriod: APPROVAL_DELEGATE_OVERRIDE_PERIOD,
+      }),
+    });
+  } catch(e) {
+    console.error('[settings] save failed:', e.message);
+  }
+}
+
+async function toggleApprovalDelegationForType(type) {
+  if (!canToggleApprovalDelegationForType(type)) {
+    showToast(L('⛔ You do not have permission to change this', '⛔ คุณไม่มีสิทธิ์เปลี่ยนค่านี้'), 'danger');
+    return;
+  }
+  const periodKey = currentApprovalDelegationPeriodKey();
+  if (APPROVAL_DELEGATE_OVERRIDE_PERIOD !== periodKey) {
+    // Rolled into a new period since the last time anyone touched this — every type resets to
+    // its auto-on default first, so only the type being toggled now ends up with an override.
+    APPROVAL_DELEGATE_OVERRIDES = {};
+    APPROVAL_DELEGATE_OVERRIDE_PERIOD = periodKey;
+  }
+  const enabledNow = isDelegationEnabledForType(type);
+  APPROVAL_DELEGATE_OVERRIDES[type] = !enabledNow;
+  await saveApprovalDelegationSetting();
+  showToast(!enabledNow
+    ? L('✅ Accounting can now stand in on this request type', '✅ เปิดสิทธิ์ให้ Accounting ช่วยอนุมัติแทนสำหรับประเภทนี้แล้ว')
+    : L('⚠️ Accounting stand-in turned off for this request type', '⚠️ ปิดสิทธิ์ Accounting ช่วยอนุมัติแทนสำหรับประเภทนี้แล้ว'), 'success');
+  openApprovalSettings();
+}
+
+// Every approval status maps 1:1 to "whose turn it is" — this is the single source of truth
+// that every approval-list/badge/label function reads from. Never hardcode role checks elsewhere.
+const ROLE_TO_STATUS = { manager: 'pending', accounting: 'pending-accounting', md: 'pending-md' };
+const STATUS_TO_ROLE = { pending: 'manager', 'pending-accounting': 'accounting', 'pending-md': 'md' };
+// 2026-08-16 (Opus audit M-4): driver OT routes via a separate 'driver-ot' key in Approval
+// Settings, distinct from regular office 'ot' -- any code that checks isMyTurnOrDelegate()/routing
+// using the bare l.type for an 'ot' record will silently use the wrong route whenever the record
+// is actually a driver's. This was already computed ad hoc (and correctly) at several call sites
+// (showApprovalDetail, showApprovalDelegationForType's badge, etc.) but re-typed identically each
+// time -- extracted here so new call sites can't recreate the M-4 bug by copy-pasting an
+// out-of-date version. Use this instead of `l.type` wherever a leave record's type feeds into
+// isMyTurnOrDelegate()/getApprovalRoute()-style routing logic.
+function effectiveRouteType(l) {
+  if (l.type !== 'ot') return l.type;
+  return (l.isDriverOT || DATA_USERS.find(u => u.id === l.userId)?.role === 'driver') ? 'driver-ot' : 'ot';
+}
+
+// Normalizes a routing value to an array — tolerates the old boolean format
+// (false = MD only, true = Manager -> MD) in case older saved settings.json still has it.
+function getApprovalRoute(type) {
+  const r = APPROVAL_ROUTING[type];
+  if (Array.isArray(r) && r.length > 0) return r;
+  return r ? ['manager', 'md'] : ['md'];
+}
+
+// Builds the "your request will be sent to X for approval" hint text straight from whatever
+// route is actually configured (⚙️ Approval Settings) — must be called fresh on every modal
+// open, never cached, so it stays correct after MD changes the routing.
+function approvalRouteNoteText(type) {
+  const roleLabel = { manager: L('Manager','Manager'), accounting: L('Accounting','Accounting'), md: L('Managing Director','Managing Director') };
+  const names = getApprovalRoute(type).map(r => roleLabel[r] || r);
+  // L()'s LANG_JA dict lookup only matches exact static strings -- it can never match a template
+  // literal with an interpolated role list (a different string every call), so this needs its
+  // own explicit JA branch instead of relying on L(), same pattern used elsewhere in the file for
+  // interpolated strings (e.g. formatDuration, lateOutAllowanceForHour's toast text).
+  if (currentLang === 'ja') {
+    const joinedJa = names.length > 1 ? names.join('・') : names[0];
+    return `📋 このリクエストは${joinedJa}の承認へ送信されます。`;
+  }
+  const joined = names.length > 1
+    ? names.slice(0, -1).join(', ') + L(' and ', ' และ ') + names[names.length - 1]
+    : names[0];
+  return L(`📋 Your request will be sent to ${joined} for approval.`, `📋 คำขอจะถูกส่งไปยัง ${joined} เพื่อขออนุมัติ`);
+}
+
+async function loadSettingsFromBackend() {
+  try {
+    const res = await apiFetch(`/api/settings`);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.approvalRouting) {
+      APPROVAL_ROUTING = { ...APPROVAL_ROUTING_DEFAULT, ...data.approvalRouting };
+    }
+    DATA_COMPANY_TRIP_DATES = data.companyTripDates || [];
+    APPROVAL_DELEGATE_OVERRIDES = data.approvalDelegateOverrides || {};
+    APPROVAL_DELEGATE_OVERRIDE_PERIOD = data.approvalDelegateOverridePeriod || null;
+    // Load payroll/allowance/tax settings — deep merge so missing keys fall back to defaults
+    if (data.periodLocks)       PERIOD_LOCKS        = data.periodLocks;
+    if (data.leaveCarryForward) LEAVE_CARRY_FORWARD = data.leaveCarryForward;
+    if (data.tawi50Overrides)   TAWI50_OVERRIDES    = data.tawi50Overrides;
+    if (data.appSettings) {
+      const s = data.appSettings;
+      if (s.company)      Object.assign(APP_SETTINGS.company, s.company);
+      if (s.payroll)      Object.assign(APP_SETTINGS.payroll, s.payroll);
+      if (s.sso)          Object.assign(APP_SETTINGS.sso, s.sso);
+      if (s.allowances)   Object.assign(APP_SETTINGS.allowances, s.allowances);
+      if (s.workSchedule) Object.assign(APP_SETTINGS.workSchedule, s.workSchedule);
+      if (s.leave)        Object.assign(APP_SETTINGS.leave, s.leave);
+      if (s.allowanceEligibility) Object.assign(APP_SETTINGS.allowanceEligibility, s.allowanceEligibility);
+      if (s.allowanceTypes) APP_SETTINGS.allowanceTypes = s.allowanceTypes;
+      if (s.lateDeductPolicy) APP_SETTINGS.lateDeductPolicy = s.lateDeductPolicy;
+      // 2026-07-31: optimistic-concurrency stamp -- echoed back on the next save so the server
+      // can detect "someone else saved appSettings since I loaded it" and reject instead of
+      // silently merging over their change. See PUT /api/settings for the check.
+      if (s.updatedAt) APP_SETTINGS_UPDATED_AT = s.updatedAt;
+      if (s.tax) {
+        if (s.tax.personalAllowanceAnnual !== undefined) APP_SETTINGS.tax.personalAllowanceAnnual = s.tax.personalAllowanceAnnual;
+        // JSON has no Infinity — the top bracket's uncapped upTo:Infinity always comes back
+        // from the backend as null after a JSON round-trip. Normalize it back here (the one
+        // place settings are loaded) instead of at every `b.upTo === Infinity` check site —
+        // otherwise calcAnnualTax() silently mis-taxes income above the top bracket, and the
+        // Settings page renders a literal "null" in the uncapped bracket's input box.
+        if (Array.isArray(s.tax.brackets) && s.tax.brackets.length > 0) {
+          APP_SETTINGS.tax.brackets = s.tax.brackets.map(b => ({ ...b, upTo: b.upTo === null ? Infinity : b.upTo }));
+        }
+      }
+    }
+    if (data.emailConfig)        APP_SETTINGS.emailConfig        = data.emailConfig;
+    if (data.emailNotification)  APP_SETTINGS.emailNotification  = data.emailNotification;
+    if (data.payslipEmailEnabled !== undefined) APP_SETTINGS.payslipEmailEnabled = data.payslipEmailEnabled;
+  } catch(e) {}
+}
+
+// 2026-07-31: optimistic concurrency -- echoes back APP_SETTINGS_UPDATED_AT (captured at the
+// last successful load/save) so the server can detect someone else saved appSettings in
+// between and reject with 409 instead of silently merging over their change. Returns
+// {success, conflict} so callers COULD branch on it, but every current call site is a
+// fire-and-forget save -- the toast + auto-refresh below is enough on its own, so none of them
+// need to change.
+async function savePayrollSettings() {
+  if (blockIfObserver()) return { success: false };
+  try {
+    // 2026-08-12 (3rd audit, F6b): APP_SETTINGS is one big in-memory object that also happens to
+    // carry emailConfig/emailNotification/payslipEmailEnabled (loaded from the top-level settings
+    // keys, not from inside appSettings) -- sending it whole here duplicated the live Resend API
+    // key into appSettings.emailConfig on every single Settings save, re-creating exactly the
+    // secret-duplication surface a CRITICAL fix earlier today closed on the READ side. Those 3
+    // keys are already saved separately by saveSettingsPage(); only send the genuine appSettings
+    // (payroll-config) sub-keys here.
+    const { emailConfig, emailNotification, payslipEmailEnabled, ...payrollOnlyAppSettings } = APP_SETTINGS;
+    const res = await apiFetch(`/api/settings`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appSettings: payrollOnlyAppSettings, appSettingsUpdatedAt: APP_SETTINGS_UPDATED_AT }),
+    });
+    if (res.status === 409) {
+      showToast(L('⚠️ Someone else changed these settings after you loaded this page. Reloading the latest version — please re-apply your change.', '⚠️ มีคนอื่นแก้ไขการตั้งค่านี้หลังจากที่คุณโหลดหน้านี้ — กำลังโหลดค่าล่าสุด กรุณาแก้ไขซ้ำอีกครั้ง'), 'warning');
+      await loadSettingsFromBackend();
+      if (currentPage === 'settings') renderSettingsPage(true);
+      return { success: false, conflict: true };
+    }
+    if (res.ok) {
+      const data = await res.json();
+      if (data.settings && data.settings.appSettings && data.settings.appSettings.updatedAt) {
+        APP_SETTINGS_UPDATED_AT = data.settings.appSettings.updatedAt;
+      }
+      return { success: true };
+    }
+    return { success: false };
+  } catch(e) {
+    console.error('[settings] savePayrollSettings failed:', e.message);
+    return { success: false };
+  }
+}
+
+// ===== PERIOD LOCK =====
+function getPeriodLockKey(start) {
+  const p2 = n => String(n).padStart(2,'0');
+  return `${start.getFullYear()}${p2(start.getMonth()+1)}${p2(start.getDate())}`;
+}
+
+function getPeriodStartForDate(dateStr) {
+  const sd = APP_SETTINGS.payroll.periodStartDay || 21;
+  const d = new Date(dateStr);
+  let y = d.getFullYear(), m = d.getMonth();
+  if (d.getDate() >= sd) return new Date(y, m, sd);
+  m -= 1;
+  if (m < 0) { m = 11; y -= 1; }
+  return new Date(y, m, sd);
+}
+
+function isPeriodLocked(start) {
+  return !!(PERIOD_LOCKS[getPeriodLockKey(start)]?.locked);
+}
+
+function mdApprovedPeriodInRange(dateFrom, dateTo, userId) {
+  if (!dateFrom || userId == null) return false;
+  const endStr = dateTo || dateFrom;
+  const cursor = getPeriodStartForDate(dateFrom);
+  let guard = 0;
+  while (localDateStr(cursor) <= endStr && guard++ < 1000) {
+    if (finalizeData[getMdApprovalKey(cursor, userId)]?.approved === true) return true;
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+  return false;
+}
+
+function isLegacyAutoApprovedPersonalCar(l) {
+  return !!(l && l.type === 'personal-car' && l.status === 'approved' && !l.approver);
+}
+
+async function savePeriodLocks() {
+  await apiFetch(`/api/settings`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ periodLocks: PERIOD_LOCKS })
+  });
+}
+
+async function lockPeriod() {
+  if (blockIfObserver()) return;
+  const { start } = getPeriodBounds(finalizeSelectedPeriodIndex);
+  if (!confirm(L('Lock this pay period? Attendance and leave records for this period will be read-only.',
+    'ล็อครอบเงินเดือนนี้? ข้อมูลการเข้างานและการลาในรอบนี้จะไม่สามารถแก้ไขได้'))) return;
+  PERIOD_LOCKS[getPeriodLockKey(start)] = { locked: true, lockedAt: fmtDateTime(new Date()), lockedBy: currentUser.name };
+  try {
+    await savePeriodLocks();
+    showToast(L('🔒 Period locked', '🔒 ล็อครอบเงินเดือนเรียบร้อย'), 'success');
+    renderFinalize();
+  } catch(e) {
+    showToast(L('❌ Could not lock period: ', '❌ ไม่สามารถล็อคได้: ') + e.message, 'danger');
+  }
+}
+
+async function unlockPeriod() {
+  if (blockIfObserver()) return;
+  if (!confirm(L('Unlock this pay period? Attendance and leave records can be edited again.',
+    'ยกเลิกล็อครอบนี้? จะสามารถแก้ไขข้อมูลการเข้างานและการลาได้อีกครั้ง'))) return;
+  const { start } = getPeriodBounds(finalizeSelectedPeriodIndex);
+  PERIOD_LOCKS[getPeriodLockKey(start)] = { locked: false };
+  try {
+    await savePeriodLocks();
+    showToast(L('🔓 Period unlocked', '🔓 ยกเลิกล็อครอบเงินเดือนแล้ว'), 'success');
+    renderFinalize();
+  } catch(e) {
+    showToast(L('❌ Could not unlock: ', '❌ ไม่สามารถยกเลิกล็อคได้: ') + e.message, 'danger');
+  }
+}
+
+// ===== LEAVE CARRY-FORWARD =====
+async function saveLeaveCarryForward() {
+  if (blockIfObserver()) return;
+  await apiFetch(`/api/settings`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ leaveCarryForward: LEAVE_CARRY_FORWARD })
+  });
+}
+
+function getCarryForwardKey(year, userId)     { return `${year}_${userId}`; }
+function getCarryForwardCompKey(year, userId) { return `comp_${year}_${userId}`; }
+
+function getCarryForwardDays(year, userId) {
+  // 2026-08-12 (Opus comprehensive audit): coerce at the read site -- server now validates this
+  // to always be a number going forward, but a legacy non-numeric value (from before that
+  // validation existed) would otherwise string-concat into effectiveMax below and reach an
+  // unescaped innerHTML render (renderLeaveBalanceCard/renderLeaveBalanceSummary).
+  return Number(LEAVE_CARRY_FORWARD[getCarryForwardKey(year, userId)]) || 0;
+}
+
+function getCarryForwardCompDays(year, userId) {
+  return Number(LEAVE_CARRY_FORWARD[getCarryForwardCompKey(year, userId)]) || 0;
+}
+
+function getApprovedCompDays(year, userId) {
+  const yStart = `${year}-01-01`, yEnd = `${year}-12-31`;
+  return DATA_LEAVES.filter(l =>
+    l.userId === userId && l.type === 'comp' && l.status === 'approved' &&
+    (l.workedDate || l.dateFrom) >= yStart && (l.workedDate || l.dateFrom) <= yEnd
+  ).reduce((s, l) => s + (l.days || 1), 0);
+}
+
+// Shared leave-balance math — keeps the profile card (renderLeaveBalanceCard) and the leave-page
+// summary (renderLeaveBalanceSummary) in sync: year-scoped used, hourly-aware, comp + carry-forward
+// entitlement, and annual late-arrival deduction. Both surfaces must show the same remaining number.
+function computeLeaveBalance(u, type, baseMax, year) {
+  year = year || new Date().getFullYear();
+  const cfDays   = type === 'annual' ? getCarryForwardDays(year, u.id) : 0;
+  const compDays = type === 'annual' ? getApprovedCompDays(year, u.id) + getCarryForwardCompDays(year, u.id) : 0;
+  const effectiveMax = baseMax + cfDays + compDays;
+  const yStart = `${year}-01-01`, yEnd = `${year}-12-31`;
+  let usedMin = 0;
+  DATA_LEAVES.filter(l =>
+    l.userId === u.id && l.type === type && l.status === 'approved' &&
+    l.dateFrom >= yStart && l.dateFrom <= yEnd
+  ).forEach(l => {
+    if ((l.days || 0) > 0) usedMin += l.days * 8 * 60;
+    else if (l.hourlyStart && l.hourlyEnd) {
+      const [sh, sm] = l.hourlyStart.split(':').map(Number);
+      const [eh, em] = l.hourlyEnd.split(':').map(Number);
+      usedMin += Math.max(0, (eh*60+em) - (sh*60+sm));
+    } else if (l.timePart) {
+      const hM = l.timePart.match(/(\d+)\s*(?:ชม\.|h|時間)/);
+      const mM = l.timePart.match(/(\d+)\s*(?:น\.|m|分)/);
+      usedMin += (hM ? parseInt(hM[1]) : 0) * 60 + (mM ? parseInt(mM[1]) : 0);
+    }
+  });
+  const lateDeduct = type === 'annual' ? computeLateDeductMinutes(u.id, year) : { count: 0, deductMin: 0 };
+  const totalMin = effectiveMax * 8 * 60;
+  const remMin = Math.max(0, totalMin - usedMin - lateDeduct.deductMin);
+  return { cfDays, compDays, effectiveMax, usedMin, lateDeduct, totalMin, remMin, remDays: Math.floor(remMin / 480) };
+}
+
+// Called from Settings page — snapshots remaining annual leave for all users into next year
+async function processYearEndCarryForward(forYear) {
+  if (blockIfObserver()) return;
+  const maxCF = APP_SETTINGS.leave.carryForwardMax || 5;
+  const thisYear = forYear || new Date().getFullYear();
+  const startOfYear = `${thisYear}-01-01`;
+  const endOfYear   = `${thisYear}-12-31`;
+
+  DATA_USERS.filter(u => isEmployeeRecord(u) && u.active).forEach(u => {
+    const usedDays = DATA_LEAVES.filter(l =>
+      l.userId === u.id && l.type === 'annual' && l.status === 'approved' &&
+      l.dateFrom >= startOfYear && l.dateFrom <= endOfYear
+    ).reduce((sum, l) => sum + (l.days || 0), 0);
+    const compEarned = getApprovedCompDays(thisYear, u.id) + getCarryForwardCompDays(thisYear, u.id);
+    const maxAnnual = 10;
+    // Comp + annual (incl. what carried in from last year) are one merged pool this year, capped
+    // together by carryForwardMax on the way out — matches user policy 2026-07-23: comp no longer
+    // gets its own uncapped carry-forward, and usage is treated as depleting comp first (though the
+    // combined leftover total is mathematically the same regardless of which pool "used" comes from
+    // once both share one cap — see [[project_time_attendance_payroll_review]] for the derivation).
+    const combinedAvailable = maxAnnual + getCarryForwardDays(thisYear, u.id) + compEarned;
+    const combinedLeftover = Math.max(0, combinedAvailable - usedDays);
+    const cfMerged = Math.min(combinedLeftover, maxCF);
+    LEAVE_CARRY_FORWARD[getCarryForwardKey(thisYear + 1, u.id)]     = cfMerged;
+    LEAVE_CARRY_FORWARD[getCarryForwardCompKey(thisYear + 1, u.id)] = 0;
+  });
+  try {
+    await saveLeaveCarryForward();
+    showToast(currentLang === 'ja' ? `✅ ${thisYear + 1}年への繰越処理が完了しました` : L(`✅ Carry-forward processed for ${thisYear + 1}`, `✅ บันทึกยอดยกไปปี ${thisYear + 1} เรียบร้อย`), 'success');
+    renderSettingsPage();
+  } catch(e) {
+    showToast(L('❌ Error: ', '❌ ข้อผิดพลาด: ') + e.message, 'danger');
+  }
+}
+
+function checkCarryForwardNotification() {
+  const cf = APP_SETTINGS.leave;
+  if (!cf || !currentUser) return;
+  const exM = (cf.carryForwardExpiryMonth || 3) - 1;
+  const exD = cf.carryForwardExpiryDay || 31;
+  const notifyDays = cf.carryForwardNotifyDays || 30;
+  const year = new Date().getFullYear();
+  const expiry = new Date(year, exM, exD);
+  const today = new Date(); today.setHours(0,0,0,0);
+  const daysLeft = Math.ceil((expiry - today) / 86400000);
+  if (daysLeft < 0 || daysLeft > notifyDays) return;
+  const myCF = getCarryForwardDays(year, currentUser.id);
+  if (myCF <= 0) return;
+  showToast(
+    currentLang === 'ja' ? `⚠️ 繰越有給休暇${myCF}日が${fmtDate(expiry)}に失効します — お早めにご利用ください！` :
+    L(`⚠️ ${myCF} carry-forward leave day(s) expire on ${fmtDate(expiry)} — use them soon!`,
+      `⚠️ วันลาพักร้อนยกยอด ${myCF} วัน จะหมดอายุ ${fmtDate(expiry)} — ใช้ให้ทันนะ!`),
+    'warning'
+  );
+}
+
+// ===== 50 ทวิ =====
+async function render50Tawi(targetYear) {
+  await loadFinalizeData();
+  const year = targetYear || new Date().getFullYear();
+  const isMdOrAcct = isMdAccountingView();
+  if (!isMdOrAcct) return;
+
+  // Collect all periods whose END date falls in this year (≈ 12 periods). Only CONFIRMED
+  // periods (Finalize Payroll -> ✓ Confirm per employee) count toward the totals below -- an
+  // unconfirmed period for a given employee is silently skipped, which used to have no
+  // indication anywhere on this page. periodsInYear/confirmedCount track this so the UI can
+  // show "included N of M periods" per employee instead of a number that just looks complete.
+  let periodsInYear = 0;
+  const periodData = {}; // userId → { totalGross, totalSSO, totalPVD, totalPIT, name, nationalId, confirmedCount }
+  for (let i = 0; i <= 60; i++) {
+    const { start, end } = getPeriodBounds(i);
+    if (end.getFullYear() < year) break;
+    if (end.getFullYear() > year) continue;
+    if (start < APP_FIRST_PERIOD_START) break;
+    periodsInYear++;
+    DATA_USERS.filter(isEmployeeRecord).forEach(u => {
+      const fKey = getFinalizeKey(start, u.id);
+      const saved = finalizeData[fKey];
+      if (!periodData[u.id]) periodData[u.id] = { name: u.name, nationalId: u.idCard || '', totalGross: 0, totalSSO: 0, totalPVD: 0, totalPIT: 0, confirmedCount: 0 };
+      if (!saved?.confirmed) return;
+      // 2026-08-01: explicit periodIndex (was the bug -- this loop always got the currently-
+      // selected Finalize page period's isCurrent flag regardless of which `i` was being summed).
+      // pit/bonus/manualAllowances read from calc.fin (frozen once approved) instead of live
+      // `saved` -- this is the annual tax report, it must not silently drift after the fact.
+      const calc = calcFinalizeEmployee(u, start, end, i);
+      const pit = calc.fin.pit;
+      const bonus = calc.fin.bonus;
+      const manualIncome = calc.fin.manualAllowances.reduce((s, ma) => s + (ma.amount || 0), 0);
+      const gross = calc.grossIncome + bonus + manualIncome;
+      periodData[u.id].totalGross += gross;
+      periodData[u.id].totalSSO  += calc.ssf;
+      periodData[u.id].totalPVD  += calc.pvd;
+      periodData[u.id].totalPIT  += pit;
+      periodData[u.id].confirmedCount++;
+    });
+  }
+
+  const banner = document.getElementById('tawi50-warning-banner');
+  if (banner) {
+    const incompleteNames = Object.values(periodData).filter(d => d.confirmedCount < periodsInYear && d.confirmedCount > 0).map(d => d.name);
+    if (incompleteNames.length > 0) {
+      banner.style.display = '';
+      banner.textContent = currentLang === 'ja'
+        ? `⚠️ ${incompleteNames.length}名の従業員が今年未確定の給与期間があり、以下の合計が不完全な可能性があります: ${incompleteNames.join('、')}。給与確定画面で✓確定が未了の期間がないか確認してください。`
+        : L(
+          `⚠️ ${incompleteNames.length} employee(s) have unconfirmed payroll periods this year, so their totals below may be incomplete: ${incompleteNames.join(', ')}. Check Finalize Payroll for any period still missing a ✓ Confirm.`,
+          `⚠️ พนักงาน ${incompleteNames.length} คนมีรอบเงินเดือนที่ยังไม่ Confirm ในปีนี้ ยอดรวมด้านล่างอาจไม่ครบ: ${incompleteNames.join(', ')} — เช็คหน้า Finalize Payroll ว่ามีรอบไหนยังไม่ได้กด ✓ Confirm`
+        );
+    } else {
+      banner.style.display = 'none';
+    }
+  }
+
+  const el = document.getElementById('tawi50-body');
+  if (!el) return;
+  const rows = Object.entries(periodData).map(([uid, d]) => {
+    const overKey = `${year}_${uid}`;
+    const ov = TAWI50_OVERRIDES[overKey] || {};
+    const gross = ov.grossOverride !== undefined ? ov.grossOverride : d.totalGross;
+    const pit   = ov.pitOverride   !== undefined ? ov.pitOverride   : d.totalPIT;
+    // 2026-08-17 (user request): SSF/PVD now editable the same way gross/PIT already were --
+    // system-computed default (summed from confirmed periods), override persisted the same way.
+    const sso   = ov.ssoOverride   !== undefined ? ov.ssoOverride   : d.totalSSO;
+    const pvd   = ov.pvdOverride   !== undefined ? ov.pvdOverride   : d.totalPVD;
+    // 2026-08-17 (user request): once an employee has gone inactive/observer AND has zero
+    // resolved income for this year (same gross>0 threshold the xlsx export itself uses -- see
+    // GET /api/tawi50-xlsx-all), drop their row entirely instead of showing a permanent 0/0/0/0
+    // line with nothing to certify. A row still shows if the employee is CURRENTLY active/non-
+    // observer (payroll may still be getting entered/confirmed for them) or if they have any real
+    // resolved gross (a genuine former employee's year with real income must never be hidden --
+    // this table doubles as a preview of what the tax-certificate export will contain).
+    const u = DATA_USERS.find(x => x.id == uid);
+    if (u && (u.active === false || u.isObserver) && gross <= 0) return null;
+    return `<tr>
+      <td style="font-weight:600">${escapeHtml(d.name)}</td>
+      <td class="col-hide-mobile" style="color:#94a3b8;font-size:12px">${escapeHtml(d.nationalId)}</td>
+      <td style="text-align:right;color:#059669;font-weight:700">
+        <input type="number" class="tawi-input" data-key="${overKey}" data-field="grossOverride"
+          value="${escapeHtml(String(gross))}" style="width:100px;text-align:right;border:1.5px solid #e2e8f0;border-radius:4px;padding:4px 6px;font-size:13px;color:#059669;font-weight:700">
+        <div style="font-size:10px;font-weight:400;color:${d.confirmedCount < periodsInYear ? '#dc2626' : '#94a3b8'};margin-top:2px">${currentLang === 'ja' ? `確定済み ${d.confirmedCount}/${periodsInYear} 期間` : L(`from ${d.confirmedCount}/${periodsInYear} confirmed periods`, `จาก ${d.confirmedCount}/${periodsInYear} รอบที่ Confirm แล้ว`)}</div>
+      </td>
+      <td class="col-hide-mobile" style="text-align:right;color:#dc2626">
+        <input type="number" class="tawi-input" data-key="${overKey}" data-field="ssoOverride"
+          value="${escapeHtml(String(sso))}" style="width:80px;text-align:right;border:1.5px solid #e2e8f0;border-radius:4px;padding:4px 6px;font-size:13px;color:#dc2626">
+      </td>
+      <td class="col-hide-mobile" style="text-align:right;color:#dc2626">
+        <input type="number" class="tawi-input" data-key="${overKey}" data-field="pvdOverride"
+          value="${escapeHtml(String(pvd))}" style="width:80px;text-align:right;border:1.5px solid #e2e8f0;border-radius:4px;padding:4px 6px;font-size:13px;color:#dc2626">
+      </td>
+      <td style="text-align:right;color:#b45309;font-weight:700">
+        <input type="number" class="tawi-input" data-key="${overKey}" data-field="pitOverride"
+          value="${escapeHtml(String(pit))}" style="width:90px;text-align:right;border:1.5px solid #e2e8f0;border-radius:4px;padding:4px 6px;font-size:13px;color:#b45309;font-weight:700">
+      </td>
+      <td style="text-align:right;font-weight:700;font-size:14px;color:var(--primary)">${(gross - sso - pvd - pit).toLocaleString()}</td>
+    </tr>`;
+  }).filter(Boolean).join('');
+  el.innerHTML = rows || `<tr><td colspan="7" style="text-align:center;padding:32px;color:#94a3b8">${L('No confirmed payroll data for this year','ยังไม่มีข้อมูล Payroll ที่ยืนยันแล้วสำหรับปีนี้')}</td></tr>`;
+  document.querySelectorAll('.tawi-input').forEach(inp => {
+    inp.addEventListener('change', async () => {
+      if (isPayrollLockDisabled()) { showToast(L('System account: 50-Tawi overrides are view-only', 'บัญชีระบบ: แก้ 50 ทวิ ไม่ได้'), 'warning'); render50Tawi(); return; }
+      const key = inp.dataset.key;
+      const field = inp.dataset.field;
+      if (!TAWI50_OVERRIDES[key]) TAWI50_OVERRIDES[key] = {};
+      TAWI50_OVERRIDES[key][field] = parseInt(inp.value) || 0;
+      try {
+        await apiFetch(`/api/settings`, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ tawi50Overrides: TAWI50_OVERRIDES }) });
+        showToast(L('✅ Override saved', '✅ บันทึกการแก้ไขแล้ว'), 'success');
+      } catch(e) { showToast('❌ ' + e.message, 'danger'); }
+    });
+  });
+}
+
+function export50TawiCSV(year) {
+  const yr = (year || new Date().getFullYear()) + 543;
+  const rows = [['ชื่อ-นามสกุล','เลขประจำตัวประชาชน','เงินได้รวม (บาท)','SSF (บาท)','PVD (บาท)','ภาษีที่หัก (บาท)','สุทธิ (บาท)']];
+  document.querySelectorAll('#tawi50-body tr').forEach(tr => {
+    const tds = tr.querySelectorAll('td');
+    if (tds.length < 7) return;
+    const gross = parseInt(tds[2].querySelector('input')?.value) || 0;
+    const sso   = parseInt(tds[3].querySelector('input')?.value) || 0;
+    const pvd   = parseInt(tds[4].querySelector('input')?.value) || 0;
+    const pit   = parseInt(tds[5].querySelector('input')?.value) || 0;
+    rows.push([tds[0].textContent.trim(), tds[1].textContent.trim(), gross, sso, pvd, pit, gross - sso - pvd - pit]);
+  });
+  downloadCSV(`50Tawi_${yr}.csv`, rows);
+}
+
+// 2026-08-17: official 50-Tawi .xlsx export (real government form layout, computed server-side --
+// see GET /api/tawi50-xlsx-all / tawi50Xlsx.js). Clone of downloadAllPayslipsXlsx()'s fetch-blob-
+// download pattern, plus a pre-flight completeness warning: the certificate needs namePrefix/
+// firstNameTh/lastNameTh/idCardAddress/idCard/employeeNo (the HR-only fields added earlier this
+// session) on every employee who'll actually get a sheet -- matched against the year's #tawi50-body
+// table rows the same loose name-textContent way export50TawiCSV() above already does, so a
+// missing field doesn't silently come back as a blank cell on a real legal document with no
+// warning first.
+async function download50TawiXlsx(year) {
+  const yr = year || new Date().getFullYear();
+  // 2026-08-17 (review fix): only check employees the export will actually GIVE a sheet to (gross
+  // > 0, same threshold GET /api/tawi50-xlsx-all itself uses) -- previously matched every row in
+  // the table, which includes employees with zero resolved income (MD, observer, anyone with no
+  // confirmed periods yet) who never get a sheet either way, so the warning fired on names that
+  // were never actually going to be in the file.
+  const namesInTable = Array.from(document.querySelectorAll('#tawi50-body tr')).filter(tr => {
+    const grossInput = tr.querySelector('input[data-field="grossOverride"]');
+    return grossInput && (parseInt(grossInput.value) || 0) > 0;
+  }).map(tr => tr.querySelector('td')?.textContent.trim()).filter(Boolean);
+  const incomplete = DATA_USERS.filter(u => namesInTable.includes(u.name) &&
+    (!u.namePrefix || !u.firstNameTh || !u.lastNameTh || !u.idCardAddress || !u.idCard || !u.employeeNo)
+  ).map(u => u.name);
+  // 2026-08-17 (review fix): the on-screen banner already tells the admin when someone's total
+  // is based on fewer than all of this year's confirmed periods (render50Tawi() above) -- but that
+  // banner is easy to miss, and nothing in the export flow itself mentioned it, so a certificate
+  // covering an incomplete year could be generated and signed with no warning at the moment that
+  // actually matters. Fold it into the same pre-flight confirm() instead of a separate one.
+  const banner = document.getElementById('tawi50-warning-banner');
+  const hasIncompleteYear = banner && banner.style.display !== 'none' && banner.textContent.trim();
+  if (incomplete.length > 0 || hasIncompleteYear) {
+    const parts = [];
+    if (incomplete.length > 0) {
+      parts.push(currentLang === 'ja'
+        ? `${incomplete.length}名の従業員に氏名（タイ語）／身分証番号／住所などの必須項目が未入力です: ${incomplete.join('、')}。このまま作成すると、その従業員のシートは空欄になります。`
+        : L(`${incomplete.length} employee(s) are missing required fields (Thai name / ID number / ID-card address / employee no.) needed for this certificate: ${incomplete.join(', ')}. Their sheets will come back with blank fields if you continue.`,
+            `พนักงาน ${incomplete.length} คนยังกรอกข้อมูลที่จำเป็นไม่ครบ (ชื่อไทย/เลขบัตร/ที่อยู่ตามบัตร/รหัสพนักงาน) สำหรับเอกสารนี้: ${incomplete.join(', ')} — ถ้าดำเนินการต่อ ชีทของพนักงานเหล่านี้จะมีช่องว่างเปล่า`));
+    }
+    if (hasIncompleteYear) {
+      parts.push(currentLang === 'ja'
+        ? '今年、一部の給与期間がまだ確定（Confirm）されていない従業員がいます。合計額が不完全な可能性があります。'
+        : L('Some employees have unconfirmed payroll periods this year, so their totals may be incomplete.',
+            'พนักงานบางคนมีรอบเงินเดือนที่ยังไม่ Confirm ในปีนี้ ยอดรวมอาจไม่ครบ'));
+    }
+    const ok = confirm(`⚠️ ${parts.join(' ')} ${currentLang === 'ja' ? '続行しますか？' : L('Proceed anyway?', 'ต้องการดำเนินการต่อหรือไม่?')}`);
+    if (!ok) return;
+  }
+
+  const btn = document.getElementById('tawi50-btn-xlsx');
+  if (btn) btn.disabled = true;
+  try {
+    const res = await apiFetch(`/api/tawi50-xlsx-all?year=${yr}`);
+    if (!res.ok) {
+      let msg = L('Could not generate the Excel file', 'ไม่สามารถสร้างไฟล์ Excel ได้');
+      try { const d = await res.json(); if (d.message) msg = d.message; } catch (e) {}
+      showToast(`❌ ${msg}`, 'error');
+      return;
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get('Content-Disposition') || '';
+    const m = /filename="([^"]+)"/.exec(cd);
+    const filename = m ? m[1] : `50Tawi_${yr}.xlsx`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    showToast(`❌ ${L('Could not generate the Excel file', 'ไม่สามารถสร้างไฟล์ Excel ได้')}`, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// ===== PAYROLL EXPORTS =====
+// 2026-08-02: neutralize CSV formula injection -- a cell starting with =/+/-/@ (or a tab/CR,
+// the less-common variants) is executed as a formula by Excel/Sheets on open. Fields here are
+// admin-entered (employee name, position, bank branch, etc.), so risk is low, but a leading
+// single-quote is a one-line, zero-behavior-change-for-normal-data guard.
+function csvSafeCell(c) {
+  const s = String(c ?? '');
+  return /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
+}
+function downloadCSV(filename, rows) {
+  const bom = '﻿';
+  const csv = bom + rows.map(r => r.map(c => `"${csvSafeCell(c).replace(/"/g,'""')}"`).join(',')).join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+}
+
+function exportBankCSV() {
+  const { start, end } = getPeriodBounds(finalizeSelectedPeriodIndex);
+  const p2 = n => String(n).padStart(2,'0');
+  const dateStr = `${start.getFullYear()}${p2(start.getMonth()+1)}${p2(start.getDate())}`;
+  const rows = [['บัญชีธนาคาร','ชื่อ-นามสกุล','ยอดโอน (บาท)','ธนาคาร','สาขา','หมายเหตุ']];
+  // 2026-08-01: filter on `approved` not `confirmed` -- the export BUTTONS only render once
+  // everyone is approved (see renderFinalize()'s allApproved banner), but this function is a
+  // global one stale render away from writing a bank-transfer row for someone only confirmed,
+  // not approved. pit/bonus/manualAllowances read from calc.fin (frozen once approved).
+  DATA_USERS.filter(u => isEmployeeRecord(u) && u.active).forEach(u => {
+    const mdApproved = !!(finalizeData[getMdApprovalKey(start, u.id)]?.approved);
+    if (!mdApproved) return;
+    const calc = calcFinalizeEmployee(u, start, end, finalizeSelectedPeriodIndex);
+    const pit = calc.fin.pit;
+    const bonus = calc.fin.bonus;
+    const manualNet = calc.fin.manualAllowances.reduce((s, ma) => s + (ma.amount || 0) - (ma.advance || 0), 0);
+    const net = calc.grossIncome + bonus + manualNet - calc.ssf - calc.pvd - pit;
+    rows.push([u.bankAccount || '', u.name, net, u.bankName || APP_SETTINGS.company.bankName || 'Bangkok Bank', u.bankBranch || '', `เงินเดือน ${p2(start.getDate())}/${p2(start.getMonth()+1)}/${start.getFullYear()}`]);
+  });
+  downloadCSV(`Bangkok_Bank_${dateStr}.csv`, rows);
+}
+
+function exportSSOCSV() {
+  const { start, end } = getPeriodBounds(finalizeSelectedPeriodIndex);
+  const p2 = n => String(n).padStart(2,'0');
+  const rawMonth = start.getMonth() + 2;
+  const rollYear = rawMonth > 12;
+  const y = start.getFullYear() + (rollYear ? 1 : 0) + 543;
+  const m = p2(rollYear ? rawMonth - 12 : rawMonth);
+  const maxSal = APP_SETTINGS.sso.maxSalary || 17500;
+  const rows = [['ลำดับ','เลขประกันสังคม','ชื่อ-นามสกุล','ฐานเงินเดือน (บาท)','ประกันฯ ฝ่ายลูกจ้าง (บาท)','ประกันฯ ฝ่ายนายจ้าง (บาท)','รวม (บาท)']];
+  let seq = 1;
+  DATA_USERS.filter(u => isEmployeeRecord(u) && u.active && u.role !== 'md').forEach(u => {
+    const calc = calcFinalizeEmployee(u, start, end, finalizeSelectedPeriodIndex);
+    const emp = calc.ssf;         // ใช้ค่าที่หักจริงจาก computePayroll ไม่คำนวณซ้ำ
+    const er = calc.ssf;         // employer contribution = employee share (5% ทั้งคู่) — logic เดิม er=emp
+    rows.push([seq++, u.ssoId || '', u.name, Math.min(calc.base, maxSal), emp, er, emp + er]);
+  });
+  downloadCSV(`SSO_${y}${m}.csv`, rows);
+}
+
+function exportPayrollSummaryCSV() {
+  const { start, end } = getPeriodBounds(finalizeSelectedPeriodIndex);
+  const p2 = n => String(n).padStart(2,'0');
+  const dateStr = `${start.getFullYear()}${p2(start.getMonth()+1)}${p2(start.getDate())}`;
+  const header = [
+    'ชื่อ', 'ตำแหน่ง',
+    'เงินเดือน', 'ค่าเดินทาง', 'ค่าตำแหน่ง', 'ค่าที่พัก', 'เบี้ยขยัน',
+    'A1 Upcountry', 'A2 Early/LateNight', 'A3 โทรศัพท์', 'OT', 'Long Distance', 'Personal Car',
+    'รวมรับ (Gross)', 'โบนัส', 'Manual Adj. (สุทธิ)',
+    'SSF', 'PVD', 'PIT', 'สุทธิ (Net)',
+    'สถานะ'
+  ];
+  const rows = [header];
+  DATA_USERS.filter(u => isEmployeeRecord(u) && u.active).forEach(u => {
+    const fKey = getFinalizeKey(start, u.id);
+    const saved = finalizeData[fKey] || {};
+    // 2026-08-01: `c` is now the FULL calc object (was a 5-field pick before) -- transport/
+    // posAllowance/housingAllowance/diligenceAllowance/allowance1/earlyLateBonus/allowance3/
+    // otAmount below used to always read as `undefined` (silently shown as 0 via `|| 0`) because
+    // the old calcFinalizeEmployee() never returned those fields at all. Also reads pit/bonus/
+    // manualAllowances from c.fin (frozen once approved) instead of live `saved`.
+    const c = calcFinalizeEmployee(u, start, end, finalizeSelectedPeriodIndex);
+    const pit = c.fin.pit;
+    const bonus = c.fin.bonus;
+    const manualNet = c.fin.manualAllowances.reduce((s, ma) => s + (ma.amount || 0) - (ma.advance || 0), 0);
+    const net = c.grossIncome + bonus + manualNet - c.ssf - c.pvd - pit;
+    rows.push([
+      u.name, u.position || '',
+      c.base, c.transport || 0, c.posAllowance || 0, c.housingAllowance || 0, c.diligenceAllowance || 0,
+      // 2026-08-02: Long Distance / Personal Car were already inside grossIncome but had no
+      // columns of their own -- the visible columns didn't reconcile to Gross for anyone
+      // earning either, a reconciliation gap for accounting/drivers.
+      c.allowance1 || 0, c.earlyLateBonus || 0, c.allowance3 || 0, c.otAmount || 0, c.longDistanceTotal || 0, c.personalCarTotal || 0,
+      c.grossIncome, bonus, manualNet,
+      c.ssf, c.pvd, pit, net,
+      saved.confirmed ? (currentLang==='en' ? 'Confirmed' : 'ยืนยันแล้ว') : (currentLang==='en' ? 'Pending' : 'รอยืนยัน')
+    ]);
+  });
+  downloadCSV(`Payroll_Summary_${dateStr}.csv`, rows);
+}
+
+// ===== PRINT PAYSLIP FROM FINALIZE =====
+function printFinalizePayslip(userId) {
+  const u = DATA_USERS.find(x => x.id === userId);
+  if (!u) return;
+  // Navigate to payslip page for this user/period, then trigger print
+  navigateTo('payslip');
+  const sel = document.getElementById('payslip-employee');
+  if (sel) { sel.value = userId; }
+  // Sync period index
+  payslipPeriodIndex = finalizeSelectedPeriodIndex;
+  const periodSel = document.getElementById('payslip-period-select');
+  if (periodSel) periodSel.value = String(payslipPeriodIndex);
+  renderPayslip().then(() => {
+    setTimeout(() => window.print(), 400);
+  });
+}
+
+// ===== ARCHIVE (Former Employees) =====
+function renderArchivePage() {
+  const tbody = document.getElementById('archive-tbody');
+  if (!tbody) return;
+  const former = DATA_USERS.filter(u => !u.active);
+  if (former.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:32px;color:#94a3b8">${L('No former employees found', 'ไม่พบอดีตพนักงาน')}</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = former.map(u => `
+    <tr>
+      <td style="font-weight:600">
+        <div>${escapeHtml(u.name)}</div>
+        <div style="font-size:11px;color:var(--text-muted)">${escapeHtml(u.username || '')}</div>
+      </td>
+      <td class="col-hide-mobile">${escapeHtml(u.position || '—')}</td>
+      <td class="col-hide-mobile">${escapeHtml(u.department || u.role || '—')}</td>
+      <td class="col-hide-mobile" style="color:var(--text-muted);font-size:12px">${u.employeeId || u.id}</td>
+      <td style="text-align:center">
+        ${u.isObserver
+          ? `<span class="badge badge-info">👁️ ${L('Observer — can still log in', 'ผู้สังเกตการณ์ — ยัง login ได้')}</span>`
+          : `<span class="badge badge-danger">${L('Inactive — cannot log in', 'ระงับ — login ไม่ได้')}</span>`}
+      </td>
+      <td style="text-align:center">
+        <button class="btn btn-sm btn-ghost" onclick="navigateTo('payslip');document.getElementById('payslip-employee')&&(document.getElementById('payslip-employee').value=${u.id});renderPayslip()">
+          📋 ${L('View Payslip', 'ดู Payslip')}
+        </button>
+      </td>
+    </tr>`).join('');
+}
+
+// ===== 50 ทวิ YEAR DROPDOWN =====
+function populateTawi50YearDropdown() {
+  const sel = document.getElementById('tawi50-year');
+  if (!sel) return;
+  const curYear = new Date().getFullYear();
+  sel.innerHTML = '';
+  for (let y = curYear; y >= curYear - 4; y--) {
+    const opt = document.createElement('option');
+    opt.value = y;
+    opt.textContent = `${y} (พ.ศ. ${y + 543})`;
+    sel.appendChild(opt);
+  }
+}
+
+// ===== DATA BACKUP =====
+function exportDataBackup(role) {
+  const isMd = role === 'md' || currentUser?.role === 'md';
+  // 2026-08-16 (Opus audit L-6): APP_SETTINGS.emailConfig.pass is the live Resend/SMTP API key --
+  // was being serialized straight into the downloaded JSON in cleartext. Strip it the same way
+  // the backend already strips it for non-admins (stripSensitiveSettingsForRole()), since a
+  // downloaded backup file is far more likely to be emailed/uploaded/left in Downloads than the
+  // in-app Settings page ever is.
+  // 2026-08-16 (Opus re-audit of L-6): also strip smtpUser, matching the backend's own
+  // stripSensitiveSettingsForRole() (server.js) which strips both pass AND smtpUser -- the export
+  // was only mirroring half of that.
+  const _safeAppSettings = { ...APP_SETTINGS, emailConfig: { ...APP_SETTINGS.emailConfig, pass: undefined, smtpUser: undefined } };
+  const data = {};
+  if (isMd) {
+    data.users    = DATA_USERS;
+    data.leaves   = DATA_LEAVES;
+    data.settings = { periodLocks: PERIOD_LOCKS, leaveCarryForward: LEAVE_CARRY_FORWARD, tawi50Overrides: TAWI50_OVERRIDES, appSettings: _safeAppSettings };
+    data.finalize = finalizeData;
+  } else {
+    data.finalize = finalizeData;
+    data.settings = { appSettings: _safeAppSettings, tawi50Overrides: TAWI50_OVERRIDES };
+  }
+  const json = JSON.stringify(data, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `backup_${isMd ? 'full' : 'payroll'}_${new Date().toISOString().slice(0,10)}.json`;
+  a.click();
+  showToast(L('✅ Backup downloaded', '✅ ดาวน์โหลด Backup เรียบร้อย'), 'success');
+}
+
+// ===== SETTINGS PAGE =====
+function minsToTime(mins) {
+  const h = Math.floor(mins / 60).toString().padStart(2, '0');
+  const m = (mins % 60).toString().padStart(2, '0');
+  return `${h}:${m}`;
+}
+function timeToMins(val) {
+  const [h, m] = (val || '00:00').split(':').map(Number);
+  return h * 60 + (m || 0);
+}
+
+// 2026-07-31: `_skipRefresh` guards against a refresh loop -- the background re-fetch below
+// calls this function again once fresh data lands, and that recursive call must not itself
+// trigger another fetch. Fixes the stale-tab class of bug from the settings.json incident: a
+// tab left open on Settings (or navigated back to it) now always re-syncs from disk within one
+// round-trip instead of silently saving whatever it loaded at page-init, possibly hours old.
+function renderSettingsPage(_skipRefresh) {
+  const container = document.getElementById('settings-container');
+  if (!container) return;
+  if (!_skipRefresh) {
+    loadSettingsFromBackend().then(() => {
+      if (currentPage === 'settings') renderSettingsPage(true);
+    }).catch(() => {});
+  }
+  const s = APP_SETTINGS;
+  // Settings page is now reachable by every role (previously accounting/md-only) so that
+  // regular employees can reach their own notification preferences below — admin-only sections
+  // (company/payroll/tax/SMTP/digest-recipients/backup) stay gated behind adminSection().
+  const isAdmin = isMdAccountingView();
+  const fv = id => document.getElementById(id)?.value;
+  const fi = id => parseInt(document.getElementById(id)?.value) || 0;
+  const ff = id => parseFloat(document.getElementById(id)?.value) || 0;
+
+  const section = (icon, title, content) => `
+    <div class="card" style="margin-bottom:20px">
+      <div class="card-body" style="padding:20px 24px">
+        <div style="font-size:15px;font-weight:700;color:#1e3a5f;margin-bottom:16px;padding-bottom:10px;border-bottom:2px solid #e2e8f0">${icon} ${title}</div>
+        ${content}
+      </div>
+    </div>`;
+
+  const row2 = (a, b) => `<div class="form-row" style="margin-bottom:12px">${a}${b}</div>`;
+  const field = (label, inputHtml, hint = '') => `
+    <div>
+      <label style="display:block;font-size:12px;font-weight:600;color:#64748b;margin-bottom:4px">${label}</label>
+      ${inputHtml}
+      ${hint ? `<div style="font-size:11px;color:#94a3b8;margin-top:3px">${hint}</div>` : ''}
+    </div>`;
+  const inp = (id, val, type = 'text', extra = '') =>
+    `<input id="${id}" type="${type}" value="${escapeHtml(val)}" ${extra} style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`;
+  const adminSection = isAdmin ? section : () => '';
+
+  container.innerHTML = `
+    <div class="settings-sticky-header" style="margin:0 -4px 20px;padding:14px 4px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap">
+      <div>
+        <div style="font-size:18px;font-weight:800;color:#1e3a5f">⚙️ ${L('System Settings','การตั้งค่าระบบ')}</div>
+        <div style="font-size:13px;color:#64748b;margin-top:4px">${L('Changes apply immediately and are saved to the NAS.','การเปลี่ยนแปลงมีผลทันทีและบันทึกลงเซิร์ฟเวอร์')}</div>
+      </div>
+      ${isAdmin ? `
+      <div style="display:flex;gap:10px">
+        <button class="btn btn-ghost btn-sm" onclick="renderSettingsPage()">${L('↩ Reset','↩ รีเซ็ต')}</button>
+        <button class="btn btn-primary btn-sm" onclick="saveSettingsPage()">💾 ${L('Save Settings','บันทึกการตั้งค่า')}</button>
+      </div>` : ''}
+    </div>
+
+    ${adminSection('🏢', L('Company Information','ข้อมูลบริษัท'), `
+      ${row2(
+        field(L('Company Name','ชื่อบริษัท'), inp('set-company-name', s.company.name)),
+        field(L('Tax ID (เลขผู้เสียภาษี)','เลขผู้เสียภาษี'), inp('set-company-taxid', s.company.taxId))
+      )}
+      ${field(L('Address','ที่อยู่'), `<textarea id="set-company-address" rows="2" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box;resize:vertical">${escapeHtml(s.company.address)}</textarea>`)}
+      ${field(L('Company Name (Thai)','ชื่อบริษัท (ภาษาไทย)'), inp('set-company-name-th', s.company.nameTh), L('For official Thai documents, e.g. the 50 Tawi tax certificate','สำหรับเอกสารราชการ เช่น หนังสือรับรองหัก ณ ที่จ่าย 50 ทวิ'))}
+      ${field(L('Address (Thai)','ที่อยู่ (ภาษาไทย)'), `<textarea id="set-company-address-th" rows="2" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box;resize:vertical">${escapeHtml(s.company.addressTh)}</textarea>`)}
+      ${row2(
+        field(L('Main Bank','ธนาคารหลัก'), inp('set-bank-name', s.company.bankName)),
+        field(L('Bank Code','รหัสธนาคาร'), inp('set-bank-code', s.company.bankCode), L('e.g. 002 = Bangkok Bank','เช่น 002 = ธ.กรุงเทพ'))
+      )}
+    `)}
+
+    ${adminSection('📄', L('50 Tawi / Tax Documents','50 ทวิ / เอกสารภาษี'), `
+      ${row2(
+        field(L('PVD License No.','เลขที่ใบอนุญาตกองทุนสำรองเลี้ยงชีพ'), inp('set-pvd-license', s.company.pvdLicenseNo)),
+        field(L('SSO Employer Account No.','เลขที่บัญชีนายจ้างประกันสังคม'), inp('set-sso-employer-acct', s.company.ssoEmployerAccountNo))
+      )}
+    `)}
+
+    ${adminSection('📅', L('Payroll Period','รอบเงินเดือน'), `
+      ${row2(
+        field(L('Period Start Day','วันเริ่มรอบ (วันที่)'), inp('set-period-start', s.payroll.periodStartDay, 'number', 'min="1" max="28"'), L('Current: every month on this date','ปัจจุบัน: เริ่มทุกเดือนในวันนี้')),
+        field(L('End day is auto (Start − 1)','วันสิ้นรอบ = วันเริ่ม − 1 (อัตโนมัติ)'), `<div style="padding:9px 10px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;color:#64748b">${currentLang==='ja'?`翌月${(s.payroll.periodStartDay||21)-1}日`:L(`Day ${(s.payroll.periodStartDay||21)-1} of the following month`,`วันที่ ${(s.payroll.periodStartDay||21)-1} ของเดือนถัดไป`)}</div>`)
+      )}
+    `)}
+
+    ${adminSection('🏥', L('Social Security (SSO)','ประกันสังคม (สปส.)'), `
+      <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:12px;color:#92400e;line-height:1.6">
+        ⚠️ ${L('Update these fields when the law changes. Ceiling/max-contribution schedule:', 'อัปเดตค่าด้านล่างเมื่อถึงรอบที่กฎหมายเปลี่ยน ตารางเพดานเงินสมทบ:')}<br>
+        • ${L('Phase 1 (2026–2028): ceiling ฿17,500 (max ฿875/mo) — current', 'ระยะที่ 1 (2569–2571): เพดาน ฿17,500 (สมทบสูงสุด ฿875/เดือน) — ปัจจุบัน')}<br>
+        • ${L('Phase 2 (2029–2031): ceiling ฿20,000 (max ฿1,000/mo)', 'ระยะที่ 2 (2572–2574): เพดาน ฿20,000 (สมทบสูงสุด ฿1,000/เดือน)')}<br>
+        • ${L('Phase 3 (2032 onward): ceiling ฿23,000 (max ฿1,150/mo)', 'ระยะที่ 3 (2575 เป็นต้นไป): เพดาน ฿23,000 (สมทบสูงสุด ฿1,150/เดือน)')}
+      </div>
+      ${row2(
+        field(L('Rate (%)','อัตรา (%)'), inp('set-sso-rate', s.sso.rate, 'number', 'min="1" max="10" step="0.5"'), L('Employee\'s share only, not employer\'s', 'ส่วนของพนักงานเท่านั้น ไม่รวมส่วนนายจ้าง')),
+        field(L('Max Amount (฿/month)','สูงสุด (฿/เดือน)'), inp('set-sso-max', s.sso.maxAmount, 'number'), L('Hard cap on the deduction, regardless of salary', 'เพดานเงินหักสูงสุด ไม่ว่าเงินเดือนจะสูงแค่ไหน'))
+      )}
+      ${row2(
+        field(L('Min Salary Threshold (฿)','เงินเดือนขั้นต่ำที่ต้องหัก (฿)'), inp('set-sso-min-sal', s.sso.minSalary, 'number'), L('Employees below this salary are exempt — no deduction', 'พนักงานที่เงินเดือนต่ำกว่านี้ไม่ต้องหัก')),
+        field(L('Max Salary Ceiling (฿)','เพดานเงินเดือน (฿)'), inp('set-sso-max-sal', s.sso.maxSalary, 'number'), L('Salary above this is not counted for the calc — update together with Max Amount when the law changes', 'เงินเดือนส่วนเกินนี้ไม่ถูกนำมาคิด — ต้องอัปเดตพร้อมกับ "สูงสุด (฿/เดือน)" เวลากฎหมายเปลี่ยน'))
+      )}
+    `)}
+
+    ${adminSection('💰', L('Allowance Rates','อัตราเบี้ยเลี้ยง'), `
+      ${row2(
+        field(L('Upcountry (฿/trip)','Upcountry (฿/ครั้ง)'), inp('set-allow-upcountry', s.allowances.upcountry, 'number')),
+        field('', `<div style="padding:9px 10px;background:#f8fafc;border-radius:8px;font-size:12px;color:#94a3b8">${L('Applied per approved Upcountry request','นับต่อคำขอ Upcountry ที่ approved')}</div>`)
+      )}
+      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">Early Morning Bonus</div>
+      ${row2(
+        field(L('×1 (06:30–07:29) ฿','×1 (06:30–07:29) ฿'), inp('set-early1-amt', s.allowances.earlyMorning1, 'number')),
+        field(L('×2 (before 06:30) ฿','×2 (ก่อน 06:30) ฿'), inp('set-early2-amt', s.allowances.earlyMorning2, 'number'))
+      )}
+      ${row2(
+        field(L('Check-in before (×1 rate)','เช็กอินก่อนกี่โมงได้ ×1'), `<input id="set-early-thr1" type="time" value="${minsToTime(s.allowances.earlyThreshold1Min)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 07:30','เช่น 07:30')),
+        field(L('Check-in before (×2 rate)','เช็กอินก่อนกี่โมงได้ ×2'), `<input id="set-early-thr2" type="time" value="${minsToTime(s.allowances.earlyThreshold2Min)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 06:30','เช่น 06:30'))
+      )}
+      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">Late Night Bonus</div>
+      ${row2(
+        field(L('×1 (late night) ฿','×1 (กลับดึก) ฿'), inp('set-late1-amt', s.allowances.lateNight1, 'number')),
+        field(L('×2 (very late night) ฿','×2 (กลับดึกมาก) ฿'), inp('set-late2-amt', s.allowances.lateNight2, 'number'))
+      )}
+      ${row2(
+        field(L('Check-out from (×1 rate)','เช็กเอาท์ตั้งแต่กี่โมงได้ ×1'), `<input id="set-late-thr1" type="time" value="${String(s.allowances.lateNightThreshold1Hour||19).padStart(2,'0')}:00" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 19:00','เช่น 19:00')),
+        field(L('Check-out from (×2 rate)','เช็กเอาท์ตั้งแต่กี่โมงได้ ×2'), `<input id="set-late-thr2" type="time" value="${String(s.allowances.lateNightThreshold2Hour||s.allowances.lateNightThresholdHour||20).padStart(2,'0')}:00" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 20:00','เช่น 20:00'))
+      )}
+      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Diligence / Personal Car','เบี้ยขยัน / ค่าใช้รถส่วนตัว')}</div>
+      ${row2(
+        field(L('Diligence Allowance (฿/month)','เบี้ยขยัน (฿/เดือน)'), inp('set-diligence-amt', s.allowances.diligence, 'number'), L('who gets it is set in Allowance Eligibility below','ใครได้บ้างตั้งได้ที่สิทธิ์เบี้ยเลี้ยงด้านล่าง')),
+        field(L('Personal Car (฿/time)','ค่าใช้รถส่วนตัว (฿/ครั้ง)'), inp('set-personalcar-amt', s.allowances.personalCar, 'number'), L('also needs the per-employee eligibility checkbox','ต้องติ๊กสิทธิ์รายคนในหน้าข้อมูลพนักงานด้วย'))
+      )}
+      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Long Distance','Long Distance')}</div>
+      ${row2(
+        field(L('Allowance (฿/day)','เบี้ยเลี้ยง (฿/วัน)'), inp('set-longdistance-amt', s.allowances.longDistance, 'number')),
+        field(L('Minimum distance (km)','ระยะทางขั้นต่ำ (กม.)'), inp('set-longdistance-threshold', s.allowances.longDistanceThresholdKm, 'number'))
+      )}
+      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Phone Allowance','เบี้ยเลี้ยงโทรศัพท์')}</div>
+      ${row2(
+        field(L('Phone Allowance (฿/month)','ค่าโทรศัพท์ (฿/เดือน)'), inp('set-phone-amt', s.allowances.phone, 'number'), L('also needs the per-employee eligibility checkbox','ต้องติ๊กสิทธิ์รายคนในหน้าข้อมูลพนักงานด้วย')),
+        field('', '')
+      )}
+    `)}
+
+    ${adminSection('🎫', L('Allowance Eligibility by Role','สิทธิ์เบี้ยเลี้ยงตามระดับผู้ใช้'), `
+      <div style="font-size:12px;color:#92400e;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 12px;margin-bottom:14px">
+        ⚠️ ${L('Changes only apply to periods not yet approved by the Managing Director — once MD approves a period, its payslip is frozen and later eligibility/role/salary/Settings changes no longer affect it.', 'การเปลี่ยนแปลงมีผลเฉพาะรอบเงินเดือนที่ยังไม่ได้รับการอนุมัติจาก MD เท่านั้น — รอบที่ MD อนุมัติแล้วจะถูก freeze ไว้ การเปลี่ยน role/เงินเดือน/Settings ภายหลังจะไม่กระทบรอบที่อนุมัติแล้ว')}
+      </div>
+      <div style="font-size:11px;color:#64748b;margin-bottom:12px">
+        ℹ️ ${L('Other logged-in sessions pick this up on their next reload, not instantly.', 'เซสชันอื่นที่ล็อกอินค้างไว้จะเห็นการเปลี่ยนแปลงหลังโหลดหน้าใหม่ ไม่ใช่ทันที')}
+      </div>
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:12.5px;min-width:640px">
+          <thead>
+            <tr style="background:#f8fafc">
+              <th style="text-align:left;padding:8px 10px;border-bottom:2px solid #e2e8f0;font-weight:700;color:#475569">${L('Allowance','เบี้ยเลี้ยง')}</th>
+              ${ROLE_KEYS.map(role => `<th style="text-align:center;padding:8px 6px;border-bottom:2px solid #e2e8f0;font-weight:700;color:#475569" title="${escapeHtml(document.querySelector(`#emp-role option[value="${role}"]`)?.textContent || role)}">${L(role.charAt(0).toUpperCase()+role.slice(1), {md:'MD',manager:'ผจก.',accounting:'บัญชี',user:'พนักงาน',marketing:'การตลาด',driver:'คนขับ'}[role])}</th>`).join('')}
+            </tr>
+          </thead>
+          <tbody>
+            ${[
+              ['diligence',    L('Diligence Allowance','เบี้ยขยัน'), L('rate set above (Allowance Rates)','ใช้อัตรากลางด้านบน')],
+              ['longDistance', L('Long Distance Allowance','ค่าเดินทางไกล'), L('rate set above (Allowance Rates)','ใช้อัตรากลางด้านบน')],
+              ['personalCar',  L('Personal Car Allowance','ค่าใช้รถส่วนตัว'), L('rate set above; enabled per employee','ใช้อัตรากลางด้านบน + ต้องติ๊กสิทธิ์รายคน')],
+              ['upcountry',    L('Upcountry Allowance','ค่า Upcountry'), L('rate set above (Allowance Rates)','ใช้อัตรากลางด้านบน')],
+              ['earlyLate',    L('Early Morning / Late Night','เบี้ยมาเช้า/กลับดึก'), L('rate set above (Allowance Rates)','ใช้อัตรากลางด้านบน')],
+              ['ot',           L('Overtime (OT) Pay','ค่า OT'), L('hourly rate × approved OT hours','อัตราต่อชม. × ชม.ที่อนุมัติ')],
+              ['phone',        L('Phone Allowance','เบี้ยเลี้ยงโทรศัพท์'), L('rate set above; enabled per employee','ใช้อัตรากลางด้านบน + ต้องติ๊กสิทธิ์รายคน')],
+            ].map(([key, label, hint]) => `
+              <tr style="border-bottom:1px solid #f1f5f9">
+                <td style="padding:8px 10px">
+                  <div style="font-weight:600;color:#1e293b">${label}</div>
+                  <div style="font-size:10.5px;color:#94a3b8">${hint}</div>
+                </td>
+                ${ROLE_KEYS.map(role => `<td style="text-align:center;padding:8px 6px">
+                  <input type="checkbox" id="set-elig-${key}-${role}" ${isAllowanceEligible(s.allowanceEligibility, role, key) ? 'checked' : ''} style="width:16px;height:16px;cursor:pointer">
+                </td>`).join('')}
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    `)}
+
+    ${adminSection('⏰', L('Work Schedule','เวลาทำงาน'), `
+      ${row2(
+        field(L('Standard Start Time','เวลาเข้างานมาตรฐาน'), `<div style="display:flex;gap:8px;align-items:center">
+          ${inp('set-std-hour', s.workSchedule.standardStartHour, 'number', 'min="6" max="10"')}
+          <span style="color:#64748b">:</span>
+          ${inp('set-std-min', s.workSchedule.standardStartMinute, 'number', 'min="0" max="59"')}
+        </div>`),
+        field('', `<div style="padding:9px;font-size:12px;color:#64748b">${L('Used to calculate late arrivals','ใช้คำนวณการมาสาย')}</div>`)
+      )}
+    `)}
+
+    ${adminSection('🏖️', L('Leave Policy','นโยบายวันลา'), `
+      <div style="font-size:12px;color:#64748b;margin-bottom:12px">${L('This cap only applies when someone clicks "Process Carry-Forward" in the Year-End Carry-Forward section below — days beyond the cap are forfeited, not queued for later.', 'เพดานนี้จะถูกใช้ก็ต่อเมื่อมีคนกด "ประมวลผลยกยอด" ในส่วน Year-End Carry-Forward ด้านล่าง — วันที่เกินเพดานจะถูกตัดทิ้งเลย ไม่ได้เก็บไว้รอ')}</div>
+      ${row2(
+        field(L('Max Carry-Forward Days','วันลาสูงสุดที่ยกยอดได้ (วัน)'), inp('set-cf-max', s.leave.carryForwardMax, 'number', 'min="0"')),
+        field(L('Expiry Month','เดือนที่ยอดยกมาหมดอายุ'), `<select id="set-cf-expiry-month" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;background:#fff;box-sizing:border-box">${[L('January','มกราคม'),L('February','กุมภาพันธ์'),L('March','มีนาคม'),L('April','เมษายน'),L('May','พฤษภาคม'),L('June','มิถุนายน'),L('July','กรกฎาคม'),L('August','สิงหาคม'),L('September','กันยายน'),L('October','ตุลาคม'),L('November','พฤศจิกายน'),L('December','ธันวาคม')].map((m,i)=>`<option value="${i+1}" ${s.leave.carryForwardExpiryMonth===i+1?'selected':''}>${m}</option>`).join('')}</select>`)
+      )}
+      ${row2(
+        field(L('Expiry Day','วันที่หมดอายุ'), inp('set-cf-expiry-day', s.leave.carryForwardExpiryDay, 'number', 'min="1" max="31"')),
+        field(L('Notify Before Expiry (days)','แจ้งเตือนล่วงหน้าก่อนหมดอายุ (วัน)'), inp('set-cf-notify', s.leave.carryForwardNotifyDays, 'number', 'min="1"'), L('Shows an in-app toast to the employee only — no email or manager notice', 'แจ้งเตือนแบบ toast ในแอปให้พนักงานคนนั้นเห็นเองเท่านั้น — ไม่มีอีเมลหรือแจ้ง manager'))
+      )}
+    `)}
+
+    ${adminSection('📊', L('Income Tax (Thai Progressive Brackets)','ภาษีเงินได้บุคคลธรรมดา (ขั้นบันได)'), `
+      <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:12px;color:#1d4ed8">
+        ℹ️ ${L('Auto PIT is an estimate — Accounting can override in Finalize Payroll.','ภาษีอัตโนมัติเป็นการประมาณ — Accounting ปรับได้ใน Finalize Payroll')}
+      </div>
+      ${row2(
+        field(L('Personal Allowance (฿/year)','ค่าลดหย่อนส่วนตัว (฿/ปี)'), inp('set-tax-personal', s.tax.personalAllowanceAnnual, 'number')),
+        field('', `<div style="padding:9px;font-size:12px;color:#64748b">${L('Expense deduction 50% (max ฿100,000) is applied automatically','ค่าใช้จ่าย 50% (สูงสุด ฿100,000) คำนวณอัตโนมัติ')}</div>`)
+      )}
+      <div style="font-size:12px;font-weight:600;color:#64748b;margin-bottom:8px">${L('Tax Brackets (annual taxable income)','ขั้นภาษี (รายได้สุทธิต่อปี)')}</div>
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead><tr style="background:#f8fafc">
+            <th style="padding:8px 10px;text-align:left;color:#64748b;font-weight:600;border-bottom:2px solid #e2e8f0">${L('Up to (฿)','ถึง (฿)')}</th>
+            <th style="padding:8px 10px;text-align:left;color:#64748b;font-weight:600;border-bottom:2px solid #e2e8f0">${L('Rate (%)','อัตรา (%)')}</th>
+          </tr></thead>
+          <tbody id="tax-brackets-body">
+            ${s.tax.brackets.map((b, i) => `
+              <tr style="border-bottom:1px solid #f1f5f9">
+                <td style="padding:7px 10px">
+                  ${b.upTo === Infinity
+                    ? `<span style="color:#64748b">${L('Over ฿5,000,000','เกิน ฿5,000,000')}</span>`
+                    : `<input type="number" data-bracket="${i}" data-field="upTo" value="${escapeHtml(String(b.upTo))}" style="width:130px;padding:5px 8px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px">`}
+                </td>
+                <td style="padding:7px 10px">
+                  <input type="number" data-bracket="${i}" data-field="rate" value="${escapeHtml(String(b.rate))}" min="0" max="100" step="1" style="width:80px;padding:5px 8px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px"> %
+                </td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    `)}
+
+    ${adminSection('📋', L('Manual Allowance Categories','หมวดหมู่ค่าเบี้ยเลี้ยงพิเศษ'), `
+      <div style="font-size:12px;color:#64748b;margin-bottom:12px">${L('Accounting can record ad-hoc allowances per employee in Finalize Payroll. Add or remove categories here.','บัญชีสามารถกรอกค่าเบี้ยเลี้ยงพิเศษต่อพนักงานได้ในหน้า Finalize Payroll จัดการหมวดหมู่ที่นี่')}</div>
+      <div id="allowance-types-list"></div>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <input id="allowance-type-input" type="text" placeholder="${L('Category name...','ชื่อหมวดหมู่...')}" onkeydown="if(event.key==='Enter')addAllowanceType()" style="flex:1;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px">
+        <button type="button" class="btn btn-primary btn-sm" onclick="addAllowanceType()">+ ${L('Add','เพิ่ม')}</button>
+      </div>
+    `)}
+
+    ${adminSection('⏰', L('Late Arrival Deduction Policy','นโยบายหักวันลาจากการมาสาย'), `
+      <div style="font-size:12px;color:#64748b;margin-bottom:12px">${L('When enabled, late arrivals deduct minutes from the employee\'s annual leave balance. Effective from the selected pay period onwards.','เมื่อเปิดใช้งาน การมาสายจะหักเวลาออกจากวันลาพักร้อนของพนักงาน มีผลตั้งแต่รอบเงินเดือนที่กำหนด')}</div>
+      <div id="late-deduct-policy-ui"></div>
+    `)}
+
+    ${adminSection('↩️', L('Year-End Carry-Forward', 'ยอดวันลายกไปปีหน้า'), `
+      <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">
+        ${L('Click to snapshot remaining annual leave (up to max) for each employee and carry it into next year.','กดปุ่มเพื่อนำยอดวันลาพักร้อนคงเหลือ (ไม่เกินสูงสุด) ของพนักงานทุกคนยกไปปีหน้า')}
+      </p>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <button class="btn btn-primary btn-sm" onclick="processYearEndCarryForward(${new Date().getFullYear()})">
+          ↩️ ${currentLang === 'ja' ? `${new Date().getFullYear()}年 → ${new Date().getFullYear()+1}年 繰越処理` : L(`Process ${new Date().getFullYear()} → ${new Date().getFullYear()+1}`, `ประมวลผล ${new Date().getFullYear()} → ${new Date().getFullYear()+1}`)}
+        </button>
+      </div>
+    `)}
+
+    ${adminSection('📧', L('Email Configuration (SMTP)', 'ตั้งค่าอีเมล (SMTP)'), `
+      <div style="margin-bottom:14px">
+        <label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px">${currentLang === 'ja' ? 'プロバイダー（自動入力）' : L('Provider (auto-fill)','ผู้ให้บริการ (เติมค่าอัตโนมัติ)')}</label>
+        <select id="set-email-provider" onchange="applyEmailProviderPreset(this.value)" style="width:100%;max-width:320px;padding:7px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px">
+          <option value="">${currentLang === 'ja' ? 'カスタム / 選択してください' : L('Custom / choose below','กำหนดเอง / เลือกด้านล่าง')}</option>
+          <option value="gmail">Gmail</option>
+          <option value="resend">Resend</option>
+        </select>
+      </div>
+      <div class="form-row" style="margin-bottom:12px">
+        <div>
+          <label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px">SMTP Host</label>
+          <input id="set-email-host" value="${escapeHtml(APP_SETTINGS.emailConfig?.host||'smtp.gmail.com')}" style="width:100%;padding:7px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px">
+        </div>
+        <div>
+          <label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px">SMTP Port</label>
+          <input id="set-email-port" type="number" value="${APP_SETTINGS.emailConfig?.port||587}" style="width:100%;padding:7px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px">
+        </div>
+        <div>
+          <label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px">${L('Sender Email','อีเมลผู้ส่ง')}</label>
+          <input id="set-email-user" type="email" value="${escapeHtml(APP_SETTINGS.emailConfig?.user||'')}" placeholder="noreply@yourdomain.com" style="width:100%;padding:7px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px">
+        </div>
+        <div>
+          <label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px">${currentLang === 'ja' ? 'SMTPユーザー名（任意）' : L('SMTP Username (optional)','SMTP Username (ถ้าต่างจากอีเมลผู้ส่ง)')}</label>
+          <input id="set-email-smtpuser" value="${escapeHtml(APP_SETTINGS.emailConfig?.smtpUser||'')}" placeholder="${currentLang === 'ja' ? '空欄なら上のメールを使用' : L('Leave blank to use Sender Email above','เว้นว่างถ้าเหมือนอีเมลผู้ส่ง')}" style="width:100%;padding:7px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px">
+        </div>
+        <div>
+          <label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px">${L('App Password','App Password')}</label>
+          <input id="set-email-pass" type="password" value="${escapeHtml(APP_SETTINGS.emailConfig?.pass||'')}" placeholder="xxxx xxxx xxxx xxxx" style="width:100%;padding:7px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px">
+        </div>
+        <div>
+          <label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px">${L('Display Name','ชื่อผู้ส่ง')}</label>
+          <input id="set-email-fromname" value="${escapeHtml(APP_SETTINGS.emailConfig?.fromName||'Time Attendance Application')}" style="width:100%;padding:7px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px">
+        </div>
+        <div style="display:flex;align-items:flex-end">
+          <button class="btn btn-outline btn-sm" onclick="testEmailConfig()" style="width:100%">📨 ${L('Test Email','ทดสอบส่งอีเมล')}</button>
+        </div>
+      </div>
+      <p style="font-size:11px;color:#94a3b8">💡 Gmail: เปิด 2FA แล้วสร้าง <a href="https://myaccount.google.com/apppasswords" target="_blank" style="color:#3b82f6">App Password</a> — ไม่ต้องใช้รหัส Google จริง</p>
+      <p style="font-size:11px;color:#94a3b8">💡 ${currentLang === 'ja' ? 'Resendなど（SMTPユーザー名がメールアドレスではないサービス）を使う場合は、SMTPユーザー名欄に指定のユーザー名（例: resend）を入力してください。' : L('For services like Resend (whose SMTP username isn\'t an email address), fill in SMTP Username above with their required value (e.g. resend).', 'ถ้าใช้บริการอย่าง Resend (ที่ SMTP Username ไม่ใช่อีเมล) ให้กรอกช่อง SMTP Username ด้านบนตามที่ผู้ให้บริการกำหนด (เช่น resend)')}</p>
+    `)}
+
+    ${adminSection('📧', L('Payslip Email', 'ส่งสลิปเงินเดือนทางอีเมล'), `
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <label style="font-size:13px;font-weight:600">${L('Enable Payslip Email','เปิดใช้งานส่งสลิปทางอีเมล')}</label>
+        <input id="set-payslip-email-enabled" type="checkbox" ${APP_SETTINGS.payslipEmailEnabled !== false ? 'checked' : ''} style="width:18px;height:18px;cursor:pointer">
+      </div>
+      <p style="font-size:11px;color:#94a3b8">${currentLang === 'ja'
+        ? 'オフにすると、Finalize Payroll画面の📧給与明細メール送信ボタンが非表示になり、サーバー側でも送信がブロックされます。下の「承認待ち通知」（休暇・OT承認のリマインダー）とは別の機能です。'
+        : L('When off, the 📧 email-payslip button is hidden on the Finalize Payroll page and the server blocks sending, until turned back on. This is separate from "Pending Approval Notifications" below, which is about leave/OT approval reminders.',
+            'เมื่อปิด ปุ่ม 📧 ส่งสลิปทางอีเมลในหน้า Finalize Payroll จะถูกซ่อน และเซิร์ฟเวอร์จะปฏิเสธการส่งจนกว่าจะเปิดใช้งานอีกครั้ง — คนละเรื่องกับ "แจ้งเตือนคำขอค้างอนุมัติ" ด้านล่าง ซึ่งเป็นการแจ้งเตือนเรื่องอนุมัติวันลา/OT')}</p>
+    `)}
+
+    ${adminSection('🔔', L('Pending Approval Notifications', 'แจ้งเตือนคำขอค้างอนุมัติ'), `
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+        <label style="font-size:13px;font-weight:600">${L('Enable Notifications','เปิดการแจ้งเตือน')}</label>
+        <input id="set-notif-enabled" type="checkbox" ${APP_SETTINGS.emailNotification?.enabled ? 'checked' : ''} style="width:18px;height:18px;cursor:pointer">
+      </div>
+      <div class="form-row">
+        <div>
+          <div style="font-size:12px;font-weight:600;color:#64748b;margin-bottom:8px">${L('Send to','ส่งแจ้งเตือนหา')}</div>
+          ${[['manager','Manager'],['md','Managing Director'],['accounting','Accounting']].map(([k,lbl]) => `
+          <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer">
+            <input type="checkbox" id="set-notif-${k}" ${APP_SETTINGS.emailNotification?.recipients?.[k] ? 'checked' : ''} style="width:16px;height:16px">
+            <span style="font-size:13px">${lbl}</span>
+          </label>`).join('')}
+          <div style="font-size:11px;color:#94a3b8;margin-top:4px;margin-bottom:8px">${L('Each recipient above gets the digest in their own language preference (set below in their profile).','แต่ละคนด้านบนจะได้รับอีเมลตามภาษาที่ตั้งไว้ในโปรไฟล์ของตัวเอง (ตั้งได้ที่หัวข้อด้านล่าง)')}</div>
+          <label style="font-size:12px;color:#64748b;display:block;margin-top:8px;margin-bottom:4px">${L('Additional emails','อีเมลเพิ่มเติม')}</label>
+          <div id="notif-extra-list"></div>
+          <button type="button" class="btn btn-outline btn-sm" onclick="addNotifExtraRow()" style="margin-top:4px">+ ${L('Add email','เพิ่มอีเมล')}</button>
+        </div>
+        <div>
+          <div style="font-size:12px;font-weight:600;color:#64748b;margin-bottom:8px">${L('Schedule','ตารางเวลา')}</div>
+          <label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px">${L('Days','วันที่ส่ง')}</label>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">
+            ${(() => {
+              // Short day-of-week labels were hardcoded Thai regardless of currentLang — mirror
+              // the language-aware pattern DAY_NAMES_EN/JA/TH already use elsewhere in this file.
+              const shortLabels = currentLang === 'en' ? ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
+                : currentLang === 'ja' ? ['日','月','火','水','木','金','土']
+                : ['อา','จ','อ','พ','พฤ','ศ','ส'];
+              return ['sun','mon','tue','wed','thu','fri','sat'].map((k,i) => [k, shortLabels[i]]);
+            })().map(([k,lbl]) => `
+            <label style="display:flex;align-items:center;gap:4px;cursor:pointer;padding:4px 8px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px">
+              <input type="checkbox" class="notif-day" value="${k}" ${(APP_SETTINGS.emailNotification?.schedule?.days||['mon','tue','wed','thu','fri']).includes(k) ? 'checked' : ''} style="width:14px;height:14px">
+              ${lbl}
+            </label>`).join('')}
+          </div>
+          <label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px">${L('Time','เวลา')}</label>
+          <input id="set-notif-time" type="time" value="${APP_SETTINGS.emailNotification?.schedule?.time||'09:00'}" style="padding:7px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px;margin-bottom:12px">
+          <label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px">${L('Only if pending for at least','ส่งเฉพาะที่ค้างมาแล้วอย่างน้อย')}</label>
+          <div style="display:flex;align-items:center;gap:8px">
+            <input id="set-notif-min-days" type="number" min="0" max="30" value="${APP_SETTINGS.emailNotification?.schedule?.minPendingDays||0}" style="width:70px;padding:7px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px">
+            <span style="font-size:13px;color:#64748b">${L('days','วัน')}</span>
+          </div>
+        </div>
+      </div>
+    `)}
+
+    ${(() => { const installHtml = renderInstallAppButton(); return installHtml ? section('📲', L('Install App','ติดตั้งแอป'), installHtml) : ''; })()}
+
+    ${section('🔔', L('Browser Push Notifications','การแจ้งเตือนในเบราว์เซอร์'), (() => {
+      const perm = ('Notification' in window) ? Notification.permission : 'unsupported';
+      const prefs = getPushPrefs();
+      const statusColor = perm === 'granted' ? '#059669' : perm === 'denied' ? '#dc2626' : '#d97706';
+      const statusLabel = perm === 'granted'
+        ? L('Allowed ✅','อนุญาตแล้ว ✅')
+        : perm === 'denied'
+          ? L('Blocked ❌ — change in browser settings','บล็อก ❌ — เปลี่ยนใน browser → Site Settings')
+          : perm === 'unsupported'
+            ? L('Not supported by this browser','เบราว์เซอร์ไม่รองรับ')
+            : L('Not yet enabled','ยังไม่ได้เปิด');
+      const isApprover = actingRoles().some(r => ['manager','md','accounting'].includes(r));
+      return `
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;padding:12px 16px;background:var(--bg);border-radius:10px;border:1px solid var(--border)">
+          <div style="font-size:22px">${perm === 'denied' ? '🔕' : '🔔'}</div>
+          <div style="flex:1">
+            <div style="font-size:12px;color:#64748b;margin-bottom:2px">${L('Permission Status','สถานะการอนุญาต')}</div>
+            <div style="font-weight:700;color:${statusColor}">${statusLabel}</div>
+          </div>
+          ${perm === 'default' ? `<button class="btn btn-primary btn-sm" onclick="requestPushPermission()">${L('Enable','เปิดการแจ้งเตือน')}</button>` : ''}
+        </div>
+        ${perm === 'granted' ? `
+          <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:14px">
+            <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+              <input type="checkbox" ${prefs.onMyLeave !== false ? 'checked' : ''}
+                style="width:16px;height:16px"
+                onchange="savePushPrefs({...getPushPrefs(),onMyLeave:this.checked})">
+              <span style="font-size:13px">${L('Notify me when my leave or request is approved / rejected','แจ้งเตือนเมื่อคำขอของฉันได้รับการอนุมัติหรือถูกปฏิเสธ')}</span>
+            </label>
+            ${isApprover ? `
+            <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+              <input type="checkbox" ${prefs.onNewPending !== false ? 'checked' : ''}
+                style="width:16px;height:16px"
+                onchange="savePushPrefs({...getPushPrefs(),onNewPending:this.checked})">
+              <span style="font-size:13px">${L('Notify me when new requests need my approval','แจ้งเตือนเมื่อมีคำขอใหม่รออนุมัติจากฉัน')}</span>
+            </label>` : ''}
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn btn-outline btn-sm" onclick="testPushNotification()">
+              🔔 ${L('Test Notification','ทดสอบการแจ้งเตือน')}
+            </button>
+          </div>
+          <p style="font-size:11px;color:#94a3b8;margin-top:10px">💡 ${L('The system polls for changes every 3 minutes while this tab is open','ระบบตรวจสอบการเปลี่ยนแปลงทุก 3 นาที ขณะที่แท็บนี้เปิดอยู่')}</p>
+        ` : ''}
+      `;
+    })())}
+
+    ${section('📧', L('Email Notification Preferences','การแจ้งเตือนทางอีเมลส่วนตัว'), (() => {
+      const lang = currentUser?.notifyLangEmail || 'th';
+      const hasEmail = !!currentUser?.email;
+      return `
+        ${!hasEmail ? `<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:12px;color:#92400e">⚠️ ${L('Add an email to your profile first to receive email notifications.','กรุณาเพิ่มอีเมลในโปรไฟล์ของคุณก่อนจึงจะรับการแจ้งเตือนทางอีเมลได้')}</div>` : ''}
+        <div class="form-row" style="margin-bottom:6px">
+          <div>
+            <label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px">${L('Notification email language','ภาษาที่ใช้ในอีเมลแจ้งเตือน')}</label>
+            <select id="set-my-notif-lang" onchange="saveMyNotifyPrefs({notifyLangEmail:this.value})" style="width:100%;padding:7px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px;background:#fff">
+              <option value="th" ${lang==='th'?'selected':''}>ไทย</option>
+              <option value="en" ${lang==='en'?'selected':''}>English</option>
+              <option value="ja" ${lang==='ja'?'selected':''}>日本語</option>
+            </select>
+          </div>
+          <div style="display:flex;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:8px;cursor:${hasEmail?'pointer':'not-allowed'};opacity:${hasEmail?1:0.5}">
+              <input type="checkbox" ${currentUser?.emailNotifyOnResult ? 'checked' : ''} ${hasEmail?'':'disabled'}
+                onchange="saveMyNotifyPrefs({emailNotifyOnResult:this.checked})" style="width:16px;height:16px">
+              <span style="font-size:13px">${L('Email me the result when my request is approved or rejected','ส่งอีเมลแจ้งผลเมื่อคำขอของฉันได้รับการอนุมัติหรือไม่อนุมัติ')}</span>
+            </label>
+          </div>
+        </div>
+        <p style="font-size:11px;color:#94a3b8;margin-top:6px">💡 ${L('In-app notifications (bell icon / browser push above) always work regardless of this setting — this only controls the extra email.','การแจ้งเตือนในแอป (กระดิ่ง/push ด้านบน) ทำงานเสมอไม่ว่าจะตั้งค่านี้อย่างไร — ตัวเลือกนี้ควบคุมเฉพาะอีเมลเพิ่มเติมเท่านั้น')}</p>
+      `;
+    })())}
+
+    ${adminSection('💾', L('Data Backup', 'สำรองข้อมูล'), `
+      <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">
+        ${L('Download a JSON snapshot of application data.','ดาวน์โหลดข้อมูลในรูปแบบ JSON')}
+      </p>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <button class="btn btn-primary btn-sm" onclick="exportDataBackup('md')">
+          📦 ${L('Full Backup (Managing Director)', 'Backup ทั้งหมด (Managing Director)')}
+        </button>
+        <button class="btn btn-outline btn-sm" onclick="exportDataBackup('accounting')">
+          💰 ${L('Payroll Backup (Accounting)', 'Backup Payroll (Accounting)')}
+        </button>
+      </div>
+    `)}
+  `;
+  if (isAdmin) {
+    _notifExtraDraft = (APP_SETTINGS.emailNotification?.recipients?.extra || []).map(e =>
+      typeof e === 'string' ? { email: e, lang: 'th' } : { email: e.email || '', lang: e.lang || 'th' }
+    );
+    renderNotifExtraList();
+    renderAllowanceTypesList();
+    renderLateDeductPolicyUI();
+  }
+}
+
+let _notifExtraDraft = [];
+function renderNotifExtraList() {
+  const el = document.getElementById('notif-extra-list');
+  if (!el) return;
+  el.innerHTML = _notifExtraDraft.map((e, i) => `
+    <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+      <input value="${escapeHtml(e.email)}" placeholder="a@b.com" oninput="_notifExtraDraft[${i}].email=this.value"
+        style="flex:1;padding:6px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px">
+      <select onchange="_notifExtraDraft[${i}].lang=this.value" style="padding:6px 8px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px;background:#fff">
+        <option value="th" ${e.lang==='th'?'selected':''}>TH</option>
+        <option value="en" ${e.lang==='en'?'selected':''}>EN</option>
+        <option value="ja" ${e.lang==='ja'?'selected':''}>JA</option>
+      </select>
+      <button type="button" class="btn btn-outline btn-sm" onclick="removeNotifExtraRow(${i})" style="padding:6px 10px">✕</button>
+    </div>`).join('') || `<div style="font-size:12px;color:#94a3b8;margin-bottom:6px">${L('No additional emails','ยังไม่มีอีเมลเพิ่มเติม')}</div>`;
+}
+function addNotifExtraRow() { _notifExtraDraft.push({ email: '', lang: 'th' }); renderNotifExtraList(); }
+function removeNotifExtraRow(i) { _notifExtraDraft.splice(i, 1); renderNotifExtraList(); }
+
+function renderAllowanceTypesList() {
+  const list = document.getElementById('allowance-types-list');
+  if (!list) return;
+  const types = APP_SETTINGS.allowanceTypes || [];
+  list.innerHTML = types.length === 0
+    ? `<div style="color:#94a3b8;font-size:13px;padding:8px 0">${L('No categories yet','ยังไม่มีหมวดหมู่')}</div>`
+    : types.map((name, i) => `
+      <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #f1f5f9">
+        <span style="flex:1;font-size:13px">${escapeHtml(name)}</span>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="removeAllowanceType(${i})" style="color:#ef4444;padding:2px 8px">✕</button>
+      </div>`).join('');
+}
+
+async function addAllowanceType() {
+  if (blockIfObserver()) return;
+  const inp = document.getElementById('allowance-type-input');
+  if (!inp) return;
+  const val = inp.value.trim();
+  if (!val) return;
+  if (!APP_SETTINGS.allowanceTypes) APP_SETTINGS.allowanceTypes = [];
+  if (APP_SETTINGS.allowanceTypes.includes(val)) { showToast(L('Already exists','มีอยู่แล้ว'), 'warning'); return; }
+  APP_SETTINGS.allowanceTypes.push(val);
+  inp.value = '';
+  await savePayrollSettings();
+  renderAllowanceTypesList();
+}
+
+async function removeAllowanceType(idx) {
+  if (blockIfObserver()) return;
+  if (!APP_SETTINGS.allowanceTypes) return;
+  APP_SETTINGS.allowanceTypes.splice(idx, 1);
+  await savePayrollSettings();
+  renderAllowanceTypesList();
+}
+
+function renderLateDeductPolicyUI() {
+  const el = document.getElementById('late-deduct-policy-ui');
+  if (!el) return;
+  const p = APP_SETTINGS.lateDeductPolicy;
+  const effDate = p.effectiveFromPeriod
+    ? `${p.effectiveFromPeriod.slice(0,4)}-${p.effectiveFromPeriod.slice(4,6)}-${p.effectiveFromPeriod.slice(6,8)}`
+    : '';
+  const effLabel = p.effectiveFromPeriod
+    ? (currentLang === 'ja'
+        ? `${effDate} 期間より有効`
+        : L(`Effective from period starting ${effDate}`, `มีผลตั้งแต่รอบ ${effDate}`))
+    : L('Not activated yet — enable to set effective period', 'ยังไม่ได้เปิดใช้งาน');
+  const tiersHtml = (p.tiers || []).map((t, i) =>
+    `<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:12px;color:#374151">
+      <span style="min-width:52px;color:#64748b">${currentLang === 'ja' ? `段階${i+1}:` : L(`Tier ${i+1}:`,'ระดับ '+(i+1)+':')}</span>
+      ${L('Late','มาสาย')}
+      <input type="number" id="ldp-t${i}-from" value="${escapeHtml(String(t.fromMin))}" min="1" style="width:48px;padding:3px 6px;border:1px solid #e2e8f0;border-radius:5px;font-size:12px">
+      –
+      <input type="number" id="ldp-t${i}-to" value="${escapeHtml(String(t.toMin))}" min="1" style="width:48px;padding:3px 6px;border:1px solid #e2e8f0;border-radius:5px;font-size:12px">
+      ${L('min → Deduct','นาที → หัก')}
+      <input type="number" id="ldp-t${i}-deduct" value="${escapeHtml(String(t.deductMin))}" min="1" style="width:48px;padding:3px 6px;border:1px solid #e2e8f0;border-radius:5px;font-size:12px">
+      ${L('min of annual leave','นาทีจากวันลาพักร้อน')}
+      <button type="button" onclick="removeLateDeductTier(${i})" style="margin-left:4px;background:none;border:none;color:#ef4444;cursor:pointer;font-size:14px;padding:0 4px" title="Remove tier">✕</button>
+    </div>`
+  ).join('');
+  el.innerHTML = `
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+      <div class="toggle-switch ${p.enabled ? 'on' : ''}" onclick="toggleLateDeductPolicy()" style="flex-shrink:0"></div>
+      <span style="font-weight:600;font-size:13px;color:${p.enabled ? '#059669' : '#94a3b8'}">
+        ${p.enabled ? L('Enabled','เปิดใช้งาน') : L('Disabled','ปิดอยู่')}
+      </span>
+    </div>
+    <div style="font-size:12px;color:#64748b;margin-bottom:10px">${effLabel}</div>
+    <div style="font-size:12px;font-weight:600;color:#374151;margin-bottom:8px">${L('Deduction Tiers (minutes late → minutes deducted from annual leave):','เกณฑ์การหักวันลาพักร้อน (มาสายกี่นาที → หักกี่นาที):')}</div>
+    ${tiersHtml}
+    <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+      <button type="button" class="btn btn-ghost btn-sm" onclick="addLateDeductTier()">➕ ${L('Add Tier','เพิ่ม Tier')}</button>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="saveLateDeductTiers()">💾 ${L('Save Tiers','บันทึก Tiers')}</button>
+    </div>
+  `;
+}
+
+async function toggleLateDeductPolicy() {
+  if (blockIfObserver()) return;
+  const p = APP_SETTINGS.lateDeductPolicy;
+  p.enabled = !p.enabled;
+  if (p.enabled && !p.effectiveFromPeriod) {
+    const today = new Date();
+    const ps = getPeriodStartForDate(today.toISOString().slice(0, 10));
+    const pad = n => String(n).padStart(2, '0');
+    p.effectiveFromPeriod = `${ps.getFullYear()}${pad(ps.getMonth()+1)}${pad(ps.getDate())}`;
+  }
+  await savePayrollSettings();
+  renderLateDeductPolicyUI();
+  showToast(p.enabled
+    ? L('✅ Late deduction policy enabled', '✅ เปิดนโยบายหักวันลาจากการมาสายแล้ว')
+    : L('⛔ Late deduction policy disabled', '⛔ ปิดนโยบายหักวันลาจากการมาสายแล้ว'), 'success');
+}
+
+async function saveLateDeductTiers() {
+  if (blockIfObserver()) return;
+  const p = APP_SETTINGS.lateDeductPolicy;
+  const newTiers = [];
+  (p.tiers || []).forEach((_, i) => {
+    const fromEl = document.getElementById(`ldp-t${i}-from`);
+    const toEl   = document.getElementById(`ldp-t${i}-to`);
+    const dedEl  = document.getElementById(`ldp-t${i}-deduct`);
+    if (fromEl && toEl && dedEl) {
+      newTiers.push({ fromMin: parseInt(fromEl.value)||1, toMin: parseInt(toEl.value)||10, deductMin: parseInt(dedEl.value)||10 });
+    }
+  });
+  if (newTiers.length > 0) p.tiers = newTiers;
+  await savePayrollSettings();
+  renderLateDeductPolicyUI();
+  showToast(L('✅ Tiers saved', '✅ บันทึก Tiers แล้ว'), 'success');
+}
+
+function addLateDeductTier() {
+  if (blockIfObserver()) return;
+  const p = APP_SETTINGS.lateDeductPolicy;
+  const tiers = p.tiers || [];
+  const lastTo = tiers.length ? tiers[tiers.length - 1].toMin : 0;
+  tiers.push({ fromMin: lastTo + 1, toMin: lastTo + 10, deductMin: (tiers.length + 1) * 10 });
+  p.tiers = tiers;
+  renderLateDeductPolicyUI();
+}
+
+function removeLateDeductTier(idx) {
+  if (blockIfObserver()) return;
+  const p = APP_SETTINGS.lateDeductPolicy;
+  if (!p.tiers || p.tiers.length <= 1) return;
+  p.tiers.splice(idx, 1);
+  renderLateDeductPolicyUI();
+}
+
+function minToStr(min) {
+  const d = Math.floor(min / 480);
+  const h = Math.floor((min % 480) / 60);
+  const m = min % 60;
+  const parts = [];
+  const ja = currentLang === 'ja';
+  if (d > 0) parts.push(ja ? `${d}日` : L(`${d}d`, `${d} วัน`));
+  if (h > 0) parts.push(ja ? `${h}時間` : L(`${h}h`, `${h} ชั่วโมง`));
+  if (m > 0) parts.push(ja ? `${m}分` : L(`${m}m`, `${m} นาที`));
+  return parts.length ? parts.join(' ') : (ja ? '0日' : L('0d', '0 วัน'));
+}
+
+function computeLateDeductMinutes(userId, year) {
+  const policy = APP_SETTINGS.lateDeductPolicy;
+  if (!policy?.enabled || !policy.effectiveFromPeriod) return { count: 0, deductMin: 0 };
+  // Drivers are never marked 'late' anywhere else in the app (status derivation at line ~2288/2415,
+  // isLate flag at ~3351) since their check-in time isn't governed by the fixed office start time —
+  // keep this function consistent with that rather than independently re-deriving lateness from raw time.
+  const driverUser = DATA_USERS.find(u => u.id === userId);
+  if (driverUser?.role === 'driver') return { count: 0, deductMin: 0 };
+  const eff = policy.effectiveFromPeriod;
+  const effDateStr = `${eff.slice(0,4)}-${eff.slice(4,6)}-${eff.slice(6,8)}`;
+  const yearStr = String(year);
+  // 2026-08-09 (Opus audit finding 4.2): was hardcoded 8*60+30 while every display site (late
+  // badge, late-minute detail, report detail) reads the configurable Settings value -- changing
+  // the standard start time used to silently desync this deduction from what the UI showed.
+  const _ws3 = APP_SETTINGS.workSchedule;
+  const stdStart = (_ws3?.standardStartHour ?? 8) * 60 + (_ws3?.standardStartMinute ?? 30);
+  let count = 0, deductMin = 0;
+  Object.keys(attendanceLog).forEach(key => {
+    if (!key.startsWith(`${userId}_`)) return;
+    const dateStr = key.slice(String(userId).length + 1);
+    if (!dateStr.startsWith(yearStr)) return;
+    if (dateStr < effDateStr) return;
+    const rec = attendanceLog[key];
+    const dw = new Date(dateStr + 'T12:00:00').getDay();
+    if (dw === 0 || dw === 6) return;
+    if (isPublicHoliday(dateStr) || isCompanyTripDay(dateStr)) return;
+    // Skip days covered by approved annual/sick/business leave
+    const onLeave = DATA_LEAVES.some(l =>
+      l.userId === userId && l.status === 'approved' &&
+      ['annual','sick','business'].includes(l.type) &&
+      dateStr >= l.dateFrom && dateStr <= (l.dateTo || l.dateFrom)
+    );
+    if (onLeave) return;
+    // Use corrected check-in time if an approved time-correction exists
+    const corr = DATA_LEAVES.find(l =>
+      l.userId === userId && l.status === 'approved' &&
+      l.type === 'time-correction' && l.correctionField === 'checkIn' &&
+      l.dateFrom === dateStr
+    );
+    const effectiveCheckIn = corr ? corr.correctedTime : rec.checkIn;
+    if (!effectiveCheckIn) return;
+    const [h, m] = effectiveCheckIn.split(':').map(Number);
+    const lateMin = h * 60 + m - stdStart;
+    if (lateMin <= 0) return;
+    const tier = (policy.tiers || []).find(t => lateMin >= t.fromMin && lateMin <= t.toMin);
+    if (tier) { count++; deductMin += tier.deductMin; }
+  });
+  return { count, deductMin };
+}
+
+// BUG FIX 2026-08-06 (round 4 of the door-access re-audit chain): this used to (1) always build
+// the URL from currentUser.employeeNo with no guard at all -- an employeeNo-less employee hit
+// either `/api/users/` (matches no route) or `/api/users/undefined` (matched some other record's
+// PUT, if any, via the F-6-hardened isOwnRecord identity check -- either way the wrong outcome
+// went unnoticed); (2) never checked the response, so it always toasted "✅ Preference saved"
+// regardless of what actually happened; (3) mutated currentUser/u optimistically with no rollback
+// on failure. Now: routes to the id-keyed route when unlinked, checks success, rolls back both
+// mutated objects on failure.
+async function saveMyNotifyPrefs(patch) {
+  const currentUserSnapshot = { ...currentUser };
+  const u = DATA_USERS.find(x => x.id === currentUser.id);
+  const uSnapshot = u ? { ...u } : null;
+  Object.assign(currentUser, patch);
+  if (u) Object.assign(u, patch);
+  try {
+    const url = currentUser.employeeNo ? `/api/users/${encodeURIComponent(currentUser.employeeNo)}` : `/api/users/id/${currentUser.id}`;
+    const res = await apiFetch(url, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch)
+    });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.message || 'Server error');
+    showToast(L('✅ Preference saved', '✅ บันทึกการตั้งค่าแล้ว'), 'success');
+  } catch(e) {
+    Object.assign(currentUser, currentUserSnapshot);
+    if (u && uSnapshot) Object.assign(u, uSnapshot);
+    showToast(L('❌ Could not save: ', '❌ บันทึกไม่สำเร็จ: ') + e.message, 'danger');
+  }
+}
+
+async function saveSettingsPage() {
+  if (blockIfObserver()) return;
+  if (!isMdAccountingView()) return;
+
+  // 2026-08-01 (bug fix): every finalize.json record key (getFinalizeKey/getMdApprovalKey/
+  // getSnapshotKey/getPeriodLockKey) is derived from the period's START DATE, which itself is
+  // derived from payroll.periodStartDay. Changing this value makes every existing finalize
+  // record, approval, lock, and payroll snapshot unreachable by key -- not deleted, just
+  // orphaned, since nothing will ever compute that exact date again. There is no undo once
+  // saved (the old records still sit in finalize.json, just permanently invisible to the UI).
+  await loadFinalizeData();
+  const newPeriodStartDay = Math.max(1, Math.min(28, parseInt(document.getElementById('set-period-start')?.value) || 0));
+  if (newPeriodStartDay !== APP_SETTINGS.payroll.periodStartDay && Object.keys(finalizeData).length > 0) {
+    const ok = confirm(currentLang === 'ja'
+      ? `⚠️ 給与期間の開始日を${APP_SETTINGS.payroll.periodStartDay}日から${newPeriodStartDay}日に変更しようとしています。finalize.jsonに既存の記録（確定・承認・ロック・スナップショット）があり、この変更後はすべて参照できなくなります（削除はされませんが、二度とアクセスできません）。本当に続行しますか？`
+      : L(`⚠️ You're changing the payroll period start day from ${APP_SETTINGS.payroll.periodStartDay} to ${newPeriodStartDay}. There are existing finalize/approval/lock/snapshot records keyed to the OLD start date — after this change, none of them will ever be reachable again (they aren't deleted, just permanently orphaned). Continue anyway?`,
+          `⚠️ กำลังจะเปลี่ยนวันเริ่มรอบเงินเดือนจากวันที่ ${APP_SETTINGS.payroll.periodStartDay} เป็นวันที่ ${newPeriodStartDay} มีข้อมูล finalize/อนุมัติ/ล็อค/snapshot ที่อ้างอิงวันที่เริ่มรอบเดิมอยู่ — หลังเปลี่ยนแล้วจะไม่มีทางเข้าถึงข้อมูลเหล่านั้นได้อีกเลย (ไม่ได้ลบ แต่จะหาไม่เจอถาวร) ยืนยันจะดำเนินการต่อไหม?`));
+    if (!ok) return;
+  }
+  const fv = id => (document.getElementById(id)?.value || '').trim();
+  const fi = id => parseInt(document.getElementById(id)?.value) || 0;
+  const ff = id => parseFloat(document.getElementById(id)?.value) || 0;
+
+  APP_SETTINGS.company.name    = fv('set-company-name');
+  APP_SETTINGS.company.taxId   = fv('set-company-taxid');
+  APP_SETTINGS.company.address = fv('set-company-address');
+  APP_SETTINGS.company.nameTh    = fv('set-company-name-th');
+  APP_SETTINGS.company.addressTh = fv('set-company-address-th');
+  APP_SETTINGS.company.bankName = fv('set-bank-name');
+  APP_SETTINGS.company.bankCode = fv('set-bank-code');
+  APP_SETTINGS.company.pvdLicenseNo = fv('set-pvd-license');
+  APP_SETTINGS.company.ssoEmployerAccountNo = fv('set-sso-employer-acct');
+
+  APP_SETTINGS.payroll.periodStartDay = Math.max(1, Math.min(28, fi('set-period-start')));
+
+  APP_SETTINGS.sso.rate      = ff('set-sso-rate');
+  APP_SETTINGS.sso.maxAmount = fi('set-sso-max');
+  APP_SETTINGS.sso.minSalary = fi('set-sso-min-sal');
+  APP_SETTINGS.sso.maxSalary = fi('set-sso-max-sal');
+
+  APP_SETTINGS.allowances.upcountry           = fi('set-allow-upcountry');
+  APP_SETTINGS.allowances.earlyMorning1        = fi('set-early1-amt');
+  APP_SETTINGS.allowances.earlyMorning2        = fi('set-early2-amt');
+  APP_SETTINGS.allowances.earlyThreshold1Min   = timeToMins(document.getElementById('set-early-thr1')?.value);
+  APP_SETTINGS.allowances.earlyThreshold2Min   = timeToMins(document.getElementById('set-early-thr2')?.value);
+  APP_SETTINGS.allowances.lateNight1            = fi('set-late1-amt');
+  APP_SETTINGS.allowances.lateNight2            = fi('set-late2-amt');
+  APP_SETTINGS.allowances.lateNightThreshold1Hour = parseInt((document.getElementById('set-late-thr1')?.value || '19:00').split(':')[0]) || 19;
+  APP_SETTINGS.allowances.lateNightThreshold2Hour = parseInt((document.getElementById('set-late-thr2')?.value || '20:00').split(':')[0]) || 20;
+  APP_SETTINGS.allowances.diligence               = fi('set-diligence-amt');
+  APP_SETTINGS.allowances.personalCar             = fi('set-personalcar-amt');
+  APP_SETTINGS.allowances.longDistance            = fi('set-longdistance-amt');
+  APP_SETTINGS.allowances.longDistanceThresholdKm = fi('set-longdistance-threshold');
+  APP_SETTINGS.allowances.phone                   = fi('set-phone-amt');
+
+  // 2026-07-31: allowance eligibility by role. Two guardrails before committing, since this is
+  // a live payroll system and eligibility changes affect pay retroactively (see the warning
+  // banner in the section itself):
+  //   1. Warn (don't block) if a row ends up with zero roles checked.
+  //   2. Confirm if a role is being REMOVED from an allowance while an active employee of that
+  //      role currently has a nonzero per-employee amount for it (diligence/longDistance/
+  //      personalCar only -- upcountry/earlyLate/ot have no static per-employee amount field to
+  //      check against, they're computed from leave records + the global rates above).
+  const newElig = {};
+  const emptyRows = [];
+  // 2026-07-31: diligence/longDistance amounts are now company-wide (Settings -> Allowance
+  // Rates), so removing a role from either means EVERY active employee of that role loses the
+  // allowance (not just ones with a nonzero per-employee field, which no longer exists).
+  // personalCar keeps a per-employee flag (personalCarEligible), so that one still only warns
+  // about employees actually flagged eligible.
+  // 2026-07-31: extended to cover all 6 keys (was only diligence/longDistance/personalCar --
+  // upcountry/earlyLate/ot silently warned about nothing, and those were exactly the two keys
+  // that got corrupted in the incident this guard should have caught). upcountry/ot check for
+  // an actual approved leave record this period (the thing that would stop paying); earlyLate
+  // has no discrete leave-record equivalent (it's derived from raw check-in/check-out times),
+  // so it warns on any active employee of the role, same as diligence/longDistance.
+  const removedRoleWarnings = [];
+  const { start: curStart, end: curEnd } = getPeriodBounds(0);
+  const pad2w = n => String(n).padStart(2, '0');
+  const curStartStr = `${curStart.getFullYear()}-${pad2w(curStart.getMonth()+1)}-${pad2w(curStart.getDate())}`;
+  const curEndStr    = `${curEnd.getFullYear()}-${pad2w(curEnd.getMonth()+1)}-${pad2w(curEnd.getDate())}`;
+  const leaveTypeForKey = { upcountry: 'upcountry', ot: 'ot', longDistance: 'long-distance', personalCar: 'personal-car' };
+  ALLOWANCE_KEYS.forEach(key => {
+    const roles = ROLE_KEYS.filter(role => document.getElementById(`set-elig-${key}-${role}`)?.checked);
+    if (roles.length === 0) emptyRows.push(key);
+    const oldRoles = (APP_SETTINGS.allowanceEligibility[key] || []);
+    const removedRoles = oldRoles.filter(r => !roles.includes(r));
+    removedRoles.forEach(role => {
+      let affected;
+      if (key === 'personalCar' || key === 'phone') {
+        const flagField = key === 'phone' ? 'phoneAllowanceEligible' : 'personalCarEligible';
+        affected = DATA_USERS.filter(u => u.role === role && u.active !== false && u[flagField] === true);
+      } else if (key === 'diligence' || key === 'earlyLate') {
+        affected = DATA_USERS.filter(u => u.role === role && u.active !== false);
+      } else {
+        // upcountry / ot / longDistance: warn only if someone of this role actually has an
+        // approved record of the matching type this period -- otherwise removing the role
+        // wouldn't change anyone's pay right now.
+        const leaveType = leaveTypeForKey[key];
+        const roleUserIds = new Set(DATA_USERS.filter(u => u.role === role && u.active !== false).map(u => u.id));
+        const affectedIds = new Set(DATA_LEAVES.filter(l =>
+          roleUserIds.has(l.userId) && l.type === leaveType && l.status === 'approved' &&
+          l.dateFrom >= curStartStr && l.dateFrom <= curEndStr
+        ).map(l => l.userId));
+        affected = DATA_USERS.filter(u => affectedIds.has(u.id));
+      }
+      if (affected.length > 0) {
+        removedRoleWarnings.push(`${key} — ${role}: ${affected.map(u => u.name).join(', ')}`);
+      }
+    });
+    newElig[key] = roles;
+  });
+  if (removedRoleWarnings.length > 0) {
+    const msg = L('Removing eligibility for:\n', 'กำลังเอาสิทธิ์ออกสำหรับ:\n') + removedRoleWarnings.join('\n') +
+      L('\n\nThis will reduce their pay starting from the current period (and past unissued periods). Continue?',
+        '\n\nจะทำให้เงินของคนเหล่านี้ลดลงตั้งแต่รอบปัจจุบัน (และรอบเก่าที่ยังไม่ได้จ่าย) ต้องการดำเนินการต่อหรือไม่?');
+    if (!confirm(msg)) return;
+  }
+  if (emptyRows.length > 0) {
+    showToast(L('⚠️ Saved with no roles checked for: ', '⚠️ บันทึกโดยไม่มี role ที่ติ๊กไว้สำหรับ: ') + emptyRows.join(', '), 'warning');
+  }
+  APP_SETTINGS.allowanceEligibility = newElig;
+
+  APP_SETTINGS.workSchedule.standardStartHour   = fi('set-std-hour');
+  APP_SETTINGS.workSchedule.standardStartMinute  = fi('set-std-min');
+
+  APP_SETTINGS.leave.carryForwardMax        = fi('set-cf-max');
+  APP_SETTINGS.leave.carryForwardExpiryMonth = parseInt(document.getElementById('set-cf-expiry-month')?.value) || 3;
+  APP_SETTINGS.leave.carryForwardExpiryDay   = fi('set-cf-expiry-day');
+  APP_SETTINGS.leave.carryForwardNotifyDays  = fi('set-cf-notify');
+
+  APP_SETTINGS.tax.personalAllowanceAnnual = fi('set-tax-personal');
+  // Read bracket rate overrides (upTo for last bracket is Infinity — skip)
+  document.querySelectorAll('#tax-brackets-body input[data-bracket]').forEach(inp => {
+    const i = parseInt(inp.dataset.bracket);
+    const field = inp.dataset.field;
+    if (field === 'rate') APP_SETTINGS.tax.brackets[i].rate = parseFloat(inp.value) || 0;
+    if (field === 'upTo') APP_SETTINGS.tax.brackets[i].upTo = parseInt(inp.value) || APP_SETTINGS.tax.brackets[i].upTo;
+  });
+
+  // Email config
+  APP_SETTINGS.emailConfig = {
+    host:     fv('set-email-host') || 'smtp.gmail.com',
+    port:     parseInt(document.getElementById('set-email-port')?.value) || 587,
+    user:     fv('set-email-user'),
+    smtpUser: fv('set-email-smtpuser'),
+    pass:     document.getElementById('set-email-pass')?.value || '',
+    fromName: fv('set-email-fromname') || 'Time Attendance Application'
+  };
+
+  // Notification config
+  const notifDays = [...document.querySelectorAll('.notif-day:checked')].map(el => el.value);
+  APP_SETTINGS.emailNotification = {
+    enabled: document.getElementById('set-notif-enabled')?.checked || false,
+    recipients: {
+      manager:    document.getElementById('set-notif-manager')?.checked || false,
+      md:         document.getElementById('set-notif-md')?.checked || false,
+      accounting: document.getElementById('set-notif-accounting')?.checked || false,
+      extra:      _notifExtraDraft.map(e => ({ email: (e.email||'').trim(), lang: e.lang||'th' })).filter(e => e.email)
+    },
+    schedule: {
+      days:           notifDays.length ? notifDays : ['mon','tue','wed','thu','fri'],
+      time:           fv('set-notif-time') || '09:00',
+      minPendingDays: parseInt(document.getElementById('set-notif-min-days')?.value) || 0
+    }
+  };
+
+  APP_SETTINGS.payslipEmailEnabled = document.getElementById('set-payslip-email-enabled')?.checked || false;
+
+  if (!(APP_SETTINGS.sso.rate > 0)) { showToast(L('⚠️ SSO rate must be greater than 0', '⚠️ อัตรา SSO ต้องมากกว่า 0'), 'warning'); return; }
+  if (!(APP_SETTINGS.sso.maxAmount > 0)) { showToast(L('⚠️ SSO max amount must be greater than 0', '⚠️ จำนวนสูงสุด SSO ต้องมากกว่า 0'), 'warning'); return; }
+
+  await savePayrollSettings();
+  // Save email + notification config to backend
+  await apiFetch(`/api/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ emailConfig: APP_SETTINGS.emailConfig, emailNotification: APP_SETTINGS.emailNotification, payslipEmailEnabled: APP_SETTINGS.payslipEmailEnabled })
+  });
+  showToast(L('✅ Settings saved', '✅ บันทึกการตั้งค่าแล้ว'), 'success');
+  renderSettingsPage();
+}
+
+const EMAIL_PROVIDER_PRESETS = {
+  gmail:  { host: 'smtp.gmail.com',  port: 587, smtpUser: '' },
+  resend: { host: 'smtp.resend.com', port: 587, smtpUser: 'resend' }
+};
+function applyEmailProviderPreset(key) {
+  const preset = EMAIL_PROVIDER_PRESETS[key];
+  if (!preset) return; // "Custom" -- leave whatever is already typed alone
+  const hostEl = document.getElementById('set-email-host');
+  const portEl = document.getElementById('set-email-port');
+  const suEl   = document.getElementById('set-email-smtpuser');
+  if (hostEl) hostEl.value = preset.host;
+  if (portEl) portEl.value = preset.port;
+  if (suEl)   suEl.value   = preset.smtpUser;
+  // Sender email, password, and display name are account-specific -- never overwritten by a
+  // preset switch, so switching providers back and forth doesn't wipe out what's already typed.
+}
+
+async function testEmailConfig() {
+  if (blockIfObserver()) return;
+  const cfg = APP_SETTINGS.emailConfig || {};
+  if (!cfg.user) { showToast(L('Please enter sender email first', 'กรุณากรอกอีเมลผู้ส่งก่อน'), 'warning'); return; }
+  showToast(L('Sending test email...', 'กำลังส่งอีเมลทดสอบ...'), 'info');
+  try {
+    const res = await apiFetch(`/api/test-email`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: cfg.user })
+    });
+    const d = await res.json();
+    if (d.success) showToast(L('✅ Test email sent!', '✅ ส่งอีเมลทดสอบสำเร็จ!'), 'success');
+    else showToast(`❌ ${d.message}`, 'error');
+  } catch(e) { showToast(`❌ ${e.message}`, 'error'); }
+}
+
+// F-16 (2026-07-22): no longer computes the payslip numbers here and ships them to the
+// server — the server now independently recomputes everything via its own computePayroll()
+// port and refuses to send unless this period is actually confirmed in finalize.json (see
+// memory feedback_attendance_payroll_engine_dual_sync.md). Only the lightweight
+// {to, userId, periodIndex} identifiers are sent; the server's error message (e.g. "not
+// confirmed yet") is surfaced back to the user so they understand why sending failed.
+async function sendPayslipEmail(userId, periodIdx) {
+  if (blockIfObserver()) return;
+  const emp = DATA_USERS.find(u => u.id === userId);
+  if (!emp?.email) {
+    showToast(L('Employee has no email on record', 'พนักงานยังไม่มีอีเมลในระบบ'), 'warning');
+    return;
+  }
+  if (APP_SETTINGS.payslipEmailEnabled === false) {
+    showToast(L('❌ Payslip email is currently disabled', '❌ การส่งสลิปทางอีเมลถูกปิดใช้งานอยู่'), 'error');
+    return;
+  }
+  const cfg = APP_SETTINGS.emailConfig || {};
+  if (!cfg.user) { showToast(L('Email not configured in Settings', 'ยังไม่ได้ตั้งค่าอีเมลใน Settings'), 'warning'); return; }
+
+  showToast(L('Sending payslip...', 'กำลังส่งสลิปเงินเดือน...'), 'info');
+  try {
+    // 2026-08-13 (Opus audit, P-1): `to` dropped -- the server now always resolves the recipient
+    // itself from the employee's own record instead of trusting a client-supplied destination.
+    const res = await apiFetch(`/api/send-payslip`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId, periodIndex: periodIdx })
+    });
+    const d = await res.json();
+    if (d.success) showToast(`✅ ${L('Payslip sent to','ส่งสลิปไปที่')} ${emp.email}`, 'success');
+    else if (d.code === 'PAYSLIP_EMAIL_DISABLED') showToast(L('❌ Payslip email is currently disabled', '❌ การส่งสลิปทางอีเมลถูกปิดใช้งานอยู่'), 'error');
+    else showToast(`❌ ${d.message}`, 'error');
+  } catch(e) { showToast(`❌ ${e.message}`, 'error'); }
+}
+
+async function saveApprovalRouting() {
+  if (blockIfObserver()) return;
+  try {
+    await apiFetch(`/api/settings`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ approvalRouting: APPROVAL_ROUTING }),
+    });
+  } catch(e) {
+    console.error('[settings] save failed:', e.message);
+  }
+}
+
+async function saveCompanyTripDates() {
+  if (blockIfObserver()) return false;
+  // 2026-08-12 (2nd comprehensive audit, F4): apiFetch() doesn't throw on a non-2xx response (only
+  // 401 is specially handled), so a 403 here previously fell straight into "success" -- callers
+  // now check the returned boolean and show a real error instead of a false "✅ Added" toast.
+  try {
+    const res = await apiFetch(`/api/settings`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ companyTripDates: DATA_COMPANY_TRIP_DATES }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      console.error('[settings] save failed:', data.message || res.status);
+      return false;
+    }
+    return true;
+  } catch(e) {
+    console.error('[settings] save failed:', e.message);
+    return false;
+  }
+}
+
+function getInitialStatus(type) {
+  const route = getApprovalRoute(type);
+  return ROLE_TO_STATUS[route[0]] || 'pending-md';
+}
+
+// Returns the next status after `approvingRole` approves a leave of this `type` currently at
+// `currentStatus` — or null if it's not actually that role's turn (button shouldn't be visible,
+// but this guards the request in case status changed between render and click).
+// storedRoute: the route snapshot saved on the leave record at submission time — prevents a
+// mid-flight settings change from skipping or duplicating approval steps.
+function computeNextStatus(type, currentStatus, approvingRole, storedRoute) {
+  if (STATUS_TO_ROLE[currentStatus] !== approvingRole) return null;
+  const route = storedRoute || getApprovalRoute(type);
+  const idx = route.indexOf(approvingRole);
+  if (idx === -1 || idx === route.length - 1) return 'approved';
+  return ROLE_TO_STATUS[route[idx + 1]];
+}
+
+let currentUser = null;
+let currentPage = 'checkin';
+let clockInterval = null;
+let currentGPS = null;
+let editingEmployeeId = null;
+let selectedPeriodIndex = 0;
+let payslipPeriodIndex = 0;
+let reportsViewMode = 'monthly'; // 'monthly' | 'yearly' -- see switchReportsView()
+let selectedReportYear = null;
+let selectedAttUserId = null;
+const geoCache = {};
+let checkedIn = false;
+let checkInTime = null;
+let sidebarOpen = false;
+
+// Leaflet map instances
+let leafletMap = null;
+let leafletMarker = null;
+let leafletCircle = null;
+let gpsWatchId = null;
+
+// Real attendance records: key = "userId_YYYY-MM-DD"
+let attendanceLog = {};
+
+// ===== PERIOD MANAGEMENT =====
+function getCurrentPeriodStart() {
+  const today = new Date();
+  const day = today.getDate();
+  const sd = APP_SETTINGS.payroll.periodStartDay || 21;
+  let month = today.getMonth();
+  let year = today.getFullYear();
+  if (day < sd) {
+    month -= 1;
+    if (month < 0) { month = 11; year -= 1; }
+  }
+  return new Date(year, month, sd);
+}
+
+function getPeriodBounds(index = 0) {
+  const sd = APP_SETTINGS.payroll.periodStartDay || 21;
+  const ed = sd - 1 || 20;
+  const base = getCurrentPeriodStart();
+  const startMonth = base.getMonth() - index;
+  const startYear = base.getFullYear();
+  const adj = new Date(startYear, startMonth, sd);
+  const endM = adj.getMonth() + 1;
+  const endY = endM >= 12 ? adj.getFullYear() + 1 : adj.getFullYear();
+  const end = new Date(endY, endM % 12, ed);
+  return { start: adj, end, isCurrent: index === 0 };
+}
+
+function getPeriodLabel(start, end) {
+  return `${fmtDate(start)} — ${fmtDate(end)}`;
+}
+
+function getPeriodOptions(count = 6) {
+  const opts = [];
+  for (let i = 0; i < count; i++) {
+    const { start, end } = getPeriodBounds(i);
+    if (start < APP_FIRST_PERIOD_START) break;
+    opts.push({ index: i, start, end, label: getPeriodLabel(start, end) });
+  }
+  return opts;
+}
+
+// ===== ATTENDANCE DATA GENERATION =====
+// 2026-08-06: classifies how much of `dateStr` an approved annual/sick/business leave record
+// covers -- 'full' (a day-mode record, or an hourly record spanning the whole work day), 'am'/
+// 'pm' (a clean half-day matching the lunch-break boundary, e.g. the 08:30-12:00 / 13:00-17:30
+// shortcuts), 'partial' (any other partial span, e.g. a 1-hour doctor's appointment), or 'none'
+// (this leave record doesn't apply to this date/type at all). Used by generatePeriodDays()'s
+// leave-overlay below so a partial-day leave no longer wipes the whole day's real check-in/
+// check-out -- a pre-existing bug found and fixed alongside the half-day-leave feature this was
+// built for (an approved 1-hour hourly-mode leave used to blank the entire day and mark it a full
+// leave day, since this classifier didn't exist and the overlay only ever checked the date range).
+const LUNCH_START_MIN = 12 * 60;      // 12:00
+const LUNCH_END_MIN   = 13 * 60;      // 13:00
+const STD_END_MIN     = 17 * 60 + 30; // 17:30 -- hardcoded like the OT-start time elsewhere (app.js:9125, 11942), not a Settings field
+// 2026-08-06 (Opus audit finding 5): absorbs a few-minutes-off manual entry (e.g. 08:31 instead of
+// 08:30, or a rounder-looking 17:00 instead of 17:30) so a near-exact half-day/full-day boundary
+// doesn't silently degrade to 'partial' and lose the late-clearing/chip treatment.
+const HALFDAY_TOL_MIN = 15;
+function leaveDayCoverage(l, dateStr, stdStartMin) {
+  if (!['annual', 'sick', 'business'].includes(l.type)) return 'none';
+  if (!(dateStr >= l.dateFrom && dateStr <= (l.dateTo || l.dateFrom))) return 'none';
+  if ((l.days || 0) > 0) return 'full';
+  if (!l.hourlyStart || !l.hourlyEnd) return 'full'; // legacy/malformed hourly record -- safest default matches today's behavior
+  const [sh, sm] = l.hourlyStart.split(':').map(Number);
+  const [eh, em] = l.hourlyEnd.split(':').map(Number);
+  // 2026-08-06 (Opus audit finding 6): a present-but-garbage hourlyStart/hourlyEnd (not merely
+  // missing) used to fall through to 'partial' -- the OPPOSITE of the documented safe default above.
+  if ([sh, sm, eh, em].some(n => Number.isNaN(n))) return 'full';
+  const sMin = sh * 60 + sm, eMin = eh * 60 + em;
+  if (sMin <= stdStartMin + HALFDAY_TOL_MIN && eMin >= STD_END_MIN - HALFDAY_TOL_MIN) return 'full';
+  if (sMin <= stdStartMin + HALFDAY_TOL_MIN && eMin >= LUNCH_START_MIN) return 'am';
+  if (sMin >= LUNCH_START_MIN && sMin <= LUNCH_END_MIN && eMin >= STD_END_MIN - HALFDAY_TOL_MIN) return 'pm';
+  return 'partial';
+}
+
+// 2026-08-06: a day's "late" minutes should be measured from whichever is later -- the standard
+// start time, or the end of an approved partial/am leave that covers the standard start time (e.g.
+// approved 08:30-10:00 leave + arriving at 10:05 is 5 minutes late, not 95). Only applies when the
+// leave's OWN start is at/before the standard start -- a PM-only leave (starts at/after noon) has
+// nothing to do with morning lateness and must never suppress it. 'am' coverage itself never
+// reaches this (generatePeriodDays() already clears it straight to 'present'); this mainly matters
+// for 'partial' coverage, which doesn't get that automatic clearing.
+function lateReferenceMin(row, stdStartMin) {
+  const pl = row.partialLeave;
+  if (!pl || !pl.hourlyStart || !pl.hourlyEnd) return stdStartMin;
+  const [sh, sm] = pl.hourlyStart.split(':').map(Number);
+  const [eh, em] = pl.hourlyEnd.split(':').map(Number);
+  if (Number.isNaN(sh) || Number.isNaN(sm) || Number.isNaN(eh) || Number.isNaN(em)) return stdStartMin;
+  const plStartMin = sh * 60 + sm, plEndMin = eh * 60 + em;
+  return (plStartMin <= stdStartMin && plEndMin > stdStartMin) ? plEndMin : stdStartMin;
+}
+
+function generatePeriodDays(start, end, isCurrent, userId) {
+  const uid = userId || (currentUser ? currentUser.id : null);
+  const days = [];
+  const todayObj = new Date();
+  const todayCopy = new Date(todayObj);
+  todayCopy.setHours(23, 59, 59, 0);
+  const todayStr = localDateStr(todayObj);
+  const dayNamesEn = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+  let d = new Date(start);
+  while (d <= end) {
+    const isFuture = isCurrent && d > todayCopy;
+    const isWeekend = d.getDay() === 0 || d.getDay() === 6;
+    const dateStr = localDateStr(d);
+    const isPubHoliday = isPublicHoliday(dateStr) && !isWeekend;
+    const isCompanyTrip = isCompanyTripDay(dateStr);
+    const isToday = dateStr === todayStr;
+    const seed = d.getDate() + d.getMonth() * 31 + d.getFullYear();
+
+    let status = 'present', checkIn = null, checkOut = null, earlyIn = null, lateOut = null;
+    let upcountry = false, earlyApproved = false, lateApproved = false;
+    let longDistance = false, longDistanceKm = 0, longDistanceAllowance = 0;
+    let checkInSource = null, checkOutSource = null;
+    let checkInGPS = null, checkOutGPS = null;
+    let firstScanAfterCutoff = null, partialLeave = null;
+
+    if (isCompanyTrip) {
+      // Overrides weekend/holiday/future — these dates are set explicitly by MD/Accounting.
+      // Still shows real scan times if the employee actually badged in/out, but never counts
+      // as late/absent and never earns early/late/OT/upcountry bonuses (see the callers below).
+      status = 'company-trip';
+      const realKey = uid ? attKey(uid, dateStr) : null;
+      const realRecord = realKey ? attendanceLog[realKey] : null;
+      if (realRecord) {
+        checkIn = realRecord.checkIn || null;
+        checkOut = realRecord.checkOut || null;
+        checkInSource  = realRecord.checkInSource  || null;
+        checkOutSource = realRecord.checkOutSource || null;
+        checkInGPS  = realRecord.checkInGPS  || null;
+        checkOutGPS = realRecord.checkOutGPS || null;
+      }
+    } else if (isWeekend) {
+      status = 'weekend';
+    } else if (isPubHoliday && isFuture) {
+      status = 'holiday';
+    } else if (isFuture) {
+      status = 'future';
+    } else {
+      const realKey = uid ? attKey(uid, dateStr) : null;
+      const realRecord = realKey ? attendanceLog[realKey] : null;
+
+      if (realRecord) {
+        const hasIn = !!realRecord.checkIn;
+        const hasOut = !!realRecord.checkOut;
+        if (hasIn || hasOut) {
+          status = realRecord.status || 'present';
+          checkIn = realRecord.checkIn || null;
+          checkOut = realRecord.checkOut || null;
+          checkInSource  = realRecord.checkInSource  || null;
+          checkOutSource = realRecord.checkOutSource || null;
+          checkInGPS  = realRecord.checkInGPS  || null;
+          checkOutGPS = realRecord.checkOutGPS || null;
+          firstScanAfterCutoff = realRecord.firstScanAfterCutoff || null;
+          earlyIn = realRecord.earlyIn || null;
+          lateOut = realRecord.lateOut || null;
+          earlyApproved = realRecord.earlyApproved || false;
+          lateApproved = realRecord.lateApproved || false;
+          upcountry = realRecord.upcountry || false;
+          longDistance = realRecord.longDistance || false;
+          longDistanceKm = realRecord.longDistanceKm || 0;
+          longDistanceAllowance = realRecord.longDistanceAllowance || 0;
+        } else {
+          status = 'absent';
+        }
+      } else {
+        // No real record from backend — mark absent (no fake data generated)
+        status = isPubHoliday ? 'holiday' : 'absent';
+      }
+    }
+
+    // Overlay approved DATA_LEAVES so approvals always appear regardless of attendanceLog state.
+    // Skip on company-trip days — status stays company-trip (paid day off); allowance flags
+    // from leftover approved claims must not leak into reports that count d.upcountry / lateApproved.
+    if (!isCompanyTrip && !isWeekend && !isFuture && uid) {
+      const _ws2 = APP_SETTINGS.workSchedule;
+      const _stdStartMin2 = (_ws2?.standardStartHour ?? 8) * 60 + (_ws2?.standardStartMinute ?? 30);
+      DATA_LEAVES.filter(l => l.userId == uid && l.status === 'approved').forEach(l => {
+        if (['annual','sick','business'].includes(l.type)) {
+          // 2026-08-06: was a blanket "any approved annual/sick/business record whose date range
+          // covers this day wipes checkIn/checkOut and marks the whole day as leave" -- didn't
+          // distinguish a full-day leave from an hourly one (see leaveDayCoverage() above). A
+          // full-day leave still behaves exactly as before (the 'full' branch is unchanged); a
+          // half-day/partial hourly leave now keeps the real scan data and only overlays a badge.
+          const coverage = leaveDayCoverage(l, dateStr, _stdStartMin2);
+          // 2026-08-06 (Opus audit finding 1, refined after a follow-up check): if there's truly no
+          // scan at all this day (status is still 'absent' -- nothing to preserve) AND the leave is
+          // 'am' coverage, fall back to full-day treatment. Scoped to 'am' ONLY, not 'pm' or
+          // 'partial': leaveDayCoverage()'s 'am' branch has a deliberately loose end-boundary (any
+          // afternoon end time before the 'full' cutoff counts), so it also catches a "near-full-day"
+          // leave that's just short of 17:30 -- Opus's original repro (08:00-17:00) is exactly this
+          // shape and should read as a leave day, not "Absent". 'pm' has no such ambiguity
+          // (leaveDayCoverage() requires its start to fall in a tight 12:00-13:00 window, so a 'pm'
+          // match is always a genuinely clean half-day, never a mislabeled near-full-day) -- a clean
+          // PM leave combined with a total no-show is a real, distinct absence (the employee still
+          // never showed up for the morning) that full-day treatment would incorrectly hide, same
+          // reasoning as 'partial' below.
+          const treatAsFull = coverage === 'full' || (status === 'absent' && coverage === 'am');
+          if (treatAsFull && !isPubHoliday) {
+            status = l.type === 'annual' ? 'leave-annual' : l.type === 'sick' ? 'leave-sick' : 'leave-business';
+            checkIn = null; checkOut = null; upcountry = false;
+          } else if ((coverage === 'am' || coverage === 'pm' || coverage === 'partial') && !isPubHoliday) {
+            // 2026-08-09 (Opus audit finding 5.1): two qualifying hourly leaves on the same day
+            // used to let whichever record appeared LAST in DATA_LEAVES' array order silently win
+            // -- e.g. an 08:30-10:00 leave (covers the standard start, relevant to late-clearing)
+            // plus an unrelated 15:00-16:00 leave later the same day; if the afternoon one landed
+            // later in the array, IT became `partialLeave`, and a 09:55 check-in read as fully
+            // late instead of covered. Prefer whichever leave's own start is at/before the
+            // standard start (the one that actually matters for late-arrival clearing) over one
+            // that isn't, instead of last-write-wins.
+            const candidate = { type: l.type, coverage, hourlyStart: l.hourlyStart, hourlyEnd: l.hourlyEnd };
+            const covers = pl => { const [h,m]=(pl?.hourlyStart||'').split(':').map(Number); return Number.isFinite(h) && Number.isFinite(m) && (h*60+m) <= _stdStartMin2; };
+            // 2026-08-09 (2nd-pass audit finding 3 follow-up): 'am' coverage gets unconditional
+            // late-clearing treatment a few lines below (the strongest signal of a genuine
+            // morning half-day leave) -- ranked above the plain covers() check so a narrow
+            // 'partial' leave starting earlier the same day can't displace it just because its
+            // own start happens to satisfy covers() while a borderline 'am' leave (started just
+            // inside HALFDAY_TOL_MIN past the standard start) doesn't. Otherwise unchanged:
+            // whichever leave covers the standard start wins; first-seen wins if neither/both do.
+            const rank = pl => pl && pl.coverage === 'am' ? 2 : (covers(pl) ? 1 : 0);
+            if (!partialLeave || rank(candidate) > rank(partialLeave)) {
+              partialLeave = candidate;
+            }
+          }
+        } else if (l.dateFrom === dateStr) {
+          if (l.type === 'upcountry') {
+            upcountry = true;
+          } else if (l.type === 'long-distance') {
+            longDistance = true;
+            longDistanceKm = l.distanceKm || 0;
+            longDistanceAllowance = l.longDistanceAllowance || 0;
+          } else if (l.type === 'time-correction') {
+            if (l.correctionField === 'checkIn') {
+              checkIn = l.correctedTime;
+              // Correcting check-in can change late/present status — recompute it the same
+              // way loadAttendanceFromBackend() does, instead of leaving the stale auto-computed value.
+              if (status === 'present' || status === 'late' || status === 'not-clocked-in') {
+                const correctedUser = DATA_USERS.find(u => u.id === uid);
+                const _ws = APP_SETTINGS.workSchedule;
+                const _stdStr = `${String(_ws?.standardStartHour ?? 8).padStart(2,'0')}:${String(_ws?.standardStartMinute ?? 30).padStart(2,'0')}`;
+                status = (correctedUser?.role !== 'driver' && checkIn > _stdStr) ? 'late' : 'present';
+              }
+            }
+            if (l.correctionField === 'checkOut') checkOut = l.correctedTime;
+          } else if (l.type === 'late-out') {
+            lateApproved = true;
+            if (l.lateOutTime) lateOut = l.lateOutTime;
+          }
+        }
+      });
+      // 2026-08-06 (Opus audit finding 4): the AM-coverage late/not-clocked-in clearing used to run
+      // INSIDE the forEach above, immediately after processing the leave record -- so whether it
+      // actually stuck depended on whether the annual/sick/business leave record or a same-day
+      // time-correction record happened to come first in DATA_LEAVES' array order. A correction
+      // applied after the leave record in iteration order would silently recompute status back to
+      // 'late', undoing the clearing. Moved here, strictly after every record (leaves AND
+      // corrections) for this day has been processed, so it's no longer order-dependent.
+      if (partialLeave && partialLeave.coverage === 'am' && (status === 'late' || status === 'not-clocked-in')) {
+        status = 'present';
+      } else if (partialLeave && partialLeave.coverage === 'partial' && status === 'late' && checkIn) {
+        // 2026-08-07: 'partial' coverage never got the automatic clearing 'am' has -- a check-in
+        // at/before the leave's own end time (not the standard start) should not read as late.
+        const [ch, cm] = checkIn.split(':').map(Number);
+        if (ch * 60 + cm <= lateReferenceMin({ partialLeave }, _stdStartMin2)) status = 'present';
+      }
+    }
+
+    const holidayName = DATA_HOLIDAYS.find(h => h.date === dateStr)?.name || null;
+    days.push({ date: dateStr, dayName: dayNamesEn[d.getDay()], isWeekend, isPubHoliday, isFuture, isToday, status, checkIn, checkOut, earlyIn, lateOut, upcountry, longDistance, longDistanceKm, longDistanceAllowance, checkInSource, checkOutSource, earlyApproved, lateApproved, checkInGPS, checkOutGPS, holidayName, firstScanAfterCutoff, partialLeave });
+    d.setDate(d.getDate() + 1);
+  }
+  return days;
+}
+
+const DATA_VERSION = 'v6'; // bump this to force-reset localStorage on next load
+
+function seedMockAttendance() {
+  if (localStorage.getItem('ta_mock_seeded') === DATA_VERSION) return;
+  // Clear all demo/stale data — real data comes from backend
+  ['ta_log','ta_leaves','ta_nextLeave'].forEach(k => localStorage.removeItem(k));
+  attendanceLog = {};
+  DATA_LEAVES = [];
+  nextLeaveId = 1;
+  localStorage.setItem('ta_mock_seeded', DATA_VERSION);
+}
+
+async function fetchExchangeRate() {
+  const banks = ['smbc', 'mizuho', 'resona'];
+  const ids = banks.map(b => `dash-rate-${b}`);
+  try {
+    const res = await apiFetch(`/api/exchange-rate`);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    banks.forEach(b => {
+      const bank = data[b];
+      const rateEl = document.getElementById(`dash-rate-${b}`);
+      const dateEl = document.getElementById(`dash-rate-${b}-date`);
+      if (rateEl) rateEl.textContent = (bank && !bank.error && typeof bank.ttb === 'number') ? bank.ttb.toFixed(2) : 'N/A';
+      if (dateEl) {
+        const raw = (bank && bank.updatedAt) || '';
+        const fmt = raw ? raw.replace(/^(\d{4})\/(\d{2})\/(\d{2})(.*)/, '$3/$2/$1$4') : '';
+        dateEl.textContent = fmt ? `${L('Updated', 'อัปเดต')}: ${fmt}` : '';
+      }
+    });
+  } catch(e) {
+    ids.forEach(id => { const el = document.getElementById(id); if (el) el.textContent = 'N/A'; });
+    console.error('[APP] Exchange rate fetch error:', e.message);
+  }
+}
+
+async function loadLeavesFromBackend() {
+  try {
+    const res = await apiFetch(`/api/leaves`);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const leaves = await res.json();
+    DATA_LEAVES = Array.isArray(leaves) ? leaves : [];
+    nextLeaveId = DATA_LEAVES.length > 0 ? Math.max(...DATA_LEAVES.map(l => l.id || 0)) + 1 : 1;
+    console.log('[APP] Loaded', DATA_LEAVES.length, 'leaves from backend');
+    return true;
+  } catch(e) {
+    console.error('[APP] loadLeavesFromBackend error:', e.message);
+    return false;
+  }
+}
+
+// 2026-08-06 (user report + Opus-planned change): the "is this scan too late in the day to be a
+// real check-in" cutoff, used by loadAttendanceFromBackend()/processLiveScanEvent()/doScan() here
+// and buildAttendanceLogForUser() in server.js (dual-sync -- must stay identical in both files).
+// Was 17:00; lowered to 13:00 after a real case (an employee who worked off-site all morning and
+// only badged in at 16:48) got misread as "arrived late" instead of "no morning attendance at
+// all". Hardcoded like the existing 17:30 end-of-day / 12:00 lunch-start conventions elsewhere in
+// this file (app.js:9125, 11942) -- not wired into Settings in this change, see project memory.
+const CHECKIN_CUTOFF = '13:00';
+
+async function loadAttendanceFromBackend() {
+  if (DATA_USERS.length === 0) return false;
+  try {
+    // 2026-08-17: must track server.js's MAX_EVENT_LIMIT -- this was left at 5000 when the
+    // server cap was raised to 50000, silently capping attendanceLog (and everything derived
+    // from it: attendance table, reports, payroll preview) below what the backend's own
+    // unlimited buildAttendanceLogForUser() uses at finalize time, once real volume passed 5000.
+    const res = await apiFetch(`/api/events?limit=50000`);
+    if (!res.ok) return false;
+    const events = await res.json();
+
+    attendanceLog = {};
+
+    // Sort ascending so first scan = checkIn, last scan = checkOut
+    events.sort((a, b) => (a.event_time || '').localeCompare(b.event_time || ''));
+
+    events.forEach(ev => {
+      if (String(ev.employeeNo) === '6344') return; // emergency office-access account on Hikvision device, not a real employee — skip attendance tracking
+      const raw = ev.event_time || '';
+      if (!raw) return;
+
+      // event_time is "YYYY-MM-DDTHH:MM:SS+07:00" — already Thai local time
+      const datePart = raw.substring(0, 10);
+      const timePart = raw.substring(11, 16); // "HH:MM"
+      const hour = parseInt(timePart.substring(0, 2), 10);
+
+      let businessDate = datePart;
+      if (hour < 5) {
+        const d = new Date(datePart + 'T00:00:00');
+        d.setDate(d.getDate() - 1);
+        businessDate = localDateStr(d);
+      }
+
+      const user = DATA_USERS.find(u => String(u.employeeNo) === String(ev.employeeNo));
+      if (!user) return;
+
+      const key = attKey(user.id, businessDate);
+      if (!attendanceLog[key]) attendanceLog[key] = {};
+      const rec = attendanceLog[key];
+
+      const source = ev.eventType === 'WebScan' ? 'web' : 'device';
+      const gps    = ev.gps || '';
+
+      if (hour < 5) {
+        if (!rec.checkOut || timePart > rec.checkOut) {
+          rec.checkOut = timePart;
+          rec.checkOutSource = source;
+          if (gps) rec.checkOutGPS = gps;
+        }
+      } else if (!rec.checkIn && timePart >= CHECKIN_CUTOFF) {
+        // No morning check-in on record and it's already past the cutoff — this scan can't be
+        // a real arrival time, so record it as check-out instead and leave check-in blank.
+        // 2026-08-06: also remember it as `firstScanAfterCutoff` (distinct from `checkOut`, which
+        // a later scan the same day can still overwrite) -- generatePeriodDays() uses this to show
+        // "returned at 16:48" under a half-day-morning leave badge, or as the only known time on a
+        // day with no leave at all (see the new 'not-clocked-in' status below).
+        if (!rec.firstScanAfterCutoff) rec.firstScanAfterCutoff = timePart;
+        if (!rec.status) rec.status = 'not-clocked-in';
+        if (!rec.checkOut || timePart > rec.checkOut) {
+          rec.checkOut = timePart;
+          rec.checkOutSource = source;
+          if (gps) rec.checkOutGPS = gps;
+        }
+      } else if (!rec.checkIn) {
+        rec.checkIn = timePart;
+        rec.checkInSource = source;
+        if (gps) rec.checkInGPS = gps;
+        // 2026-08-09 (2nd-pass audit finding 4.2 follow-up): hardcoded '08:30' even though this is
+        // the site that decides 'late' vs 'present' in the first place -- every downstream late-
+        // deduction/display site already reads the configurable Settings value, so this was the
+        // one place a changed standard start time would silently desync from.
+        const _ws5 = APP_SETTINGS.workSchedule;
+        const _stdStr5 = `${String(_ws5?.standardStartHour ?? 8).padStart(2,'0')}:${String(_ws5?.standardStartMinute ?? 30).padStart(2,'0')}`;
+        rec.status = (user.role !== 'driver' && timePart > _stdStr5) ? 'late' : 'present';
+      } else {
+        // A scan still in the morning (< 12:00) can't be a real end-of-day check-out — it's
+        // almost always a duplicate/lingering door scan shortly after arrival (e.g. checked in
+        // at 08:27, scanned again at 09:25, then no further scans all day). Skip it instead of
+        // recording a nonsensical morning check-out; if no later scan ever comes, check-out
+        // correctly stays blank ("No check-out") rather than showing a fake early time.
+        if (timePart >= '12:00' && (!rec.checkOut || timePart > rec.checkOut)) {
+          rec.checkOut = timePart;
+          rec.checkOutSource = source;
+          if (gps) rec.checkOutGPS = gps;
+        }
+      }
+    });
+
+    console.log('[APP] Attendance loaded from backend:', Object.keys(attendanceLog).length, 'records');
+    // Re-render whichever page is currently active
+    renderDashboard();
+    if (currentPage === 'attendance')   renderAttendanceTable();
+    if (currentPage === 'myattendance') {
+      if (typeof window._maTriggerLoad === 'function') window._maTriggerLoad();
+    }
+    // Update checkin page scan button to reflect loaded attendance state
+    if (currentUser) restoreTodayLog();
+    return true;
+  } catch(e) {
+    console.error('[APP] loadAttendanceFromBackend error:', e);
+    return false;
+  }
+}
+
+// ===== SESSION PERSISTENCE =====
+// Stored in localStorage so login persists across browser closes until explicit logout
+function saveSession() {
+  try {
+    localStorage.setItem('ta_user',      JSON.stringify(currentUser));
+    localStorage.setItem('ta_checkedIn', JSON.stringify(checkedIn));
+    localStorage.setItem('ta_page',      currentPage);
+    localStorage.setItem('ta_token',     AUTH_TOKEN || '');
+    localStorage.setItem('ta_remember',  REMEMBER_ME ? '1' : '');
+  } catch(e) {}
+}
+
+function clearSession() {
+  ['ta_user','ta_checkedIn','ta_page','ta_token','ta_remember'].forEach(k => localStorage.removeItem(k));
+}
+
+// ===== AUTH =====
+async function login() {
+  const username = document.getElementById('username').value.trim();
+  const password = document.getElementById('password').value;
+  const remember = document.getElementById('remember-me').checked;
+  const btn = document.querySelector('#login-page button[onclick="login()"]') || document.querySelector('#login-page button');
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch(`${NAS_BACKEND}/api/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password, remember })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      const errEl = document.getElementById('login-error');
+      // Was always showing "incorrect password" no matter what the backend actually said --
+      // masked a rate-limit lockout (429) as a password error, which is genuinely misleading
+      // since the fix for one is "wait" and the fix for the other is "check your password".
+      errEl.querySelector('span').textContent = res.status === 429
+        ? L('⏳ Too many login attempts — please wait a few minutes and try again', '⏳ ลองเข้าสู่ระบบบ่อยเกินไป — กรุณารอสักครู่แล้วลองใหม่')
+        : L('Incorrect username or password', 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง');
+      errEl.style.display = 'flex';
+      return;
+    }
+    currentUser = data.user;
+    AUTH_TOKEN = data.token;
+    // 2026-08-09 (Opus audit finding 6.1/6.3): a fresh token means any earlier "session expired"
+    // state no longer applies, and any queued logout from before this login must not fire.
+    _sessionExpiredShown = false;
+    clearTimeout(_pendingLogoutTimer);
+    REMEMBER_ME = remember;
+    saveSession();
+    document.getElementById('login-page').style.display = 'none';
+    document.getElementById('app').style.display = 'flex';
+    initApp();
+    maybeShowForcePasswordGate(); // F-09: block until a first-login default password is changed
+    // DATA_USERS starts empty and login() itself never populates it (unlike the
+    // session-restore path in DOMContentLoaded, which always calls loadUsersFromBackend()
+    // first) — every page that reads DATA_USERS (Employees, Payslip, Finalize, Reports, and
+    // the Dashboard "who's checked in" widget) rendered completely empty on a fresh login
+    // until the user manually refreshed. Mirrors the session-restore chain exactly.
+    loadUsersFromBackend().then(() => {
+      if (currentPage === 'employees') renderEmployeesTable();
+      if (currentPage === 'payslip') { renderPayslipEmployeeList(); renderPayslip(); }
+      if (currentPage === 'finalize') renderFinalize();
+      if (currentPage === 'reports') { syncReportPeriodDropdown(); renderReports(); }
+      return loadAttendanceFromBackend();
+    }).then(ok => {
+      if (ok) {
+        renderDashboard();
+        if (currentPage === 'attendance') renderAttendanceTable();
+        if (currentPage === 'checkin') { restoreTodayLog(); updateScanButton(); }
+        if (currentPage === 'reports') renderReports();
+      }
+      syncHikvisionEmployees(true);
+    });
+    if (typeof Notification !== 'undefined' && Notification.permission === 'granted') syncPushSubscription();
+  } catch(e) {
+    const errEl = document.getElementById('login-error');
+    errEl.querySelector('span').textContent = L('Server error — please try again', 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้');
+    errEl.style.display = 'flex';
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// ===== SESSION TIMEOUT =====
+const SESSION_TIMEOUT_MS = 8 * 60 * 60 * 1000; // 8 hours (default, no "remember me")
+const SESSION_TIMEOUT_REMEMBER_MS = 30 * 24 * 60 * 60 * 1000; // 30 days (with "remember me")
+let _sessionTimer = null;
+let _sessionLastActivity = Date.now();
+
+function resetSessionTimer() {
+  _sessionLastActivity = Date.now();
+}
+
+function startSessionTimer() {
+  clearInterval(_sessionTimer);
+  _sessionTimer = setInterval(() => {
+    if (!currentUser) return;
+    const timeoutMs = REMEMBER_ME ? SESSION_TIMEOUT_REMEMBER_MS : SESSION_TIMEOUT_MS;
+    if (Date.now() - _sessionLastActivity > timeoutMs) {
+      clearInterval(_sessionTimer);
+      if (!_sessionExpiredShown) {
+        _sessionExpiredShown = true;
+        showToast(L('⏰ Session expired — please log in again', '⏰ หมดเวลาล็อกอิน — กรุณาเข้าสู่ระบบใหม่'), 'warning');
+      }
+      clearTimeout(_pendingLogoutTimer);
+      _pendingLogoutTimer = setTimeout(logout, 1500);
+    }
+  }, 60000);
+}
+
+async function logout() {
+  // SECURITY/CORRECTNESS FIX 2026-08-13 (P-3, Opus audit): unregister this browser's push
+  // subscription server-side before the auth token clears -- without this, a shared/kiosk browser
+  // kept the previous user's endpoint bound forever (only a push-service 404/410 ever removed a
+  // row), so the next person to use that machine would keep seeing THIS user's notifications
+  // (incl. sick/maternity-leave-adjacent wording) on the lock screen. getSubscription() is a fast
+  // local browser call, so it's awaited; the DELETE call itself is fire-and-forget (never awaited,
+  // errors swallowed) so a slow/failed network call can never delay or block the rest of logout.
+  try {
+    if (window._swReg && 'pushManager' in window._swReg) {
+      const sub = await window._swReg.pushManager.getSubscription();
+      if (sub) {
+        apiFetch('/api/push-subscribe', {
+          method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ endpoint: sub.endpoint })
+        }).catch(() => {});
+      }
+    }
+  } catch(e) { console.warn('[push] unsubscribe-on-logout failed', e); }
+  clearInterval(_sessionTimer);
+  clearSession();
+  currentUser = null;
+  AUTH_TOKEN = null;
+  REMEMBER_ME = false;
+  checkedIn = false;
+  checkInTime = null;
+  attendanceLog = {};
+  clearInterval(clockInterval);
+  if (gpsWatchId !== null) { navigator.geolocation.clearWatch(gpsWatchId); gpsWatchId = null; }
+  if (leafletMap) { leafletMap.remove(); leafletMap = null; leafletMarker = null; leafletCircle = null; }
+  if (hikvisionWs) { try { hikvisionWs.close(); } catch(e) {} hikvisionWs = null; }
+  clearTimeout(wsReconnectTimer);
+  updateWsStatus('offline');
+  clearInterval(_pushPollTimer); _pushPollTimer = null; _leaveSnapshot = null;
+  currentGPS = null;
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('login-page').style.display = 'flex';
+  document.getElementById('username').value = '';
+  document.getElementById('password').value = '';
+  document.getElementById('login-error').style.display = 'none';
+}
+
+// ─── Browser Push Notifications ───────────────────────────────────────
+function getPushPrefs() {
+  try { return JSON.parse(localStorage.getItem('ta_push_prefs') || '{}'); }
+  catch { return {}; }
+}
+function savePushPrefs(p) {
+  localStorage.setItem('ta_push_prefs', JSON.stringify(p));
+  initNotificationPolling();
+}
+
+// SECURITY FIX 2026-08-04 (4th Opus audit, CRITICAL): this used to be a hardcoded string
+// literal copied from data/vapid-keys.json -- when that file was rotated, this constant went
+// stale and every push subscription silently failed (browser bound to the old public key,
+// backend signed with the new private key). Fetched fresh from the backend now, so a future
+// rotation can't desync the two sides again.
+let _vapidPublicKeyCache = null;
+async function getVapidPublicKey() {
+  if (_vapidPublicKeyCache) return _vapidPublicKeyCache;
+  const res = await fetch(`${NAS_BACKEND}/api/push/vapid-public-key`);
+  const data = await res.json();
+  _vapidPublicKeyCache = data.publicKey;
+  return _vapidPublicKeyCache;
+}
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; i++) outputArray[i] = rawData.charCodeAt(i);
+  return outputArray;
+}
+
+// Subscribes this browser/device to real server-triggered push (distinct from the tab-open-only
+// polling in initNotificationPolling()) and registers the subscription with the backend, tied to
+// the logged-in user via the JWT on this request (see server.js POST /api/push-subscribe).
+async function syncPushSubscription() {
+  if (!window._swReg || !('pushManager' in window._swReg) || !currentUser) return;
+  try {
+    let sub = await window._swReg.pushManager.getSubscription();
+    if (!sub) {
+      const publicKey = await getVapidPublicKey();
+      sub = await window._swReg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(publicKey)
+      });
+    }
+    await apiFetch('/api/push-subscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subscription: sub.toJSON() })
+    });
+  } catch (e) {
+    console.warn('[push] subscribe failed', e);
+  }
+}
+
+async function requestPushPermission() {
+  if (!('Notification' in window)) {
+    showToast(L('Browser does not support notifications','เบราว์เซอร์ไม่รองรับการแจ้งเตือน'), 'warning');
+    return;
+  }
+  const perm = await Notification.requestPermission();
+  if (perm === 'granted') {
+    const prefs = getPushPrefs();
+    prefs.enabled = true;
+    savePushPrefs(prefs);
+    showToast(L('✅ Notifications enabled','✅ เปิดการแจ้งเตือนแล้ว'), 'success');
+    initNotificationPolling();
+    syncPushSubscription();
+  } else {
+    showToast(L('❌ Notifications blocked — please allow in browser settings','❌ บล็อกการแจ้งเตือน — กรุณาอนุญาตใน browser'), 'danger');
+  }
+  if (currentPage === 'settings') renderSettingsPage();
+}
+
+// Renders the "Install App" button/status for the Settings page. Three states:
+// 1. Already installed (standalone mode) -> a plain confirmation line, no button.
+// 2. Android/Chrome-family with a captured beforeinstallprompt -> a real button that triggers
+//    the native install dialog on click.
+// 3. iOS -> a button that opens manual instructions (no programmatic install API exists on iOS
+//    at all, per Apple's own restriction -- this is not something any web code can trigger).
+// 4. Anything else (desktop browser with no install support, or install prompt not fired yet) ->
+//    nothing rendered.
+function renderInstallAppButton() {
+  if (isStandaloneApp()) {
+    return `<div style="display:flex;align-items:center;gap:8px;font-size:13px;color:#059669;padding:10px 14px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px">✅ ${L('App is installed','ติดตั้งแอปแล้ว')}</div>`;
+  }
+  if (_deferredInstallPrompt) {
+    return `<button class="btn btn-primary btn-sm" onclick="clickInstallApp()">📲 ${L('Install App','ติดตั้งแอป')}</button>
+      <div style="font-size:11px;color:#94a3b8;margin-top:6px">${L('Installing lets you receive push notifications and open the app from your home screen like a native app.','ติดตั้งแล้วจะรับการแจ้งเตือน push ได้ และเปิดแอปจากหน้าจอหลักได้เหมือนแอปทั่วไป')}</div>`;
+  }
+  if (isIOSDevice()) {
+    return `<button class="btn btn-primary btn-sm" onclick="openInstallAppModal()">📲 ${L('Install App (iPhone/iPad)','ติดตั้งแอป (iPhone/iPad)')}</button>
+      <div style="font-size:11px;color:#94a3b8;margin-top:6px">${L('Required to receive push notifications on iPhone/iPad — iOS does not allow it any other way.','จำเป็นต้องติดตั้งก่อนถึงจะรับการแจ้งเตือน push บน iPhone/iPad ได้ — iOS ไม่มีทางอื่น')}</div>`;
+  }
+  if (isFirefoxBrowser()) {
+    return `<div style="font-size:12px;color:#92400e;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 14px">🦊 ${L("Firefox doesn't support installing this as an app — use Chrome or Edge instead.", 'Firefox ไม่รองรับการติดตั้งแอป — กรุณาใช้ Chrome หรือ Edge แทน')}</div>`;
+  }
+  return '';
+}
+
+async function clickInstallApp() {
+  if (!_deferredInstallPrompt) return;
+  _deferredInstallPrompt.prompt();
+  const { outcome } = await _deferredInstallPrompt.userChoice;
+  _deferredInstallPrompt = null;
+  showToast(outcome === 'accepted' ? L('✅ Installing…', '✅ กำลังติดตั้ง…') : L('Install cancelled', 'ยกเลิกการติดตั้ง'), outcome === 'accepted' ? 'success' : 'info');
+  if (currentPage === 'settings') renderSettingsPage();
+}
+
+function openInstallAppModal() { document.getElementById('install-app-modal').classList.add('show'); }
+function closeInstallAppModal() { document.getElementById('install-app-modal').classList.remove('show'); }
+
+function showBrowserNotification(title, body, { tag = 'ta', url } = {}) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  const opts = {
+    body, icon: '/images/logo-short.jpg',
+    badge: '/images/logo-short.jpg', tag, data: { url },
+  };
+  if (window._swReg) {
+    window._swReg.showNotification(title, opts);
+  } else {
+    new Notification(title, opts);
+  }
+}
+
+async function testPushNotification() {
+  const title = '🔔 ' + L('Test Notification', 'ทดสอบ');
+  const body = L('Notification is working!', 'การแจ้งเตือนทำงานปกติ');
+  try {
+    const res = await apiFetch('/api/push-test', { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (data.success) {
+      showToast(L('✅ Test notification sent — check this device', '✅ ส่งการทดสอบแล้ว — ดูที่อุปกรณ์นี้'), 'success');
+      return;
+    }
+  } catch (e) { /* fall through to local toast */ }
+  showBrowserNotification(title, body, { tag: 'test' });
+  showToast(L('Local test shown — server push is not subscribed on this browser', 'ทดสอบในแท็บนี้แล้ว — เครื่องนี้ยังไม่ได้สมัคร server push'), 'info');
+}
+
+let _pushPollTimer = null;
+let _leaveSnapshot = null;
+
+function initNotificationPolling() {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  clearInterval(_pushPollTimer);
+  pollLeaveNotifications();
+  _pushPollTimer = setInterval(pollLeaveNotifications, 3 * 60 * 1000);
+}
+
+async function pollLeaveNotifications() {
+  if (!currentUser) return;
+  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+  const prefs = getPushPrefs();
+  try {
+    const res = await apiFetch(`/api/leaves`);
+    if (!res.ok) return;
+    const leaves = await res.json();
+    try {
+    if (_leaveSnapshot) {
+      const typeMap = {
+        annual: L('Annual Leave','ลาพักร้อน'), sick: L('Sick Leave','ลาป่วย'),
+        business: L('Business Leave','ลากิจ'), upcountry: L('Upcountry','Upcountry'),
+        'late-out': L('Late Night','กลับดึก'), ot: 'OT',
+        'time-correction': L('Time Correction','แก้ไขเวลา'),
+        'long-distance': L('Long Distance','Long Distance'),
+        'personal-car': L('Personal Car','รถส่วนตัว'),
+        comp: L('Compensatory Day','วันหยุดชดเชย'),
+        'clear-attachments': L('Clear Old Attachments','ล้างไฟล์แนบเก่า'),
+      };
+
+      // My leaves: notify on status change
+      if (prefs.onMyLeave !== false) {
+        leaves.filter(l => l.userId === currentUser.id).forEach(leaf => {
+          const prev = _leaveSnapshot.find(p => p.id === leaf.id);
+          if (!prev || prev.status === leaf.status) return;
+          const t = typeMap[leaf.type] || leaf.type;
+          const period = leaf.dateFrom + (leaf.dateTo && leaf.dateTo !== leaf.dateFrom ? ` – ${leaf.dateTo}` : '');
+          if (leaf.status === 'approved') {
+            showBrowserNotification(
+              L('✅ Request Approved', '✅ คำขออนุมัติแล้ว'),
+              `${t} ${period} ${L('has been approved','ได้รับการอนุมัติ')}`,
+              { tag: `leaf-${leaf.id}` }
+            );
+          } else if (leaf.status === 'rejected') {
+            showBrowserNotification(
+              L('❌ Request Rejected', '❌ คำขอถูกปฏิเสธ'),
+              `${t} ${period} ${L('was rejected','ถูกปฏิเสธ')}`,
+              { tag: `leaf-${leaf.id}` }
+            );
+          }
+        });
+      }
+
+      // Approvers: notify on new pending requests
+      if (prefs.onNewPending !== false && actingRoles().some(r => ['manager','md','accounting'].includes(r))) {
+        // 2026-08-11 (Opus re-audit): the first fix (`l.status.startsWith('pending')`) closed the
+        // missing-pending-accounting gap but dropped turn-awareness entirely -- every manager/md/
+        // accounting got "Awaiting your approval" for every pending record system-wide, including
+        // ones routed to a DIFFERENT role. isMyTurnOrDelegate() (already used everywhere else for
+        // this exact purpose) is both turn-aware AND covers pending-accounting via the delegation
+        // path, so it fixes both issues at once. String(...) guards a legacy record with no
+        // `status` from throwing inside this try/catch (which would otherwise also skip
+        // `_leaveSnapshot = leaves` below, permanently freezing the notification baseline).
+        const nowPending  = leaves.filter(l => String(l.status || '').startsWith('pending') && isMyTurnNow(l));
+        const prevPending = _leaveSnapshot.filter(l => String(l.status || '').startsWith('pending') && isMyTurnNow(l));
+        const added = nowPending.filter(l => !prevPending.find(p => p.id === l.id));
+        if (added.length > 0) {
+          showBrowserNotification(
+            currentLang === 'ja' ? `📋 新規申請 ${added.length}件` : L(`📋 ${added.length} New Request${added.length > 1 ? 's' : ''}`, `📋 ${added.length} คำขอใหม่`),
+            L('Awaiting your approval','รออนุมัติจากคุณ'),
+            { tag: 'new-pending' }
+          );
+        }
+      }
+    }
+    } finally {
+      _leaveSnapshot = leaves;
+    }
+  } catch {}
+}
+// ──────────────────────────────────────────────────────────────────────
+
+function initApp(startPage) {
+  // Attendance always rebuilt from backend — never load from localStorage
+  attendanceLog = {};
+  localStorage.removeItem('ta_log'); // clear any stale cached data
+  const isMdRole = isMdView() || currentUser.isObserver;
+  const safePage = (isMdRole && startPage === 'checkin') ? 'dashboard' : (startPage || (isMdRole ? 'dashboard' : 'checkin'));
+  // If any setup step below throws (e.g. a stale localStorage session racing with data that
+  // hasn't loaded from backend yet), the screen must never stay blank waiting for a manual
+  // refresh — navigateTo(safePage) below always runs regardless.
+  try {
+    seedMockAttendance();
+    updateUserUI();
+    applyRolePermissions();
+    startClock();
+    requestGPS();
+    populatePeriodDropdown();
+    populateAttPeriodDropdown();
+    restoreTodayLog();
+    updateTodayLogDate();
+    updateLeaveBalanceDate();
+  } catch(e) {
+    console.error('[initApp] setup step failed:', e);
+  }
+  startSessionTimer();
+  ['click','keydown','touchstart'].forEach(ev => document.addEventListener(ev, resetSessionTimer, { passive: true }));
+  navigateTo(safePage);
+  updateMyRequestsBadge();
+  updateApprovalBadge();
+  initHikvisionLive();
+  // Load settings + attendance + leaves + holidays from backend async
+  loadSettingsFromBackend().then(() => {
+    // BUG FIX 2026-08-13: applyRolePermissions() (line ~3325 above) runs synchronously BEFORE
+    // this async settings fetch resolves, so it reads whatever APP_SETTINGS.allowanceEligibility
+    // is at that moment (not yet the real configured values) -- isAllowanceEligible() then falls
+    // back to DEFAULT_ALLOWANCE_ELIGIBILITY for every key, and since that default list is more
+    // permissive than this company's actual configured Settings for several roles (e.g. driver is
+    // in the DEFAULT upcountry/earlyLate lists but was explicitly excluded in real Settings),
+    // buttons like 🗺️ Upcountry and 🌙 Late Night Out incorrectly stayed visible for the rest of
+    // the session -- confirmed live via a real driver login, user-reported. Re-running here once
+    // the real settings are in means the gate reflects actual config instead of the fallback.
+    applyRolePermissions();
+    if (currentPage === 'calendar') renderCalendarPage();
+    if (currentPage === 'holidays') renderHolidaysPage();
+  });
+  loadHolidaysFromBackend().then(() => {
+    if (currentPage === 'calendar') renderCalendarPage();
+    if (currentPage === 'holidays') renderHolidaysPage();
+  });
+  loadLeavesFromBackend().then(() => {
+    updateMyRequestsBadge();
+    updateApprovalBadge();
+    if (currentPage === 'leave') renderLeaveHistory();
+    if (currentPage === 'my-requests') renderMyRequests();
+    if (currentPage === 'approval') renderApprovals();
+    initNotificationPolling();
+  });
+  if (currentPage === 'dashboard') fetchExchangeRate();
+  loadAttendanceFromBackend().then(ok => {
+    if (ok) {
+      renderDashboard();
+      if (currentPage === 'attendance') renderAttendanceTable();
+      if (currentPage === 'checkin') { restoreTodayLog(); updateScanButton(); }
+      if (currentPage === 'reports') renderReports();
+    }
+  });
+}
+
+function updateTodayLogDate() {
+  const el = document.getElementById('today-log-date');
+  if (el) el.textContent = fmtDate(new Date());
+}
+
+function populateAttPeriodDropdown() {
+  const sel = document.getElementById('att-period-select');
+  if (!sel) return;
+  sel.innerHTML = '';
+  getPeriodOptions(12).forEach(opt => {
+    const o = document.createElement('option');
+    o.value = opt.index;
+    o.textContent = opt.index === 0 ? `${opt.label}  ${L('← Current Period', '← รอบปัจจุบัน')}` : opt.label;
+    sel.appendChild(o);
+  });
+}
+
+// Approved payslips are frozen snapshots and must stay selectable even after attendance
+// events are pruned (25 months). 240 is a safety cap (~20 years); getPeriodOptions() still
+// stops at APP_FIRST_PERIOD_START, so the dropdown is "every period since launch".
+const PAYSLIP_PERIOD_COUNT = 240;
+
+function populatePayslipPeriodDropdown() {
+  const sel = document.getElementById('payslip-period-select');
+  if (!sel) return;
+  sel.innerHTML = '';
+  getPeriodOptions(PAYSLIP_PERIOD_COUNT).forEach(opt => {
+    const o = document.createElement('option');
+    o.value = opt.index;
+    o.textContent = opt.index === 0 ? `${opt.label}  ${L('← Current', '← ปัจจุบัน')}` : opt.label;
+    sel.appendChild(o);
+  });
+  sel.value = payslipPeriodIndex;
+}
+
+function onPayslipPeriodChange(val) {
+  payslipPeriodIndex = parseInt(val);
+  renderPayslip();
+}
+
+function loadPeriod() {
+  const sel = document.getElementById('att-period-select');
+  if (sel) { selectedPeriodIndex = parseInt(sel.value); renderDashboard(); renderAttendanceTable(); }
+}
+
+function updateLeaveBalanceDate() {
+  const el = document.getElementById('leave-balance-date');
+  if (el) el.textContent = `${L('Calculated as of', 'คำนวณ ณ วันที่')} ${fmtDate(new Date())}`;
+}
+
+function restoreTodayLog() {
+  const dateStr = businessDateStr();
+  const key = currentUser ? attKey(currentUser.id, dateStr) : null;
+  const rec = key ? attendanceLog[key] : null;
+
+  // ถ้า record มีแต่ไม่มี scans[] (ข้อมูลเก่าก่อน multi-scan) → สร้าง scans จาก checkIn/checkOut
+  if (rec && !rec.scans) {
+    rec.scans = [];
+    if (rec.checkIn)  rec.scans.push({ time: rec.checkIn,  type: 'in',  source: rec.checkInSource  || 'web', gps: rec.checkInGPS  || '—' });
+    if (rec.checkOut) rec.scans.push({ time: rec.checkOut, type: 'out', source: rec.checkOutSource || 'web', gps: rec.checkOutGPS || '—' });
+  }
+
+  renderTodayLog(rec?.scans || []);
+  updateScanButton();
+  updateLateOutEntryVisibility();
+}
+
+function updateUserUI() {
+  document.getElementById('sidebar-name').textContent = currentUser.name;
+  document.getElementById('sidebar-position').textContent = currentUser.position;
+  document.getElementById('topbar-name').textContent = currentUser.name;
+  const roleLabels = { md:t('role_md'), manager:t('role_manager'), accounting:t('role_accounting'), user:t('role_user'), driver:t('role_driver'), marketing:t('role_marketing'), superadmin:t('role_superadmin') };
+  document.getElementById('sidebar-role-badge').textContent = (currentUser.position ? L(currentUser.position, currentUser.position) : roleLabels[currentUser.role] || currentUser.role) + (currentUser.isObserver ? ` — ${L('view only','ดูอย่างเดียว')} 👁️` : '') + (isSuperAdmin() && previewRole ? ` — ${L('preview','ดูเป็น')} ${roleLabels[previewRole] || previewRole}` : '');
+  document.getElementById('sidebar-role-badge').className = `role-badge role-${isSuperAdmin() && previewRole ? previewRole : currentUser.role}`;
+  const avatar = document.getElementById('user-avatar');
+  if (currentUser.facePhoto) {
+    avatar.style.backgroundImage = `url(${currentUser.facePhoto})`;
+    avatar.style.backgroundSize = 'cover';
+    avatar.style.backgroundPosition = 'center';
+    avatar.textContent = '';
+  } else {
+    avatar.style.backgroundImage = '';
+    avatar.textContent = currentUser.name.charAt(0).toUpperCase();
+  }
+  updateSystemAccountUI();
+}
+
+function applyRolePermissions() {
+  const role = effectiveRole();
+  document.querySelectorAll('.nav-admin,.nav-manager,.nav-approval,.nav-staff-only,.nav-accounting-only,.nav-emp-only,.nav-no-md').forEach(el => el.style.display = '');
+  document.querySelectorAll('.nav-payslip').forEach(el => el.style.display = '');
+  // Accounting/Marketing have no Early Morning/Late Night/OT/Upcountry — office-hours roles,
+  // no fieldwork or overtime concept for them at all.
+  const isAcctMkt = role === 'accounting' || role === 'marketing';
+  // Upcountry/Late-out carry BOTH .driver-hide and .acct-mkt-hide (hidden for drivers AND for
+  // accounting/marketing, for different reasons). Toggling these classes in separate passes
+  // meant whichever ran last unconditionally reset `display:''` for every role it didn't care
+  // about — e.g. the .acct-mkt-hide pass reset display:'' for a driver session, silently
+  // undoing the .driver-hide pass that had just correctly hidden the same button. One pass
+  // that ANDs every applicable rule per element avoids that clobbering.
+  // NOTE: .driver-hide also gates the unrelated Compensatory Day button (a separate business
+  // rule, not one of the 6 allowanceEligibility types) -- that one intentionally still uses a
+  // plain role check below, not eligibility.
+  document.querySelectorAll('.driver-hide, .driver-only, .acct-mkt-hide').forEach(el => {
+    let hidden = false;
+    if (el.classList.contains('driver-hide') && role === 'driver') hidden = true;
+    if (el.classList.contains('driver-only') && role !== 'driver') hidden = true;
+    if (el.classList.contains('acct-mkt-hide') && isAcctMkt) hidden = true;
+    el.style.display = hidden ? 'none' : '';
+  });
+  // 2026-07-31: override the generic pass above for the 4 buttons that actually correspond to
+  // an allowanceEligibility type, reading the same config computePayroll() uses instead of the
+  // hardcoded driver/acct-mkt role checks -- Comp Day (also under .driver-hide) is untouched,
+  // it's a different rule.
+  const elig = APP_SETTINGS.allowanceEligibility;
+  const setBtnVisible = (selector, visible) => {
+    const el = document.querySelector(selector);
+    if (el) el.style.display = visible ? '' : 'none';
+  };
+  setBtnVisible('[onclick="openUpcountryModal()"]', isAllowanceEligible(elig, role, 'upcountry'));
+  updateLateOutEntryVisibility();
+  setBtnVisible('[onclick="openLongDistanceModal()"]', isAllowanceEligible(elig, role, 'longDistance'));
+  setBtnVisible('[onclick="openOTModal()"]', isAllowanceEligible(elig, role, 'ot'));
+  // Compensatory Day normally spans the full row (grid-column:1/-1) — looks right for
+  // roles that still have 3 buttons hidden above it (Upcountry/Late-out/OT), since that leaves
+  // an even number of buttons before it. For Accounting/Marketing only 3 buttons (Annual/Sick/
+  // Business) come before it, so spanning full-width leaves a lopsided half-empty row — let it
+  // sit as a normal grid item instead so it fills in cleanly next to Business.
+  const compBtn = document.getElementById('checkin-comp-btn');
+  if (compBtn) compBtn.style.gridColumn = isAcctMkt ? '' : '1/-1';
+  if (role === 'user' || role === 'driver' || role === 'marketing') {
+    document.querySelectorAll('.nav-admin').forEach(el => el.style.display = 'none');
+    document.querySelectorAll('.nav-manager').forEach(el => el.style.display = 'none');
+    document.querySelectorAll('.nav-approval').forEach(el => el.style.display = 'none');
+    document.querySelectorAll('.nav-accounting-only').forEach(el => el.style.display = 'none');
+  } else if (role === 'manager') {
+    document.querySelectorAll('.nav-payslip').forEach(el => el.style.display = 'none');
+    document.querySelectorAll('.nav-staff-only').forEach(el => el.style.display = 'none');
+    document.querySelectorAll('.nav-accounting-only').forEach(el => el.style.display = 'none');
+  } else if (role === 'md') {
+    document.querySelectorAll('.nav-staff-only').forEach(el => el.style.display = 'none');
+    document.querySelectorAll('.nav-no-md').forEach(el => el.style.display = 'none');
+    document.querySelectorAll('.nav-emp-only').forEach(el => el.style.display = 'none');
+  } else if (role === 'accounting') {
+    // nav-approval stays visible for accounting — scoped to Driver OT only (see renderApprovals)
+    document.querySelectorAll('.nav-emp-only').forEach(el => el.style.display = 'none');
+  } else if (role === 'superadmin') {
+    document.querySelectorAll('.nav-staff-only').forEach(el => el.style.display = 'none');
+    document.querySelectorAll('.nav-no-md').forEach(el => el.style.display = 'none');
+    document.querySelectorAll('.nav-emp-only').forEach(el => el.style.display = 'none');
+  } else {
+    document.querySelectorAll('.nav-accounting-only').forEach(el => el.style.display = 'none');
+    document.querySelectorAll('.nav-emp-only').forEach(el => el.style.display = 'none');
+  }
+  const canAddEmp = (role === 'md' || role === 'accounting' || role === 'superadmin') && !currentUser.isObserver;
+  document.querySelectorAll('.btn-add-employee').forEach(el => el.style.display = canAddEmp ? '' : 'none');
+  document.querySelectorAll('.btn-door-audit').forEach(el => el.style.display = canAddEmp ? '' : 'none');
+  // salary column visibility
+  const canSeeSalary = role === 'md' || role === 'accounting' || role === 'superadmin';
+  const thSalary = document.getElementById('th-salary');
+  if (thSalary) thSalary.style.display = canSeeSalary ? '' : 'none';
+  // Observer: former employee, still browses everything at their old role level, but no
+  // check-in (nothing to clock in for) — reuse the same .nav-no-md class MD already hides
+  // check-in with, applied last so it wins regardless of which role branch ran above.
+  if (currentUser.isObserver) {
+    document.querySelectorAll('.nav-no-md').forEach(el => el.style.display = 'none');
+  }
+}
+
+// ===== MOBILE SIDEBAR =====
+function toggleSidebar() {
+  sidebarOpen = !sidebarOpen;
+  const sidebar = document.getElementById('sidebar');
+  const overlay = document.getElementById('sidebar-overlay');
+  sidebar.classList.toggle('open', sidebarOpen);
+  overlay.classList.toggle('show', sidebarOpen);
+}
+
+function closeSidebar() {
+  sidebarOpen = false;
+  document.getElementById('sidebar').classList.remove('open');
+  document.getElementById('sidebar-overlay').classList.remove('show');
+}
+
+// ===== NAVIGATION =====
+function navigateTo(page) {
+  const viewRole = effectiveRole();
+  if (page === 'finalize' && viewRole !== 'accounting' && viewRole !== 'superadmin') {
+    showToast(L('⛔ Finalize Payroll is for Accounting only', '⛔ Finalize Payroll สำหรับ Accounting เท่านั้น'), 'danger');
+    return;
+  }
+  // Payroll History's whole purpose is drilling into a period's Finalize Payroll (the "View"
+  // button on every row calls navigateTo('finalize')) — for MD that always bounces off the
+  // guard above, so the page has no working action for them. Nav item is hidden via
+  // .nav-no-md; this blocks direct navigation too (e.g. a stale localStorage `ta_page`).
+  if (page === 'payroll-history' && viewRole === 'md') {
+    showToast(L('⛔ Payroll History is not available for Managing Director', '⛔ ประวัติเงินเดือนไม่เปิดให้ Managing Director'), 'danger');
+    return;
+  }
+  if (page === 'checkin' && (viewRole === 'md' || viewRole === 'superadmin' || currentUser.isObserver)) {
+    showToast(L('⛔ Check-in is not available for this account', '⛔ หน้าลงเวลาไม่เปิดสำหรับบัญชีนี้'), 'danger');
+    return;
+  }
+  if (page === 'leave' && (viewRole === 'md' || viewRole === 'superadmin')) {
+    showToast(L('⛔ Leave is not available for this account', '⛔ หน้าวันลาไม่เปิดสำหรับบัญชีนี้'), 'danger');
+    return;
+  }
+  if (['audit-log', 'archive', 'tawi50'].includes(page) && !['accounting', 'md', 'superadmin'].includes(viewRole)) {
+    showToast(L('⛔ This page is not available for your role', '⛔ หน้านี้ไม่เปิดสำหรับสิทธิ์ของคุณ'), 'danger');
+    return;
+  }
+  currentPage = page;
+  saveSession();
+  closeSidebar();
+  document.querySelectorAll('.modal-overlay.show').forEach(m => m.classList.remove('show'));
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.querySelectorAll('.bottom-nav-item').forEach(n => n.classList.remove('active'));
+  const pageEl = document.getElementById(`page-${page}`);
+  if (pageEl) pageEl.classList.add('active');
+  // payslip has 2 nav items (nav-emp-only for staff, nav-admin for MD/Accounting) — only one is
+  // ever visible per role, but querySelector only grabbed the first (possibly hidden) one, so the
+  // visible copy never got its .active highlight. querySelectorAll+forEach covers both.
+  document.querySelectorAll(`.nav-item[data-page="${page}"]`).forEach(el => el.classList.add('active'));
+  const bnEl = document.querySelector(`.bottom-nav-item[data-page="${page}"]`);
+  if (bnEl) bnEl.classList.add('active');
+
+  const titles = {
+    dashboard:      { title:t('pt_dashboard'),    sub:t('ps_dashboard') },
+    checkin:        { title:t('pt_checkin'),       sub:t('ps_checkin') },
+    attendance:     { title:t('pt_attendance'),    sub:t('ps_attendance') },
+    myattendance:   { title:t('pt_myattendance'),  sub:t('ps_myattendance') },
+    leave:          { title:t('pt_leave'),         sub:t('ps_leave') },
+    'my-requests':  { title:t('pt_myrequests'),    sub:t('ps_myrequests') },
+    approval:       { title:t('pt_approval'),      sub:t('ps_approval') },
+    employees:      { title:t('pt_employees'),     sub:t('ps_employees') },
+    payslip:        { title:t('pt_payslip'),       sub:t('ps_payslip') },
+    finalize:       { title:t('pt_finalize'),      sub:t('ps_finalize') },
+    reports:        { title:t('pt_reports'),       sub:t('ps_reports') },
+    archive:        { title: L('Former Employees Archive', 'อดีตพนักงาน'), sub: L('Payroll & leave history for ex-employees', 'ประวัติ Payroll และการลาสำหรับพนักงานที่ออกแล้ว') },
+    tawi50:         { title: L('Withholding Tax Certificate', 'ใบรับรองการหักภาษี ณ ที่จ่าย (50 ทวิ)'), sub: L('Annual PIT summary — edit to override', 'สรุปภาษีรายปี — แก้ไขได้ตามต้องการ') },
+    'audit-log':    { title: L('Activity Log', 'บันทึกกิจกรรม'), sub: L('All leave & request history across employees', 'ประวัติคำขอและการลาทุกคน') },
+    faq:            { title: L('FAQ', 'คำถามที่พบบ่อย'), sub: L('Rules, calculations, and how-to guides', 'กฎ การคำนวณ และวิธีใช้งาน') },
+    'payroll-history': { title: L('Payroll History', 'ประวัติเงินเดือน'), sub: L('Past finalized payroll periods', 'รอบเงินเดือนที่สรุปแล้ว') },
+    settings:       { title: L('Settings', 'การตั้งค่าระบบ'), sub: L('Company & system configuration', 'ตั้งค่าบริษัทและระบบ') },
+    profile:        { title:t('pt_profile'),       sub:`${currentUser?.name || ''} — ${currentUser?.position || ''}` },
+    calendar:       { title:t('pt_calendar'),      sub:t('ps_calendar') },
+    holidays:       { title:t('pt_holidays'),      sub:t('ps_holidays') },
+  };
+  const pageInfo = titles[page] || { title: page, sub: '' };
+  document.getElementById('page-title').textContent = pageInfo.title;
+  document.getElementById('page-subtitle').textContent = pageInfo.sub;
+
+  if (page === 'checkin')      { restoreTodayLog(); updateScanButton(); setTimeout(() => { if (leafletMap) leafletMap.invalidateSize(); }, 120); }
+  if (page === 'attendance') {
+    // Accounting's primary use of this page is their own attendance — always reopen on
+    // themselves, not whichever other employee they last checked (MD is unaffected: MD has
+    // no "own" record here and intentionally keeps browsing the same employee across visits).
+    if (effectiveRole() === 'accounting' && isEmployeeRecord(currentUser)) selectedAttUserId = currentUser.id;
+    renderAttendanceTable();
+  }
+  if (page === 'myattendance') { clearInterval(myAttLiveTimer); renderMyAttendance(); }
+  if (page === 'leave')        renderLeaveHistory();
+  if (page === 'my-requests')  renderMyRequests();
+  if (page === 'approval')     renderApprovals();
+  if (page === 'payslip')      { renderPayslipEmployeeList(); populatePayslipPeriodDropdown(); renderPayslip(); }
+  if (page === 'finalize')     renderFinalize();
+  if (page === 'dashboard')    { renderDashboard(); fetchExchangeRate(); }
+  if (page === 'employees')    renderEmployeesTable();
+  if (page === 'calendar')     renderCalendarPage();
+  if (page === 'holidays')     renderHolidaysPage();
+  if (page === 'profile')      renderMyProfile();
+  if (page === 'reports')          { syncReportPeriodDropdown(); renderReports(); }
+  if (page === 'settings')         renderSettingsPage();
+  if (page === 'archive')          renderArchivePage();
+  if (page === 'tawi50')           { populateTawi50YearDropdown(); render50Tawi(); }
+  if (page === 'payroll-history')  renderPayrollHistory();
+  if (page === 'audit-log')        { _auditPage = 0; renderAuditLog(); }
+  if (page === 'faq')              renderFAQPage();
+  // Several pages above (holidays' Company Trip range, settings' digest time, payslip, etc.)
+  // build fresh date/time inputs on every render — the initial DOMContentLoaded pass only ever
+  // sees whatever's statically pre-rendered in index.html, so those dynamic ones were silently
+  // staying native/unlocalized until the user happened to also toggle language afterward.
+  initDatePickers();
+}
+
+// ===== CLOCK =====
+function startClock() {
+  function update() {
+    const now = new Date();
+    const h = String(now.getHours()).padStart(2,'0');
+    const m = String(now.getMinutes()).padStart(2,'0');
+    const s = String(now.getSeconds()).padStart(2,'0');
+    const timeStr = `${h}:${m}:${s}`;
+    const dateStr = fmtDateFull(now);
+    document.querySelectorAll('.clock-display').forEach(el => el.textContent = timeStr);
+    document.querySelectorAll('.date-display').forEach(el => el.textContent = dateStr);
+    const tt = document.getElementById('topbar-time');
+    const td = document.getElementById('topbar-date');
+    if (tt) tt.textContent = `${h}:${m}:${s}`;
+    if (td) td.textContent = fmtDateLong(now);
+  }
+  update();
+  clockInterval = setInterval(update, 1000);
+}
+
+// ===== GPS & MAP =====
+function requestGPS() {
+  if (!navigator.geolocation) {
+    updateGPSError(L('GPS unavailable — browser blocks GPS on HTTP (use HTTPS or enable an exception in Chrome)', 'GPS ไม่พร้อมใช้งาน — Browser บล็อก GPS บน HTTP (ต้องใช้ HTTPS หรือเปิด Exception ใน Chrome)'));
+    return;
+  }
+  // Check if in secure context (https or localhost)
+  if (!window.isSecureContext) {
+    updateGPSError(L('GPS blocked — enable it via chrome://flags → "Insecure origins treated as secure" and add http://192.168.100.100', 'GPS ถูกบล็อก — เปิดใช้งานได้โดยไปที่ chrome://flags → "Insecure origins treated as secure" แล้วเพิ่ม http://192.168.100.100'));
+    return;
+  }
+
+  // Update status to "searching"
+  setGPSStatusSearching();
+
+  // Use watchPosition for continuous tracking (updates if device moves)
+  if (gpsWatchId !== null) navigator.geolocation.clearWatch(gpsWatchId);
+
+  gpsWatchId = navigator.geolocation.watchPosition(
+    pos => onGPSSuccess(pos),
+    err => updateGPSError(gpsErrorMsg(err)),
+    {
+      enableHighAccuracy: true,   // use device GPS chip (Android/iOS)
+      maximumAge: 10000,          // accept cached position up to 10s
+      timeout: 15000,
+    }
+  );
+}
+
+function gpsErrorMsg(err) {
+  const msgs = {
+    1: L('User denied GPS access — please allow it in your browser settings', 'ผู้ใช้ไม่อนุญาตให้เข้าถึง GPS — กรุณาอนุญาตในการตั้งค่า Browser'),
+    2: L('Location unavailable', 'ไม่สามารถระบุตำแหน่งได้'),
+    3: L('Location request timed out', 'หมดเวลาการระบุตำแหน่ง'),
+  };
+  return msgs[err.code] || L('GPS error', 'เกิดข้อผิดพลาด GPS');
+}
+
+function onGPSSuccess(pos) {
+  const lat = pos.coords.latitude;
+  const lng = pos.coords.longitude;
+  const acc = Math.round(pos.coords.accuracy);
+
+  currentGPS = {
+    lat: lat.toFixed(6),
+    lng: lng.toFixed(6),
+    latRaw: lat,
+    lngRaw: lng,
+    accuracy: acc,
+    timestamp: new Date().toISOString(),
+  };
+
+  // Update status bar
+  const dot = document.getElementById('gps-dot');
+  const coordsText = document.getElementById('gps-coords-text');
+  const accText = document.getElementById('gps-accuracy-text');
+  const lockBadge = document.getElementById('gps-lock-badge');
+  const detail = document.getElementById('gps-coords-detail');
+
+  if (dot) { dot.style.background = '#10b981'; dot.style.animation = 'none'; }
+  if (coordsText) coordsText.textContent = `${currentGPS.lat}, ${currentGPS.lng}`;
+  if (accText) accText.textContent = `${L('Accuracy', 'ความแม่นยำ')} ±${acc} ${L('m', 'เมตร')}`;
+  if (lockBadge) lockBadge.style.display = 'flex';
+  if (detail) detail.textContent = `Lat: ${lat.toFixed(8)}  |  Lng: ${lng.toFixed(8)}  |  Accuracy: ±${acc}m  |  ${L('Updated', 'อัปเดต')}: ${fmtTime(new Date())}`;
+
+  // Legacy .gps-status elements (in checkin panel badge)
+  document.querySelectorAll('.gps-status').forEach(el => {
+    el.textContent = `${currentGPS.lat}, ${currentGPS.lng} (±${acc}m)`;
+  });
+
+  // Render or update map
+  initLeafletMap(lat, lng, acc);
+}
+
+function updateGPSError(msg) {
+  const dot = document.getElementById('gps-dot');
+  const coordsText = document.getElementById('gps-coords-text');
+  const accText = document.getElementById('gps-accuracy-text');
+  if (dot) { dot.style.background = '#ef4444'; dot.style.animation = 'none'; }
+  if (coordsText) coordsText.textContent = msg;
+  if (accText) accText.textContent = L('Please enable GPS permission on your device', 'กรุณาเปิดสิทธิ์ GPS บนอุปกรณ์');
+  document.querySelectorAll('.gps-status').forEach(el => el.textContent = msg);
+}
+
+function setGPSStatusSearching() {
+  const dot = document.getElementById('gps-dot');
+  const coordsText = document.getElementById('gps-coords-text');
+  const accText = document.getElementById('gps-accuracy-text');
+  const lockBadge = document.getElementById('gps-lock-badge');
+  if (dot) { dot.style.background = '#f59e0b'; dot.style.animation = 'pulse 2s infinite'; }
+  if (coordsText) coordsText.textContent = L('Locating...', 'กำลังระบุตำแหน่ง...');
+  if (accText) accText.textContent = L('Waiting for GPS signal from device', 'รอสัญญาณ GPS จากอุปกรณ์');
+  if (lockBadge) lockBadge.style.display = 'none';
+  document.querySelectorAll('.gps-status').forEach(el => el.textContent = L('Locating...', 'กำลังระบุตำแหน่ง...'));
+}
+
+function initLeafletMap(lat, lng, accuracy) {
+  const mapEl = document.getElementById('gps-map');
+  if (!mapEl) return;
+  const _L = window._LeafletAPI;
+  if (!_L) return;
+
+  // Custom non-draggable marker icon
+  const markerIcon = _L.divIcon({
+    html: '<div class="gps-marker-pulse"></div>',
+    iconSize: [18, 18],
+    iconAnchor: [9, 9],
+    className: '',
+  });
+
+  if (leafletMap) {
+    // Map exists — just update position
+    leafletMap.setView([lat, lng], 17);
+    if (leafletMarker) leafletMarker.setLatLng([lat, lng]);
+    if (leafletCircle) {
+      leafletCircle.setLatLng([lat, lng]);
+      leafletCircle.setRadius(accuracy);
+    }
+    leafletMap.invalidateSize();
+    return;
+  }
+
+  // Init new map
+  leafletMap = _L.map('gps-map', {
+    attributionControl: true,
+    zoomControl: true,
+    dragging: true,        // allow panning map
+    scrollWheelZoom: true,
+    doubleClickZoom: false,
+  }).setView([lat, lng], 17);
+
+  _L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors © <a href="https://carto.com/attributions">CARTO</a>',
+    maxZoom: 19,
+  }).addTo(leafletMap);
+
+  // Accuracy circle (read-only, decorative)
+  leafletCircle = _L.circle([lat, lng], {
+    radius: accuracy,
+    color: '#2563eb',
+    fillColor: '#93c5fd',
+    fillOpacity: 0.15,
+    weight: 1.5,
+    interactive: false,
+  }).addTo(leafletMap);
+
+  // Marker — draggable: false, cannot be moved
+  leafletMarker = _L.marker([lat, lng], {
+    icon: markerIcon,
+    draggable: false,
+    interactive: true,
+    keyboard: false,
+  }).addTo(leafletMap)
+    .bindPopup(`
+      <div style="font-family:Sarabun,sans-serif;font-size:13px;min-width:180px">
+        <strong style="color:#1e3a5f">📍 ${L('Current Location', 'ตำแหน่งปัจจุบัน')}</strong><br>
+        <span style="color:#64748b">Lat: ${lat.toFixed(6)}</span><br>
+        <span style="color:#64748b">Lng: ${lng.toFixed(6)}</span><br>
+        <span style="color:#059669;font-size:11px">±${accuracy}m — ${L('auto-locked', 'ล็อกอัตโนมัติ')}</span>
+      </div>
+    `, { closeButton: false })
+    .openPopup();
+
+  // Prevent marker drag (defensive)
+  if (leafletMarker.dragging) leafletMarker.dragging.disable();
+}
+
+// ===== CHECK-IN =====
+function localDateStr(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+// ===== DATE FORMAT HELPERS (DD MMMM YYYY CE) =====
+const DAY_NAMES_TH = ['อาทิตย์','จันทร์','อังคาร','พุธ','พฤหัสบดี','ศุกร์','เสาร์'];
+const MONTH_NAMES_TH = ['มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน','กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม'];
+const MONTH_SHORT_TH = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
+const DAY_NAMES_EN = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+const MONTH_NAMES_EN = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const MONTH_SHORT_EN = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const DAY_NAMES_JA = ['日曜日','月曜日','火曜日','水曜日','木曜日','金曜日','土曜日'];
+const MONTH_NAMES_JA = ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'];
+const MONTH_SHORT_JA = ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'];
+function _dayNames()   { return currentLang === 'en' ? DAY_NAMES_EN : currentLang === 'ja' ? DAY_NAMES_JA : DAY_NAMES_TH; }
+function _monthNames() { return currentLang === 'en' ? MONTH_NAMES_EN : currentLang === 'ja' ? MONTH_NAMES_JA : MONTH_NAMES_TH; }
+function _monthShort() { return currentLang === 'en' ? MONTH_SHORT_EN : currentLang === 'ja' ? MONTH_SHORT_JA : MONTH_SHORT_TH; }
+
+// 2026-08-12: exact calendar-based tenure (years/months/days), replacing the old
+// milliseconds-divided-by-365.25-days approximation used at every tenure display site -- accurate
+// to the day, which matters for checking how close someone is to a 5-year/10-year milestone.
+//
+// Clamps the day-of-month to each target month's real length (Jan 31 + 1 month -> Feb 28) instead
+// of a single-pass day-borrow, which used to go negative for ANY 30th/31st start date the first
+// 1-3 days after a short month (e.g. hired 2015-01-31, viewed 2017-03-01 -> old code returned
+// "2y 1m -2d"; verified 2026-08-13 re-audit, brute-forced over 24M start/now combinations that this
+// clamped version never produces a negative day or an out-of-range month).
+function tenureAnchorFor(start, years, months) {
+  const norm = new Date(start.getFullYear() + years, start.getMonth() + months, 1);
+  const y = norm.getFullYear(), m = norm.getMonth();
+  return new Date(y, m, Math.min(start.getDate(), new Date(y, m + 1, 0).getDate()));
+}
+function computeTenure(startDateStr) {
+  if (!startDateStr) return { years: 0, months: 0, days: 0 };
+  const start = new Date(startDateStr + 'T00:00:00');
+  const now = new Date(); now.setHours(0, 0, 0, 0);
+  let years = now.getFullYear() - start.getFullYear();
+  let months = now.getMonth() - start.getMonth();
+  if (months < 0) { years--; months += 12; }
+  let anchor = tenureAnchorFor(start, years, months);
+  if (anchor > now) { // overshot (clamped anchor still ahead of "now") -- back off one month
+    months--;
+    if (months < 0) { years--; months += 12; }
+    anchor = tenureAnchorFor(start, years, months);
+  }
+  return { years, months, days: Math.round((now - anchor) / 86400000) };
+}
+// Days remaining until the employee's NEXT 5-year or 10-year work anniversary -- null once both
+// milestones are already behind them (this app only tracks these two). Target date is clamped the
+// same way as computeTenure's anchor (see tenureAnchorFor) so the two functions agree on which day
+// counts as "the" anniversary for a Feb 29 / 30th / 31st start date -- otherwise this could still
+// count down after computeTenure already reports the milestone reached (re-audit 2026-08-13).
+function daysToNextTenureMilestone(startDateStr) {
+  if (!startDateStr) return null;
+  const start = new Date(startDateStr + 'T00:00:00');
+  const now = new Date(); now.setHours(0, 0, 0, 0);
+  for (const yrs of [5, 10]) {
+    const target = tenureAnchorFor(start, yrs, 0);
+    if (target > now) return { years: yrs, daysLeft: Math.round((target - now) / 86400000) };
+  }
+  return null;
+}
+// Date-only values (`YYYY-MM-DD` strings, or Date objects from `new Date('YYYY-MM-DD')`
+// which are UTC midnight) must display the intended calendar day in every timezone.
+// A real timestamp (clock "now", event_time with hours) stays local.
+function toCalendarDate(d) {
+  if (d == null || d === '') return null;
+  if (typeof d === 'string') {
+    const s = d.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return new Date(s + 'T12:00:00');
+    const parsed = new Date(s);
+    return isNaN(parsed.getTime()) ? null : parsed;
+  }
+  if (d instanceof Date && !isNaN(d.getTime())) {
+    if (d.getUTCHours() === 0 && d.getUTCMinutes() === 0 && d.getUTCSeconds() === 0 && d.getUTCMilliseconds() === 0) {
+      return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 12, 0, 0);
+    }
+    return d;
+  }
+  return null;
+}
+function fmtDate(d) {
+  const dt = toCalendarDate(d);
+  if (!dt) return '—';
+  if (currentLang === 'ja') return `${dt.getFullYear()}年${dt.getMonth()+1}月${dt.getDate()}日`;
+  return `${dt.getDate()} ${_monthShort()[dt.getMonth()]} ${dt.getFullYear()}`;
+}
+
+function fmtDateLong(d) {
+  const dt = toCalendarDate(d);
+  if (!dt) return '—';
+  if (currentLang === 'ja') return `${dt.getFullYear()}年${dt.getMonth()+1}月${dt.getDate()}日`;
+  return `${dt.getDate()} ${_monthNames()[dt.getMonth()]} ${dt.getFullYear()}`;
+}
+
+function fmtDateShort(d) {
+  const dt = toCalendarDate(d);
+  if (!dt) return '—';
+  if (currentLang === 'ja') return `${dt.getMonth()+1}月${dt.getDate()}日`;
+  return `${dt.getDate()} ${_monthShort()[dt.getMonth()]}`;
+}
+
+function fmtDateFull(d) {
+  const dt = toCalendarDate(d);
+  if (!dt) return '—';
+  return currentLang === 'en'
+    ? `${DAY_NAMES_EN[dt.getDay()]}, ${fmtDate(dt)}`
+    : currentLang === 'ja' ? `${fmtDate(dt)}（${DAY_NAMES_JA[dt.getDay()]}）`
+    : `วัน${DAY_NAMES_TH[dt.getDay()]}ที่ ${fmtDate(dt)}`;
+}
+
+function fmtTime(d) {
+  const dt = typeof d === 'string' ? new Date(d) : d;
+  return `${String(dt.getHours()).padStart(2,'0')}:${String(dt.getMinutes()).padStart(2,'0')}`;
+}
+
+function fmtDateTime(d) {
+  return `${fmtDate(d)} ${fmtTime(d)}`;
+}
+
+function todayDateStr() {
+  return localDateStr(new Date());
+}
+
+const PERSONAL_LEAVE_TYPES = new Set(['annual', 'sick', 'business']);
+
+function leaveCoversDate(l, dateStr) {
+  if (!l || !l.dateFrom) return false;
+  const to = l.dateTo || l.dateFrom;
+  return l.dateFrom <= dateStr && to >= dateStr;
+}
+
+function getTodayPersonalLeaves() {
+  const todayStr = todayDateStr();
+  return DATA_LEAVES.filter(l => {
+    if (l.status !== 'approved' || !PERSONAL_LEAVE_TYPES.has(l.type) || !leaveCoversDate(l, todayStr)) return false;
+    const u = DATA_USERS.find(x => x.id === l.userId);
+    // Same population as the dashboard check-in card — inactive/archived/orphan/MD/system
+    // accounts must not inflate "On Leave Today".
+    return u && isEmployeeRecord(u) && u.active !== false && u.role !== 'md';
+  });
+}
+
+function getDashPendingLeaves() {
+  if (!currentUser) return [];
+  const isStaff = ['user', 'driver', 'marketing'].includes(effectiveRole());
+  if (isStaff) {
+    return DATA_LEAVES.filter(l => l.userId === currentUser.id && String(l.status || '').startsWith('pending'));
+  }
+  return DATA_LEAVES.filter(l => String(l.status || '').startsWith('pending') && isMyTurnNow(l));
+}
+
+// "Business day" date — ก่อนตี 5 ถือเป็นวันทำงานก่อนหน้า (กรณีกลับดึกข้ามคืน)
+function businessDateStr() {
+  const now = new Date();
+  if (now.getHours() < 5) {
+    const prev = new Date(now);
+    prev.setDate(prev.getDate() - 1);
+    return localDateStr(prev);
+  }
+  return localDateStr(now);
+}
+
+function attKey(userId, dateStr) {
+  return `${userId}_${dateStr}`;
+}
+
+async function doScan(source) {
+  if (blockIfObserver()) return;
+  if (!currentUser.employeeNo) {
+    showToast(L('This account cannot clock in', 'บัญชีนี้ลงเวลาไม่ได้'), 'warning');
+    return;
+  }
+  source = source || 'web';
+  const now     = new Date();
+  const gpsInfo = currentGPS ? `${currentGPS.lat}, ${currentGPS.lng}` : 'ไม่ทราบตำแหน่ง';
+  const timeStr = fmtTime(now);
+  const dateStr = businessDateStr();
+  const key     = attKey(currentUser.id, dateStr);
+  // ก่อนตี 5 = กลับดึก → checkout เสมอ (ไม่นับเป็น check-in ใหม่)
+  const isPreDawn = now.getHours() < 5;
+  const isFirst   = !isPreDawn && !attendanceLog[key]?.checkIn;
+  // 2026-08-06: mirror the CHECKIN_CUTOFF rule (loadAttendanceFromBackend()/processLiveScanEvent())
+  // for the manual "ตอกบัตร" button too -- without this, pressing it at e.g. 14:00 with no earlier
+  // check-in would locally record a checkIn+'late', but the very next page reload re-derives the
+  // same underlying WebScan event through the cutoff rule and silently flips it to a check-out
+  // with checkIn left blank -- the display changing under the employee's feet. Ask first instead.
+  const isAfterCutoff = isFirst && timeStr >= CHECKIN_CUTOFF;
+  if (isAfterCutoff) {
+    const ok = confirm(currentLang === 'ja'
+      ? `本日はまだ午前の出勤打刻がありません。この時刻（${timeStr}）は退勤時刻として記録されます。続行しますか？`
+      : L(`No morning check-in was recorded today. This will be saved as a CHECK-OUT time (${timeStr}), not a check-in. Continue?`,
+          `วันนี้ยังไม่มีการลงเวลาเข้างานช่วงเช้า ระบบจะบันทึกเวลานี้ (${timeStr}) เป็นเวลาออกงาน ไม่ใช่เวลาเข้างาน ต้องการดำเนินการต่อหรือไม่?`));
+    if (!ok) return;
+  }
+
+  const prevRec = attendanceLog[key] ? JSON.parse(JSON.stringify(attendanceLog[key])) : null;
+
+  if (isFirst && !isAfterCutoff) {
+    // 2026-08-16 (Opus audit L-1): was hardcoded 8:30, unlike loadAttendanceFromBackend() and
+    // processLiveScanEvent() which both already read APP_SETTINGS.workSchedule (fixed 2026-08-09)
+    // -- a web check-in flashed the wrong late/present status locally until the next reload
+    // re-derived it correctly from the real setting.
+    const _stdH = APP_SETTINGS.workSchedule?.standardStartHour ?? 8;
+    const _stdM = APP_SETTINGS.workSchedule?.standardStartMinute ?? 30;
+    const overTime = now.getHours() > _stdH || (now.getHours() === _stdH && now.getMinutes() > _stdM);
+    const isLate = overTime && effectiveRole() !== 'driver';
+    attendanceLog[key] = {
+      checkIn: timeStr, checkOut: null,
+      checkInGPS: gpsInfo, checkOutGPS: null,
+      checkInSource: source, checkOutSource: null,
+      status: isLate ? 'late' : 'present',
+    };
+    checkedIn   = true;
+    checkInTime = now;
+    appendLog('in', now, gpsInfo, source);
+  } else {
+    // ทุกครั้งหลังจากนั้น (รวมถึงก่อนตี 5, และรวมถึง first-scan-after-cutoff) = update เวลาออก
+    if (!attendanceLog[key]) attendanceLog[key] = { checkIn: null, status: isAfterCutoff ? 'not-clocked-in' : 'present', checkInSource: source };
+    else if (isAfterCutoff && !attendanceLog[key].status) attendanceLog[key].status = 'not-clocked-in';
+    if (isAfterCutoff && !attendanceLog[key].firstScanAfterCutoff) attendanceLog[key].firstScanAfterCutoff = timeStr;
+    attendanceLog[key].checkOut       = timeStr;
+    attendanceLog[key].checkOutGPS    = gpsInfo;
+    attendanceLog[key].checkOutSource = source;
+    appendLog('out', now, gpsInfo, source);
+  }
+
+  const pad = n => String(n).padStart(2, '0');
+  const isoStr = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}+07:00`;
+  try {
+    const res = await apiFetch(`/api/hikvision/event`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        AccessControllerEvent: { employeeNoString: String(currentUser.employeeNo), cardholderName: currentUser.name },
+        dateTime: isoStr,
+        eventType: 'WebScan',
+        gps: gpsInfo
+      })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.success === false) {
+      throw new Error(data.message || (res.status === 400 ? 'Could not save scan' : 'Server error'));
+    }
+  } catch (e) {
+    if (prevRec) attendanceLog[key] = prevRec;
+    else delete attendanceLog[key];
+    showToast(L('❌ Could not save check-in: ', '❌ บันทึกเวลาไม่สำเร็จ: ') + (e.message || ''), 'danger');
+    updateScanButton();
+    return;
+  }
+  if (isFirst && !isAfterCutoff) {
+    showToast(L('✅ Check-in recorded', '✅ บันทึกเวลาเข้างานเรียบร้อย'), 'success');
+  } else {
+    showToast(isPreDawn ? L('✅ Check-out recorded (late night)', '✅ บันทึกเวลาออกงาน (กลับดึก)') : L('✅ Check-out recorded (latest)', '✅ บันทึกเวลาออกงาน (ล่าสุด)'), 'success');
+  }
+
+  updateScanButton();
+  saveSession();
+  renderDashboard();
+  updateLateOutEntryVisibility();
+  if (currentPage === 'attendance') renderAttendanceTable();
+}
+
+function updateScanButton() {
+  const btn = document.getElementById('scan-btn');
+  if (!btn) return;
+  const dateStr = businessDateStr();
+  const key     = currentUser ? attKey(currentUser.id, dateStr) : null;
+  const rec     = key ? attendanceLog[key] : null;
+  const hasIn   = !!rec?.checkIn;
+  const hasOut  = !!rec?.checkOut;
+
+  const iconEl  = document.getElementById('scan-btn-icon');
+  const labelEl = document.getElementById('scan-btn-label');
+  const subEl   = document.getElementById('scan-btn-sub');
+  const timesEl = document.getElementById('scan-times');
+  const dotEl   = document.getElementById('checkin-status-dot');
+  const txtEl   = document.getElementById('checkin-status-text');
+
+  if (!hasIn && !hasOut) {
+    btn.className = 'scan-btn scan-ready';
+    if (iconEl)  iconEl.textContent  = '⏱';
+    if (labelEl) labelEl.textContent = L('Clock In', 'ตอกบัตร');
+    if (subEl)   subEl.textContent   = L('Tap to record check-in', 'กดเพื่อบันทึกเข้างาน');
+    if (timesEl) timesEl.innerHTML   = '';
+    if (dotEl)   dotEl.className     = 'status-dot none';
+    if (txtEl)   txtEl.textContent   = L('Not clocked in', 'ยังไม่ได้ลงเวลา');
+    checkedIn = false;
+  } else if (!hasIn && hasOut) {
+    // 2026-08-06 (Opus audit finding 7): a post-13:00-cutoff first scan is recorded as a
+    // check-OUT with no check-in (CHECKIN_CUTOFF) -- this used to fall into the `!hasIn` branch
+    // above, which cleared the just-recorded checkout off the screen entirely and showed "Tap to
+    // record check-in" seconds after doScan() toasted a successful check-out.
+    btn.className = 'scan-btn scan-working';
+    if (iconEl)  iconEl.textContent  = '✅';
+    if (labelEl) labelEl.textContent = L('Clock In', 'ตอกบัตร');
+    if (subEl)   subEl.textContent   = L('Tap to update check-out', 'กดเพื่ออัปเดตเวลาออก');
+    const srcOut = rec.checkOutSource === 'device' ? '📷' : '🌐';
+    if (timesEl) timesEl.innerHTML = `
+      <div style="opacity:.65;font-size:12px">⬆️ ${L('No morning check-in', 'ยังไม่ลงเวลาทำงาน')}</div>
+      <div>⬇️ ${L('Check Out', 'ออกงาน')} <strong>${escapeHtml(rec.checkOut)}</strong> <span style="font-size:10px;opacity:.7">${srcOut}</span></div>`;
+    if (dotEl) dotEl.className = 'status-dot out';
+    if (txtEl) txtEl.textContent = L('Checked out', 'ออกงานแล้ว');
+    checkedIn = true;
+  } else {
+    btn.className = 'scan-btn scan-working';
+    if (iconEl)  iconEl.textContent  = '✅';
+    if (labelEl) labelEl.textContent = L('Clock In', 'ตอกบัตร');
+    if (subEl)   subEl.textContent   = rec.checkOut ? L('Tap to update check-out', 'กดเพื่ออัปเดตเวลาออก') : L('Tap to record check-out', 'กดเพื่อบันทึกออกงาน');
+    const srcIn  = rec.checkInSource  === 'device' ? '📷' : '🌐';
+    const srcOut = rec.checkOutSource === 'device' ? '📷' : '🌐';
+    if (timesEl) timesEl.innerHTML = `
+      <div>⬆️ ${L('Check In', 'เข้างาน')} <strong>${escapeHtml(rec.checkIn)}</strong> <span style="font-size:10px;opacity:.7">${srcIn}</span></div>
+      ${rec.checkOut
+        ? `<div>⬇️ ${L('Check Out', 'ออกงาน')} <strong>${escapeHtml(rec.checkOut)}</strong> <span style="font-size:10px;opacity:.7">${srcOut}</span></div>`
+        : `<div style="opacity:.65;font-size:12px">⬇️ ${L('Not checked out yet', 'ยังไม่ได้บันทึกออก')}</div>`}`;
+    if (dotEl) dotEl.className = rec.checkOut ? 'status-dot out' : 'status-dot in';
+    if (txtEl) txtEl.textContent = rec.checkOut ? L('Checked out', 'ออกงานแล้ว') : L('Checked in', 'เข้างานแล้ว');
+    checkedIn = true;
+  }
+}
+
+function appendLog(type, now, gpsInfo, source) {
+  const dateStr = businessDateStr();
+  const key = currentUser ? attKey(currentUser.id, dateStr) : null;
+  if (!key) return;
+  if (!attendanceLog[key].scans) attendanceLog[key].scans = [];
+  attendanceLog[key].scans.push({
+    time: fmtTime(now), type, source: source || 'web', gps: gpsInfo
+  });
+  renderTodayLog(attendanceLog[key].scans);
+}
+
+const LOG_MAX_VISIBLE = 4;
+
+function renderTodayLog(scans) {
+  const container = document.getElementById('today-log');
+  const moreBtn   = document.getElementById('today-log-more-btn');
+  if (!container) return;
+  container.innerHTML = '';
+
+  if (!scans || scans.length === 0) {
+    container.innerHTML = `<div class="log-empty" style="text-align:center;padding:30px;color:#94a3b8">
+      <div style="font-size:40px;margin-bottom:12px">⏰</div>
+      <p>${L('No time records today', 'ยังไม่มีการบันทึกเวลาวันนี้')}</p>
+      <p style="font-size:12px;margin-top:4px">${L('Tap the button on the left to clock in', 'กดปุ่มด้านซ้ายเพื่อลงเวลา')}</p></div>`;
+    if (moreBtn) moreBtn.style.display = 'none';
+    return;
+  }
+
+  // แสดง 4 รายการล่าสุด (scans เรียงจากเก่าไปใหม่ แสดงใหม่ก่อน)
+  const visible = scans.slice(-LOG_MAX_VISIBLE).reverse();
+  visible.forEach(e => {
+    container.appendChild(buildLogItem(e));
+  });
+
+  if (moreBtn) moreBtn.style.display = scans.length > LOG_MAX_VISIBLE ? '' : 'none';
+}
+
+function buildLogItem(e) {
+  const isDevice = e.source === 'device';
+  const isIn     = e.type === 'in';
+  const label    = isIn ? L('Check In', 'เข้างาน') : L('Check Out (latest)', 'บันทึกออก (ล่าสุด)');
+  const el = document.createElement('div');
+  el.className = `log-item ${isIn ? 'in' : 'out'}`;
+  el.innerHTML = `
+    <div class="log-icon ${isIn ? 'in' : 'out'}">${isIn ? '🟢' : '🔴'}</div>
+    <div class="log-info">
+      <div class="time">${escapeHtml(e.time)}</div>
+      <div class="label">${label}</div>
+    </div>
+    <div style="flex-shrink:0;text-align:right;min-width:110px">
+      <div class="log-source ${isDevice ? 'device' : 'web'}">${isDevice ? L('📷 Face Scanner', '📷 อุปกรณ์สแกนหน้า') : '🌐 Web App'}</div>
+      <div class="log-gps" style="font-size:11px;color:#94a3b8;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:110px">📍 </div>
+    </div>`;
+  // SECURITY FIX 2026-08-04 (Opus audit, C2): e.gps is free text from the request body -- used to
+  // be interpolated straight into innerHTML above. Set as a text node instead of escaping into
+  // the template, so it's inherently immune rather than relying on getting the escaping right.
+  el.querySelector('.log-gps').textContent = '📍 ' + (e.gps || '—');
+  return el;
+}
+
+function showFullLog() {
+  const dateStr  = businessDateStr();
+  const key      = currentUser ? attKey(currentUser.id, dateStr) : null;
+  const scans    = key ? (attendanceLog[key]?.scans || []) : [];
+  const listEl   = document.getElementById('full-log-list');
+  const labelEl  = document.getElementById('full-log-date-label');
+  if (!listEl) return;
+
+  if (labelEl) {
+    const d = new Date(dateStr + 'T12:00:00');
+    labelEl.textContent = `${fmtDate(d)} — ${scans.length} ${L('items', 'รายการ')}`;
+  }
+
+  listEl.innerHTML = '';
+  if (scans.length === 0) {
+    listEl.innerHTML = `<p style="text-align:center;padding:24px;color:#94a3b8">${L('No data', 'ยังไม่มีข้อมูล')}</p>`;
+  } else {
+    [...scans].reverse().forEach(e => listEl.appendChild(buildLogItem(e)));
+  }
+  document.getElementById('full-log-modal').classList.add('show');
+}
+
+function closeFullLog() {
+  document.getElementById('full-log-modal').classList.remove('show');
+}
+
+// ===== PERIOD DROPDOWN =====
+function populatePeriodDropdown() {
+  const sel = document.getElementById('period-select');
+  if (!sel) return;
+  sel.innerHTML = '';
+  getPeriodOptions(12).forEach(opt => {
+    const o = document.createElement('option');
+    o.value = opt.index;
+    o.textContent = opt.index === 0 ? `${opt.label}  ${L('← Current Period', '← รอบปัจจุบัน')}` : opt.label;
+    sel.appendChild(o);
+  });
+}
+
+function onPeriodChange(val) {
+  selectedPeriodIndex = parseInt(val);
+  renderAttendanceTable();
+}
+
+function attAllowIcon(emoji, title) {
+  return `<span class="att-allow-icon" title="${escapeHtml(title)}">${emoji}</span>`;
+}
+
+function buildRowActions(row, readOnly, actionUser) {
+  const actor = actionUser || currentUser;
+  let html = '';
+
+  // ปุ่มรายละเอียด
+  if (!row.isFuture) {
+    html += `<button class="btn btn-ghost btn-sm" onclick="showAttendanceDetail('${row.date}')">${L('Details', 'รายละเอียด')}</button>`;
+  }
+
+  if (readOnly) return html;
+
+  // ✏️ แก้ไขเวลา — วันทำงานทั่วไป (ไม่ใช่วันหยุด/อนาคต/เสาร์อาทิตย์)
+  if (!row.isFuture && !row.isWeekend && row.status !== 'holiday') {
+    html += `<button class="btn btn-ghost btn-sm" style="color:#f59e0b;margin-left:4px" title="${L('Edit check-in/out time', 'แก้ไขเวลาเข้า-เลิกงาน')}" onclick="openTimeCorrectionModal('${escapeJsAttr(row.date)}','${escapeJsAttr(row.checkIn||'')}','${escapeJsAttr(row.checkOut||'')}')">✏️</button>`;
+  }
+
+  // สำหรับวันทำงานจริง (ไม่ใช่ลา/หยุด/เสาร์อาทิตย์/อนาคต/Company Trip)
+  // 🗺️ และ 🌙 ต้องอยู่ตำแหน่งคงที่เสมอ ใช้ visibility:hidden แทนการซ่อน
+  const isWorkDay = !row.isFuture && !row.isWeekend &&
+    !['holiday','leave-annual','leave-sick','leave-business','company-trip'].includes(row.status);
+
+  // 2026-07-31: each quick-action icon now reads allowanceEligibility independently instead of
+  // one shared isAcctMkt gate + an if/else that could only ever show Upcountry OR Long
+  // Distance — a role granted both now correctly gets both icons.
+  const _viewRole = actor.role;
+  const canUpcountryRow   = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, _viewRole, 'upcountry');
+  const canLongDistRow    = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, _viewRole, 'longDistance');
+  const canEarlyLateRow   = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, _viewRole, 'earlyLate');
+  const canOTRow          = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, _viewRole, 'ot');
+
+  if (isWorkDay) {
+    if (canLongDistRow) {
+      // 🚗 ตำแหน่ง 2
+      const ldApproved = DATA_LEAVES.find(l => l.userId === actor.id && l.type === 'long-distance' && l.dateFrom === row.date && l.status === 'approved');
+      const ldHide = (!row.checkIn || ldApproved) ? 'visibility:hidden;pointer-events:none' : '';
+      html += `<button class="btn btn-ghost btn-sm" style="color:#0369a1;margin-left:4px;${ldHide}" title="${L('Report Long Distance', 'แจ้ง Long Distance')}" onclick="openLongDistanceModal('${row.date}')">🚗</button>`;
+    }
+    if (canUpcountryRow) {
+      // 🗺️ ตำแหน่ง 2 — invisible เมื่อ approved upcountry ไปแล้ว
+      const upcountryHide = row.upcountry ? 'visibility:hidden;pointer-events:none' : '';
+      html += `<button class="btn btn-ghost btn-sm" style="color:#7c3aed;margin-left:4px;${upcountryHide}" title="${L('Report Upcountry', 'Upcountry')}" onclick="openUpcountryModal('${row.date}')">🗺️</button>`;
+    }
+
+    // 🌙 ตำแหน่ง 3 — invisible เมื่อ checkOut ยังไม่ถึงเกณฑ์ที่ตั้งค่าไว้
+    if (canEarlyLateRow) {
+      // 2026-08-16 (Opus audit M-7): was hardcoded >= 19, not matching the configurable
+      // lateNightThreshold1Hour Settings actually uses everywhere else -- a checkout genuinely
+      // eligible per Settings could have no visible way to claim it from this row if the
+      // threshold was ever changed away from the current default.
+      const _lnThr1 = APP_SETTINGS.allowances.lateNightThreshold1Hour || APP_SETTINGS.allowances.lateNightThresholdHour || 19;
+      const hasLate = row.checkOut && parseInt(row.checkOut.split(':')[0]) >= _lnThr1 && isDeviceScanSource(row.checkOutSource);
+      const lateHide = !hasLate ? 'visibility:hidden;pointer-events:none' : '';
+      html += `<button class="btn btn-ghost btn-sm" style="color:#0891b2;margin-left:4px;${lateHide}" title="${L('Report late night out', 'แจ้งขอเลิกงานดึก')}" onclick="openLateOutModal('${row.date}')">🌙</button>`;
+    }
+
+  }
+
+  // ⏱️ ตำแหน่ง 4 — OT: ยังไม่ได้ approved OT วันนี้ + เงื่อนไขวันที่มีสิทธิ์ขอ
+  // Drivers are gated on checkIn only (they often drop off the boss and head straight home
+  // without ever scanning out); everyone else still needs checkOut, same as before -- this
+  // stays a role check (badge/UX behavior), not an eligibility check.
+  // 2026-08-13: pulled out of the `isWorkDay` block for drivers specifically -- their OT tiers
+  // are self-declared at ×2/×3 on weekend/public-holiday days (that's the whole point of those
+  // tiers), so gating the row button on `isWorkDay` (which excludes those) made those tiers
+  // unreachable from this row's quick-action icon. Non-driver roles keep the original `isWorkDay`
+  // gate unchanged. Still excludes future days and the driver's own leave days -- only a day they
+  // actually worked (row.checkIn) shows the icon regardless.
+  // 2026-08-16 POLICY CHANGE (user-confirmed, reverses the company-trip half of the 2026-08-13
+  // change only): Company Trip is a paid day off with no work expected of anyone, drivers
+  // included -- explicitly excluded again here, unlike weekend/public-holiday which are
+  // unaffected by this reversal and still show the row icon for the ×2/×3 tiers.
+  const otRowEligibleDay = _viewRole === 'driver'
+    ? (!row.isFuture && row.status !== 'company-trip' && !['leave-annual', 'leave-sick', 'leave-business'].includes(row.status))
+    : isWorkDay;
+  if (canOTRow && otRowEligibleDay) {
+    const otExisting = DATA_LEAVES.filter(l =>
+      l.userId === actor.id && l.type === 'ot' && l.dateFrom === row.date && l.status !== 'rejected'
+    );
+    const otFilled = _viewRole === 'driver'
+      ? (otExisting.some(l => !l.isDriverOT) || otExisting.filter(l => l.isDriverOT).length >= 3)
+      : otExisting.length > 0;
+    const otDayOk = _viewRole === 'driver' ? !!row.checkIn : !!row.checkOut;
+    const otHide = (!otDayOk || otFilled) ? 'visibility:hidden;pointer-events:none' : '';
+    html += `<button class="btn btn-ghost btn-sm" style="color:#ea580c;margin-left:4px;${otHide}" title="${L('Request OT', 'ขอ OT')}" onclick="openOTModal('${row.date}')">⏱️</button>`;
+  }
+
+  // 🚙 ปุ่มที่ 5 — Personal Car: role ต้อง eligible (allowanceEligibility.personalCar) AND ตัวพนักงานเอง
+  // ต้องถูกติ๊ก personalCarEligible ไว้ด้วย (2026-07-31: rate ย้ายไปอยู่ Settings กลางแล้ว, เหลือ
+  // แค่ flag นี้ต่อคนว่าใครได้สิทธิ์บ้าง)
+  if (isAllowanceEligible(APP_SETTINGS.allowanceEligibility, _viewRole, 'personalCar') && actor.personalCarEligible === true && (APP_SETTINGS.allowances.personalCar || 0) > 0 && !row.isFuture && !row.isWeekend && row.checkIn &&
+      !['holiday','leave-annual','leave-sick','leave-business','company-trip'].includes(row.status)) {
+    const pcExists = DATA_LEAVES.find(l => l.userId === actor.id && l.type === 'personal-car' && l.dateFrom === row.date && l.status !== 'rejected');
+    const pcStyle = pcExists ? 'color:#854d0e;margin-left:4px' : 'color:#ca8a04;margin-left:4px';
+    const pcTitle = pcExists ? L('Personal car already submitted', 'ยื่นใช้รถส่วนตัวแล้ว') : L('Record personal car use', 'แจ้งใช้รถส่วนตัว');
+    html += `<button class="btn btn-ghost btn-sm" style="${pcStyle}" title="${pcTitle}" onclick="${pcExists ? '' : `openPersonalCarModal('${row.date}')`}" ${pcExists ? 'disabled' : ''}>🚙</button>`;
+  }
+
+  return html;
+}
+
+// ===== ATTENDANCE TABLE =====
+function renderAttTodayCard() {
+  const container = document.getElementById('att-today-card-container');
+  if (!container) return;
+  const today = localDateStr(new Date());
+  const key = attKey(currentUser.id, today);
+  const rec = attendanceLog[key] || {};
+  container.innerHTML = `
+    <div class="ma-today-card" style="margin-bottom:20px">
+      <div class="ma-today-label">${L('Today', 'วันนี้')} &nbsp; ${fmtDateLong(new Date())}</div>
+      <div class="ma-checkinout-row">
+        <div class="ma-time-box ma-in">
+          <div class="ma-time-icon">🟢</div>
+          <div class="ma-time-label">${L('Check In', 'เข้างาน')}</div>
+          <div class="ma-time-value" id="att-checkin-val">${escapeHtml(rec.checkIn) || '—'}</div>
+        </div>
+        <div class="ma-time-sep">→</div>
+        <div class="ma-time-box ma-out">
+          <div class="ma-time-icon">🔵</div>
+          <div class="ma-time-label">${L('Check Out', 'ออกงาน')}</div>
+          <div class="ma-time-value" id="att-checkout-val">${escapeHtml(rec.checkOut) || '—'}</div>
+        </div>
+      </div>
+      <div class="ma-working-row">
+        <span>⏱</span>
+        <span id="att-working-time">—</span>
+      </div>
+    </div>`;
+  if (rec.checkIn && !rec.checkOut) {
+    clearInterval(window._attTodayTimer);
+    const [h, m] = rec.checkIn.split(':').map(Number);
+    const inMs = h * 3600000 + m * 60000;
+    window._attTodayTimer = setInterval(() => {
+      const now = new Date();
+      const diff = Math.max(0, now.getHours() * 3600000 + now.getMinutes() * 60000 + now.getSeconds() * 1000 - inMs);
+      const hh = Math.floor(diff / 3600000);
+      const mm = Math.floor((diff % 3600000) / 60000);
+      const ss = Math.floor((diff % 60000) / 1000);
+      const el = document.getElementById('att-working-time');
+      if (el) el.textContent = currentLang === 'ja' ? `勤務中 ${hh}時間${mm}分${ss}秒` : L(`Working ${hh}h ${mm}m ${ss}s`, `กำลังทำงาน ${hh} ชม. ${mm} น. ${ss} วิ`);
+    }, 1000);
+  } else if (rec.checkIn && rec.checkOut) {
+    clearInterval(window._attTodayTimer);
+    const [ih, im] = rec.checkIn.split(':').map(Number);
+    const [oh, om] = rec.checkOut.split(':').map(Number);
+    const diff = Math.max(0, (oh * 60 + om) - (ih * 60 + im));
+    const el = document.getElementById('att-working-time');
+    if (el) el.textContent = currentLang === 'ja' ? `勤務時間 ${Math.floor(diff / 60)}時間${diff % 60}分` : L(`Worked ${Math.floor(diff / 60)}h ${diff % 60}m`, `ทำงาน ${Math.floor(diff / 60)} ชม. ${diff % 60} น.`);
+  } else {
+    clearInterval(window._attTodayTimer);
+  }
+}
+
+function reverseGeocode(lat, lng, callback) {
+  const key = `${lat.toFixed(5)},${lng.toFixed(5)}`;
+  if (geoCache[key]) { callback(geoCache[key]); return; }
+  fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&accept-language=th`)
+    .then(r => r.json())
+    .then(data => { geoCache[key] = data.display_name || `${lat}, ${lng}`; callback(geoCache[key]); })
+    .catch(() => callback(`${lat.toFixed(6)}, ${lng.toFixed(6)}`));
+}
+
+function renderAttEmployeeSelector() {
+  const container = document.getElementById('att-employee-selector-container');
+  if (!container) return;
+  // MD, Accounting, and the developer system account can browse any employee's attendance.
+  if (!canViewOtherEmployees()) { container.innerHTML = ''; return; }
+  const employees = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active !== false && u.role !== 'md')
+    .sort((a, b) => parseInt(a.employeeNo) - parseInt(b.employeeNo));
+  if (!selectedAttUserId) {
+    const role = effectiveRole();
+    // Accounting defaults to own record when they are a real employee; MD/superadmin pick first.
+    selectedAttUserId = (role === 'accounting' && isEmployeeRecord(currentUser))
+      ? currentUser.id
+      : ((employees[0] && employees[0].id) || null);
+  }
+  const currentEmp = employees.find(u => u.id == selectedAttUserId);
+  container.innerHTML = `
+    <div class="card mb-4 att-emp-sticky-bar" style="padding:14px 20px">
+      <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+        <span style="font-size:22px">👤</span>
+        <div style="flex:1;min-width:140px">
+          <div style="font-size:10px;color:#3b82f6;font-weight:700;text-transform:uppercase;letter-spacing:.03em">${L('Now Viewing', 'กำลังดูข้อมูลของ')}</div>
+          <div style="font-size:16px;font-weight:800;color:var(--text)">${currentEmp ? `#${escapeHtml(currentEmp.employeeNo)} ${escapeHtml(currentEmp.name)}${currentEmp.position ? ' — ' + escapeHtml(currentEmp.position) : ''}` : L('— Select employee —', '— เลือกพนักงาน —')}</div>
+        </div>
+        <select id="att-emp-select" onchange="onAttEmpChange(this.value)" style="min-width:200px;padding:8px 12px;border:1.5px solid #93c5fd;border-radius:8px;font-size:14px;background:white">
+          ${employees.map(u => `<option value="${u.id}" ${selectedAttUserId == u.id ? 'selected' : ''}>#${escapeHtml(u.employeeNo)} ${escapeHtml(u.name)}${u.position ? ' — ' + escapeHtml(u.position) : ''}</option>`).join('')}
+        </select>
+      </div>
+      ${isSuperAdmin() && qaAttendanceActionsEnabled(currentEmp) ? `<div style="margin-top:8px;font-size:11px;color:#9a3412">🛠️ ${L('Request buttons follow the selected employee (or the preview role). The system account cannot actually submit.', 'ปุ่มคำขอแสดงตามพนักงานที่เลือก (หรือตาม role ที่ดูเป็น) — บัญชีระบบยื่นคำขอจริงไม่ได้')}</div>` : ''}
+    </div>`;
+}
+
+function onAttEmpChange(val) {
+  selectedAttUserId = parseInt(val);
+  renderAttendanceTable();
+}
+
+function renderAttendanceTable() {
+  const tbody = document.getElementById('attendance-tbody');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+  const mobileCards = document.getElementById('att-cards-mobile');
+  if (mobileCards) mobileCards.innerHTML = '';
+
+  // 2026-07-31: legend used to hardcode the rates/thresholds directly in index.html.
+  // Reads live from Settings so it cannot silently contradict the actual rates.
+  const _legA = APP_SETTINGS.allowances;
+  const elEarly = document.getElementById('att-legend-early');
+  if (elEarly) elEarly.textContent = currentLang === 'ja'
+    ? `🌅 早朝手当 ${_legA.earlyThreshold2Min}分前=฿${_legA.earlyMorning2} | ${_legA.earlyThreshold1Min}分前=฿${_legA.earlyMorning1}`
+    : L(`🌅 Early Morning before ${minsToTime(_legA.earlyThreshold2Min)} = ฿${_legA.earlyMorning2} | before ${minsToTime(_legA.earlyThreshold1Min)} = ฿${_legA.earlyMorning1}`,
+        `🌅 Early Morning ก่อน ${minsToTime(_legA.earlyThreshold2Min)} = ฿${_legA.earlyMorning2} | ก่อน ${minsToTime(_legA.earlyThreshold1Min)} = ฿${_legA.earlyMorning1}`);
+  const elLate = document.getElementById('att-legend-late');
+  const _ln1 = String(_legA.lateNightThreshold1Hour ?? 19).padStart(2,'0') + ':00';
+  const _ln2 = String(_legA.lateNightThreshold2Hour ?? 20).padStart(2,'0') + ':00';
+  if (elLate) elLate.textContent = currentLang === 'ja'
+    ? `🌙 深夜手当 ${_ln2}以降=฿${_legA.lateNight2} | ${_ln1}以降=฿${_legA.lateNight1}`
+    : L(`🌙 Late Night after ${_ln2} = ฿${_legA.lateNight2} | after ${_ln1} = ฿${_legA.lateNight1}`,
+        `🌙 Late Night หลัง ${_ln2} = ฿${_legA.lateNight2} | หลัง ${_ln1} = ฿${_legA.lateNight1}`);
+  const elPc = document.getElementById('att-legend-personalcar');
+  if (elPc) elPc.textContent = currentLang === 'ja'
+    ? `🚙 自家用車使用 (฿${(_legA.personalCar||0).toLocaleString()}/回)`
+    : L(`🚙 Personal car used (฿${(_legA.personalCar||0).toLocaleString()}/time)`, `🚙 ใช้รถส่วนตัว (฿${(_legA.personalCar||0).toLocaleString()}/ครั้ง)`);
+
+  renderAttEmployeeSelector();
+
+  const canViewOthers = canViewOtherEmployees();
+  const targetUserId = canViewOthers ? (selectedAttUserId || currentUser.id) : currentUser.id;
+  const targetUser = canViewOthers ? (DATA_USERS.find(u => u.id === targetUserId) || currentUser) : currentUser;
+  const isViewingSelf = targetUserId === currentUser.id;
+
+  // อัพเดท header column ให้ตรงกับ role ของพนักงานที่กำลังแสดง (ไม่ใช่ผู้ login)
+  // 2026-07-31: replaced the isDriverView/isTargetAcctMkt exclusive fork -- same bug already
+  // fixed in showReportDetail()/renderDashboard() (a driver is actually earlyLate/upcountry
+  // eligible by default, but this view hid those and only showed OT+Long Distance) -- with
+  // independent per-allowance-type eligibility flags so all applicable badges show together.
+  const eligAtt = APP_SETTINGS.allowanceEligibility;
+  const canEarlyLateTarget   = isAllowanceEligible(eligAtt, targetUser.role, 'earlyLate');
+  const canOTTarget          = isAllowanceEligible(eligAtt, targetUser.role, 'ot');
+  const canUpcountryTarget   = isAllowanceEligible(eligAtt, targetUser.role, 'upcountry');
+  const canLongDistTarget    = isAllowanceEligible(eligAtt, targetUser.role, 'longDistance');
+  const canPersonalCarTarget = isAllowanceEligible(eligAtt, targetUser.role, 'personalCar') && targetUser.personalCarEligible === true;
+  const hasAnyAllowanceTarget = canEarlyLateTarget || canOTTarget || canUpcountryTarget || canLongDistTarget || canPersonalCarTarget;
+  const thAllowances = tbody.closest('table')?.querySelector('thead th#att-th-allowances');
+  if (thAllowances) { thAllowances.style.display = hasAnyAllowanceTarget ? '' : 'none'; }
+
+  // Today card — hide when viewing someone else's data
+  const todayContainer = document.getElementById('att-today-card-container');
+  if (todayContainer) todayContainer.style.display = isViewingSelf ? '' : 'none';
+  if (isViewingSelf) renderAttTodayCard();
+
+  const { start, end, isCurrent } = getPeriodBounds(selectedPeriodIndex);
+  const days = generatePeriodDays(start, end, isCurrent, targetUserId);
+  const today = new Date();
+  // Non-MD users always view only their own data → everyone can see own GPS
+  // MD viewing others → also fine (management role)
+  const canSeeGPS = true;
+
+  // Update subtitle
+  const sub = document.getElementById('page-subtitle');
+  const empLabel = !isViewingSelf && targetUser ? ` — ${targetUser.name}` : '';
+  if (sub) sub.textContent = `${L('Period', 'รอบ')} ${getPeriodLabel(start, end)}${isCurrent ? L('  (Current Period)', '  (รอบปัจจุบัน)') : ''}${empLabel}`;
+
+  // Update summary cards
+  const workDays = days.filter(d => d.status === 'present' || d.status === 'late' || d.status === 'not-clocked-in').length;
+  const lateDays = days.filter(d => d.status === 'late').length;
+  const annualDays = days.filter(d => d.status === 'leave-annual').length;
+  const sickDays = days.filter(d => d.status === 'leave-sick').length;
+  ['att-work','att-late','att-annual','att-sick'].forEach((id, i) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = [workDays, lateDays, annualDays, sickDays][i];
+  });
+
+  const statusMap = {
+    present: `<span class="badge badge-success">✅ ${L('Present', 'มาทำงาน')}</span>`,
+    late: `<span class="badge badge-warning">⏰ ${L('Late', 'มาสาย')}</span>`,
+    'leave-annual': `<span class="badge badge-info">🏖️ ${L('Annual Leave', 'ลาพักร้อน')}</span>`,
+    'leave-sick': `<span class="badge badge-danger">🤒 ${L('Sick Leave', 'ลาป่วย')}</span>`,
+    'leave-business': `<span class="badge badge-purple">📋 ${L('Business Leave', 'ลากิจ')}</span>`,
+    // 2026-08-06 (D2): renamed from "Not clocked in" -- that wording is now reserved for the new
+    // 'not-clocked-in' status below (a scan exists, just after the cutoff with no morning
+    // check-in), which is a genuinely different situation from a day with NO scan at all.
+    absent: `<span class="badge badge-danger" style="opacity:0.7">⏸ ${L('Absent', 'ไม่มาทำงาน')}</span>`,
+    'not-clocked-in': `<span class="badge badge-warning" style="opacity:0.85">⏸ ${L('No morning check-in', 'ยังไม่ลงเวลาทำงาน')}</span>`,
+    future: `<span class="badge badge-gray" style="color:#94a3b8">⏳ ${L('Upcoming', 'ยังไม่ถึง')}</span>`,
+  };
+  // 2026-08-06: half-day-AM/PM (or oddly-shaped partial) leave overlay -- generatePeriodDays()
+  // sets row.partialLeave = {type, coverage, hourlyStart, hourlyEnd} WITHOUT touching the real
+  // checkIn/checkOut scan data (see leaveDayCoverage()). Renders as a small chip on whichever
+  // side of the day the leave actually covers, so the real scan on the other side stays visible.
+  const partialLeaveTypeLabel = {
+    annual: L('🏖️ Annual Leave', '🏖️ ลาพักร้อน'),
+    sick: L('🤒 Sick Leave', '🤒 ลาป่วย'),
+    business: L('📋 Business Leave', '📋 ลากิจ'),
+  };
+  const partialLeaveCoverageSuffix = {
+    am: L('morning half-day', 'ลาครึ่งวันเช้า'),
+    pm: L('afternoon half-day', 'ลาครึ่งวันบ่าย'),
+    partial: L('partial day', 'ลาบางส่วนของวัน'),
+  };
+  // SECURITY FIX 2026-08-06 (Opus audit): hourlyStart/hourlyEnd come straight from the leave
+  // request POST body with no format validation anywhere -- escapeHtml() them before interpolating
+  // (pl.type/pl.coverage are safe: leaveDayCoverage() only ever sets partialLeave when l.type is
+  // one of the 3 known enum values, and coverage is always one of leaveDayCoverage()'s own fixed
+  // return strings, so both dict lookups below always hit and never fall through to raw input).
+  const buildPartialLeaveChip = pl => `<span class="badge badge-info" style="display:block;width:fit-content;margin-bottom:2px;font-size:10px" title="${escapeHtml(pl.hourlyStart)}-${escapeHtml(pl.hourlyEnd)}">${partialLeaveTypeLabel[pl.type] || pl.type} (${partialLeaveCoverageSuffix[pl.coverage] || pl.coverage})</span>`;
+  const buildReturnSubline = row => (row.partialLeave && row.partialLeave.coverage === 'am' && row.firstScanAfterCutoff)
+    ? `<div style="font-size:10px;color:#64748b;margin-top:2px">↩️ ${L('Returned at', 'กลับมาเวลา')} ${escapeHtml(row.firstScanAfterCutoff)}</div>` : '';
+  // 2026-08-06 (Opus audit finding 3): used to only show for 'partial' coverage. But when the
+  // employee's real scan happens to land on the same side the am/pm chip would have rendered (e.g.
+  // an AM-leave employee returns at 12:50, recorded as an ordinary checkIn), the chip never shows
+  // and the row looked like a completely normal day with zero indication of the approved leave.
+  // Now always shows a small note regardless of coverage, so the leave is never invisible.
+  const buildPartialNoteHtml = row => {
+    const pl = row.partialLeave;
+    if (!pl) return '';
+    return `<div style="font-size:10px;color:#7c3aed;margin-top:2px">${partialLeaveTypeLabel[pl.type] || pl.type} (${partialLeaveCoverageSuffix[pl.coverage] || pl.coverage}) ${escapeHtml(pl.hourlyStart)}-${escapeHtml(pl.hourlyEnd)}</div>`;
+  };
+  const getStatusBadge = row => {
+    if (row.status === 'company-trip') {
+      return `<span class="badge" style="background:#e0f2fe;color:#0369a1">🚌 ${L('Company Trip', 'Company Trip')}</span>`;
+    }
+    if (row.status === 'weekend') {
+      const dayTH = row.dayName === 'Sat' ? L('Saturday', 'วันเสาร์') : L('Sunday', 'วันอาทิตย์');
+      return `<span class="badge badge-gray">🛌 ${dayTH}</span>`;
+    }
+    if (row.status === 'holiday') {
+      const name = row.holidayName || L('Public Holiday', 'วันหยุดราชการ');
+      return `<span class="badge badge-amber">🎌 ${escapeHtml(name)}</span>`;
+    }
+    return statusMap[row.status] || '';
+  };
+
+  days.forEach(row => {
+    const tr = document.createElement('tr');
+    if (row.isWeekend) tr.className = 'weekend-row';
+    if (row.status === 'holiday') tr.className = 'holiday-row';
+    if (row.isFuture) tr.style.opacity = '0.45';
+
+    // Highlight today
+    const rowDate = new Date(row.date + 'T12:00:00');
+    if (!row.isFuture && rowDate.toDateString() === today.toDateString()) {
+      tr.style.background = document.documentElement.getAttribute('data-theme') === 'dark' ? 'rgba(59,130,246,0.12)' : '#eff6ff';
+      tr.style.fontWeight = '600';
+    }
+
+    const d = new Date(row.date + 'T12:00:00');
+    const dateStr = fmtDate(d);
+
+    const _ATallowances = APP_SETTINGS.allowances;
+    let earlyBadge = '';
+    let earlyWarnBadge = '';
+    if (canEarlyLateTarget && row.checkIn && row.status !== 'company-trip') {
+      const [h, m] = row.checkIn.split(':').map(Number);
+      const mins = h * 60 + m;
+      if (mins <= (_ATallowances.earlyThreshold1Min || 450) && isDeviceScanSource(row.checkInSource)) {
+        const bonus = mins <= (_ATallowances.earlyThreshold2Min || 390)
+          ? `฿${_ATallowances.earlyMorning2 || 480}`
+          : `฿${_ATallowances.earlyMorning1 || 240}`;
+        earlyBadge = attAllowIcon('🌅', `${L('Early Morning', 'Early Morning')} ${row.checkIn} (${bonus})`);
+      }
+      // Check-in before 06:00 is often a false read (e.g. a door scan while someone lingered
+      // overnight, not a real early arrival) — flag it for MD/Accounting to verify manually.
+      if (mins < 6 * 60) {
+        earlyWarnBadge = `<span class="badge badge-danger" style="margin-left:4px" title="${L('Check-in before 06:00 — please verify this is the real time','เข้างานก่อน 06:00 — กรุณาตรวจสอบว่าเป็นเวลาจริง')}">⚠️ ${L('Verify','ตรวจสอบ')}</span>`;
+        // Only MD/Accounting reviewing someone else's row can quick-fix — never for their own data.
+        if (!isViewingSelf && !isSuperAdmin()) {
+          earlyWarnBadge += ` <button class="btn btn-ghost btn-sm" onclick="openQuickFixCheckIn('${escapeJsAttr(row.date)}', ${targetUserId}, '${escapeJsAttr(row.checkIn)}')" title="${L('Fix this check-in time now','แก้ไขเวลาเข้างานนี้ทันที')}">🔧</button>`;
+        }
+      }
+    }
+    let lateBadge = '';
+    if (canEarlyLateTarget && row.lateOut && row.lateApproved && row.status !== 'company-trip') {
+      const h = parseInt(row.lateOut.split(':')[0]);
+      const _ln2Thr = _ATallowances.lateNightThreshold2Hour || _ATallowances.lateNightThresholdHour || 20;
+      const bonus = h >= _ln2Thr ? `฿${_ATallowances.lateNight2 || 480}` : `฿${_ATallowances.lateNight1 || 240}`;
+      lateBadge = attAllowIcon('🌙', `${L('Late Night', 'Late Night')} ${row.lateOut} (${bonus})`);
+    }
+
+    let otBadge = '';
+    const approvedOT = !canOTTarget ? null : DATA_LEAVES.find(l =>
+      l.userId === (targetUserId || currentUser.id) &&
+      l.type === 'ot' && l.dateFrom === row.date && l.status === 'approved'
+    );
+    if (approvedOT) {
+      const h = Math.floor(approvedOT.otHours || 0);
+      const m = Math.round(((approvedOT.otHours || 0) - h) * 60);
+      const dur = currentLang === 'ja' ? (m > 0 ? `${h}時間${m}分` : `${h}時間`) : (m > 0 ? L(`${h}h${m}m`, `${h}ชม.${m}น.`) : L(`${h}h`, `${h}ชม.`));
+      const uid = approvedOT.userId;
+      const empUser = DATA_USERS.find(u => u.id == uid) || currentUser;
+      const salary = empUser?.salary || 0;
+      const mult = approvedOT.otMultiplier || (new Date(approvedOT.dateFrom + 'T12:00:00').getDay() % 6 === 0 ? 3 : 1.5);
+      const amount = salary > 0 ? Math.round(salary / 30 / 8 * mult * (approvedOT.otHours || 0)) : 0;
+      const amountStr = amount > 0 ? ` (฿${amount.toLocaleString()})` : '';
+      otBadge = attAllowIcon('⏱️', `OT ${dur}${amountStr}`);
+    }
+
+    let personalCarBadge = '';
+    const pcLeave = canPersonalCarTarget ? DATA_LEAVES.find(l =>
+      l.userId === targetUserId && l.type === 'personal-car' && l.dateFrom === row.date && l.status === 'approved'
+    ) : null;
+    if (pcLeave) {
+      const pcRate = pcLeave.personalCarRate != null ? pcLeave.personalCarRate : (APP_SETTINGS.allowances.personalCar != null ? APP_SETTINGS.allowances.personalCar : 1000);
+      personalCarBadge = attAllowIcon('🚙', `${L('Personal Car', 'รถส่วนตัว')} (+฿${pcRate.toLocaleString()})`);
+    }
+    const upcountryBadge = (canUpcountryTarget && row.upcountry && row.status !== 'company-trip')
+      ? attAllowIcon('🗺️', L('Upcountry', 'Upcountry')) : '';
+    const ldBadge = (canLongDistTarget && row.longDistance)
+      ? attAllowIcon('🚗', `${L('Long Distance', 'Long Distance')} ${Number(row.longDistanceKm) || 0} ${L('km', 'กม.')}${row.longDistanceAllowance > 0 ? ` (+฿${row.longDistanceAllowance})` : ''}`)
+      : '';
+    const allowIcons = [earlyBadge, lateBadge, otBadge, upcountryBadge, ldBadge, personalCarBadge].filter(Boolean).join('');
+    const allowIconsHtml = allowIcons
+      ? `<span class="att-allow-icons">${allowIcons}</span>`
+      : '<span style="color:#cbd5e1">—</span>';
+
+    const inSrc  = row.checkInSource  === 'web'
+      ? `<span class="log-source web"    style="font-size:10px;margin-left:4px" title="${L('Recorded via Web App','บันทึกผ่าน Web App')}">🌐</span>`
+      : `<span class="log-source device" style="font-size:10px;margin-left:4px" title="${L('Face scanner device','สแกนหน้าอุปกรณ์')}">📷</span>`;
+    const outSrc = row.checkOutSource === 'web'
+      ? `<span class="log-source web"    style="font-size:10px;margin-left:4px" title="${L('Recorded via Web App','บันทึกผ่าน Web App')}">🌐</span>`
+      : `<span class="log-source device" style="font-size:10px;margin-left:4px" title="${L('Face scanner device','สแกนหน้าอุปกรณ์')}">📷</span>`;
+
+    // SECURITY FIX 2026-08-04 (Opus audit, C2): this used to escape only the single quote
+    // (/'/g) while interpolating into DOUBLE-quoted attributes below -- protecting the wrong
+    // character and letting ", <, > through untouched. escapeHtml() covers all of them correctly.
+    const safeGpsIn  = row.checkInGPS  ? escapeHtml(row.checkInGPS)  : '';
+    const safeGpsOut = row.checkOutGPS ? escapeHtml(row.checkOutGPS) : '';
+    const gpsInBtn  = (canSeeGPS && row.checkInSource  === 'web' && row.checkInGPS  && row.checkInGPS  !== 'ไม่ทราบตำแหน่ง')
+      ? `<a href="#" target="_blank" rel="noopener" class="gps-map-link" data-gps="${safeGpsIn}" title="${safeGpsIn}"
+           style="display:block;font-size:11px;color:#2563eb;text-decoration:none;margin-top:3px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+           📍 <span>${L('Loading...', 'กำลังโหลด...')}</span></a>` : '';
+    const gpsOutBtn = (canSeeGPS && row.checkOutSource === 'web' && row.checkOutGPS && row.checkOutGPS !== 'ไม่ทราบตำแหน่ง')
+      ? `<a href="#" target="_blank" rel="noopener" class="gps-map-link" data-gps="${safeGpsOut}" title="${safeGpsOut}"
+           style="display:block;font-size:11px;color:#2563eb;text-decoration:none;margin-top:3px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+           📍 <span>${L('Loading...', 'กำลังโหลด...')}</span></a>` : '';
+
+    tr.innerHTML = `
+      <td class="date-cell">
+        ${rowDate.toDateString() === today.toDateString() ? `<span style="font-size:10px;background:#2563eb;color:white;padding:1px 6px;border-radius:10px;margin-right:4px">${L('Today', 'วันนี้')}</span>` : ''}
+        ${dateStr}<div class="day">${row.dayName}</div>
+        ${row.holidayName ? `<div style="font-size:10px;color:#dc2626;margin-top:1px">🔴 ${escapeHtml(row.holidayName)}</div>` : ''}
+      </td>
+      <td>${getStatusBadge(row)}${buildPartialNoteHtml(row)}</td>
+      <td>${row.partialLeave && row.partialLeave.coverage === 'am' && !row.checkIn
+        ? buildPartialLeaveChip(row.partialLeave)
+        : (row.checkIn
+          ? `<span class="time-chip in">⬆️ ${escapeHtml(row.checkIn)}</span>${earlyWarnBadge}${inSrc}${gpsInBtn}`
+          : (row.checkOut ? `<span style="color:#f59e0b;font-size:11px">⚠️ ${L('No check-in', 'ไม่มีข้อมูลเข้า')}</span>` : '<span style="color:#cbd5e1">—</span>'))
+      }</td>
+      <td>${row.partialLeave && row.partialLeave.coverage === 'pm' && !row.checkOut
+        ? buildPartialLeaveChip(row.partialLeave)
+        : (row.checkOut
+          ? `<span class="time-chip out">⬇️ ${escapeHtml(row.checkOut)}</span>${outSrc}${gpsOutBtn}${buildReturnSubline(row)}`
+          : (row.checkIn ? `<span style="color:#f59e0b;font-size:11px">⚠️ ${L('No check-out', 'ไม่มีข้อมูลออก')}</span>` : '<span style="color:#cbd5e1">—</span>'))
+      }</td>
+      <td class="col-hide-mobile"${hasAnyAllowanceTarget ? '' : ' style="display:none"'}>${allowIconsHtml}</td>
+      <td style="white-space:nowrap">${buildRowActions(row, !isViewingSelf && !qaAttendanceActionsEnabled(targetUser), qaAttendanceInspectUser(targetUser))}</td>`;
+    tbody.appendChild(tr);
+
+    // Mobile card
+    if (mobileCards) {
+      const isToday = !row.isFuture && rowDate.toDateString() === today.toDateString();
+      const cardCls = ['att-mobile-card',
+        row.isWeekend        ? 'att-card-weekend' : '',
+        row.status === 'holiday' ? 'att-card-holiday' : '',
+        isToday              ? 'att-card-today'   : '',
+      ].filter(Boolean).join(' ');
+      const card = document.createElement('div');
+      card.className = cardCls;
+      if (row.isFuture) card.style.opacity = '0.45';
+      const badgesArr = [earlyBadge, lateBadge, otBadge, upcountryBadge, ldBadge, personalCarBadge].filter(Boolean);
+      card.innerHTML = `
+        <div class="att-card-header">
+          <div class="att-card-date">
+            ${isToday ? `<span class="att-card-today-tag">${L('Today', 'วันนี้')}</span>` : ''}
+            <span>${row.dayName}</span>
+            <span style="font-weight:400;font-size:12px;color:#64748b">${dateStr}</span>
+          </div>
+          ${getStatusBadge(row)}${buildPartialNoteHtml(row)}
+        </div>
+        <div class="att-card-times">
+          <div class="att-card-time-item">
+            <span class="att-card-time-label">${L('In', 'เข้า')}</span>
+            ${row.partialLeave && row.partialLeave.coverage === 'am' && !row.checkIn
+              ? buildPartialLeaveChip(row.partialLeave)
+              : (row.checkIn
+                ? `<span class="time-chip in">⬆️ ${escapeHtml(row.checkIn)}</span>${earlyWarnBadge}${inSrc}${gpsInBtn}`
+                : '<span style="color:#cbd5e1;font-size:12px">—</span>')}
+          </div>
+          <div class="att-card-time-item">
+            <span class="att-card-time-label">${L('Out', 'ออก')}</span>
+            ${row.partialLeave && row.partialLeave.coverage === 'pm' && !row.checkOut
+              ? buildPartialLeaveChip(row.partialLeave)
+              : (row.checkOut
+                ? `<span class="time-chip out">⬇️ ${escapeHtml(row.checkOut)}</span>${outSrc}${gpsOutBtn}${buildReturnSubline(row)}`
+                : '<span style="color:#cbd5e1;font-size:12px">—</span>')}
+          </div>
+        </div>
+        ${badgesArr.length ? `<div class="att-card-badges att-allow-icons">${badgesArr.join('')}</div>` : ''}
+        <div class="att-card-actions">${buildRowActions(row, !isViewingSelf && !qaAttendanceActionsEnabled(targetUser), qaAttendanceInspectUser(targetUser))}</div>
+      `;
+      mobileCards.appendChild(card);
+    }
+  });
+  geocodeTableGpsLinks();
+
+  buildAttendancePrintView({
+    targetUser, days, start, end,
+    workDays, lateDays, annualDays, sickDays,
+    canEarlyLateTarget, canOTTarget, canUpcountryTarget, canPersonalCarTarget,
+  });
+}
+
+// สำหรับปุ่ม 🖨 พิมพ์ — เอกสารพิมพ์แยกต่างหาก (แนวนอน, ตัดข้อมูลที่ไม่จำเป็นสำหรับหน้าจอออก
+// เช่นปุ่ม/ลิงก์ GPS/badge ตรวจสอบ) แทนการ print ตารางบนหน้าจอตรงๆ — สร้างใหม่ทุกครั้งที่
+// ตารางเรนเดอร์ ให้ข้อมูลตรงกับที่กำลังดูอยู่เสมอ (เปลี่ยนรอบ/เปลี่ยนพนักงานแล้วพิมพ์ได้ทันที)
+// 2026-08-02: rebuilt on feedback — plain "28 July 2026" date (fmtDateLong, no Thai
+// วัน...ที่ grammar prefix) + a separate explicit Status column (Present/Late/Not clocked
+// in/Holiday/...) instead of a stacked note under the date; cleaner font/spacing throughout.
+function buildAttendancePrintView({ targetUser, days, start, end, workDays, lateDays, annualDays, sickDays, canEarlyLateTarget, canOTTarget, canUpcountryTarget, canPersonalCarTarget }) {
+  const el = document.getElementById('att-print-view');
+  if (!el || !targetUser) return;
+
+  const _pA = APP_SETTINGS.allowances;
+  const dayNameArr = currentLang === 'en' ? DAY_NAMES_EN : currentLang === 'ja' ? DAY_NAMES_JA : DAY_NAMES_TH;
+
+  const statusText = row => {
+    switch (row.status) {
+      case 'present':       return { text: L('Present', 'มาทำงาน'), cls: 'ok' };
+      case 'late':           return { text: L('Late', 'มาสาย'), cls: 'warn' };
+      case 'leave-annual':    return { text: L('Annual Leave', 'ลาพักร้อน'), cls: 'info' };
+      case 'leave-sick':      return { text: L('Sick Leave', 'ลาป่วย'), cls: 'danger' };
+      case 'leave-business':  return { text: L('Business Leave', 'ลากิจ'), cls: 'info' };
+      case 'company-trip':    return { text: L('Company Trip', 'Company Trip'), cls: 'info' };
+      case 'holiday':         return { text: L('Holiday', 'วันหยุด'), cls: 'holiday' };
+      case 'weekend':         return { text: L('Weekend', 'วันหยุดสุดสัปดาห์'), cls: 'muted' };
+      case 'absent':          return { text: L('Absent', 'ไม่มาทำงาน'), cls: 'danger' };
+      case 'not-clocked-in':  return { text: L('No morning check-in', 'ยังไม่ลงเวลาทำงาน'), cls: 'warn' };
+      default:                return { text: '—', cls: 'muted' };
+    }
+  };
+
+  const rows = days.filter(d => !d.isFuture).map(row => {
+    const rowCls = row.status === 'holiday' ? 'att-print-holiday'
+      : row.isWeekend ? 'att-print-weekend' : '';
+    const d = new Date(row.date + 'T12:00:00');
+    const st = statusText(row);
+
+    const srcIcon = src => src === 'web' ? '🌐' : '📷';
+    const plAbbrev = { annual: L('Leave', 'ลา'), sick: L('Sick', 'ป่วย'), business: L('Biz', 'กิจ') };
+    const inCell  = (row.partialLeave && row.partialLeave.coverage === 'am' && !row.checkIn)
+      ? `${plAbbrev[row.partialLeave.type] || row.partialLeave.type} (${L('AM', 'เช้า')})`
+      : (row.checkIn  ? `⬆️ ${escapeHtml(row.checkIn)} ${srcIcon(row.checkInSource)}`   : '—');
+    const outCell = (row.partialLeave && row.partialLeave.coverage === 'pm' && !row.checkOut)
+      ? `${plAbbrev[row.partialLeave.type] || row.partialLeave.type} (${L('PM', 'บ่าย')})`
+      : (row.checkOut ? `⬇️ ${escapeHtml(row.checkOut)} ${srcIcon(row.checkOutSource)}` : '—');
+
+    const badges = [];
+    if (canEarlyLateTarget && row.checkIn && row.status !== 'company-trip' && isDeviceScanSource(row.checkInSource)) {
+      const [h, m] = row.checkIn.split(':').map(Number);
+      if (h * 60 + m <= (_pA.earlyThreshold1Min || 450)) badges.push('🌅');
+    }
+    if (canEarlyLateTarget && row.lateOut && row.lateApproved && row.status !== 'company-trip' && isDeviceScanSource(row.checkOutSource)) badges.push('🌙');
+    if (canOTTarget) {
+      const otLv = DATA_LEAVES.find(l => l.userId === targetUser.id && l.type === 'ot' && l.dateFrom === row.date && l.status === 'approved');
+      if (otLv) badges.push('⏱️');
+    }
+    if (canUpcountryTarget && row.upcountry) badges.push('🗺️');
+    if (canLongDistTarget && row.longDistance) badges.push('🚗');
+    if (canPersonalCarTarget) {
+      const pcLv = DATA_LEAVES.find(l => l.userId === targetUser.id && l.type === 'personal-car' && l.dateFrom === row.date && l.status === 'approved');
+      if (pcLv) badges.push('🚙');
+    }
+    const notesCell = row.status === 'holiday'
+      ? escapeHtml(row.holidayName || L('Public Holiday', 'วันหยุดราชการ'))
+      : (badges.join(' ') || '—');
+
+    return `<tr class="${rowCls}">
+      <td class="att-print-date">${fmtDateLong(row.date)}</td>
+      <td class="att-print-day">${dayNameArr[d.getDay()]}</td>
+      <td><span class="att-print-status att-print-status-${st.cls}">${st.text}</span></td>
+      <td class="att-print-time">${inCell}</td>
+      <td class="att-print-time">${outCell}</td>
+      <td class="att-print-badges">${notesCell}</td>
+    </tr>`;
+  }).join('');
+
+  const stat = (num, label) => `<div class="att-print-stat"><div class="att-print-stat-num">${num}</div><div class="att-print-stat-label">${label}</div></div>`;
+
+  el.innerHTML = `
+    <div class="att-print-header">
+      <img src="images/logo-long.png" alt="Tozai Boeki" class="att-print-logo">
+      <div class="att-print-header-center">
+        <div class="att-print-title">${L('Attendance Record', 'บันทึกเวลาทำงาน')}</div>
+        <div class="att-print-emp">${escapeHtml(targetUser.name)} (#${escapeHtml(targetUser.employeeNo)})</div>
+      </div>
+      <div class="att-print-period">
+        <div><span class="att-print-period-label">${L('Period', 'รอบ')}</span> ${getPeriodLabel(start, end)}</div>
+        <div><span class="att-print-period-label">${L('Printed', 'พิมพ์เมื่อ')}</span> ${fmtDateTime(new Date())}</div>
+      </div>
+    </div>
+    <table class="att-print-table">
+      <thead><tr>
+        <th>${L('Date', 'วันที่')}</th>
+        <th>${L('Day', 'วัน')}</th>
+        <th>${L('Status', 'สถานะ')}</th>
+        <th>${L('Check In', 'เวลาเข้า')}</th>
+        <th>${L('Check Out', 'เวลาออก')}</th>
+        <th>${L('Notes', 'รายการพิเศษ')}</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="att-print-summary">
+      ${stat(workDays, L('Work Days', 'วันทำงาน'))}
+      ${stat(lateDays, L('Late', 'มาสาย'))}
+      ${stat(annualDays, L('Annual Leave', 'ลาพักร้อน'))}
+      ${stat(sickDays, L('Sick Leave', 'ลาป่วย'))}
+    </div>
+    <div class="att-print-legend">
+      <span>🌐 ${L('Web App', 'Web App')}</span>
+      <span>📷 ${L('Scanner', 'เครื่องสแกน')}</span>
+      <span>🌅 ${L('Early Morning', 'Early Morning')}</span>
+      <span>🌙 ${L('Late Night', 'Late Night')}</span>
+      <span>⏱️ ${L('OT', 'OT')}</span>
+      <span>🗺️ ${L('Upcountry', 'Upcountry')}</span>
+      <span>🚗 ${L('Long Distance', 'Long Distance')}</span>
+      <span>🚙 ${L('Personal Car', 'รถส่วนตัว')}</span>
+    </div>
+    <div class="att-print-footer">Tozai Boeki Kaisha (Thailand) Ltd. — ${L('Time Attendance System', 'ระบบ Time Attendance')}</div>`;
+}
+
+function geocodeTableGpsLinks() {
+  // 2026-08-17 (review fix): the desktop table's <tr> and the mobile card for the same day are
+  // both always rendered (only CSS display:none hides whichever one isn't active), so every GPS
+  // coordinate now has 2 links, not 1. This used to schedule one reverseGeocode() call PER LINK
+  // with a 1.1s stagger keyed on element index -- since the duplicate link never contributed a
+  // new index to "seen", its own call always landed at delay=0, defeating the stagger and firing
+  // simultaneous requests against Nominatim's 1 req/sec policy. Group by coordinate first and
+  // geocode each unique coordinate exactly once, fanning the result out to every link that shares
+  // it, so the stagger is keyed on unique coordinates rather than link count.
+  const groups = new Map();
+  document.querySelectorAll('a.gps-map-link[data-gps]').forEach(el => {
+    const gpsStr = el.dataset.gps;
+    const m = gpsStr.match(/(-?\d+\.?\d*),\s*(-?\d+\.?\d*)/);
+    if (!m) return;
+    const lat = parseFloat(m[1]), lng = parseFloat(m[2]);
+    el.href = `https://www.google.com/maps?q=${lat},${lng}`;
+    const key = `${lat.toFixed(4)},${lng.toFixed(4)}`;
+    if (!groups.has(key)) groups.set(key, { lat, lng, els: [] });
+    // 2026-08-17 (review fix): keep each element's OWN parsed lat/lng alongside it -- the group's
+    // lat/lng (whichever element was encountered first) is only used to pick where to geocode
+    // FROM, not what to print in each element's own tooltip. Two elements can share a geocode
+    // group (rounded to 4 decimals, ~11m) while still differing at the 6-decimal display
+    // precision below.
+    groups.get(key).els.push({ el, lat, lng });
+  });
+  let i = 0;
+  groups.forEach(({ lat, lng, els }) => {
+    setTimeout(() => {
+      reverseGeocode(lat, lng, name => {
+        const short = name.split(',').slice(0, 2).join(',').trim();
+        els.forEach(({ el, lat: ownLat, lng: ownLng }) => {
+          const title = name + '\n(' + ownLat.toFixed(6) + ', ' + ownLng.toFixed(6) + ')\n' + L('Click to open Google Maps', 'คลิกเพื่อเปิด Google Maps');
+          const span = el.querySelector('span');
+          if (span) span.textContent = short;
+          el.title = title;
+        });
+      });
+    }, i * 1100);
+    i++;
+  });
+}
+
+// ===== DASHBOARD =====
+function renderDashboard() {
+  const statsWrap = document.getElementById('dash-period-stats-wrap');
+  const isMd = currentUser && isMdView();
+  if (statsWrap) statsWrap.style.display = isMd ? 'none' : '';
+  const roleStatsRow = document.getElementById('dash-role-stats-row');
+  // 2026-07-31: rebuilt from a hardcoded isAcctMkt/isDriver fork (which hid a driver's real
+  // Early Morning/Upcountry stats and showed OT-hours only for drivers) into a per-tile list
+  // driven by allowanceEligibility, matching the same fix already applied to showReportDetail().
+  if (roleStatsRow && !isMd) {
+    const eligDash = APP_SETTINGS.allowanceEligibility;
+    const role = currentUser && effectiveRole();
+    const canEarlyLateDash   = isAllowanceEligible(eligDash, role, 'earlyLate');
+    const canUpcountryDash   = isAllowanceEligible(eligDash, role, 'upcountry');
+    const canOTDash          = isAllowanceEligible(eligDash, role, 'ot');
+    const canLongDistDash    = isAllowanceEligible(eligDash, role, 'longDistance');
+    const canPersonalCarDash = isAllowanceEligible(eligDash, role, 'personalCar') && currentUser && currentUser.personalCarEligible === true;
+    const tile = (icon, id, label, sub, color, kind) => `
+        <div class="stat-card dash-stat-click" style="flex-direction:column;text-align:center;gap:4px;cursor:pointer" onclick="showDashPeriodDetail('${kind}')" title="${L('Click to view days', 'คลิกเพื่อดูวันที่')}">
+          <div style="font-size:26px">${icon}</div>
+          <div style="font-size:24px;font-weight:800;color:${color}" id="${id}">—</div>
+          <div style="font-size:11px;color:#718096">${label}</div>
+          <div style="font-size:10px;color:#94a3b8">${sub}</div>
+        </div>`;
+    const tiles = [
+      ...(canEarlyLateDash ? [tile('🌅', 'dash-early-count', t('rpt_early'), L('allowance units (higher tier = 2)','นับตามสิทธิ์ (ขั้นสูงนับ 2)'), '#f59e0b', 'early')] : []),
+      ...(canEarlyLateDash ? [tile('🌙', 'dash-latenight-count', t('rpt_latenight'), L('allowance units (higher tier = 2)','นับตามสิทธิ์ (ขั้นสูงนับ 2)'), '#3b82f6', 'latenight')] : []),
+      ...(canUpcountryDash ? [tile('🗺️', 'dash-upcountry-count', L('Upcountry','Upcountry'), L('times','ครั้ง'), '#10b981', 'upcountry')] : []),
+      ...(canOTDash ? [tile('⏱️', 'dash-ot-count', L('Days with OT','จำนวนวันที่ทำ OT'), L('times','ครั้ง'), '#7c3aed', 'ot')] : []),
+      ...(canLongDistDash ? [tile('🚗', 'dash-longdistance-count', 'Long Distance', L('times','ครั้ง'), '#0369a1', 'longdistance')] : []),
+      ...(canPersonalCarDash ? [tile('🚙', 'dash-personalcar-count', L('Personal Car','รถส่วนตัว'), L('times','ครั้ง'), '#854d0e', 'personalcar')] : []),
+    ];
+    // 2026-07-31: was a fixed-class lookup capped at grid-5, but a role eligible for everything
+    // can reach 6 tiles (early+late+upcountry+ot-count+longdistance+personalcar) -- auto-fit
+    // handles any count without ever needing a new class. (2026-08-02: OT-hours tile removed --
+    // was never asked for, dropped from 7 to 6 max.)
+    roleStatsRow.innerHTML = tiles.length > 0 ? `<div class="grid grid-auto-stats">${tiles.join('')}</div>` : '';
+  }
+
+  const { start, end, isCurrent } = getPeriodBounds(selectedPeriodIndex);
+  const label = getPeriodLabel(start, end);
+  const el = document.getElementById('dash-period-label');
+  if (el) el.textContent = `${L('Period', 'รอบ')} ${label}`;
+
+  const days = generatePeriodDays(start, end, isCurrent);
+  const workDays = days.filter(d => d.status === 'present' || d.status === 'late' || d.status === 'not-clocked-in').length;
+  const lateDays = days.filter(d => d.status === 'late').length;
+  const leaveDays = days.filter(d => d.status.startsWith('leave')).length;
+
+  // Early/Late — นับครั้ง
+  const _S = APP_SETTINGS.allowances;
+  const _ln2Thr = _S.lateNightThreshold2Hour || _S.lateNightThresholdHour || 20;
+  let earlyCount = 0, lateNightCount = 0;
+  days.forEach(d => {
+    if (d.checkIn && (d.status === 'present' || d.status === 'late') && isDeviceScanSource(d.checkInSource)) {
+      const [h, m] = d.checkIn.split(':').map(Number);
+      const mins = h * 60 + m;
+      earlyCount += mins <= (_S.earlyThreshold2Min||390) ? 2 : mins <= (_S.earlyThreshold1Min||450) ? 1 : 0;
+    }
+    if (d.lateOut && d.lateApproved && d.status !== 'company-trip' && isDeviceScanSource(d.checkOutSource)) {
+      lateNightCount += parseInt(d.lateOut) >= _ln2Thr ? 2 : 1;
+    }
+  });
+
+  const startStr = localDateStr(start);
+  const endStr   = localDateStr(end);
+  const upcountryCount = DATA_LEAVES.filter(l =>
+    l.userId === currentUser.id && l.type === 'upcountry' && l.status === 'approved' &&
+    l.dateFrom >= startStr && l.dateFrom <= endStr &&
+    !isCompanyTripDay(l.dateFrom)
+  ).length;
+
+  const otLeavesThisPeriod = DATA_LEAVES.filter(l =>
+    l.userId === currentUser.id && l.type === 'ot' && l.status === 'approved' &&
+    l.dateFrom >= startStr && l.dateFrom <= endStr &&
+    !isCompanyTripDay(l.dateFrom)
+  );
+  const otCount = otLeavesThisPeriod.length;
+
+  const longDistanceCount = DATA_LEAVES.filter(l =>
+    l.userId === currentUser.id && l.type === 'long-distance' && l.status === 'approved' &&
+    l.dateFrom >= startStr && l.dateFrom <= endStr &&
+    !isCompanyTripDay(l.dateFrom)
+  ).length;
+
+  // 2026-08-16 (Opus audit L-5 + user confirmation): use the same eligibility table that
+  // governs whether the tile is shown at all (isAllowanceEligible), instead of a hardcoded
+  // role pair — a role granted personalCar via Settings used to see the tile but the count
+  // stuck at 0 forever, since this check never recognized it as eligible.
+  const personalCarDashCount = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, effectiveRole(), 'personalCar') ? DATA_LEAVES.filter(l =>
+    l.userId === currentUser.id && l.type === 'personal-car' && l.status === 'approved' &&
+    l.dateFrom >= startStr && l.dateFrom <= endStr &&
+    !isCompanyTripDay(l.dateFrom)
+  ).length : 0;
+
+  const el2 = document.getElementById('dash-work-days');
+  const el3 = document.getElementById('dash-late-days');
+  const el4 = document.getElementById('dash-leave-days');
+  const elE = document.getElementById('dash-early-count');
+  const elL = document.getElementById('dash-latenight-count');
+  const elO = document.getElementById('dash-upcountry-count');
+  const elOT = document.getElementById('dash-ot-count');
+  const elLD = document.getElementById('dash-longdistance-count');
+  if (elLD) elLD.textContent = longDistanceCount;
+  if (el2) el2.textContent = workDays;
+  if (el3) el3.textContent = lateDays;
+  if (el4) el4.textContent = leaveDays;
+  const elLT = document.getElementById('dash-late-threshold');
+  if (elLT) {
+    const _ws2 = APP_SETTINGS.workSchedule;
+    const _sh2 = _ws2?.standardStartHour ?? 8;
+    const _sm2 = _ws2?.standardStartMinute ?? 30;
+    const _st2 = `${String(_sh2).padStart(2,'0')}:${String(_sm2).padStart(2,'0')}`;
+    elLT.textContent = currentLang === 'ja' ? `${_st2}以降` : L(`After ${_st2}`, `เกิน ${_st2} น.`);
+  }
+  if (elE) elE.textContent = earlyCount;
+  if (elL) elL.textContent = lateNightCount;
+  if (elO) elO.textContent = upcountryCount;
+  if (elOT) elOT.textContent = otCount;
+  const elPCar = document.getElementById('dash-personalcar-count');
+  if (elPCar) elPCar.textContent = personalCarDashCount;
+
+  const el5 = document.getElementById('dash-today-date');
+  if (el5) el5.textContent = fmtDate(new Date());
+
+  // Today leave + attendance count (consistent across stat cards)
+  const todayStr = todayDateStr();
+  const activeUsers = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active && u.role !== 'md');
+  const todayLeaves = getTodayPersonalLeaves();
+  // 2026-08-06: only a FULL-day leave should pull someone out of "expected today" -- a half-day
+  // AM/PM (or partial) annual/sick/business leave still leaves them expected for the other half
+  // of the day (leaveDayCoverage() handles the am/pm/partial classification). Other leave types
+  // (upcountry, ot, etc.) keep the prior "any overlap excludes" behavior, out of scope here.
+  const _stdStartMinDash = (APP_SETTINGS.workSchedule?.standardStartHour ?? 8) * 60 + (APP_SETTINGS.workSchedule?.standardStartMinute ?? 30);
+  const onLeaveIds = new Set(todayLeaves.filter(l =>
+    !['annual', 'sick', 'business'].includes(l.type) || leaveDayCoverage(l, todayStr, _stdStartMinDash) === 'full'
+  ).map(l => l.userId));
+  const expectedToday = activeUsers.filter(u => !onLeaveIds.has(u.id));
+  const checkedInToday = expectedToday.filter(u => {
+    const rec = attendanceLog[attKey(u.id, todayStr)];
+    return rec && rec.checkIn;
+  });
+  const notYet = expectedToday.length - checkedInToday.length;
+
+  const elTE = document.getElementById('dash-total-emp');
+  const elTES = document.getElementById('dash-total-emp-sub');
+  if (elTE) elTE.textContent = checkedInToday.length;
+  if (elTES) {
+    if (currentLang === 'ja') {
+      const fromStrJa = `予定${expectedToday.length}名中`;
+      elTES.textContent = notYet > 0
+        ? `${fromStrJa} — 未出勤${notYet}名`
+        : expectedToday.length > 0
+          ? `${fromStrJa} — 全員出勤済み ✓`
+          : '本日勤務予定なし';
+    } else {
+      const fromStr = L(`of ${expectedToday.length} expected`, `จาก ${expectedToday.length} คนที่คาดว่ามา`);
+      elTES.textContent = notYet > 0
+        ? L(`${fromStr} — ${notYet} not checked in`, `${fromStr} — ยังไม่ check-in ${notYet} คน`)
+        : expectedToday.length > 0
+          ? L(`${fromStr} — all present ✓`, `${fromStr} — ครบทุกคนแล้ว ✓`)
+          : L('No employees today', 'ไม่มีพนักงานวันนี้');
+    }
+  }
+
+  // Pending approvals card — staff see own pending; approvers see items waiting on them
+  const pendingList = getDashPendingLeaves();
+  const pendingCard = document.getElementById('stat-pending-approvals');
+  if (pendingCard) pendingCard.style.display = '';
+
+  const elPC = document.getElementById('dash-pending-count');
+  const elPS = document.getElementById('dash-pending-sub');
+  if (elPC) elPC.textContent = pendingList.length;
+  if (elPS) elPS.textContent = pendingList.length > 0
+    ? (currentLang === 'ja' ? `↑ 保留中 ${pendingList.length}件` : L(`↑ ${pendingList.length} pending`, `↑ รอดำเนินการ ${pendingList.length} รายการ`))
+    : L('No pending requests', 'ไม่มีคำขอค้างอยู่');
+
+  const elTLC = document.getElementById('dash-today-leave-count');
+  const elTLS = document.getElementById('dash-today-leave-sub');
+  const todayLeavePeople = new Set(todayLeaves.map(l => l.userId)).size;
+  if (elTLC) elTLC.textContent = todayLeavePeople;
+  if (elTLS) {
+    if (todayLeaves.length === 0) {
+      elTLS.textContent = L('→ No one on leave today', '→ ไม่มีพนักงานลาวันนี้');
+    } else {
+      const typeCounts = {};
+      todayLeaves.forEach(l => {
+        const lbl = (getLEAVE_TYPE_CFG()[l.type] || { label: l.type }).label;
+        typeCounts[lbl] = (typeCounts[lbl] || 0) + 1;
+      });
+      elTLS.textContent = '→ ' + Object.entries(typeCounts).map(([k,v]) => currentLang === 'ja' ? `${k} ${v}名` : L(`${k} ${v}`, `${k} ${v} คน`)).join(', ');
+    }
+  }
+
+  // Render left panel based on role
+  const panel = document.getElementById('dash-left-panel');
+  const rightPanel = document.getElementById('dash-right-panel');
+  if (!panel) return;
+  const panelGrid = panel.parentElement;
+  if (effectiveRole() === 'user' || effectiveRole() === 'marketing') {
+    if (panelGrid) panelGrid.style.gridTemplateColumns = '';
+    panel.style.display = '';
+    renderUserTodayPanel(panel);
+    renderUserRequestsPanel(rightPanel);
+  } else {
+    // "Staff Status Today" (renderAllStaffPanel) removed 2026-07-13 — merged into
+    // renderCheckinStatusWidget() below to avoid showing the same checked-in/late data twice.
+    if (panelGrid) panelGrid.style.gridTemplateColumns = '1fr';
+    panel.style.display = 'none';
+    renderPendingApprovalsPanel(rightPanel);
+  }
+
+  renderCheckinStatusWidget();
+}
+
+function showDashPeriodDetail(kind) {
+  if (!currentUser) return;
+  const { start, end } = getPeriodBounds(selectedPeriodIndex);
+  const days = generatePeriodDays(start, end, selectedPeriodIndex === 0, currentUser.id);
+  const startStr = localDateStr(start);
+  const endStr = localDateStr(end);
+  const uid = currentUser.id;
+  const _S = APP_SETTINGS.allowances || {};
+  const STD_START_MIN = (APP_SETTINGS.workSchedule?.standardStartHour ?? 8) * 60 + (APP_SETTINGS.workSchedule?.standardStartMinute ?? 30);
+  const fmtLate = min => currentLang === 'ja' ? (min < 60 ? `${min}分` : `${Math.floor(min / 60)}時間${min % 60}分`) : (min < 60 ? L(`${min}m`, `${min} น.`) : L(`${Math.floor(min / 60)}h ${min % 60}m`, `${Math.floor(min / 60)} ชม. ${min % 60} น.`));
+  const fmtHrs = h => { const wh = Math.floor(h), wm = Math.round((h - wh) * 60); return currentLang === 'ja' ? (wm > 0 ? `${wh}時間${wm}分` : `${wh}時間`) : (wm > 0 ? L(`${wh}h ${wm}m`, `${wh} ชม. ${wm} น.`) : L(`${wh}h`, `${wh} ชม.`)); };
+  const TH = (txt, c) => `<th style="padding:9px 14px;text-align:left;border-bottom:2px solid ${c};font-size:12px;font-weight:700;color:#64748b">${txt}</th>`;
+  const THC = (txt, c) => `<th style="padding:9px 14px;text-align:center;border-bottom:2px solid ${c};font-size:12px;font-weight:700;color:#64748b">${txt}</th>`;
+  const statusLabel = {
+    present: L('Present', 'มาทำงาน'),
+    late: L('Late', 'มาสาย'),
+    'not-clocked-in': L('No morning check-in', 'ยังไม่ลงเวลาทำงาน'),
+    'leave-annual': L('Annual Leave', 'ลาพักร้อน'),
+    'leave-sick': L('Sick Leave', 'ลาป่วย'),
+    'leave-business': L('Business Leave', 'ลากิจ'),
+  };
+  const titles = {
+    work: L('📅 Work Days', '📅 วันทำงาน'),
+    late: L('⏰ Late', '⏰ มาสาย'),
+    leave: L('🏖️ Leave', '🏖️ วันลา'),
+    early: '🌅 ' + t('rpt_early'),
+    latenight: '🌙 ' + t('rpt_latenight'),
+    upcountry: L('🗺️ Upcountry', '🗺️ Upcountry'),
+    ot: '⏱️ OT',
+    longdistance: '🚗 Long Distance',
+    personalcar: L('🚙 Personal Car', '🚙 รถส่วนตัว'),
+  };
+  const colors = {
+    work: '#059669', late: '#fecaca', leave: '#ddd6fe', early: '#fde68a',
+    latenight: '#bfdbfe', upcountry: '#bbf7d0', ot: '#fed7aa', longdistance: '#bae6fd', personalcar: '#fde68a',
+  };
+  const c = colors[kind] || '#e2e8f0';
+
+  let rows = [];
+  let foot = '';
+  let headers = '';
+  if (kind === 'work') {
+    headers = TH(L('Date', 'วันที่'), c) + THC(L('Status', 'สถานะ'), c) + THC(L('Check In', 'เวลาเข้า'), c) + THC(L('Check Out', 'เวลาออก'), c);
+    rows = days.filter(d => d.status === 'present' || d.status === 'late' || d.status === 'not-clocked-in').map(d =>
+      `<tr style="border-bottom:1px solid #f1f5f9">
+        <td style="padding:9px 14px;font-weight:600">${fmtDate(new Date(d.date + 'T12:00:00'))}</td>
+        <td style="padding:9px 14px;text-align:center">${statusLabel[d.status] || d.status}</td>
+        <td style="padding:9px 14px;text-align:center">${escapeHtml(d.checkIn) || '—'}</td>
+        <td style="padding:9px 14px;text-align:center">${escapeHtml(d.checkOut) || '—'}</td>
+      </tr>`);
+  } else if (kind === 'late') {
+    headers = TH(L('Date', 'วันที่'), c) + THC(L('Check In', 'เวลาเข้า'), c) + THC(L('How Late', 'สายเท่าไหร่'), c);
+    const lateDays = days.filter(d => d.status === 'late' && d.checkIn);
+    let totalMin = 0;
+    rows = lateDays.map(d => {
+      const [h, m] = d.checkIn.split(':').map(Number);
+      const lateMin = Math.max(0, h * 60 + m - lateReferenceMin(d, STD_START_MIN));
+      totalMin += lateMin;
+      return `<tr style="border-bottom:1px solid #f1f5f9">
+        <td style="padding:9px 14px;font-weight:600">${fmtDate(new Date(d.date + 'T12:00:00'))}</td>
+        <td style="padding:9px 14px;text-align:center">${escapeHtml(d.checkIn)}</td>
+        <td style="padding:9px 14px;text-align:center;color:#dc2626;font-weight:700">${fmtLate(lateMin)}</td>
+      </tr>`;
+    });
+    if (rows.length) foot = `<tfoot><tr style="background:#fef2f2"><td colspan="2" style="padding:8px 14px;font-weight:700;color:#991b1b">${L('Total', 'รวม')}</td><td style="padding:8px 14px;text-align:center;font-weight:700;color:#dc2626">${fmtLate(totalMin)}</td></tr></tfoot>`;
+  } else if (kind === 'leave') {
+    headers = TH(L('Date', 'วันที่'), c) + THC(L('Leave Type', 'ประเภทการลา'), c);
+    rows = days.filter(d => statusLabel[d.status] && String(d.status).startsWith('leave')).map(d =>
+      `<tr style="border-bottom:1px solid #f1f5f9">
+        <td style="padding:9px 14px;font-weight:600">${fmtDate(new Date(d.date + 'T12:00:00'))}</td>
+        <td style="padding:9px 14px;text-align:center">${statusLabel[d.status]}</td>
+      </tr>`);
+  } else if (kind === 'early') {
+    headers = TH(L('Date', 'วันที่'), c) + THC(L('Check In', 'เวลาเข้า'), c) + THC(L('Count', 'จำนวนครั้ง'), c);
+    const t1 = _S.earlyThreshold1Min || 450;
+    const t2 = _S.earlyThreshold2Min || 390;
+    let tot = 0;
+    rows = days.filter(d => {
+      if (!d.checkIn || (d.status !== 'present' && d.status !== 'late') || !isDeviceScanSource(d.checkInSource)) return false;
+      const [h, m] = d.checkIn.split(':').map(Number);
+      return h * 60 + m <= t1;
+    }).map(d => {
+      const [h, m] = d.checkIn.split(':').map(Number);
+      const pts = h * 60 + m <= t2 ? 2 : 1;
+      tot += pts;
+      return `<tr style="border-bottom:1px solid #f1f5f9">
+        <td style="padding:9px 14px;font-weight:600">${fmtDate(new Date(d.date + 'T12:00:00'))}</td>
+        <td style="padding:9px 14px;text-align:center">${escapeHtml(d.checkIn)}</td>
+        <td style="padding:9px 14px;text-align:center;color:#d97706;font-weight:700">${pts} ${L('times', 'ครั้ง')}</td>
+      </tr>`;
+    });
+    if (rows.length) foot = `<tfoot><tr style="background:#fffbeb"><td colspan="2" style="padding:8px 14px;font-weight:700;color:#92400e">${L('Total', 'รวม')}</td><td style="padding:8px 14px;text-align:center;font-weight:700;color:#d97706">${tot} ${L('times', 'ครั้ง')}</td></tr></tfoot>`;
+  } else if (kind === 'latenight') {
+    headers = TH(L('Date', 'วันที่'), c) + THC(L('Check Out', 'เวลาออก'), c) + THC(L('Count', 'จำนวนครั้ง'), c);
+    const ln2 = _S.lateNightThreshold2Hour || _S.lateNightThresholdHour || 20;
+    let tot = 0;
+    rows = days.filter(d => d.lateOut && d.lateApproved && d.status !== 'company-trip' && isDeviceScanSource(d.checkOutSource)).map(d => {
+      const pts = parseInt(d.lateOut) >= ln2 ? 2 : 1;
+      tot += pts;
+      return `<tr style="border-bottom:1px solid #f1f5f9">
+        <td style="padding:9px 14px;font-weight:600">${fmtDate(new Date(d.date + 'T12:00:00'))}</td>
+        <td style="padding:9px 14px;text-align:center">${escapeHtml(d.lateOut)}</td>
+        <td style="padding:9px 14px;text-align:center;color:#1d4ed8;font-weight:700">${pts} ${L('times', 'ครั้ง')}</td>
+      </tr>`;
+    });
+    if (rows.length) foot = `<tfoot><tr style="background:#eff6ff"><td colspan="2" style="padding:8px 14px;font-weight:700;color:#1e40af">${L('Total', 'รวม')}</td><td style="padding:8px 14px;text-align:center;font-weight:700;color:#1d4ed8">${tot} ${L('times', 'ครั้ง')}</td></tr></tfoot>`;
+  } else if (kind === 'upcountry') {
+    headers = TH(L('Date', 'วันที่'), c) + THC(L('Type', 'ประเภท'), c);
+    rows = days.filter(d => d.upcountry && d.status !== 'company-trip').map(d =>
+      `<tr style="border-bottom:1px solid #f1f5f9">
+        <td style="padding:9px 14px;font-weight:600">${fmtDate(new Date(d.date + 'T12:00:00'))}</td>
+        <td style="padding:9px 14px;text-align:center">🗺️ Upcountry</td>
+      </tr>`);
+  } else if (kind === 'ot' || kind === 'longdistance' || kind === 'personalcar') {
+    const type = kind === 'ot' ? 'ot' : kind === 'longdistance' ? 'long-distance' : 'personal-car';
+    const leaves = DATA_LEAVES.filter(l =>
+      l.userId === uid && l.type === type && l.status === 'approved' &&
+      l.dateFrom >= startStr && l.dateFrom <= endStr && !isCompanyTripDay(l.dateFrom)
+    ).sort((a, b) => a.dateFrom.localeCompare(b.dateFrom));
+    if (kind === 'ot') {
+      headers = TH(L('Date', 'วันที่'), c) + THC(L('OT Hours', 'ชั่วโมง OT'), c) + THC(L('Rate', 'อัตรา'), c);
+      let tot = 0;
+      rows = leaves.map(l => {
+        const h = l.otHours || 0;
+        tot += h;
+        const om = Number(l.otMultiplier);
+        const mult = om === 3 ? L('×3 (Holiday)', '×3 (วันหยุด)') : om === 2 ? L('×2 (Holiday)', '×2 (วันหยุด)') : L('×1.5 (Weekday)', '×1.5 (วันธรรมดา)');
+        return `<tr style="border-bottom:1px solid #f1f5f9">
+          <td style="padding:9px 14px;font-weight:600">${fmtDate(new Date(l.dateFrom + 'T12:00:00'))}</td>
+          <td style="padding:9px 14px;text-align:center;color:#ea580c;font-weight:700">${fmtHrs(h)}</td>
+          <td style="padding:9px 14px;text-align:center;font-size:12px;color:#64748b">${mult}</td>
+        </tr>`;
+      });
+      if (rows.length) foot = `<tfoot><tr style="background:#fff7ed"><td style="padding:8px 14px;font-weight:700;color:#c2410c">${L('Total', 'รวม')}</td><td style="padding:8px 14px;text-align:center;font-weight:700;color:#ea580c">${fmtHrs(tot)}</td><td></td></tr></tfoot>`;
+    } else if (kind === 'longdistance') {
+      headers = TH(L('Date', 'วันที่'), c) + THC(L('Distance', 'ระยะทาง'), c);
+      rows = leaves.map(l =>
+        `<tr style="border-bottom:1px solid #f1f5f9">
+          <td style="padding:9px 14px;font-weight:600">${fmtDate(new Date(l.dateFrom + 'T12:00:00'))}</td>
+          <td style="padding:9px 14px;text-align:center">${Number(l.distanceKm || l.longDistanceKm) || 0} ${L('km', 'กม.')}</td>
+        </tr>`);
+    } else {
+      headers = TH(L('Date', 'วันที่'), c) + THC(L('Amount', 'ยอด'), c) + THC(L('Reason', 'เหตุผล'), c);
+      const defRate = APP_SETTINGS.allowances.personalCar != null ? APP_SETTINGS.allowances.personalCar : 1000;
+      let tot = 0;
+      rows = leaves.map(l => {
+        const amt = Number(l.personalCarRate != null ? l.personalCarRate : defRate);
+        tot += amt;
+        return `<tr style="border-bottom:1px solid #f1f5f9">
+          <td style="padding:9px 14px;font-weight:600">${fmtDate(new Date(l.dateFrom + 'T12:00:00'))}</td>
+          <td style="padding:9px 14px;text-align:center;font-weight:700;color:#854d0e">฿${amt.toLocaleString()}</td>
+          <td style="padding:9px 14px;text-align:center;font-size:12px;color:#64748b">${escapeHtml(l.reason || '—')}</td>
+        </tr>`;
+      });
+      if (rows.length) foot = `<tfoot><tr style="background:#fefce8"><td style="padding:8px 14px;font-weight:700;color:#854d0e">${L('Total', 'รวม')}</td><td style="padding:8px 14px;text-align:center;font-weight:700;color:#854d0e">฿${tot.toLocaleString()}</td><td></td></tr></tfoot>`;
+    }
+  }
+
+  const title = document.getElementById('late-detail-title');
+  const body = document.getElementById('late-detail-body');
+  if (title) title.textContent = `${titles[kind] || kind} — ${getPeriodLabel(start, end)}`;
+  if (body) {
+    body.innerHTML = rows.length
+      ? `<div style="padding:10px 16px 6px;font-weight:700;font-size:13px;color:#374151;background:#f8fafc;border-bottom:1px solid #e2e8f0">${titles[kind] || kind} — ${rows.length} ${L('items', 'รายการ')}</div>
+         <table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:#f8fafc">${headers}</tr></thead><tbody>${rows.join('')}</tbody>${foot}</table>`
+      : `<p style="text-align:center;padding:28px;color:#94a3b8">${L('No data for this period', 'ไม่มีข้อมูลในรอบนี้')}</p>`;
+  }
+  document.getElementById('late-detail-modal')?.classList.add('show');
+}
+
+function renderUserTodayPanel(panel) {
+  const dateStr = todayDateStr();
+  const key = attKey(currentUser.id, dateStr);
+  const rec = attendanceLog[key];
+  const todayLabel = fmtDateFull(new Date());
+
+  // Today's check-in status
+  let statusHtml, timeHtml;
+  if (rec && rec.checkIn && rec.checkOut) {
+    statusHtml = `<span class="badge badge-success" style="font-size:14px;padding:6px 16px">✅ ${L('Completed', 'เสร็จสิ้น')}</span>`;
+    timeHtml = `<span class="time-chip in" style="font-size:16px">⬆️ ${escapeHtml(rec.checkIn)}</span>
+                <span style="color:#94a3b8;margin:0 6px">→</span>
+                <span class="time-chip out" style="font-size:16px">⬇️ ${escapeHtml(rec.checkOut)}</span>`;
+  } else if (rec && rec.checkIn) {
+    statusHtml = `<span class="badge badge-warning" style="font-size:14px;padding:6px 16px">🟡 ${L('At work', 'อยู่ในที่ทำงาน')}</span>`;
+    timeHtml = `<span class="time-chip in" style="font-size:16px">⬆️ ${escapeHtml(rec.checkIn)}</span>
+                <span style="color:#94a3b8;font-size:12px;margin-left:8px">${L('Not checked out', 'ยังไม่ออก')}</span>`;
+  } else {
+    statusHtml = `<span class="badge" style="background:#f1f5f9;color:#94a3b8;font-size:14px;padding:6px 16px">⏸ ${L('Not clocked in', 'ยังไม่ลงเวลา')}</span>`;
+    if (!isMdView()) timeHtml = `<button class="btn btn-primary btn-sm" onclick="navigateTo('checkin')">⬆️ ${L('Clock in now', 'ลงเวลาเข้างานเลย')}</button>`;
+  }
+
+  panel.innerHTML = `
+    <div class="card">
+      <div class="card-header">
+        <h3>🙋 ${L('My Status Today', 'สถานะวันนี้ของฉัน')}</h3>
+        <span style="font-size:12px;color:#718096">${todayLabel}</span>
+      </div>
+      <div class="card-body" style="text-align:center;padding:24px 16px">
+        <div style="margin-bottom:14px">${statusHtml}</div>
+        <div style="display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:8px">${timeHtml}</div>
+      </div>
+    </div>`;
+}
+
+function renderPendingApprovalsPanel(panel) {
+  if (!panel || !currentUser) return;
+  const role = effectiveRole();
+  const pending = DATA_LEAVES.filter(l => isMyTurnNow(l));
+  const MAX_SHOW = 4;
+  const shown = pending.slice(0, MAX_SHOW);
+  const remaining = pending.length - shown.length;
+
+  const cardsHtml = shown.length === 0
+    ? `<div style="text-align:center;color:#94a3b8;padding:16px 0;font-size:13px">${L('No pending approvals', 'ไม่มีรายการรออนุมัติ')}</div>`
+    : shown.map(l => {
+        const emp = DATA_USERS.find(u => u.id === l.userId);
+        const empName = emp ? emp.name : `User #${l.userId}`;
+        const icon = LEAVE_TYPE_ICON[l.type] || '📋';
+        const label = leaveTypeLabel(l);
+        const dateStr = l.dateFrom === l.dateTo
+          ? fmtDate(new Date(l.dateFrom + 'T12:00:00'))
+          : `${fmtDate(new Date(l.dateFrom + 'T12:00:00'))} – ${fmtDate(new Date(l.dateTo + 'T12:00:00'))}`;
+        return `<div class="approval-card pending" style="margin-bottom:8px;cursor:pointer;padding:10px 12px" onclick="navigateTo('approval')">
+          <div style="font-weight:600;font-size:13px">${icon} ${escapeHtml(empName)}</div>
+          <div style="font-size:12px;color:#64748b;margin-top:2px">${escapeHtml(label)} · ${dateStr}</div>
+        </div>`;
+      }).join('');
+
+  const remainHtml = remaining > 0
+    ? `<div style="text-align:center;padding-top:4px;font-size:12px;color:#64748b">${currentLang==='ja'?`他${remaining}件`:L(`+${remaining} more`,`+อีก ${remaining} รายการ`)}</div>`
+    : '';
+
+  const countBadge = pending.length > 0
+    ? ` <span class="badge badge-warning" style="font-size:11px;margin-left:4px">${pending.length}</span>`
+    : '';
+
+  panel.innerHTML = `
+    <div class="card">
+      <div class="card-header">
+        <h3>✅ ${L('Pending Approval', 'รออนุมัติ')}${countBadge}</h3>
+        <button class="btn btn-ghost btn-sm" onclick="navigateTo('approval')">${L('View all', 'ดูทั้งหมด')} →</button>
+      </div>
+      <div class="card-body" style="padding:12px">${cardsHtml}${remainHtml}</div>
+    </div>`;
+}
+
+function renderUserRequestsPanel(panel) {
+  if (!panel || !currentUser) return;
+
+  const REQ_TYPE_LABELS = {
+    annual:           L('🏖️ Annual Leave','🏖️ ขอลาพักร้อน'),
+    sick:             L('🤒 Sick Leave','🤒 ขอลาป่วย'),
+    business:         L('📋 Business Leave','📋 ขอลากิจ'),
+    'annual-leave':   L('🏖️ Annual Leave','🏖️ ขอลาพักร้อน'),
+    upcountry:          L('🗺️ Upcountry','🗺️ Upcountry'),
+    'late-out':       L('🌙 Late Night Out','🌙 แจ้งกลับดึก'),
+    'early-in':       L('🌅 Early In','🌅 ขอเข้างานเช้า'),
+    comp:             L('🔄 Compensatory Day','🔄 ขอวันหยุดชดเชย'),
+    'long-distance':  L('🚗 Long Distance','🚗 แจ้ง Long Distance'),
+  };
+  const tcLabel = l => l.type === 'time-correction'
+    ? (l.correctionField === 'checkIn' ? L('✏️ Check-In Time Edit','✏️ ขออนุมัติแก้ไขเวลาเข้างาน') : L('✏️ Check-Out Time Edit','✏️ ขออนุมัติแก้ไขเวลาเลิกงาน'))
+    : null;
+
+  // Merge DATA_LEAVES for current user
+  const fromLeaves = DATA_LEAVES
+    .filter(l => l.userId === currentUser.id)
+    .map(l => ({
+      id: 'L' + l.id,
+      typeLabel: tcLabel(l) || REQ_TYPE_LABELS[l.type] || ('📋 ' + escapeHtml(l.type)),
+      dateLine: l.dateFrom === l.dateTo
+        ? fmtDate(l.dateFrom)
+        : `${fmtDate(l.dateFrom)} – ${fmtDate(l.dateTo)}`,
+      daysPart: l.days ? (currentLang === 'ja' ? ` (${Number(l.days)}日)` : L(` (${Number(l.days)}d)`, ` (${Number(l.days)} วัน)`)) : '',
+      submittedAt: l.submittedAt,
+      serverCreatedAt: l.serverCreatedAt,
+      reason: l.reason,
+      status: l.status,
+      approver: l.approver || null,
+    }));
+
+  const allReqs = [...fromLeaves]
+    .sort((a, b) => new Date(b.serverCreatedAt || b.submittedAt) - new Date(a.serverCreatedAt || a.submittedAt));
+  const PREVIEW_LIMIT = 3;
+  const displayReqs = allReqs.slice(0, PREVIEW_LIMIT);
+  const hiddenCount = allReqs.length - PREVIEW_LIMIT;
+
+  const cardsHtml = displayReqs.length > 0
+    ? displayReqs.map(r => {
+        let statusBadge, statusClass, metaExtra = '';
+        if (r.status === 'pending') {
+          statusBadge = `<span class="badge badge-warning">⏳ ${L('Pending Manager', 'รอ Manager อนุมัติ')}</span>`;
+          statusClass = 'pending';
+        } else if (r.status === 'pending-md') {
+          statusBadge = `<span class="badge badge-info">⏳ ${L('Pending Managing Director', 'รอ Managing Director อนุมัติ')}</span>`;
+          statusClass = 'pending';
+        } else if (r.status === 'pending-accounting') {
+          statusBadge = `<span class="badge badge-info">⏳ ${L('Pending Accounting', 'รอ Accounting อนุมัติ')}</span>`;
+          statusClass = 'pending';
+        } else if (r.status === 'approved') {
+          statusBadge = `<span class="badge badge-success">✅ ${L('Approved', 'อนุมัติแล้ว')}</span>`;
+          statusClass = 'approved';
+          if (r.approver) metaExtra = `<span>✅ ${L('Approved by', 'อนุมัติโดย')} ${escapeHtml(r.approver)}</span>`;
+        } else if (r.status === 'rejected') {
+          statusBadge = `<span class="badge badge-danger">❌ ${L('Rejected', 'ปฏิเสธ')}</span>`;
+          statusClass = 'rejected';
+          if (r.approver) metaExtra = `<span>❌ ${L('Rejected by', 'ปฏิเสธโดย')} ${escapeHtml(r.approver)}</span>`;
+        } else {
+          statusBadge = `<span class="badge badge-warning">⏳ ${escapeHtml(r.status)}</span>`;
+          statusClass = 'pending';
+        }
+        return `
+          <div class="approval-card ${statusClass}">
+            <div class="approval-header">
+              <h4>${r.typeLabel}</h4>
+              ${statusBadge}
+            </div>
+            <div class="approval-meta">
+              <span>📅 ${r.dateLine}${r.daysPart}</span>
+              <span>🕐 ${escapeHtml(_fmtDtStr(r.submittedAt))}</span>
+              ${metaExtra}
+            </div>
+            <div style="font-size:13px;color:#64748b;margin-top:8px">📝 ${escapeHtml(r.reason)}</div>
+          </div>`;
+      }).join('')
+    : `<div style="text-align:center;padding:30px;color:#94a3b8;font-size:13px">${L('No requests yet', 'ยังไม่มีคำขอ')}</div>`;
+
+  panel.innerHTML = `
+    <div class="card">
+      <div class="card-header">
+        <h3>📋 ${L('My Requests', 'คำขอของฉัน')}</h3>
+        <button class="btn btn-ghost btn-sm" onclick="openMyRequestsModal()">${L('View all', 'ดูทั้งหมด')} ${hiddenCount > 0 ? `<span style="background:#e2e8f0;border-radius:20px;padding:1px 8px;font-size:11px;margin-left:2px">+${hiddenCount}</span>` : '→'}</button>
+      </div>
+      <div class="card-body approval-list" style="padding:12px">${cardsHtml}</div>
+    </div>`;
+}
+
+function openMyRequestsModal() {
+  if (!currentUser) return;
+
+  const REQ_TYPE_LABELS = {
+    annual:           L('🏖️ Annual Leave','🏖️ ขอลาพักร้อน'),
+    sick:             L('🤒 Sick Leave','🤒 ขอลาป่วย'),
+    business:         L('📋 Business Leave','📋 ขอลากิจ'),
+    'annual-leave':   L('🏖️ Annual Leave','🏖️ ขอลาพักร้อน'),
+    upcountry:          L('🗺️ Upcountry','🗺️ Upcountry'),
+    'late-out':       L('🌙 Late Night Out','🌙 แจ้งกลับดึก'),
+    'early-in':       L('🌅 Early In','🌅 ขอเข้างานเช้า'),
+    comp:             L('🔄 Compensatory Day','🔄 ขอวันหยุดชดเชย'),
+    'long-distance':  L('🚗 Long Distance','🚗 แจ้ง Long Distance'),
+  };
+  const getTcLabel = l => l.type === 'time-correction'
+    ? (l.correctionField === 'checkIn' ? L('✏️ Check-In Time Edit','✏️ ขออนุมัติแก้ไขเวลาเข้างาน') : L('✏️ Check-Out Time Edit','✏️ ขออนุมัติแก้ไขเวลาเลิกงาน'))
+    : null;
+
+  const fromLeaves = DATA_LEAVES
+    .filter(l => l.userId === currentUser.id)
+    .map(l => ({
+      typeLabel:   getTcLabel(l) || REQ_TYPE_LABELS[l.type] || ('📋 ' + escapeHtml(l.type)),
+      dateLine:    l.dateFrom === l.dateTo
+                     ? fmtDate(l.dateFrom)
+                     : `${fmtDate(l.dateFrom)} – ${fmtDate(l.dateTo)}`,
+      daysPart:    l.days ? (currentLang === 'ja' ? ` (${Number(l.days)}日)` : L(` (${Number(l.days)}d)`, ` (${Number(l.days)} วัน)`)) : '',
+      submittedAt: l.submittedAt,
+      serverCreatedAt: l.serverCreatedAt,
+      reason:      l.reason,
+      type:        l.type,
+      // 2026-08-10 (Opus audit, finding 1): carry the record's OWN stored approvalRoute (set
+      // server-side at submit/approval time) through so _buildStepHtml() can prefer it over the
+      // live config, same reasoning as isMyTurnOrDelegate() (2026-08-10, F1) -- without this, an MD
+      // repointing routing in Settings after a request was created makes this card show step chips
+      // that disagree with what actually happened (e.g. a green "✅ Manager" checkmark for a step
+      // that was never in that request's real route).
+      approvalRoute: l.approvalRoute,
+      routeType:   (l.type === 'ot' && (l.isDriverOT || DATA_USERS.find(u => u.id === l.userId)?.role === 'driver')) ? 'driver-ot' : l.type,
+      status:      l.status,
+      approver:    l.approver || null,
+      note:        l.note || '',
+    }));
+
+  const allReqs = [...fromLeaves]
+    .sort((a, b) => new Date(b.serverCreatedAt || b.submittedAt) - new Date(a.serverCreatedAt || a.submittedAt));
+
+  const pending = allReqs.filter(r => r.status === 'pending' || r.status === 'pending-md' || r.status === 'pending-accounting');
+  const done    = allReqs.filter(r => r.status === 'approved' || r.status === 'rejected');
+
+  const _STEP_ROLE_LABEL = { manager: 'Manager', md: 'Managing Director', accounting: 'Accounting' };
+  const _STATUS_TO_ROLE  = { pending: 'manager', 'pending-md': 'md', 'pending-accounting': 'accounting' };
+  const _buildStepHtml = r => {
+    // 2026-08-10 (Opus audit, finding 1): was `APPROVAL_ROUTING[r.type] || ['md']` -- raw live
+    // config, ignoring the record's own stored route entirely. Prefer the stored route (what the
+    // server actually enforced at the time), falling back to getApprovalRoute() (which reads the
+    // live per-type route config -- see ⚙️ Approval Settings) only for a record with no stored
+    // route at all.
+    const route      = (Array.isArray(r.approvalRoute) && r.approvalRoute.length) ? r.approvalRoute : getApprovalRoute(r.routeType || r.type);
+    const curRole    = _STATUS_TO_ROLE[r.status];
+    const curIdx     = route.indexOf(curRole);
+    if (curIdx === -1) return '';
+    const chips = route.map((role, i) => {
+      const lbl = _STEP_ROLE_LABEL[role] || role;
+      if (i < curIdx)  return `<span style="background:#dcfce7;color:#166534;padding:2px 8px;border-radius:20px">✅ ${lbl}</span>`;
+      if (i === curIdx) return `<span style="background:#fef3c7;color:#92400e;padding:2px 8px;border-radius:20px">⏳ ${lbl}</span>`;
+      return `<span style="background:#f1f5f9;color:#94a3b8;padding:2px 8px;border-radius:20px">${lbl}</span>`;
+    });
+    return `<div style="display:flex;gap:6px;align-items:center;margin-top:8px;font-size:11px;flex-wrap:wrap">${chips.join('<span style="color:#cbd5e1">→</span>')}</div>`;
+  };
+
+  const renderCard = r => {
+    let statusBadge, stepHtml = '';
+    if (r.status === 'pending') {
+      statusBadge = `<span class="badge badge-warning">⏳ ${L('Pending Manager', 'รอ Manager')}</span>`;
+      stepHtml = _buildStepHtml(r);
+    } else if (r.status === 'pending-md') {
+      statusBadge = `<span class="badge badge-info">⏳ ${L('Pending Managing Director', 'รอ Managing Director')}</span>`;
+      stepHtml = _buildStepHtml(r);
+    } else if (r.status === 'pending-accounting') {
+      statusBadge = `<span class="badge badge-info">⏳ ${L('Pending Accounting', 'รอ Accounting')}</span>`;
+      stepHtml = _buildStepHtml(r);
+    } else if (r.status === 'approved') {
+      statusBadge = `<span class="badge badge-success">✅ ${L('Approved', 'อนุมัติแล้ว')}</span>`;
+      if (r.approver) stepHtml = `<div style="margin-top:6px;font-size:11px;color:#059669">✅ ${L('Approved by', 'อนุมัติโดย')} ${escapeHtml(r.approver)}</div>`;
+    } else {
+      statusBadge = `<span class="badge badge-danger">❌ ${L('Rejected', 'ถูกปฏิเสธ')}</span>`;
+      if (r.approver) stepHtml = `<div style="margin-top:6px;font-size:11px;color:#dc2626">❌ ${L('Rejected by', 'ปฏิเสธโดย')} ${escapeHtml(r.approver)}</div>`;
+    }
+    return `<div class="approval-card ${r.status.includes('pending') ? 'pending' : escapeHtml(r.status)}">
+      <div class="approval-header"><h4 style="font-size:13px">${r.typeLabel}</h4>${statusBadge}</div>
+      <div class="approval-meta" style="font-size:11px">
+        <span>📅 ${r.dateLine}${r.daysPart}</span>
+        <span>🕐 ${escapeHtml(_fmtDtStr(r.submittedAt))}</span>
+      </div>
+      <div style="font-size:12px;color:#64748b;margin-top:4px">📝 ${escapeHtml(r.reason)}</div>
+      ${r.note ? `<div style="font-size:11px;color:#94a3b8;margin-top:2px">💬 ${escapeHtml(r.note)}</div>` : ''}
+      ${stepHtml}
+    </div>`;
+  };
+
+  const emptyMsg = `<div style="text-align:center;padding:30px;color:#94a3b8;font-size:13px">${L('No items', 'ไม่มีรายการ')}</div>`;
+  document.getElementById('my-req-pending').innerHTML = pending.length ? pending.map(renderCard).join('') : emptyMsg;
+  document.getElementById('my-req-done').innerHTML    = done.length    ? done.map(renderCard).join('')    : emptyMsg;
+
+  document.getElementById('my-requests-modal').classList.add('show');
+}
+
+function closeMyRequestsModal() {
+  document.getElementById('my-requests-modal').classList.remove('show');
+}
+
+// ===== MY PROFILE =====
+function renderMyProfile() {
+  const u = currentUser;
+  if (!u) return;
+  const roleLabels = { md:t('role_md'), manager:t('role_manager'), accounting:t('role_accounting'), user:t('role_user'), driver:t('role_driver'), marketing:t('role_marketing'), superadmin:t('role_superadmin') };
+  const startDate = u.startDate ? fmtDate(new Date(u.startDate + 'T12:00:00')) : '—';
+  const { years: workYears, months: workMonths, days: workDaysTenure } = computeTenure(u.startDate);
+
+  const el = document.getElementById('profile-content');
+  if (!el) return;
+
+  el.innerHTML = `
+    <!-- Hero -->
+    <div style="background:linear-gradient(135deg,#1e3a5f,#2563eb);border-radius:16px;padding:28px;color:white;margin-bottom:20px;display:flex;align-items:center;gap:20px">
+      <div style="width:80px;height:80px;border-radius:50%;background:rgba(255,255,255,0.2);display:flex;align-items:center;justify-content:center;font-size:32px;font-weight:800;flex-shrink:0">${escapeHtml(u.name.charAt(0))}</div>
+      <div style="flex:1">
+        <h2 style="font-size:22px;font-weight:800">${escapeHtml(u.name)}</h2>
+        <p style="opacity:0.8;margin-top:4px">${escapeHtml(u.position)}</p>
+        <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap">
+          <span class="role-badge role-${u.role}" style="display:inline-block">${roleLabels[u.role]}</span>
+          <span style="background:rgba(255,255,255,0.15);padding:3px 12px;border-radius:20px;font-size:12px">📅 ${startDate} ${currentLang === 'ja' ? `(${workYears}年${workMonths}ヶ月${workDaysTenure}日)` : L(`(${workYears}y ${workMonths}m ${workDaysTenure}d)`, `(${workYears} ปี ${workMonths} เดือน ${workDaysTenure} วัน)`)}</span>
+          <span style="background:rgba(16,185,129,0.3);padding:3px 12px;border-radius:20px;font-size:12px">● ${L('Active', 'ปกติ')}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Leave Balance — MD doesn't take leave, so this section is meaningless for that role -->
+    ${u.role === 'md' ? '' : `
+    <div class="card mb-4">
+      <div class="card-header"><h3>🗓️ ${L('Leave Balance This Year', 'วันลาคงเหลือปีนี้')}</h3></div>
+      <div class="card-body">
+        <div class="leave-balance-grid">
+          ${renderLeaveBalanceCard('annual',   '🏖️', L('Annual Leave', 'ลาพักร้อน'),  u, 10)}
+          ${renderLeaveBalanceCard('sick',     '🤒', L('Sick Leave', 'ลาป่วย'),     u, 30)}
+          ${renderLeaveBalanceCard('business', '📋', L('Business Leave', 'ลากิจ'),       u,  3)}
+        </div>
+        <div style="margin-top:10px;font-size:11px;color:#94a3b8">
+          ${currentLang === 'ja' ? 'ℹ️ この残日数は承認済みの休暇のみをカウントしています — 新規申請時には承認待ちの申請分も差し引かれます。' : L('ℹ️ This balance counts approved leave only — pending requests are also reserved when you submit a new one.', 'ℹ️ ยอดนี้นับเฉพาะวันลาที่อนุมัติแล้ว — คำขอที่ยังรออนุมัติจะถูกกันไว้ด้วยตอนยื่นคำขอใหม่')}
+        </div>
+      </div>
+    </div>`}
+
+    <!-- Personal Info + Change Password -->
+    <div class="grid grid-2 gap-4">
+      <div class="card">
+        <div class="card-header">
+          <h3>👤 ${L('Personal Info', 'ข้อมูลส่วนตัว')}</h3>
+          <button class="btn btn-ghost btn-sm" onclick="openEditMyProfile()">✏️ ${L('Edit', 'แก้ไข')}</button>
+        </div>
+        <div class="card-body">
+          <div style="display:flex;flex-direction:column;gap:12px">
+            ${profileRow(L('🏷️ Name Prefix', '🏷️ คำนำหน้า'), namePrefixLabel(u.namePrefix) || '—')}
+            ${profileRow(L('🇹🇭 Full Name (Thai)', '🇹🇭 ชื่อ-นามสกุล (ภาษาไทย)'), [u.firstNameTh, u.lastNameTh].filter(Boolean).join(' ') || '—')}
+            ${profileRow(idCardFieldLabel(u.idType), formatIdCardValue(u.idType, u.idCard))}
+            ${profileRow(L('🎂 Date of Birth', '🎂 วันเกิด'), u.dob ? fmtDate(new Date(u.dob + 'T12:00:00')) : '—')}
+            ${profileRow(L('⚧ Gender', '⚧ เพศ'), { male: L('Male','ชาย'), female: L('Female','หญิง'), other: L('Other','อื่นๆ') }[u.gender] || '—')}
+            ${profileRow(L('📞 Phone', '📞 โทรศัพท์'), u.phone || '—')}
+            ${profileRow(L('📧 Email', '📧 อีเมล'), u.email || '—')}
+            ${profileRow(L('🏠 Current Address', '🏠 ที่อยู่ปัจจุบัน'), u.address || '—')}
+            ${profileRow(L('🪪 Address on ID Card', '🪪 ที่อยู่ตามบัตรประชาชน'), u.idCardAddress || '—')}
+            ${profileRow(L('🆘 Emergency Contact', '🆘 ผู้ติดต่อฉุกเฉิน'), u.emergencyContact ? `${u.emergencyContact}${u.emergencyRelation ? ' (' + relationLabel(u.emergencyRelation) + ')' : ''} — ${u.emergencyPhone || '—'}` : '—')}
+          </div>
+          <div style="font-size:11px;color:#94a3b8;margin-top:10px">
+            ${L('ℹ️ Name prefix, Thai name and ID-card address are maintained by HR — contact MD or Accounting to correct them.', 'ℹ️ คำนำหน้า ชื่อภาษาไทย และที่อยู่ตามบัตรประชาชน แก้ไขได้โดย HR — ติดต่อ MD หรือ Accounting หากต้องการแก้ไข')}
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><h3>🔐 ${L('Change Password', 'เปลี่ยนรหัสผ่าน')}</h3></div>
+        <div class="card-body">
+          <div class="form-field">
+            <label>${L('Current Password', 'รหัสผ่านปัจจุบัน')}</label>
+            <input type="password" id="pw-current" placeholder="••••••••">
+          </div>
+          <div class="form-field">
+            <label>${L('New Password', 'รหัสผ่านใหม่')}</label>
+            <input type="password" id="pw-new" placeholder="${L('At least 8 characters, letters and numbers', 'อย่างน้อย 8 ตัวอักษร มีทั้งตัวอักษรและตัวเลข')}">
+          </div>
+          <div class="form-field">
+            <label>${L('Confirm New Password', 'ยืนยันรหัสผ่านใหม่')}</label>
+            <input type="password" id="pw-confirm" placeholder="${L('Confirm again', 'ยืนยันอีกครั้ง')}">
+          </div>
+          <button class="btn btn-primary" onclick="changePassword()" style="width:100%">🔐 ${L('Change Password', 'เปลี่ยนรหัสผ่าน')}</button>
+        </div>
+        <div class="card-header" style="border-top:1px solid #e2e8f0;margin-top:0">
+          <h3>💵 ${L('Financial Info', 'ข้อมูลการเงิน')}</h3>
+        </div>
+        <div class="card-body" style="padding-top:12px">
+          ${profileRow(L('🏦 Bank', '🏦 ธนาคาร'), u.bankName || '—')}
+          <div style="margin-top:10px">${profileRow(L('🔢 Account No.', '🔢 เลขบัญชี'), u.bankAccount || '—')}</div>
+        </div>
+      </div>
+    </div>`;
+}
+
+function renderLeaveBalanceCard(type, emoji, label, u, maxDays) {
+  const bal = computeLeaveBalance(u, type, maxDays);
+  const total = bal.effectiveMax;
+  const remaining = bal.remDays;
+  const usedDays = Math.round((bal.usedMin / 480) * 10) / 10;
+  const pct = bal.totalMin > 0 ? Math.round((bal.remMin / bal.totalMin) * 100) : 0;
+  return `<div class="leave-card ${type}">
+    <div class="emoji">${emoji}</div>
+    <div class="type">${label}</div>
+    <div class="amount">${remaining}</div>
+    <div class="detail">/ ${total} ${L('days', 'วัน')} ${usedDays > 0 ? `<span style="color:#dc2626">${currentLang === 'ja' ? `(使用済み ${usedDays})` : L(`(used ${usedDays})`, `(ใช้ไป ${usedDays})`)}</span>` : L('remaining', 'คงเหลือ')}</div>
+    <div class="leave-bar"><div class="leave-bar-fill" style="width:${pct}%"></div></div>
+  </div>`;
+}
+
+function profileRow(label, value) {
+  return `<div style="padding:10px 14px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0">
+    <div style="font-size:11px;color:#94a3b8;font-weight:700;margin-bottom:3px">${label}</div>
+    <div style="font-size:13.5px;font-weight:600;color:#1e3a5f">${escapeHtml(value)}</div>
+  </div>`;
+}
+
+// SECURITY FIX 2026-07-19 (F-09): shared with the backend policy in server.js
+// passwordPolicyError() -- keep both in sync if this changes again.
+function passwordPolicyError(pw) {
+  const s = String(pw || '');
+  if (s.length < 8) return L('Password must be at least 8 characters', 'รหัสผ่านต้องมีอย่างน้อย 8 ตัวอักษร');
+  if (!/[A-Za-z]/.test(s) || !/[0-9]/.test(s)) return L('Password must include both letters and numbers', 'รหัสผ่านต้องมีทั้งตัวอักษรและตัวเลข');
+  return null;
+}
+
+// SECURITY FIX 2026-07-19 (F-09): calls the new self-service endpoint (PUT /api/users/me/password
+// -- previously changePassword() only mutated an in-memory copy of currentUser and never called
+// the backend at all, so "changing" your password here silently did nothing that survived a
+// reload; the real password on the server never changed). The backend verifies currentPassword
+// itself (bcrypt-compare against the live record) and re-issues a token with the bumped
+// tokenVersion baked in, which we must adopt immediately -- otherwise the very next apiFetch()
+// call 401s against the OLD token and auto-logs the user out right after they just succeeded.
+async function submitPasswordChange(curPw, newPw, confirmPw) {
+  if (!curPw || !newPw || !confirmPw) return { ok:false, message:L('⚠️ Please fill in all fields', '⚠️ กรุณากรอกข้อมูลให้ครบ') };
+  const policyErr = passwordPolicyError(newPw);
+  if (policyErr) return { ok:false, message:`⚠️ ${policyErr}` };
+  if (newPw !== confirmPw) return { ok:false, message:L('⚠️ New passwords do not match', '⚠️ รหัสผ่านใหม่ไม่ตรงกัน') };
+  try {
+    const res = await apiFetch(`/api/users/me/password`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ currentPassword: curPw, newPassword: newPw, remember: REMEMBER_ME })
+    });
+    const data = await res.json();
+    if (!data.success) return { ok:false, message:`❌ ${data.message || L('Could not change password', 'เปลี่ยนรหัสผ่านไม่สำเร็จ')}` };
+    AUTH_TOKEN = data.token;
+    // 2026-08-09 (Opus audit finding 6.1): same reset as login() -- a reissued token is a fresh
+    // token.
+    _sessionExpiredShown = false;
+    clearTimeout(_pendingLogoutTimer);
+    currentUser.mustChangePassword = false;
+    const u = DATA_USERS.find(x => x.id === currentUser.id);
+    if (u) u.mustChangePassword = false;
+    saveSession();
+    // LOW fix 2026-08-04 (retrospective Opus audit): syncPushSubscription() 403s while
+    // mustChangePassword is still true (server-side gate added the same day) and was never
+    // retried afterward -- a new hire who granted notification permission at first login got no
+    // push until their next full page load. Now retried right after mustChangePassword clears,
+    // covering both this gate and a regular self-service password change.
+    syncPushSubscription();
+    return { ok:true };
+  } catch(e) {
+    return { ok:false, message:`❌ ${e.message}` };
+  }
+}
+
+async function changePassword() {
+  const cur = document.getElementById('pw-current').value;
+  const nw  = document.getElementById('pw-new').value;
+  const cf  = document.getElementById('pw-confirm').value;
+  const r = await submitPasswordChange(cur, nw, cf);
+  if (!r.ok) { showToast(r.message, r.message && r.message.startsWith('❌') ? 'danger' : 'warning'); return; }
+  ['pw-current','pw-new','pw-confirm'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+  showToast(L('✅ Password changed successfully', '✅ เปลี่ยนรหัสผ่านสำเร็จ'), 'success');
+}
+
+// ===== FORCE PASSWORD CHANGE GATE (F-09) =====
+// Shown after login/session-restore whenever currentUser.mustChangePassword is true (new
+// employees created via Add Employee or Hikvision sync). Deliberately has no close/X/backdrop-
+// dismiss -- see the index.html comment above #force-pw-modal. Content is built here (not static
+// HTML) specifically because it needs currentUser, and this only ever runs post-login -- never
+// call this from fixStaticText(), which runs before login when currentUser is still null.
+function maybeShowForcePasswordGate() {
+  if (!currentUser || !currentUser.mustChangePassword) return;
+  const modal = document.getElementById('force-pw-modal');
+  const body  = document.getElementById('force-pw-modal-content');
+  if (!modal || !body) return;
+  if (modal.classList.contains('show')) return; // already up (e.g. re-checked after loadUsersFromBackend) -- don't wipe in-progress input
+  body.innerHTML = `
+    <div class="modal-header">
+      <h3>🔒 ${L('Set a New Password', 'ตั้งรหัสผ่านใหม่')}</h3>
+    </div>
+    <div class="modal-body">
+      <div class="alert alert-info" style="margin-bottom:16px">
+        <span>${L('For account security, please set your own password before continuing.', 'เพื่อความปลอดภัยของบัญชี กรุณาตั้งรหัสผ่านใหม่ของคุณเองก่อนใช้งานต่อ')}</span>
+      </div>
+      <div class="form-field">
+        <label>${L('Current Password', 'รหัสผ่านปัจจุบัน')}</label>
+        <input type="password" id="force-pw-current" placeholder="••••••••">
+      </div>
+      <div class="form-field">
+        <label>${L('New Password', 'รหัสผ่านใหม่')}</label>
+        <input type="password" id="force-pw-new" placeholder="${L('At least 8 characters, letters and numbers', 'อย่างน้อย 8 ตัวอักษร มีทั้งตัวอักษรและตัวเลข')}">
+      </div>
+      <div class="form-field" style="margin-bottom:0">
+        <label>${L('Confirm New Password', 'ยืนยันรหัสผ่านใหม่')}</label>
+        <input type="password" id="force-pw-confirm" placeholder="${L('Confirm again', 'ยืนยันอีกครั้ง')}">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-primary" style="width:100%" onclick="submitForcePasswordGate()">🔐 ${L('Set Password', 'ตั้งรหัสผ่าน')}</button>
+    </div>`;
+  modal.classList.add('show');
+}
+
+async function submitForcePasswordGate() {
+  const cur = document.getElementById('force-pw-current').value;
+  const nw  = document.getElementById('force-pw-new').value;
+  const cf  = document.getElementById('force-pw-confirm').value;
+  const btn = document.querySelector('#force-pw-modal-content .btn-primary');
+  if (btn) btn.disabled = true;
+  const r = await submitPasswordChange(cur, nw, cf);
+  if (btn) btn.disabled = false;
+  if (!r.ok) { showToast(r.message, r.message && r.message.startsWith('❌') ? 'danger' : 'warning'); return; }
+  document.getElementById('force-pw-modal').classList.remove('show');
+  showToast(L('✅ Password set — welcome!', '✅ ตั้งรหัสผ่านสำเร็จ — ยินดีต้อนรับ!'), 'success');
+}
+
+function openEditMyProfile() {
+  const viewRole = effectiveRole();
+  if (viewRole !== 'user' && viewRole !== 'marketing' && viewRole !== 'driver') {
+    // MD / Manager / Accounting ใช้ employee form เต็มรูปแบบ
+    editingEmployeeId = currentUser.id;
+    openEditEmployee(currentUser.id);
+    return;
+  }
+  // User: เปิด modal จำกัดเฉพาะข้อมูลส่วนตัว
+  const u = currentUser;
+  document.getElementById('my-profile-phone').value    = u.phone    || '';
+  document.getElementById('my-profile-email').value    = u.email    || '';
+  document.getElementById('my-profile-address').value  = u.address  || '';
+  document.getElementById('my-profile-idtype').value   = u.idType   || 'idcard';
+  document.getElementById('my-profile-idcard').value   = u.idCard   || '';
+  onMyProfileIdTypeChange();
+  document.getElementById('my-profile-emname').value     = u.emergencyContact  || '';
+  document.getElementById('my-profile-emrelation').value = u.emergencyRelation || '';
+  document.getElementById('my-profile-emphone').value    = u.emergencyPhone    || '';
+  document.getElementById('my-profile-modal').classList.add('show');
+}
+
+function onMyProfileIdTypeChange() {
+  const type = document.getElementById('my-profile-idtype').value;
+  const label = document.getElementById('my-profile-idcard-label');
+  const input = document.getElementById('my-profile-idcard');
+  if (type === 'passport') {
+    label.textContent = 'Passport No.';
+    input.placeholder = L('e.g. AA1234567', 'เช่น AA1234567');
+    input.removeAttribute('maxlength');
+  } else if (type === 'tax_id') {
+    label.textContent = L('Tax ID Number', 'เลขประจำตัวผู้เสียภาษีอากร');
+    input.placeholder = L('e.g. 1234567890123', 'เช่น 1234567890123');
+    input.removeAttribute('maxlength');
+  } else {
+    label.textContent = L('National ID (13 digits)', 'เลขบัตรประชาชน 13 หลัก');
+    input.placeholder = '1 2345 67890 12 3';
+    input.setAttribute('maxlength', '13');
+  }
+}
+
+function closeMyProfileModal() {
+  document.getElementById('my-profile-modal').classList.remove('show');
+}
+
+async function saveMyProfile() {
+  if (blockIfObserver()) return;
+  const u = DATA_USERS.find(x => x.id === currentUser.id);
+  const patch = {
+    phone:            document.getElementById('my-profile-phone').value.trim(),
+    email:            document.getElementById('my-profile-email').value.trim(),
+    address:          document.getElementById('my-profile-address').value.trim(),
+    idType:            document.getElementById('my-profile-idtype').value,
+    idCard:            document.getElementById('my-profile-idcard').value.trim(),
+    emergencyContact:  document.getElementById('my-profile-emname').value.trim(),
+    emergencyRelation: document.getElementById('my-profile-emrelation').value.trim(),
+    emergencyPhone:    document.getElementById('my-profile-emphone').value.trim(),
+  };
+  // Must persist to the backend, not just local session — this used to only update in-memory
+  // DATA_USERS/currentUser, so edits never reached the shared users.json and were invisible to
+  // MD/Accounting or lost on next login from any device.
+  // BUG FIX 2026-08-06 (round 4): used to be gated on `u?.employeeNo` -- an employeeNo-less
+  // employee's own profile edits were silently discarded (green "saved" toast, nothing
+  // persisted). Now routes to the id-keyed backend route when there's no employeeNo.
+  if (u) {
+    try {
+      const url = u.employeeNo ? `/api/users/${encodeURIComponent(u.employeeNo)}` : `/api/users/id/${u.id}`;
+      const res = await apiFetch(url, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch)
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message || 'Server error');
+    } catch(e) {
+      showToast(L('❌ Could not save: ', '❌ ไม่สามารถบันทึกได้: ') + e.message, 'danger');
+      return;
+    }
+  }
+  if (u) Object.assign(u, patch);
+  Object.assign(currentUser, patch);
+  saveSession();
+  closeMyProfileModal();
+  renderMyProfile();
+  showToast(L('✅ Personal info saved', '✅ บันทึกข้อมูลส่วนตัวเรียบร้อยแล้ว'), 'success');
+}
+
+// ===== EMPLOYEES =====
+function renderEmployeesTable() {
+  const tbody = document.getElementById('employees-tbody');
+  if (!tbody) return;
+  const canEdit = isMdAccountingView() && !currentUser.isObserver;
+  const canSeeSalary = isMdAccountingView();
+  const thSalary = document.getElementById('th-salary');
+  if (thSalary) thSalary.style.display = canSeeSalary ? '' : 'none';
+  tbody.innerHTML = '';
+  const roleLabels = { md:t('role_md'), manager:t('role_manager'), accounting:t('role_accounting'), user:t('role_user'), driver:t('role_driver'), marketing:t('role_marketing'), superadmin:t('role_superadmin') };
+  [...DATA_USERS].filter(isEmployeeRecord).sort((a, b) => parseInt(a.employeeNo) - parseInt(b.employeeNo)).forEach(u => {
+    const tr = document.createElement('tr');
+    const startDate = u.startDate ? fmtDate(new Date(u.startDate + 'T12:00:00')) : '—';
+    const { years: workYears, months: workMonths } = computeTenure(u.startDate);
+    tr.innerHTML = `
+      <td>
+        <div style="display:flex;align-items:center;gap:10px">
+          ${u.facePhoto
+            ? `<img src="${escapeHtml(u.facePhoto)}" style="width:36px;height:36px;border-radius:50%;object-fit:cover;flex-shrink:0;border:2px solid #e2e8f0">`
+            : `<div style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#2563eb,#06b6d4);display:flex;align-items:center;justify-content:center;color:white;font-weight:700;font-size:14px;flex-shrink:0">${escapeHtml(u.name.charAt(0))}</div>`}
+          <div><div style="font-weight:600;color:#1e3a5f">${escapeHtml(u.name)}</div><div style="font-size:11px;color:#94a3b8">${escapeHtml(u.username)}</div></div>
+        </div>
+      </td>
+      <td class="col-hide-mobile" style="font-family:monospace;font-size:13px;color:#475569">${u.employeeNo ? escapeHtml(u.employeeNo) : '<span style="color:#cbd5e1">—</span>'}</td>
+      <td>${escapeHtml(u.position)}</td>
+
+      <td><span class="role-badge role-${u.role}" style="display:inline-block">${roleLabels[u.role]}</span></td>
+      <td class="col-hide-mobile">${startDate}<div style="font-size:11px;color:#94a3b8">${currentLang === 'ja' ? `${workYears}年${workMonths}ヶ月` : L(`${workYears}y ${workMonths}m`, `${workYears} ปี ${workMonths} เดือน`)}</div></td>
+      <td class="col-hide-mobile" style="font-weight:700;display:${canSeeSalary ? '' : 'none'}">${u.salary != null ? '฿' + u.salary.toLocaleString() : '—'}</td>
+      <td><span class="badge ${u.isObserver ? 'badge-info' : (u.active ? 'badge-success' : 'badge-danger')}">${u.isObserver ? L('👁️ Observer', '👁️ ผู้สังเกตการณ์') : (u.active ? L('● Active', '● ปกติ') : L('● Suspended', '● ระงับ'))}</span></td>
+      <td>
+        <div style="display:flex;gap:6px">
+          <button class="btn btn-ghost btn-sm" onclick="openEmployeeProfile(${u.id})">👤 ${L('Profile', 'โปรไฟล์')}</button>
+          ${canEdit ? `<button class="btn btn-primary btn-sm" onclick="openEditEmployee(${u.id})">✏️ ${L('Edit', 'แก้ไข')}</button>` : ''}
+        </div>
+      </td>`;
+    tbody.appendChild(tr);
+  });
+  renderPayslipEmployeeList();
+}
+
+function filterEmployees() {
+  const search = (document.getElementById('emp-search')?.value || '').toLowerCase();
+  document.querySelectorAll('#employees-tbody tr').forEach(tr => {
+    tr.style.display = (!search || tr.textContent.toLowerCase().includes(search)) ? '' : 'none';
+  });
+}
+
+// ===== EMPLOYEE PROFILE VIEW =====
+let profileModalUserId = null;
+function openEmployeeProfile(id) {
+  const u = DATA_USERS.find(x => x.id === id);
+  if (!u) return;
+  profileModalUserId = id;
+  const canEdit = isMdAccountingView() && !currentUser.isObserver;
+  const canSeeSalary = isMdAccountingView();
+  const startDate = u.startDate ? fmtDate(new Date(u.startDate + 'T12:00:00')) : '—';
+  const { years: workYears, months: workMonths, days: workDaysTenure } = computeTenure(u.startDate);
+  // 2026-08-12: user asked for exact tenure (not just years) specifically to track proximity to a
+  // 5-year/10-year work anniversary -- surface the countdown directly instead of making them do
+  // the math from the raw start date each time.
+  const nextMilestone = daysToNextTenureMilestone(u.startDate);
+  const roleLabels = { md:t('role_md'), manager:t('role_manager'), accounting:t('role_accounting'), user:t('role_user'), driver:t('role_driver'), marketing:t('role_marketing'), superadmin:t('role_superadmin') };
+
+  document.getElementById('profile-modal-content').innerHTML = `
+    <div style="text-align:center;padding:28px;background:linear-gradient(135deg,#1e3a5f,#2563eb);color:white;border-radius:14px 14px 0 0;position:relative">
+      <button class="btn btn-ghost btn-sm" onclick="closeProfileModal()" style="position:absolute;top:10px;right:10px;color:white" title="${L('Close', 'ปิด')}">✕</button>
+      <div style="width:72px;height:72px;border-radius:50%;background:rgba(255,255,255,0.2);display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:800;margin:0 auto 12px">${escapeHtml(u.name.charAt(0))}</div>
+      <h2 style="font-size:20px;font-weight:700">${escapeHtml(u.name)}</h2>
+      <p style="opacity:0.8;margin-top:4px">${escapeHtml(u.position)}</p>
+      <span class="role-badge role-${u.role}" style="display:inline-block;margin-top:8px">${roleLabels[u.role]}</span>
+    </div>
+    <div style="padding:24px">
+      <div class="profile-tabs">
+        <button class="profile-tab active" onclick="switchTab(this,'ptab-personal')">👤 ${L('Personal', 'ส่วนตัว')}</button>
+        <button class="profile-tab" onclick="switchTab(this,'ptab-work')">💼 ${L('Work', 'การทำงาน')}</button>
+        ${canSeeSalary ? `<button class="profile-tab" onclick="switchTab(this,'ptab-finance')">💵 ${L('Finance', 'การเงิน')}</button>` : ''}
+      </div>
+      <div id="ptab-personal" class="tab-content active">
+        <div class="profile-field-grid">
+          <div class="profile-field"><label>${L('Name Prefix', 'คำนำหน้า')}</label><p>${namePrefixLabel(u.namePrefix) || '—'}</p></div>
+          <div class="profile-field"><label>${L('Full Name (Thai)', 'ชื่อ-นามสกุล (ภาษาไทย)')}</label><p>${escapeHtml([u.firstNameTh, u.lastNameTh].filter(Boolean).join(' ') || '—')}</p></div>
+          <div class="profile-field"><label>${idCardFieldLabel(u.idType).replace(/^[🛂🪪]\s*/, '')}</label><p>${escapeHtml(u.idCard || '—')}</p></div>
+          <div class="profile-field"><label>${L('Date of Birth', 'วันเกิด')}</label><p>${u.dob ? fmtDate(new Date(u.dob + 'T12:00:00')) : '—'}</p></div>
+          <div class="profile-field"><label>${L('Gender', 'เพศ')}</label><p>${{ male: L('Male','ชาย'), female: L('Female','หญิง'), other: L('Other','อื่นๆ') }[u.gender] || '—'}</p></div>
+          <div class="profile-field"><label>${L('Phone', 'โทรศัพท์')}</label><p>${escapeHtml(u.phone || '—')}</p></div>
+          <div class="profile-field"><label>${L('Email', 'อีเมล')}</label><p>${escapeHtml(u.email || '—')}</p></div>
+        </div>
+        <div style="margin-top:12px"><div class="profile-field"><label>${L('Current Address', 'ที่อยู่ปัจจุบัน')}</label><p style="white-space:pre-wrap">${escapeHtml(u.address || '—')}</p></div></div>
+        <div style="margin-top:12px"><div class="profile-field"><label>${L('Address on ID Card', 'ที่อยู่ตามบัตรประชาชน')}</label><p style="white-space:pre-wrap">${escapeHtml(u.idCardAddress || '—')}</p></div></div>
+        <div class="profile-field-grid" style="margin-top:12px">
+          <div class="profile-field"><label>${L('Emergency Contact', 'ผู้ติดต่อฉุกเฉิน')}</label><p>${escapeHtml(u.emergencyContact || '—')}</p></div>
+          <div class="profile-field"><label>${L('Relationship', 'ความสัมพันธ์')}</label><p>${escapeHtml(relationLabel(u.emergencyRelation) || '—')}</p></div>
+          <div class="profile-field"><label>${L('Emergency Phone', 'เบอร์โทรฉุกเฉิน')}</label><p>${escapeHtml(u.emergencyPhone || '—')}</p></div>
+        </div>
+      </div>
+      <div id="ptab-work" class="tab-content">
+        <div class="profile-field-grid">
+          ${canSeeSalary ? `<div class="profile-field"><label>Username</label><p>${escapeHtml(u.username)}</p></div>` : ''}
+          <div class="profile-field"><label>Employee No. (Hikvision)</label><p style="font-family:monospace;font-size:14px;font-weight:700;color:#1e3a5f">${escapeHtml(u.employeeNo) || '—'}</p></div>
+          <div class="profile-field"><label>${L('Rights', 'สิทธิ์')}</label><p><span class="role-badge role-${u.role}" style="display:inline-block">${roleLabels[u.role]}</span></p></div>
+          <div class="profile-field"><label>${L('Start Date', 'วันเริ่มเข้าทำงาน')}</label><p>${startDate} ${currentLang === 'ja' ? `(${workYears}年${workMonths}ヶ月${workDaysTenure}日)` : L(`(${workYears}y ${workMonths}m ${workDaysTenure}d)`, `(${workYears} ปี ${workMonths} เดือน ${workDaysTenure} วัน)`)}</p>${nextMilestone ? `<p style="font-size:11px;color:#0891b2;margin-top:2px">${currentLang === 'ja' ? `勤続${nextMilestone.years}年まであと${nextMilestone.daysLeft}日` : L(`${nextMilestone.daysLeft} days to ${nextMilestone.years}-year anniversary`, `อีก ${nextMilestone.daysLeft} วัน จะครบ ${nextMilestone.years} ปี`)}</p>` : ''}</div>
+          ${u.endDate ? `<div class="profile-field"><label>${L('End Date', 'วันที่สิ้นสุดการทำงาน')}</label><p style="color:#dc2626;font-weight:600">${fmtDate(new Date(u.endDate + 'T12:00:00'))}</p></div>` : ''}
+          <div class="profile-field"><label>${L('Annual Leave Balance', 'ลาพักร้อนคงเหลือ')}</label><p style="color:#2563eb;font-weight:700">${u.annualLeave} ${L('days', 'วัน')}</p></div>
+          <div class="profile-field"><label>${L('Sick Leave Balance', 'ลาป่วยคงเหลือ')}</label><p style="color:#ef4444;font-weight:700">${u.sickLeave} ${L('days', 'วัน')}</p></div>
+          <div class="profile-field"><label>${L('Business Leave Balance', 'ลากิจคงเหลือ')}</label><p style="color:#8b5cf6;font-weight:700">${u.businessLeave} ${L('days', 'วัน')}</p></div>
+          <div class="profile-field"><label>${L('Status', 'สถานะ')}</label><p><span class="badge ${u.active ? 'badge-success':'badge-danger'}">${u.active ? L('● Active', '● ปกติ') : L('● Suspended', '● ระงับ')}</span></p></div>
+        </div>
+      </div>
+      <div id="ptab-finance" class="tab-content">
+        <div class="profile-field-grid">
+          <div class="profile-field"><label>${L('Salary', 'เงินเดือน')}</label><p style="font-weight:700;color:#059669;font-size:16px">${u.salary != null ? '฿' + u.salary.toLocaleString() : '—'}</p></div>
+          <div class="profile-field"><label>${L('Transport', 'ค่าเดินทาง')}</label><p>${(u.transport||0) > 0 ? '฿'+(u.transport).toLocaleString() : '—'}</p></div>
+          <div class="profile-field"><label>${L('Position Allowance', 'ค่าตำแหน่ง')}</label><p>${(u.positionAllowance||0) > 0 ? '฿'+(u.positionAllowance).toLocaleString() : '—'}</p></div>
+          <div class="profile-field"><label>${L('Housing', 'ค่าที่พัก')}</label><p>${(u.housing||0) > 0 ? '฿'+(u.housing).toLocaleString() : '—'}</p></div>
+          <div class="profile-field"><label>${L('Phone Allowance', 'ค่าโทรศัพท์')}</label><p>${(isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'phone') && u.phoneAllowanceEligible === true) ? '฿'+(APP_SETTINGS.allowances.phone||0).toLocaleString() : '—'}</p></div>
+          ${u.role !== 'md' ? `<div class="profile-field"><label>${L('PVD (Provident Fund)', 'PVD (กองทุนสำรองฯ)')}</label><p style="color:#dc2626;font-weight:600">${u.pvdRate !== undefined ? u.pvdRate : 5}${L('% of salary', '% ของเงินเดือน')}</p></div>` : ''}
+          <div class="profile-field"><label>${L('Bank', 'ธนาคาร')}</label><p>${escapeHtml(u.bankName || '—')}</p></div>
+          <div class="profile-field"><label>${L('Account No.', 'เลขบัญชี')}</label><p>${escapeHtml(u.bankAccount || '—')}</p></div>
+        </div>
+      </div>
+      ${canEdit ? `<div style="text-align:right;margin-top:20px"><button class="btn btn-primary" onclick="closeProfileModal();openEditEmployee(${u.id})">✏️ ${L('Edit Info', 'แก้ไขข้อมูล')}</button></div>` : ''}
+    </div>`;
+  document.getElementById('profile-modal').classList.add('show');
+}
+
+function closeProfileModal() { document.getElementById('profile-modal').classList.remove('show'); profileModalUserId = null; }
+
+function switchTab(btn, tabId) {
+  btn.closest('.profile-tabs').querySelectorAll('.profile-tab').forEach(t => t.classList.remove('active'));
+  btn.classList.add('active');
+  const section = document.getElementById(tabId).closest('[style*="padding:24px"]') || document.getElementById(tabId).parentElement;
+  section.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.getElementById(tabId).classList.add('active');
+}
+
+// ===== ADD / EDIT EMPLOYEE =====
+function onEmpIdTypeChange() {
+  const type = document.getElementById('emp-idtype').value;
+  const label = document.getElementById('emp-idcard-label');
+  const input = document.getElementById('emp-idcard');
+  if (type === 'passport') {
+    label.textContent = 'Passport No.';
+    input.placeholder = L('e.g. AA1234567', 'เช่น AA1234567');
+    input.removeAttribute('maxlength');
+  } else if (type === 'tax_id') {
+    // 2026-08-17: for foreign employees who have no Thai national ID -- a Thai Taxpayer
+    // Identification Number, format not guaranteed to be 13 Thai-formatted digits like a
+    // national ID, so no maxlength/digit-grouping constraint (matches the passport branch).
+    label.textContent = L('Tax ID Number', 'เลขประจำตัวผู้เสียภาษีอากร');
+    input.placeholder = L('e.g. 1234567890123', 'เช่น 1234567890123');
+    input.removeAttribute('maxlength');
+  } else {
+    label.textContent = L('National ID (13 digits)', 'เลขบัตรประชาชน 13 หลัก');
+    input.placeholder = '1 2345 67890 12 3';
+    input.setAttribute('maxlength', '13');
+  }
+}
+
+function openAddEmployeeModal() {
+  editingEmployeeId = null;
+  document.getElementById('emp-modal-title').textContent = L('➕ Add New Employee', '➕ เพิ่มพนักงานใหม่');
+  document.getElementById('emp-form').reset();
+  document.getElementById('emp-id-field').style.display = 'none';
+  document.getElementById('emp-password-row').style.display = '';
+  document.getElementById('emp-password-label').textContent = L('Initial Password', 'รหัสผ่านเริ่มต้น');
+  document.getElementById('emp-password-required-mark').style.display = '';
+  document.getElementById('emp-password').placeholder = L('Set an initial password', 'ตั้งรหัสผ่านเริ่มต้น');
+  document.getElementById('emp-password-hint').innerHTML = `<span>${L('🔒 Employees can change their own password after first login', '🔒 พนักงานสามารถเปลี่ยนรหัสผ่านได้เองหลังจากเข้าสู่ระบบครั้งแรก')}</span>`;
+  // default role is always Staff; only MD can change it
+  const roleRow = document.getElementById('emp-role-row');
+  if (roleRow) roleRow.style.display = isMdView() ? '' : 'none';
+  document.getElementById('emp-role').value = 'user';
+  toggleEmpPvdRow();
+  document.getElementById('emp-idtype').value = 'idcard';
+  onEmpIdTypeChange();
+  document.getElementById('emp-modal').classList.add('show');
+}
+
+function openEditEmployee(id) {
+  try {
+  const u = DATA_USERS.find(x => x.id === id);
+  if (!u) { showToast('ไม่พบข้อมูลพนักงาน (id=' + id + ')', 'danger'); return; }
+  editingEmployeeId = id;
+  document.getElementById('emp-modal-title').textContent = currentLang === 'ja' ? `✏️ 情報編集 — ${u.name}` : L(`✏️ Edit Info — ${u.name}`, `✏️ แก้ไขข้อมูล — ${u.name}`);
+  document.getElementById('emp-id-field').style.display = '';
+  document.getElementById('emp-password-row').style.display = '';
+  document.getElementById('emp-password-label').textContent = L('Reset Password', 'รีเซ็ตรหัสผ่าน');
+  document.getElementById('emp-password-required-mark').style.display = 'none';
+  document.getElementById('emp-password').value = '';
+  document.getElementById('emp-password').placeholder = L('Leave blank to keep the current password', 'เว้นว่างไว้หากไม่ต้องการเปลี่ยนรหัสผ่าน');
+  document.getElementById('emp-password-confirm').value = '';
+  document.getElementById('emp-password-hint').innerHTML = `<span>${L('🔒 Only fill this in if the employee forgot their password and needs it reset', '🔒 กรอกเฉพาะกรณีพนักงานลืมรหัสผ่านและต้องการให้ตั้งรหัสใหม่ให้เท่านั้น')}</span>`;
+  const empNoEl = document.getElementById('emp-employee-no-display');
+  if (empNoEl) empNoEl.textContent = u.employeeNo ? `Employee No. (Hikvision): ${u.employeeNo}` : L('Employee No.: Not linked to Hikvision', 'Employee No.: ยังไม่ได้ผูกกับ Hikvision');
+  const roleRow = document.getElementById('emp-role-row');
+  // Must match saveEmployee()'s canChangeRole exactly (app.js ~4254) — this used to also
+  // require `u.role !== 'md'`, which hid the entire role row whenever the employee being
+  // edited already was MD (e.g. Daiki Katagiri), even for the MD viewer who is fully allowed
+  // to change another MD's role per the save-side logic below (blocked only by the separate
+  // "at least one active MD must remain" check, not by hiding the field outright).
+  const canAssignRole = isMdAccountingView();
+  if (roleRow) roleRow.style.display = canAssignRole ? '' : 'none';
+  // MD option visible only to MD
+  const mdOption = document.querySelector('#emp-role option[value="md"]');
+  if (mdOption) mdOption.style.display = isMdView() ? '' : 'none';
+  const f = n => document.getElementById(n);
+  const nameParts = (u.name || '').split(' ');
+  f('emp-firstname').value = u.firstName || nameParts[0] || '';
+  f('emp-lastname').value  = u.lastName  || nameParts.slice(1).join(' ') || '';
+  f('emp-name-prefix').value = u.namePrefix || '';
+  f('emp-name-prefix-th').value = u.namePrefix || '';
+  f('emp-firstname-th').value = u.firstNameTh || '';
+  f('emp-lastname-th').value = u.lastNameTh || '';
+  f('emp-username').value = u.username;
+  f('emp-idtype').value = u.idType || 'idcard';
+  onEmpIdTypeChange();
+  f('emp-idcard').value = u.idCard || '';
+  f('emp-dob').value = u.dob || '';
+  f('emp-gender').value = u.gender || '';
+  f('emp-phone').value = u.phone || '';
+  f('emp-email').value = u.email || '';
+  f('emp-address').value = u.address || '';
+  f('emp-idcard-address').value = u.idCardAddress || '';
+  f('emp-start-date').value = u.startDate || '';
+  f('emp-end-date').value = u.endDate || '';
+  f('emp-position').value = u.position;
+  f('emp-dept').value = u.dept || '';
+  f('emp-role').value = u.role;
+  f('emp-salary').value = u.salary;
+  f('emp-transport').value = u.transport || 0;
+  f('emp-position-allowance').value = u.positionAllowance || 0;
+  f('emp-housing').value = u.housing || 0;
+  f('emp-pvd-rate').value = u.pvdRate !== undefined ? u.pvdRate : 5;
+  // 2026-07-31: diligence/long-distance rate+threshold are now company-wide (Settings ->
+  // Allowance Rates), not per-employee -- only Guaranteed OT (a real per-employee contract term)
+  // and the Personal Car / Phone eligibility flags still need populating here.
+  if (f('emp-guaranteed-ot')) f('emp-guaranteed-ot').value = u.guaranteedOT || 0;
+  if (f('emp-personalcar-eligible')) f('emp-personalcar-eligible').checked = !!u.personalCarEligible;
+  if (f('emp-phone-eligible')) f('emp-phone-eligible').checked = !!u.phoneAllowanceEligible;
+  // Visibility applied AFTER values are populated (was called before -- worked only because
+  // hiding a row doesn't clear its value, but this ordering is less fragile). Also fills in the
+  // read-only rate-display divs from the live centralized rates.
+  applyEmpRoleFieldVisibility();
+  // 2026-08-02: Employment/Financial Information are MD/Accounting only (matches the server-side
+  // PUT /api/users/:empNo whitelist for manager) -- manager can still open this modal (e.g. to
+  // fix an employee's phone number) but these two sections render read-only, not just silently
+  // dropped on save. `canAssignRole` above already hides the role dropdown the same way.
+  // 2026-08-05 (Opus audit F-5): this disabled-list didn't match the server-side whitelist --
+  // name/username/dob/gender were left editable in the UI but silently dropped by the server
+  // (they're not in SELF_SERVICE_PROFILE_FIELDS), so a manager "successfully" correcting their
+  // own name saw it revert on next login. Also (F-3, above) manager can now only ever reach this
+  // path for their OWN record, so `isFinanceLocked` doubles as "self-service-only" here.
+  const isFinanceLocked = effectiveRole() === 'manager';
+  ['emp-position','emp-dept','emp-start-date','emp-end-date','emp-active','emp-annual-leave','emp-sick-leave','emp-business-leave',
+   'emp-salary','emp-transport','emp-position-allowance','emp-housing','emp-pvd-rate','emp-bank-name','emp-bank-account',
+   'emp-guaranteed-ot','emp-personalcar-eligible','emp-phone-eligible',
+   'emp-firstname','emp-lastname','emp-username','emp-dob','emp-gender',
+   // 2026-08-17: new HR-only fields -- must be in this list for the same F-5 reason as the row
+   // above (not in SELF_SERVICE_PROFILE_FIELDS server-side, so a manager editing their own record
+   // must not see these as editable when they silently can't save).
+   'emp-name-prefix','emp-name-prefix-th','emp-firstname-th','emp-lastname-th','emp-idcard-address'].forEach(id => {
+    const field = f(id);
+    if (field) field.disabled = isFinanceLocked;
+  });
+  // F-5: the password-reset row is requireRole('md','accounting') server-side -- a manager
+  // filling it in always got a silent 403 while the client still optimistically applied the new
+  // password to the in-memory user object (see the fix at the PUT .then() below). Hide it outright
+  // for manager instead of showing a control that can never actually work.
+  document.getElementById('emp-password-row').style.display = isFinanceLocked ? 'none' : '';
+  f('emp-bank-name').value = u.bankName || '';
+  f('emp-bank-account').value = u.bankAccount || '';
+  f('emp-emergency-contact').value = u.emergencyContact || '';
+  f('emp-emergency-relation').value = u.emergencyRelation || '';
+  f('emp-emergency-phone').value = u.emergencyPhone || '';
+  f('emp-annual-leave').value = u.annualLeave || 6;
+  f('emp-sick-leave').value = u.sickLeave || 30;
+  f('emp-business-leave').value = u.businessLeave || 3;
+  f('emp-active').value = u.isObserver ? 'observer' : (u.active ? 'true' : 'false');
+  renderEmpDoorSyncStatus(u);
+  document.getElementById('emp-modal').classList.add('show');
+  } catch(e) {
+    showToast('เปิดหน้าแก้ไขไม่ได้: ' + e.message, 'danger');
+    console.error('[openEditEmployee] id=' + id, e);
+  }
+}
+
+// 2026-08-05 (door access sync): shows the last known result of pushing this employee's
+// active/isObserver status to the physical door controller. `u.doorSync` is set by the backend
+// (PUT /api/users/:empNo's deviceSync response, or the retry endpoint below) -- absent entirely
+// if this employee's door status has never changed since the feature shipped.
+function renderEmpDoorSyncStatus(u) {
+  const row = document.getElementById('emp-door-sync-row');
+  const statusEl = document.getElementById('emp-door-sync-status');
+  const retryBtn = document.getElementById('emp-door-sync-retry-btn');
+  if (!row || !statusEl || !retryBtn) return;
+  const ds = u.doorSync;
+  const canRetry = isMdAccountingView();
+  if (!ds) { row.style.display = 'none'; return; }
+  row.style.display = '';
+  const when = ds.at ? new Date(ds.at).toLocaleString(currentLang === 'th' ? 'th-TH' : (currentLang === 'ja' ? 'ja-JP' : 'en-US')) : '';
+  if (ds.ok) {
+    statusEl.innerHTML = `<span style="color:#16a34a">✅ ${L('Door access synced', 'ซิงค์สิทธิ์เปิดประตูสำเร็จ')} (${when})</span>`;
+    retryBtn.style.display = 'none';
+  } else {
+    statusEl.innerHTML = `<span style="color:#dc2626">⚠️ ${L('Door access sync failed', 'ซิงค์สิทธิ์เปิดประตูไม่สำเร็จ')} (${when})</span>`;
+    retryBtn.style.display = canRetry ? '' : 'none';
+  }
+}
+
+async function retryDoorSync() {
+  if (!editingEmployeeId) return;
+  const u = DATA_USERS.find(x => x.id === editingEmployeeId);
+  if (!u || !u.employeeNo) return;
+  const btn = document.getElementById('emp-door-sync-retry-btn');
+  if (btn) { btn.disabled = true; btn.textContent = L('⏳ Retrying...', '⏳ กำลังลองใหม่...'); }
+  try {
+    const res = await apiFetch(`/api/users/${encodeURIComponent(u.employeeNo)}/door-sync`, { method:'POST' });
+    const data = await res.json();
+    if (data.deviceSync) {
+      u.doorSync = { ok: data.deviceSync.ok, want: data.deviceSync.want, at: new Date().toISOString(), error: data.deviceSync.message || null };
+      if (data.deviceSync.ok) showToast(L('✅ Door access sync retried successfully', '✅ ลองซิงค์สิทธิ์เปิดประตูใหม่สำเร็จ'), 'success');
+      else showToast(L('⚠️ Door access sync still failing: ', '⚠️ ซิงค์สิทธิ์เปิดประตูยังไม่สำเร็จ: ') + (data.deviceSync.message||''), 'danger');
+    } else if (!data.success) {
+      showToast(L('❌ Retry failed: ', '❌ ลองใหม่ไม่สำเร็จ: ') + (data.message||''), 'danger');
+    }
+  } catch(e) {
+    showToast(L('❌ Retry failed: ', '❌ ลองใหม่ไม่สำเร็จ: ') + e.message, 'danger');
+  } finally {
+    if (btn) btn.disabled = false;
+    if (editingEmployeeId === u.id) renderEmpDoorSyncStatus(u);
+  }
+}
+
+function closeEmpModal() { document.getElementById('emp-modal').classList.remove('show'); editingEmployeeId = null; }
+
+// 2026-08-05 (door access sync): read-only audit table (md/accounting) -- GET /api/door-access/
+// audit does the Search-and-join server-side; this just renders it + a per-row Push button that
+// calls the idempotent retry endpoint. Deliberately no "push all" button -- see project memory
+// project_time_attendance_2026_08_04_door_access_design section 4 for why bulk auto-push is
+// intentionally not offered.
+async function openDoorAccessAudit() {
+  document.getElementById('door-audit-modal').classList.add('show');
+  const body = document.getElementById('door-audit-body');
+  body.innerHTML = `<div style="text-align:center;padding:24px;color:#94a3b8">${L('Loading...', 'กำลังโหลด...')}</div>`;
+  try {
+    const res = await apiFetch('/api/door-access/audit');
+    const data = await res.json();
+    if (!data.success) { body.innerHTML = `<div style="color:#dc2626;padding:12px">${escapeHtml(data.message || 'Error')}</div>`; return; }
+    renderDoorAuditTable(data.rows || []);
+  } catch(e) {
+    body.innerHTML = `<div style="color:#dc2626;padding:12px">${L('Failed to load: ', 'โหลดไม่สำเร็จ: ')}${escapeHtml(e.message)}</div>`;
+  }
+}
+function closeDoorAccessAudit() { document.getElementById('door-audit-modal').classList.remove('show'); }
+
+function renderDoorAuditTable(rows) {
+  const body = document.getElementById('door-audit-body');
+  if (!rows.length) { body.innerHTML = `<div style="padding:16px;color:#64748b">${L('No employees or device records found.', 'ไม่พบข้อมูลพนักงานหรือข้อมูลจากเครื่องสแกน')}</div>`; return; }
+  const mismatches = rows.filter(r => r.mismatch);
+  const summary = mismatches.length
+    ? `<div style="background:#fef2f2;border:1px solid #fecaca;color:#b91c1c;border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:12px">⚠️ ${mismatches.length} ${L('mismatch(es) found', 'รายการที่ไม่ตรงกัน')}</div>`
+    : `<div style="background:#f0fdf4;border:1px solid #bbf7d0;color:#15803d;border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:12px">✅ ${L('Everything matches', 'ทุกรายการตรงกันแล้ว')}</div>`;
+  // Dynamically-injected HTML is NOT re-scanned by applyStaticI18n() (that only walks static
+  // index.html markup), so every label here goes through L() directly instead of data-en/data-th.
+  const rowHtml = rows.map(r => {
+    const badge = (label, ok) => `<span style="padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600;background:${ok===null?'#f1f5f9':(ok?'#dcfce7':'#fee2e2')};color:${ok===null?'#64748b':(ok?'#166534':'#991b1b')}">${label}</span>`;
+    const status = r.onDeviceOnly
+      ? `<span style="color:#f59e0b">👁️ ${L('On device only (not in app)', 'มีในเครื่องสแกนเท่านั้น ไม่มีในแอป')}</span>`
+      : r.inAppOnly
+        ? `<span style="color:#94a3b8">— ${L('Not enrolled on device', 'ยังไม่ลงทะเบียนในเครื่องสแกน')}</span>`
+        : (r.mismatch ? `<span style="color:#dc2626;font-weight:600">⚠️ ${L('Mismatch', 'ไม่ตรงกัน')}</span>` : `<span style="color:#16a34a">✅ ${L('OK', 'ตรงกัน')}</span>`);
+    const pushBtn = (!r.onDeviceOnly && !r.inAppOnly)
+      // 2026-08-16 (Opus audit D-1): escapeJsAttr() (not escapeHtml()) for an inline onclick
+      // JS-string argument -- same class as L-7. Not currently exploitable (employeeNo is
+      // isSafeEmpNo()-constrained on the sync path and in the PUT `forbidden` list), defense in depth.
+      ? `<button class="btn btn-outline btn-sm" onclick="pushDoorSyncRow('${escapeJsAttr(r.employeeNo)}', this)">${L('Push','ส่ง')}</button>`
+      : '';
+    const appStatus = r.appActive === null ? '—' : (r.appActive ? L('Active','ปกติ') : L('Inactive','ระงับ')) + (r.appIsObserver ? ` (${L('Observer','ผู้สังเกตการณ์')})` : '');
+    return `<tr>
+      <td>${escapeHtml(r.employeeNo)}</td>
+      <td>${escapeHtml(r.appName || '—')}</td>
+      <td>${appStatus}</td>
+      <td>${r.wants === null ? '—' : badge(r.wants ? L('Door open','เปิดประตูได้') : L('Door closed','เปิดประตูไม่ได้'), r.wants)}</td>
+      <td>${r.deviceEnable === null ? '—' : badge(r.deviceEnable ? L('Door open','เปิดประตูได้') : L('Door closed','เปิดประตูไม่ได้'), r.deviceEnable)}</td>
+      <td>${status}</td>
+      <td>${pushBtn}</td>
+    </tr>`;
+  }).join('');
+  body.innerHTML = summary + `<table class="table" style="width:100%;font-size:12px">
+    <thead><tr>
+      <th>${L('Emp No.','รหัส')}</th><th>${L('Name','ชื่อ')}</th><th>${L('App Status','สถานะในแอป')}</th>
+      <th>${L('Should open?','ควรเปิด?')}</th><th>${L('Device state','สถานะที่เครื่อง')}</th><th>${L('Result','ผล')}</th><th></th>
+    </tr></thead>
+    <tbody>${rowHtml}</tbody>
+  </table>`;
+}
+
+async function pushDoorSyncRow(empNo, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '...'; }
+  try {
+    const res = await apiFetch(`/api/users/${empNo}/door-sync`, { method:'POST' });
+    const data = await res.json();
+    // Interpolated (contains empNo) — must branch on currentLang directly instead of L(), since
+    // L()'s JA path does an exact-string dictionary lookup that a variable substring can never
+    // match (see the project-wide i18n audit in project memory, "121 points" incident).
+    if (data.deviceSync && data.deviceSync.ok) {
+      const msg = currentLang === 'ja' ? `✅ ${empNo} のドアアクセスを同期しました` : L(`✅ Door access synced for ${empNo}`, `✅ ซิงค์สิทธิ์เปิดประตูสำเร็จ (${empNo})`);
+      showToast(msg, 'success');
+    } else {
+      const errMsg = data.deviceSync ? data.deviceSync.message : (data.message||'');
+      const msg = currentLang === 'ja' ? `⚠️ ${empNo} の同期に失敗しました: ${errMsg}` : L(`⚠️ Sync failed for ${empNo}: `, `⚠️ ซิงค์ไม่สำเร็จ (${empNo}): `) + errMsg;
+      showToast(msg, 'danger');
+    }
+  } catch(e) {
+    showToast(L('❌ Push failed: ', '❌ Push ไม่สำเร็จ: ') + e.message, 'danger');
+  } finally {
+    openDoorAccessAudit(); // full refresh — simplest way to keep the table consistent after a push
+  }
+}
+// Kept as a thin wrapper -- bound via onchange in index.html (#emp-role), renaming it would
+// mean touching both files for no gain. Real logic lives in applyEmpRoleFieldVisibility().
+function toggleEmpPvdRow() { applyEmpRoleFieldVisibility(); }
+// 2026-07-31: PVD row stays a plain role check (md-only rule, unrelated to allowanceEligibility);
+// Diligence/Long Distance/Personal Car rows now read the same settings-driven eligibility
+// table computePayroll() uses, instead of each hardcoding its own role name.
+function applyEmpRoleFieldVisibility() {
+  const role = document.getElementById('emp-role')?.value;
+  const row = document.getElementById('emp-pvd-row');
+  if (row) row.style.display = role === 'md' ? 'none' : '';
+  const elig = APP_SETTINGS.allowanceEligibility;
+  // 2026-07-31: separate row, gated on 'ot' not 'longDistance' -- computePayroll() tops up
+  // guaranteedOT for any OT-eligible role, not just drivers (see the HTML comment above this row).
+  const otContractRow = document.getElementById('emp-ot-contract-row');
+  if (otContractRow) otContractRow.style.display = isAllowanceEligible(elig, role, 'ot') ? '' : 'none';
+  const pcRow = document.getElementById('emp-personalcar-row');
+  if (pcRow) pcRow.style.display = isAllowanceEligible(elig, role, 'personalCar') ? '' : 'none';
+  const phoneRow = document.getElementById('emp-phone-row');
+  if (phoneRow) phoneRow.style.display = isAllowanceEligible(elig, role, 'phone') ? '' : 'none';
+
+  // Read-only rate-reference displays, always kept in sync with the live centralized rates.
+  // 2026-07-31: explicit currentLang==='ja' branches (not L()) -- these strings interpolate a
+  // live number, so the LANG_JA dictionary (keyed by exact static string) could never match them.
+  const a = APP_SETTINGS.allowances;
+  const pcDisp = document.getElementById('emp-personalcar-rate-display');
+  if (pcDisp) pcDisp.textContent = currentLang === 'ja'
+    ? `レート: ฿${(a.personalCar || 0).toLocaleString()} / 回（設定で変更可）`
+    : L(`Rate: ฿${(a.personalCar || 0).toLocaleString()} / time (set in Settings)`, `อัตรา: ฿${(a.personalCar || 0).toLocaleString()} / ครั้ง (ตั้งค่าได้ที่หน้า Settings)`);
+  const phoneDisp = document.getElementById('emp-phone-rate-display');
+  if (phoneDisp) phoneDisp.textContent = currentLang === 'ja'
+    ? `レート: ฿${(a.phone || 0).toLocaleString()} / 月（設定で変更可）`
+    : L(`Rate: ฿${(a.phone || 0).toLocaleString()} / month (set in Settings)`, `อัตรา: ฿${(a.phone || 0).toLocaleString()} / เดือน (ตั้งค่าได้ที่หน้า Settings)`);
+}
+
+
+async function saveEmployee() {
+  if (blockIfObserver()) return;
+  const f = n => document.getElementById(n).value.trim();
+  const firstName = f('emp-firstname');
+  const lastName  = f('emp-lastname');
+  const fullName  = (firstName + ' ' + lastName).trim();
+  const idType    = document.getElementById('emp-idtype').value;
+  if (!firstName || !f('emp-username')) { showToast(L('⚠️ Please fill in the required fields', '⚠️ กรุณากรอกข้อมูลที่จำเป็น'), 'warning'); return; }
+  const canChangeRole = isMdView() || (isAccountingView() && !!editingEmployeeId);
+
+  if (!editingEmployeeId) {
+    if (!f('emp-password')) { showToast(L('⚠️ Please set an initial password', '⚠️ กรุณาตั้งรหัสผ่านเริ่มต้น'), 'warning'); return; }
+    if (f('emp-password') !== f('emp-password-confirm')) { showToast(L('⚠️ Passwords do not match', '⚠️ รหัสผ่านไม่ตรงกัน'), 'warning'); return; }
+    if (DATA_USERS.find(u => String(u.username || '').toLowerCase() === f('emp-username').toLowerCase())) { showToast(L('⚠️ This username already exists', '⚠️ Username นี้มีในระบบแล้ว'), 'warning'); return; }
+    const newUserData = { username: f('emp-username'), password: f('emp-password'), name: fullName, firstName: firstName, lastName: lastName, namePrefix: document.getElementById('emp-name-prefix').value, firstNameTh: f('emp-firstname-th'), lastNameTh: f('emp-lastname-th'), role: 'user', position: f('emp-position'), dept: f('emp-dept'), salary: parseInt(f('emp-salary'))||0, idCard: f('emp-idcard'), idType: idType, dob: f('emp-dob'), gender: document.getElementById('emp-gender').value, phone: f('emp-phone'), email: f('emp-email'), address: f('emp-address'), idCardAddress: f('emp-idcard-address'), startDate: f('emp-start-date'), endDate: f('emp-end-date'), bankName: f('emp-bank-name'), bankAccount: f('emp-bank-account'), emergencyContact: f('emp-emergency-contact'), emergencyRelation: f('emp-emergency-relation'), emergencyPhone: f('emp-emergency-phone'), transport: parseInt(f('emp-transport'))||0, positionAllowance: parseInt(f('emp-position-allowance'))||0, housing: parseInt(f('emp-housing'))||0, pvdRate: parseFloat(f('emp-pvd-rate'))||5, annualLeave: parseInt(f('emp-annual-leave'))||6, sickLeave: parseInt(f('emp-sick-leave'))||30, businessLeave: parseInt(f('emp-business-leave'))||3, active: true, employeeNo: '', facePhoto: '' };
+    // Must persist to the backend — this used to only push to in-memory DATA_USERS and was
+    // silently lost on refresh (the "added successfully" toast was a lie).
+    try {
+      const res = await apiFetch(`/api/users`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newUserData)
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message || 'Server error');
+      DATA_USERS.push(data.user);
+      nextUserId = Math.max(nextUserId, data.user.id + 1);
+    } catch(e) {
+      showToast(L('❌ Could not save employee: ', '❌ ไม่สามารถบันทึกพนักงานได้: ') + e.message, 'danger');
+      return;
+    }
+    showToast(currentLang === 'ja' ? `✅ 従業員「${fullName}」を追加しました` : L(`✅ Employee "${fullName}" added`, `✅ เพิ่มพนักงาน "${fullName}" สำเร็จ`), 'success');
+    closeEmpModal();
+    renderEmployeesTable();
+  } else {
+    const u = DATA_USERS.find(x => x.id === editingEmployeeId);
+    if (!u) return;
+    const newPassword = f('emp-password');
+    if (newPassword) {
+      // F-09: matches the policy PUT /api/users/:empNo/password now enforces server-side --
+      // catch it here instead of a raw 400 after the rest of the form has already been typed in.
+      const pwErr = passwordPolicyError(newPassword);
+      if (pwErr) { showToast(`⚠️ ${pwErr}`, 'warning'); return; }
+      if (newPassword !== f('emp-password-confirm')) {
+        showToast(L('⚠️ Passwords do not match', '⚠️ รหัสผ่านไม่ตรงกัน'), 'warning');
+        return;
+      }
+    }
+    const newRole = f('emp-role');
+    const wantsRoleChange = canChangeRole && newRole && newRole !== u.role;
+    let roleChanged = false;
+    if (wantsRoleChange) {
+      // Accounting can change any role except promoting someone to Managing Director.
+      if (effectiveRole() === 'accounting' && newRole === 'md') {
+        showToast(L('⛔ Accounting cannot promote someone to Managing Director', '⛔ Accounting ไม่สามารถเปลี่ยน role เป็น Managing Director ได้'), 'danger');
+      // MD can change any role, but never leave the system with zero active MDs — otherwise
+      // no one could sign back in with rights to manage roles at all.
+      } else if (u.role === 'md' && newRole !== 'md' && DATA_USERS.filter(x => x.role === 'md' && x.active !== false).length <= 1) {
+        showToast(L('⛔ Cannot change this role — at least one active Managing Director must remain', '⛔ ไม่สามารถเปลี่ยน role นี้ได้ — ต้องมี Managing Director ที่ active เหลืออย่างน้อย 1 คน'), 'danger');
+      } else {
+        roleChanged = true;
+      }
+    }
+    // Employment status: Active / Inactive / Observer (view-only, no payroll, still able to
+    // log in). Same "at least one active MD must remain" rule as the role-change guard above —
+    // that guard only fires when the *role* value itself changes, so without this a separate
+    // check, someone could silently deactivate/observer-ize the last active MD via this status
+    // dropdown alone (role staying 'md') and lock everyone out of role management.
+    const newStatusVal = f('emp-active'); // 'true' | 'false' | 'observer'
+    const wantsDeactivate = newStatusVal !== 'true';
+    const isOnlyActiveMd = u.role === 'md' && u.active !== false && DATA_USERS.filter(x => x.role === 'md' && x.active !== false).length <= 1;
+    let newActive = u.active !== false, newIsObserver = !!u.isObserver;
+    if (wantsDeactivate && isOnlyActiveMd) {
+      showToast(L('⛔ Cannot change status — at least one active Managing Director must remain', '⛔ ไม่สามารถเปลี่ยนสถานะนี้ได้ — ต้องมี Managing Director ที่ active เหลืออย่างน้อย 1 คน'), 'danger');
+    } else {
+      newActive = newStatusVal === 'true';
+      newIsObserver = newStatusVal === 'observer';
+    }
+    // 2026-07-31 (bug fix): parseInt/parseFloat(...)||u.X silently reverted a deliberately-entered
+    // 0 (e.g. PVD opt-out, zeroing a leave balance) back to the old value -- the exact `0 ||
+    // fallback` footgun already fixed twice in computePayroll(), still present here on the save
+    // path. numOrKeep treats any finite number (including 0) as a real value; only a genuinely
+    // empty/non-numeric field falls back.
+    const numOrKeep = (raw, parseFn, fallback) => { const n = parseFn(raw); return Number.isFinite(n) ? n : fallback; };
+    // 2026-08-06 (Opus re-audit, N-3): `u` is the live DATA_USERS record, mutated directly below
+    // (Object.assign + u.role) BEFORE the PUT below is known to succeed. The MEDIUM-1 fix
+    // (2026-08-05) made a failed PUT stop and toast instead of falsely showing "Saved", but never
+    // undid these mutations -- so a rejected save (403 stale-tab, 400 malformed body, etc.) left
+    // the in-memory record showing the REJECTED values as if they'd been saved, silently
+    // desyncing every render that reads DATA_USERS (including active/isObserver, which is what
+    // this modal exists to gate) until the next full reload. Snapshot before mutating, restore on
+    // failure.
+    // BUG FIX 2026-08-06 (Opus re-audit round 2, F1): a plain `Object.assign(u, uSnapshot)` is
+    // additive-only -- it restores keys the snapshot HAD but can't remove a key the mutation below
+    // ADDED. Real on this data: a record `sync-hikvision` created never has an `isObserver` key at
+    // all until the first edit sets one, so on a rejected save `isObserver` (exactly the field this
+    // modal exists to gate) stayed at the rejected value while every already-existing field
+    // correctly rolled back. `restoreSnapshot()` also deletes any key absent from the snapshot.
+    // F2: `role` is deliberately excluded from restore -- it's written through the SEPARATE
+    // fire-and-forget `updateUserRoleBackend()` call below, independent of this PUT's outcome, so
+    // this PUT failing doesn't mean the role change failed too; reverting `u.role` here could
+    // desync memory from a role change the server already persisted.
+    const uSnapshot = { ...u };
+    const uSnapshotKeys = new Set(Object.keys(uSnapshot));
+    const restoreSnapshot = () => {
+      Object.keys(u).forEach(k => { if (k !== 'role' && !uSnapshotKeys.has(k)) delete u[k]; });
+      Object.keys(uSnapshot).forEach(k => { if (k !== 'role') u[k] = uSnapshot[k]; });
+    };
+    // 2026-08-02: guaranteedOT/personalCarEligible/phoneAllowanceEligible below must gate on
+    // the role this save is ACTUALLY applying, not the form's newRole -- if the role change
+    // itself was rejected above (roleChanged stays false), u.role never changes, but these
+    // three fields were still being computed against the rejected newRole, silently clearing
+    // an eligible employee's flags the moment an admin's promotion attempt got blocked.
+    const effectiveRole = roleChanged ? newRole : u.role;
+    Object.assign(u, { name: fullName, firstName: firstName, lastName: lastName, namePrefix: document.getElementById('emp-name-prefix').value, firstNameTh: f('emp-firstname-th'), lastNameTh: f('emp-lastname-th'), username: f('emp-username'), position: f('emp-position'), dept: f('emp-dept'), salary: numOrKeep(f('emp-salary'), parseInt, u.salary), idCard: f('emp-idcard'), idType: idType, dob: f('emp-dob'), gender: document.getElementById('emp-gender').value, phone: f('emp-phone'), email: f('emp-email'), address: f('emp-address'), idCardAddress: f('emp-idcard-address'), startDate: f('emp-start-date'), endDate: f('emp-end-date'), bankName: f('emp-bank-name'), bankAccount: f('emp-bank-account'), emergencyContact: f('emp-emergency-contact'), emergencyRelation: f('emp-emergency-relation'), emergencyPhone: f('emp-emergency-phone'), transport: parseInt(f('emp-transport'))||0, positionAllowance: parseInt(f('emp-position-allowance'))||0, housing: parseInt(f('emp-housing'))||0, pvdRate: numOrKeep(f('emp-pvd-rate'), parseFloat, u.pvdRate != null ? u.pvdRate : 5), annualLeave: numOrKeep(f('emp-annual-leave'), parseInt, u.annualLeave), sickLeave: numOrKeep(f('emp-sick-leave'), parseInt, u.sickLeave), businessLeave: numOrKeep(f('emp-business-leave'), parseInt, u.businessLeave), active: newActive, isObserver: newIsObserver,
+      // 2026-07-31: writes gated on the same allowanceEligibility config the visibility function
+      // uses, instead of hardcoded role names. Not deleting the field for an ineligible role --
+      // the value survives so re-granting eligibility later restores it, and the calc already
+      // ignores it while ineligible. diligenceAllowance/longDistanceThresholdKm/longDistanceRate/
+      // allowance3 are gone -- those are company-wide rates now (Settings -> Allowance Rates),
+      // not written per employee at all.
+      // 2026-07-31 fix: was gated on 'longDistance' (wrong key, copy-paste from the row it used
+      // to share) -- computePayroll() actually tops up guaranteedOT under the 'ot' gate.
+      ...(isAllowanceEligible(APP_SETTINGS.allowanceEligibility, effectiveRole, 'ot') ? { guaranteedOT: parseFloat(f('emp-guaranteed-ot'))||0 } : {}),
+      // 2026-07-31 (bug fix): always write both flags explicitly (true/false), never spread-omit
+      // them -- omitting on an ineligible role left a stale `true` in place from before a role
+      // change, invisible until the employee was later moved back to an eligible role (or that
+      // role was re-added to the allowance), silently resuming a payment nobody re-approved.
+      personalCarEligible: isAllowanceEligible(APP_SETTINGS.allowanceEligibility, effectiveRole, 'personalCar') && !!document.getElementById('emp-personalcar-eligible')?.checked,
+      phoneAllowanceEligible: isAllowanceEligible(APP_SETTINGS.allowanceEligibility, effectiveRole, 'phone') && !!document.getElementById('emp-phone-eligible')?.checked });
+    if (roleChanged) {
+      u.role = newRole;
+      // BUG FIX 2026-08-06 (round 4): this used to gate the whole call on `u.employeeNo`, so a
+      // role change for an employeeNo-less employee (see PUT /api/users/id/:id/role's comment)
+      // was silently never even attempted -- updateUserRoleBackend() now picks the right URL
+      // itself, so this always runs.
+      updateUserRoleBackend(u, newRole).then(r => {
+        if (!r.success) {
+          // BUG FIX 2026-08-06 (Opus re-audit round 3, task #9): u.role was left at the
+          // optimistic newRole forever on a failed role PUT -- reachable in practice: accounting
+          // can pick a new role in this modal (canChangeRole above), but the backend role route
+          // is requireRole('md') only, so accounting's role change always 403s server-side,
+          // leaving memory permanently disagreeing with users.json until a full reload.
+          u.role = uSnapshot.role;
+          // BUG FIX 2026-08-06 (Opus re-audit round 4): `currentUser` is Object.assign'd from `u`
+          // synchronously further down this function (self-edit path), which already ran with the
+          // rejected role by the time this async failure arrives -- currentUser.role stayed wrong
+          // (rendering menus/permissions for a role the server never actually granted) until a
+          // full reload. Only relevant for a self-edit (e.g. accounting editing its own record,
+          // whose role change always 403s per the comment above).
+          if (u.id === currentUser.id) { currentUser.role = uSnapshot.role; updateUserUI(); }
+          renderEmployeesTable();
+          showToast(L('⚠️ Failed to save role to backend: ', '⚠️ บันทึก role ใน backend ไม่สำเร็จ: ') + r.message, 'warning');
+        }
+      });
+    }
+    // Sync profile updates to backend.
+    // 2026-08-05: this used to be fire-and-forget (.catch(()=>{})) — the PUT response now carries
+    // an optional deviceSync block (door-access push result) that must be surfaced, not discarded.
+    // 2026-08-06 (Opus re-audit round 3, task #12): this whole block used to be gated on
+    // `if (u.employeeNo)` -- an employee added via "Add Employee" gets `employeeNo:''` forever
+    // (only Hikvision device sync assigns a real one, and only for brand-new device records, never
+    // by linking back to an existing blank-employeeNo local one), so every edit to such a record
+    // silently skipped this entire block while still falling through to the "✅ Saved" toast below.
+    // Now always runs, routed to the id-keyed backend route (PUT /api/users/id/:id) when there's no
+    // employeeNo to address the record by -- that route shares the exact same handler and correctly
+    // skips the door-push (a record with no employeeNo was never enrolled on the device anyway).
+    {
+      let savedOk = false;
+      try {
+        const putUrl = u.employeeNo ? `/api/users/${encodeURIComponent(u.employeeNo)}` : `/api/users/id/${u.id}`;
+        const putRes = await apiFetch(putUrl, {
+          method:'PUT', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ name:u.name, firstName:u.firstName, lastName:u.lastName, namePrefix:u.namePrefix, firstNameTh:u.firstNameTh, lastNameTh:u.lastNameTh, username:u.username, position:u.position, dept:u.dept, salary:u.salary, idCard:u.idCard, idType:u.idType, dob:u.dob, gender:u.gender, phone:u.phone, email:u.email, address:u.address, idCardAddress:u.idCardAddress, startDate:u.startDate, endDate:u.endDate, emergencyContact:u.emergencyContact, emergencyRelation:u.emergencyRelation, emergencyPhone:u.emergencyPhone, bankName:u.bankName, bankAccount:u.bankAccount, transport:u.transport, positionAllowance:u.positionAllowance, housing:u.housing, pvdRate:u.pvdRate, guaranteedOT:u.guaranteedOT, personalCarEligible:u.personalCarEligible, phoneAllowanceEligible:u.phoneAllowanceEligible, annualLeave:u.annualLeave, sickLeave:u.sickLeave, businessLeave:u.businessLeave, active:u.active, isObserver:u.isObserver })
+        });
+        const putData = await putRes.json();
+        // 2026-08-05 (Opus audit, MEDIUM-1): this never checked `putData.success` -- a 400 (F-7,
+        // malformed body), 403 (F-3/F-6, e.g. a stale tab trying to edit a record that's no longer
+        // "own record"), 404, or 503 all fell through to the unconditional "✅ Saved" toast below,
+        // with the modal closing as if the save had actually worked. Surface the real failure and
+        // stop here instead -- leave the modal open so the admin can see what happened and retry.
+        if (!putData.success) {
+          restoreSnapshot();
+          showToast(L('❌ Could not save: ', '❌ ไม่สามารถบันทึกได้: ') + (putData.message || ''), 'danger');
+          return;
+        }
+        // BUG FIX 2026-08-06 (Opus re-audit round 2, F3): the catch block below used to roll back
+        // unconditionally on ANY throw in this try, including one thrown by the doorSync/toast
+        // code AFTER the PUT had already succeeded -- flipping the exact bug this whole fix exists
+        // to prevent (false "not saved" state on a genuinely-saved record). `savedOk` gates the
+        // catch's rollback to only the case where the save itself never actually completed.
+        savedOk = true;
+        if (putData.user) u.doorSync = putData.user.doorSync;
+        const ds = putData.deviceSync;
+        if (ds && ds.attempted) {
+          if (ds.skipped === 'not-on-device') {
+            // Normal case (person never enrolled on the physical device) — no toast needed.
+          } else if (ds.ok && ds.want === false) {
+            showToast(L('🔒 Door access revoked', '🔒 ปิดสิทธิ์เปิดประตูแล้ว'), 'success');
+          } else if (ds.ok && ds.want === true) {
+            showToast(L('🔓 Door access enabled', '🔓 เปิดสิทธิ์เปิดประตูแล้ว'), 'success');
+          } else if (!ds.ok && ds.want === false) {
+            showToast(L('⚠️ Could not revoke door access on the device — badge may still work. Use Retry in Edit Employee.', '⚠️ ปิดสิทธิ์เปิดประตูที่ตัวเครื่องไม่สำเร็จ — บัตรอาจยังใช้เปิดประตูได้อยู่ กด Retry ในหน้าแก้ไขพนักงาน'), 'danger');
+          } else if (!ds.ok && ds.want === true) {
+            showToast(L('⚠️ Could not enable door access on the device. Use Retry in Edit Employee.', '⚠️ เปิดสิทธิ์เปิดประตูที่ตัวเครื่องไม่สำเร็จ กด Retry ในหน้าแก้ไขพนักงาน'), 'warning');
+          }
+        }
+      } catch(e) {
+        // BUG FIX 2026-08-06 (Opus re-audit round 3, task #11): this used to always roll back and
+        // claim "could not save" -- but a throw here (network drop, or a 502/504 proxy error page
+        // that isn't valid JSON) doesn't mean the save failed. The server may have already
+        // genuinely persisted the update before the response failed to come back cleanly -- the
+        // exact inverse of the false-"saved" bug this whole fix chain exists to close, just
+        // pointed the other way. Don't assert either outcome: leave the optimistic in-memory edit
+        // as-is (matches what the admin just typed) and tell them the real status is unknown
+        // instead of confidently lying in either direction.
+        if (!savedOk) {
+          showToast(L('❓ Save status unknown (network/server error) — please reload before editing this employee again: ', '❓ ไม่ทราบสถานะการบันทึก (เครือข่าย/เซิร์ฟเวอร์มีปัญหา) — กรุณา reload ก่อนแก้ไขพนักงานคนนี้อีกครั้ง: ') + e.message, 'danger');
+        }
+        return;
+      }
+    }
+    // Password reset is a separate endpoint (the generic PUT above strips password on purpose)
+    // BUG FIX 2026-08-06 (round 4): used to be gated on `u.employeeNo`, so resetting the password
+    // of an employeeNo-less employee was silently discarded with NO toast at all (not even the
+    // "saved" one, since this whole block never ran) -- now routes to the id-keyed backend route.
+    if (newPassword) {
+      const pwUrl = u.employeeNo ? `/api/users/${encodeURIComponent(u.employeeNo)}/password` : `/api/users/id/${u.id}/password`;
+      apiFetch(pwUrl, {
+        method:'PUT', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ password: newPassword })
+      }).then(r => r.json()).then(r => {
+        // 2026-08-05 (Opus audit F-5): this used to set `u.password = newPassword` unconditionally,
+        // regardless of the server's answer -- the endpoint is requireRole('md','accounting'), so a
+        // manager (who can no longer even see this row, see the isFinanceLocked hide above, but this
+        // guards any other future path that hits this same code) always got a silent 403 while the
+        // in-memory user object still ended up holding a plaintext password that was never actually
+        // saved. Only apply it inside the success branch now.
+        if (r.success) { u.password = newPassword; }
+        else { showToast(L('⚠️ Failed to reset password: ', '⚠️ ตั้งรหัสผ่านใหม่ไม่สำเร็จ: ') + r.message, 'warning'); }
+      }).catch(()=>{});
+    }
+    if (u.id === currentUser.id) { Object.assign(currentUser, u); updateUserUI(); }
+    showToast(currentLang === 'ja' ? `✅ 「${u.name}」を保存しました` : L(`✅ Saved "${u.name}"`, `✅ บันทึกข้อมูล "${u.name}" สำเร็จ`), 'success');
+    closeEmpModal();
+    renderEmployeesTable();
+    if (currentPage === 'profile') renderMyProfile();
+  }
+}
+
+// ===== REPORTS =====
+function syncReportPeriodDropdown() {
+  const sel = document.getElementById('report-period');
+  if (!sel || sel.options.length > 0) return;
+  getPeriodOptions(12).forEach(opt => {
+    const o = document.createElement('option');
+    o.value = opt.index;
+    o.textContent = opt.index === 0 ? `${opt.label}  ${L('← Current Period', '← รอบปัจจุบัน')}` : opt.label;
+    sel.appendChild(o);
+  });
+}
+
+// รอบเงินเดือนถูกตั้งชื่อตาม "เดือนที่รอบจบ" เช่น periodStartDay=21 -> รอบ 21 ธ.ค.-20 ม.ค. คือ "รอบ ม.ค."
+// (ยืนยันกับ user 2026-08-20) -- ใช้ตรรกะเดียวกับ getPeriodBounds() (index 0 = รอบปัจจุบัน,
+// index ใหญ่ขึ้น = ย้อนอดีต) จึงไล่ index จนกว่าจะเจอรอบทั้งหมดที่ end.getFullYear() === year
+function getYearPeriodIndices(year) {
+  const result = [];
+  for (let i = 0; i < 300; i++) {
+    const { start, end } = getPeriodBounds(i);
+    if (start < APP_FIRST_PERIOD_START) break; // ก่อนระบบเริ่มใช้งานจริง -- ไม่ใช่รอบที่มีข้อมูลจริง (ตาม getPeriodOptions())
+    if (end.getFullYear() === year) result.push(i);
+    if (end.getFullYear() < year - 1) break;
+  }
+  return result.sort((a, b) => b - a); // index มาก = อดีตมากกว่า -> เรียงจาก ม.ค.->ธ.ค.
+}
+
+function syncReportYearDropdown() {
+  const sel = document.getElementById('report-year');
+  if (!sel || sel.options.length > 0) return;
+  const years = new Set();
+  for (let i = 0; i < 300; i++) {
+    const { start, end } = getPeriodBounds(i);
+    if (start < APP_FIRST_PERIOD_START) break;
+    years.add(end.getFullYear());
+  }
+  const nowYear = new Date().getFullYear();
+  Array.from(years).sort((a, b) => b - a).forEach(y => {
+    const o = document.createElement('option');
+    o.value = y;
+    o.textContent = y === nowYear ? `${y}  ${L('← Current Year', '← ปีปัจจุบัน')}` : String(y);
+    sel.appendChild(o);
+  });
+  if (!selectedReportYear) selectedReportYear = nowYear;
+  sel.value = selectedReportYear;
+}
+
+function applyReportsViewStyle() {
+  const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+  const active   = `background:${isDark ? '#334155' : 'white'};color:${isDark ? 'var(--text)' : '#1e3a5f'};box-shadow:0 1px 3px rgba(0,0,0,.1)`;
+  const inactive = `background:transparent;color:${isDark ? '#64748b' : '#94a3b8'}`;
+  const base = 'padding:7px 14px;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;';
+  const mBtn = document.getElementById('rpt-view-monthly-btn');
+  const yBtn = document.getElementById('rpt-view-yearly-btn');
+  const grp  = document.getElementById('rpt-view-toggle-group');
+  if (mBtn) mBtn.style.cssText = base + (reportsViewMode === 'monthly' ? active : inactive);
+  if (yBtn) yBtn.style.cssText = base + (reportsViewMode === 'yearly' ? active : inactive);
+  if (grp)  grp.style.background = isDark ? '#1e293b' : '#f1f5f9';
+  const perSel = document.getElementById('report-period');
+  const yrSel  = document.getElementById('report-year');
+  if (perSel) perSel.style.display = reportsViewMode === 'monthly' ? '' : 'none';
+  if (yrSel)  yrSel.style.display  = reportsViewMode === 'yearly'  ? '' : 'none';
+}
+
+function switchReportsView(mode) {
+  reportsViewMode = mode;
+  if (mode === 'yearly') syncReportYearDropdown();
+  applyReportsViewStyle();
+  renderReports();
+}
+
+// รวมนาทีของใบลาที่อนุมัติแล้ว (type ใดก็ได้) ในช่วงวันที่ที่กำหนด -- รองรับทั้ง 3 แบบที่ระบบเก็บ:
+// ลาเป็นวัน (days -> 8 ชม./วัน ตามกติกาที่ user ยืนยัน 2026-08-20), ลาเป็นชั่วโมง (hourlyStart/End),
+// และ record เก่าที่มีแค่ timePart string (fallback เดียวกับ computeLeaveBalance() แต่แยกฟังก์ชัน
+// เพราะ computeLeaveBalance ผูกกับปีปฏิทิน (Jan-Dec) สำหรับยอดวันลาคงเหลือ -- ไม่ใช่ rob เงินเดือน
+// (Dec-Dec) ที่หน้ารายงานนี้ใช้ -- อย่ารวมทั้งสองฟังก์ชันเข้าด้วยกัน
+function computeLeaveMinutesInRange(userId, type, startStr, endStr) {
+  let min = 0;
+  DATA_LEAVES.filter(l =>
+    l.userId === userId && l.type === type && l.status === 'approved' &&
+    l.dateFrom >= startStr && l.dateFrom <= endStr
+  ).forEach(l => {
+    if ((l.days || 0) > 0) min += l.days * 8 * 60;
+    else if (l.hourlyStart && l.hourlyEnd) {
+      const [sh, sm] = l.hourlyStart.split(':').map(Number);
+      const [eh, em] = l.hourlyEnd.split(':').map(Number);
+      min += Math.max(0, (eh * 60 + em) - (sh * 60 + sm));
+    } else if (l.timePart) {
+      const hM = l.timePart.match(/(\d+)\s*(?:ชม\.|h|時間)/);
+      const mM = l.timePart.match(/(\d+)\s*(?:น\.|m|分)/);
+      min += (hM ? parseInt(hM[1]) : 0) * 60 + (mM ? parseInt(mM[1]) : 0);
+    }
+  });
+  return min;
+}
+
+// ฟอร์แมต X ชม. Y นาที (ไม่ bucket เป็นวัน ต่างจาก fmtDuration ด้านบน) -- ใช้ตรรกะเดียวกับ fmtLate
+// ใน buildReportDetailTables()/showReportDetail() — ยกเป็น global เพราะยอดรายปีใช้ร่วมกัน
+// ระหว่างตารางหลักกับ modal รายละเอียด
+function fmtHM(totalMinutes) {
+  const min = Math.max(0, totalMinutes);
+  if (currentLang === 'ja') return min < 60 ? `${min}分` : `${Math.floor(min / 60)}時間${min % 60}分`;
+  return min < 60 ? L(`${min}m`, `${min} น.`) : L(`${Math.floor(min / 60)}h ${min % 60}m`, `${Math.floor(min / 60)} ชม. ${min % 60} น.`);
+}
+
+// สถิติของ 1 รอบเงินเดือน สำหรับ user คนเดียว -- ใช้ร่วมกันทั้งตารางรายเดือน (1 รอบ) และการรวมยอด
+// รายปี (12 รอบ) เพื่อไม่ให้ตรรกะแยกกันเพี้ยน
+function computeReportPeriodStats(u, start, end, periodIndex) {
+  const days = generatePeriodDays(start, end, periodIndex === 0, u.id);
+  const work = days.filter(d => d.status === 'present' || d.status === 'late' || d.status === 'not-clocked-in').length;
+
+  const isDriverRow = u.role === 'driver';
+  const STD_START_MIN = (APP_SETTINGS.workSchedule?.standardStartHour ?? 8) * 60 + (APP_SETTINGS.workSchedule?.standardStartMinute ?? 30);
+  const lateDaysArr = isDriverRow ? [] : days.filter(d => d.status === 'late' && d.checkIn);
+  const lateCount = lateDaysArr.length;
+  const lateMin = lateDaysArr.reduce((s, d) => {
+    const [h, m] = d.checkIn.split(':').map(Number);
+    return s + Math.max(0, h * 60 + m - lateReferenceMin(d, STD_START_MIN));
+  }, 0);
+
+  const annual  = days.filter(d => d.status === 'leave-annual').length;
+  const sick    = days.filter(d => d.status === 'leave-sick').length;
+  const upcountry = days.filter(d => d.upcountry && d.status !== 'company-trip').length;
+
+  const canEarlyLateRow = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'earlyLate');
+  const _SA = APP_SETTINGS.allowances;
+  let earlyCount = 0;
+  if (canEarlyLateRow) days.filter(d => d.checkIn && (d.status === 'present' || d.status === 'late') && isDeviceScanSource(d.checkInSource)).forEach(d => {
+    const [h, m] = d.checkIn.split(':').map(Number);
+    const mins = h * 60 + m;
+    if (mins <= (_SA.earlyThreshold2Min || 390)) earlyCount += 2;
+    else if (mins <= (_SA.earlyThreshold1Min || 450)) earlyCount += 1;
+  });
+
+  const _ln2 = _SA.lateNightThreshold2Hour || _SA.lateNightThresholdHour || 20;
+  let lateNightCount = 0;
+  days.filter(d => d.lateOut && d.lateApproved && d.status !== 'company-trip' && isDeviceScanSource(d.checkOutSource)).forEach(d => {
+    lateNightCount += parseInt(d.lateOut) >= _ln2 ? 2 : 1;
+  });
+
+  const pad2r = n => String(n).padStart(2, '0');
+  const startStr = `${start.getFullYear()}-${pad2r(start.getMonth() + 1)}-${pad2r(start.getDate())}`;
+  const endStr   = `${end.getFullYear()}-${pad2r(end.getMonth() + 1)}-${pad2r(end.getDate())}`;
+  const canOTRow = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'ot');
+  const otDays = canOTRow ? DATA_LEAVES.filter(l =>
+    l.userId === u.id && l.type === 'ot' && l.status === 'approved' &&
+    l.dateFrom >= startStr && l.dateFrom <= endStr &&
+    !isCompanyTripDay(l.dateFrom)
+  ).length : 0;
+
+  const canPersonalCarRow = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'personalCar') && u.personalCarEligible === true;
+  const pcCount = canPersonalCarRow ? DATA_LEAVES.filter(l =>
+    l.userId === u.id && l.type === 'personal-car' && l.status === 'approved' &&
+    l.dateFrom >= startStr && l.dateFrom <= endStr &&
+    !isCompanyTripDay(l.dateFrom)
+  ).length : 0;
+
+  return { work, lateCount, lateMin, annual, sick, upcountry, earlyCount, lateNightCount, otDays, pcCount, startStr, endStr };
+}
+
+function renderReports() {
+  if (reportsViewMode === 'yearly') renderReportsYearly();
+  else renderReportsMonthly();
+}
+
+function fmtDuration(totalMinutes) {
+  const WORK_MINS = 480; // 8h = 1 working day
+  const d = Math.floor(totalMinutes / WORK_MINS);
+  const rem = totalMinutes % WORK_MINS;
+  const h = Math.floor(rem / 60);
+  const m = rem % 60;
+  const parts = [];
+  if (currentLang === 'ja') {
+    if (d > 0) parts.push(`${d}日`);
+    if (h > 0) parts.push(`${h}時間`);
+    if (m > 0) parts.push(`${m}分`);
+    return parts.length ? parts.join(' ') : '0分';
+  }
+  if (d > 0) parts.push(L(`${d}d`, `${d} วัน`));
+  if (h > 0) parts.push(L(`${h}h`, `${h} ชั่วโมง`));
+  if (m > 0) parts.push(L(`${m}m`, `${m} นาที`));
+  return parts.length ? parts.join(' ') : L('0m', '0 นาที');
+}
+
+function renderReportsMonthly() {
+  const tbody = document.getElementById('reports-tbody');
+  if (!tbody) return;
+  applyReportsViewStyle();
+  tbody.innerHTML = '';
+  const role = currentUser.role;
+  const showPayslipBtn = isAccountingView();
+  // เงินเดือนสุทธิ: ไม่แสดงในหน้านี้ทุก role (ดูได้ในหน้าใบเงินเดือนโดยตรง)
+  const thSal = document.getElementById('th-report-salary');
+  const thBtn = document.getElementById('th-report-payslip-btn');
+  if (thSal) thSal.style.display = 'none';
+  if (thBtn) thBtn.style.display = showPayslipBtn ? '' : 'none';
+  const { start, end } = getPeriodBounds(selectedPeriodIndex);
+  DATA_USERS.filter(u => isEmployeeRecord(u) && u.active && u.role !== 'md').forEach(u => {
+    const s = computeReportPeriodStats(u, start, end, selectedPeriodIndex);
+
+    const lateCell       = s.lateCount > 0
+      ? `<span style="color:#dc2626;font-weight:700">${s.lateCount} ${L('times', 'ครั้ง')}</span>`
+      : '—';
+    const annualDisplay  = s.annual > 0 ? `${s.annual} ${L('days', 'วัน')}`  : '—';
+    const sickDisplay    = s.sick   > 0 ? `${s.sick} ${L('days', 'วัน')}`    : '—';
+    const upcountryDisplay = s.upcountry > 0 ? `<span class="badge badge-purple">${s.upcountry} ${L('times', 'ครั้ง')}</span>` : '—';
+    const earlyDisplay   = s.earlyCount > 0 ? `<span class="badge badge-amber">${s.earlyCount} ${L('times', 'ครั้ง')}</span>` : '—';
+    const lateNightDisp  = s.lateNightCount > 0 ? `<span class="badge badge-blue">${s.lateNightCount} ${L('times', 'ครั้ง')}</span>` : '—';
+    const otDisplay      = s.otDays > 0 ? `<span class="badge badge-success">${s.otDays} ${L('times', 'ครั้ง')}</span>` : '—';
+    const pcDisplay       = s.pcCount > 0 ? `<span class="badge" style="background:#fef3c7;color:#854d0e">${s.pcCount} ${L('times', 'ครั้ง')}</span>` : '—';
+
+    const tr = document.createElement('tr');
+    tr.className = 'report-row';
+    tr.style.cursor = 'pointer';
+    tr.onclick = () => showReportDetail(u.id);
+    tr.innerHTML = `
+      <td style="font-weight:600">${escapeHtml(u.name)}</td>
+      <td style="text-align:center">${s.work} ${L('days', 'วัน')}</td>
+      <td class="rpt-hide-mobile" style="text-align:center">${lateCell}</td>
+      <td class="rpt-hide-mobile" style="text-align:center">${annualDisplay}</td>
+      <td class="rpt-hide-mobile" style="text-align:center">${sickDisplay}</td>
+      <td class="col-hide-mobile" style="text-align:center">${upcountryDisplay}</td>
+      <td class="col-hide-mobile" style="text-align:center">${earlyDisplay}</td>
+      <td class="col-hide-mobile" style="text-align:center">${lateNightDisp}</td>
+      <td class="col-hide-mobile" style="text-align:center">${otDisplay}</td>
+      <td class="col-hide-mobile" style="text-align:center">${pcDisplay}</td>
+      <td class="rpt-hide-mobile no-print" style="display:${showPayslipBtn ? '' : 'none'}"><button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();navigateTo('payslip')">${L('View Payslip', 'ดูใบเงินเดือน')}</button></td>
+      <td class="rpt-show-mobile no-print" style="text-align:center;color:#94a3b8;font-size:18px;padding:0 8px">›</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+// รวมสถิติของ user คนเดียวตลอด 12 รอบ (ม.ค.-ธ.ค.) ของปีที่กำหนด -- ใช้ทั้งแถวสรุปในตารางรายปี
+// และ modal รายละเอียดรายปี (showReportDetailYearly)
+function computeReportYearlyStats(u, year) {
+  const indices = getYearPeriodIndices(year);
+  const totals = { work: 0, lateCount: 0, lateMin: 0, annual: 0, sick: 0, upcountry: 0, earlyCount: 0, lateNightCount: 0, otDays: 0, pcCount: 0 };
+  const periods = [];
+  indices.forEach(idx => {
+    const { start, end } = getPeriodBounds(idx);
+    const s = computeReportPeriodStats(u, start, end, idx);
+    periods.push({ idx, start, end, stats: s });
+    totals.work += s.work;
+    totals.lateCount += s.lateCount;
+    totals.lateMin += s.lateMin;
+    totals.annual += s.annual;
+    totals.sick += s.sick;
+    totals.upcountry += s.upcountry;
+    totals.earlyCount += s.earlyCount;
+    totals.lateNightCount += s.lateNightCount;
+    totals.otDays += s.otDays;
+    totals.pcCount += s.pcCount;
+  });
+  if (periods.length) {
+    totals.annualMin = computeLeaveMinutesInRange(u.id, 'annual', periods[0].stats.startStr, periods[periods.length - 1].stats.endStr);
+    totals.sickMin   = computeLeaveMinutesInRange(u.id, 'sick',   periods[0].stats.startStr, periods[periods.length - 1].stats.endStr);
+  } else {
+    totals.annualMin = 0;
+    totals.sickMin = 0;
+  }
+  return { totals, periods };
+}
+
+function renderReportsYearly() {
+  const tbody = document.getElementById('reports-tbody');
+  if (!tbody) return;
+  applyReportsViewStyle();
+  tbody.innerHTML = '';
+  const role = currentUser.role;
+  const showPayslipBtn = isAccountingView();
+  const thSal = document.getElementById('th-report-salary');
+  const thBtn = document.getElementById('th-report-payslip-btn');
+  if (thSal) thSal.style.display = 'none';
+  if (thBtn) thBtn.style.display = showPayslipBtn ? '' : 'none';
+
+  const year = selectedReportYear || new Date().getFullYear();
+  DATA_USERS.filter(u => isEmployeeRecord(u) && u.active && u.role !== 'md').forEach(u => {
+    const { totals: s } = computeReportYearlyStats(u, year);
+
+    const lateCell = s.lateCount > 0
+      ? `<span style="color:#dc2626;font-weight:700">${s.lateCount} ${L('times', 'ครั้ง')}</span> <span style="color:#94a3b8;font-size:12px">(${fmtHM(s.lateMin)})</span>`
+      : '—';
+    // นับ "วัน" แยกกับ "นาที" ได้เพราะลาแบบชั่วโมง (days=0) ก็สะสมนาทีได้โดยไม่นับวันเลย -- ต้องโชว์
+    // วงเล็บชั่วโมงแม้ annual/sick (จำนวนวัน) เป็น 0 ไม่งั้นพนักงานที่ลาแต่แบบชั่วโมงจะไม่เห็นยอดรวมเลย
+    const annualDisplay = s.annual > 0
+      ? `${s.annual} ${L('days', 'วัน')} <span style="color:#94a3b8;font-size:12px">(${fmtHM(s.annualMin)})</span>`
+      : (s.annualMin > 0 ? `<span style="color:#94a3b8;font-size:12px">(${fmtHM(s.annualMin)})</span>` : '—');
+    const sickDisplay = s.sick > 0
+      ? `${s.sick} ${L('days', 'วัน')} <span style="color:#94a3b8;font-size:12px">(${fmtHM(s.sickMin)})</span>`
+      : (s.sickMin > 0 ? `<span style="color:#94a3b8;font-size:12px">(${fmtHM(s.sickMin)})</span>` : '—');
+    const upcountryDisplay = s.upcountry > 0 ? `<span class="badge badge-purple">${s.upcountry} ${L('times', 'ครั้ง')}</span>` : '—';
+    const earlyDisplay   = s.earlyCount > 0 ? `<span class="badge badge-amber">${s.earlyCount} ${L('times', 'ครั้ง')}</span>` : '—';
+    const lateNightDisp  = s.lateNightCount > 0 ? `<span class="badge badge-blue">${s.lateNightCount} ${L('times', 'ครั้ง')}</span>` : '—';
+    const otDisplay      = s.otDays > 0 ? `<span class="badge badge-success">${s.otDays} ${L('times', 'ครั้ง')}</span>` : '—';
+    const pcDisplay       = s.pcCount > 0 ? `<span class="badge" style="background:#fef3c7;color:#854d0e">${s.pcCount} ${L('times', 'ครั้ง')}</span>` : '—';
+
+    const tr = document.createElement('tr');
+    tr.className = 'report-row';
+    tr.style.cursor = 'pointer';
+    tr.onclick = () => showReportDetailYearly(u.id, year);
+    tr.innerHTML = `
+      <td style="font-weight:600">${escapeHtml(u.name)}</td>
+      <td style="text-align:center">${s.work} ${L('days', 'วัน')}</td>
+      <td class="rpt-hide-mobile" style="text-align:center">${lateCell}</td>
+      <td class="rpt-hide-mobile" style="text-align:center">${annualDisplay}</td>
+      <td class="rpt-hide-mobile" style="text-align:center">${sickDisplay}</td>
+      <td class="col-hide-mobile" style="text-align:center">${upcountryDisplay}</td>
+      <td class="col-hide-mobile" style="text-align:center">${earlyDisplay}</td>
+      <td class="col-hide-mobile" style="text-align:center">${lateNightDisp}</td>
+      <td class="col-hide-mobile" style="text-align:center">${otDisplay}</td>
+      <td class="col-hide-mobile" style="text-align:center">${pcDisplay}</td>
+      <td class="rpt-hide-mobile no-print" style="display:${showPayslipBtn ? '' : 'none'}"></td>
+      <td class="rpt-show-mobile no-print" style="text-align:center;color:#94a3b8;font-size:18px;padding:0 8px">›</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+function closeLateDetail() {
+  const modal = document.getElementById('late-detail-modal');
+  if (modal) modal.classList.remove('show');
+}
+
+function showOTDetail(userId) {
+  const u = DATA_USERS.find(x => x.id === userId);
+  if (!u) return;
+  const { start, end } = getPeriodBounds(selectedPeriodIndex);
+  const pad2o = n => String(n).padStart(2,'0');
+  const startStr = `${start.getFullYear()}-${pad2o(start.getMonth()+1)}-${pad2o(start.getDate())}`;
+  const endStr   = `${end.getFullYear()}-${pad2o(end.getMonth()+1)}-${pad2o(end.getDate())}`;
+  const otLeaves = DATA_LEAVES.filter(l =>
+    l.userId === u.id && l.type === 'ot' && l.status === 'approved' &&
+    l.dateFrom >= startStr && l.dateFrom <= endStr &&
+    !isCompanyTripDay(l.dateFrom)
+  ).sort((a,b) => a.dateFrom.localeCompare(b.dateFrom));
+
+  const title = document.getElementById('ot-detail-title');
+  const body  = document.getElementById('ot-detail-body');
+  if (title) title.textContent = `⏱️ OT — ${u.name}`;
+
+  const fmtHrs = h => {
+    const wh = Math.floor(h), wm = Math.round((h - wh) * 60);
+    return currentLang === 'ja' ? (wm > 0 ? `${wh}時間${wm}分` : `${wh}時間`) : (wm > 0 ? L(`${wh}h ${wm}m`, `${wh} ชม. ${wm} น.`) : L(`${wh}h`, `${wh} ชม.`));
+  };
+  const TH  = (txt,c) => `<th style="padding:9px 14px;text-align:left;border-bottom:2px solid ${c};font-size:12px;font-weight:700;color:#64748b">${txt}</th>`;
+  const THC = (txt,c) => `<th style="padding:9px 14px;text-align:center;border-bottom:2px solid ${c};font-size:12px;font-weight:700;color:#64748b">${txt}</th>`;
+
+  let totalHrs = 0;
+  const rows = otLeaves.map(l => {
+    const hrs = l.otHours || 0;
+    totalHrs += hrs;
+    const mult = Number(l.otMultiplier) === 3 ? L('×3 (Holiday)', '×3 (วันหยุด)') : L('×1.5 (Weekday)', '×1.5 (วันธรรมดา)');
+    return `<tr style="border-bottom:1px solid #f1f5f9">
+      <td style="padding:10px 14px;font-weight:600">${fmtDate(new Date(l.dateFrom+'T12:00:00'))}</td>
+      <td style="padding:10px 14px;text-align:center;color:#ea580c;font-weight:700">${fmtHrs(hrs)}</td>
+      <td style="padding:10px 14px;text-align:center;font-size:12px;color:#64748b">${mult}</td>
+      <td style="padding:10px 14px;text-align:center;color:#374151">${escapeHtml(l.otEndTime) || '—'}</td>
+    </tr>`;
+  }).join('');
+
+  let html = `<div style="padding:12px 16px 6px;font-weight:700;font-size:13px;color:#c2410c;background:#fff7ed;border-bottom:1px solid #fed7aa">⏱️ OT — ${otLeaves.length} ${L('days', 'วัน')}</div>
+  <table style="width:100%;border-collapse:collapse;font-size:14px">
+    <thead><tr style="background:#fffbf7">
+      ${TH(L('Date','วันที่'),'#fed7aa')}${THC(L('OT Hours','ชั่วโมง OT'),'#fed7aa')}${THC(L('Rate','อัตรา'),'#fed7aa')}${THC(L('End Work','เลิกงาน'),'#fed7aa')}
+    </tr></thead>
+    <tbody>${rows}</tbody>
+    <tfoot><tr style="background:#fff7ed">
+      <td colspan="1" style="padding:9px 14px;font-weight:700;color:#c2410c">${L('Total','รวม')}</td>
+      <td style="padding:9px 14px;text-align:center;font-weight:700;color:#ea580c">${fmtHrs(totalHrs)}</td>
+      <td colspan="2"></td>
+    </tr></tfoot>
+  </table>`;
+
+  if (body) body.innerHTML = html;
+  const modal = document.getElementById('ot-detail-modal');
+  if (modal) modal.classList.add('show');
+}
+
+function closeOTDetail() {
+  const modal = document.getElementById('ot-detail-modal');
+  if (modal) modal.classList.remove('show');
+}
+
+// ตารางรายละเอียดรายวัน (มาสาย / ลา / Early / Late Night / OT / รถส่วนตัว)
+// ใช้ร่วมกันทั้ง modal รายเดือนและรายปี — ต่างกันแค่ชุด days + ช่วงวันที่ที่ส่งเข้ามา
+function buildReportDetailTables(u, days, startStr, endStr) {
+  const STD_START_MIN = (APP_SETTINGS.workSchedule?.standardStartHour ?? 8) * 60 + (APP_SETTINGS.workSchedule?.standardStartMinute ?? 30);
+  const fmtLate = min => currentLang === 'ja' ? (min < 60 ? `${min}分` : `${Math.floor(min/60)}時間${min%60}分`) : (min < 60 ? L(`${min}m`, `${min} น.`) : L(`${Math.floor(min/60)}h ${min%60}m`, `${Math.floor(min/60)} ชม. ${min%60} น.`));
+  const fmtHrs  = h => { const wh=Math.floor(h),wm=Math.round((h-wh)*60); return currentLang==='ja'?(wm>0?`${wh}時間${wm}分`:`${wh}時間`):(wm>0?L(`${wh}h ${wm}m`,`${wh} ชม. ${wm} น.`):L(`${wh}h`,`${wh} ชม.`)); };
+  const leaveLabel = { 'leave-annual':L('🏖️ Annual Leave','🏖️ ลาพักร้อน'),'leave-sick':L('🤒 Sick Leave','🤒 ลาป่วย'),'leave-business':L('📋 Business Leave','📋 ลากิจ') };
+  const TH  = (txt,c) => `<th style="padding:9px 14px;text-align:left;border-bottom:2px solid ${c};font-size:12px;font-weight:700;color:#64748b">${txt}</th>`;
+  const THC = (txt,c) => `<th style="padding:9px 14px;text-align:center;border-bottom:2px solid ${c};font-size:12px;font-weight:700;color:#64748b">${txt}</th>`;
+  const canEarlyLateRpt   = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'earlyLate');
+  const canOTRpt          = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'ot');
+  const canPersonalCarRpt = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'personalCar') && u.personalCarEligible === true;
+  const isDriverU = u.role === 'driver';
+  const otLeaves = canOTRpt ? DATA_LEAVES.filter(l=>l.userId===u.id&&l.type==='ot'&&l.status==='approved'&&l.dateFrom>=startStr&&l.dateFrom<=endStr&&!isCompanyTripDay(l.dateFrom)) : [];
+  const pcLeaves = canPersonalCarRpt ? DATA_LEAVES.filter(l=>l.userId===u.id&&l.type==='personal-car'&&l.status==='approved'&&l.dateFrom>=startStr&&l.dateFrom<=endStr&&!isCompanyTripDay(l.dateFrom)) : [];
+  const pcCount  = pcLeaves.length;
+  const pcTotal  = pcLeaves.reduce((sum,l)=>sum+(l.personalCarRate!=null?l.personalCarRate:(APP_SETTINGS.allowances.personalCar!=null?APP_SETTINGS.allowances.personalCar:1000)),0);
+
+  let html = '';
+
+  const lateDays = isDriverU ? [] : days.filter(d=>d.status==='late'&&d.checkIn);
+  if (lateDays.length>0) {
+    const totalMin=lateDays.reduce((s,d)=>{const[h,m]=d.checkIn.split(':').map(Number);return s+Math.max(0,h*60+m-lateReferenceMin(d, STD_START_MIN));},0);
+    html+=`<div style="padding:10px 16px 6px;font-weight:700;font-size:13px;color:#991b1b;background:#fef2f2;border-top:2px solid #e2e8f0;border-bottom:1px solid #fecaca">🕐 ${L('Late','มาสาย')} — ${lateDays.length} ${L('times','ครั้ง')}</div>
+    <table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:#fef9f9">${TH(L('Date','วันที่'),'#fecaca')}${THC(L('Check In','เวลาเข้า'),'#fecaca')}${THC(L('How Late','สายเท่าไหร่'),'#fecaca')}</tr></thead>
+    <tbody>${lateDays.map(d=>{const[h,m]=d.checkIn.split(':').map(Number);const lateMin=Math.max(0,h*60+m-lateReferenceMin(d, STD_START_MIN));return`<tr style="border-bottom:1px solid #f1f5f9"><td style="padding:9px 14px;font-weight:600">${fmtDate(new Date(d.date+'T12:00:00'))}</td><td style="padding:9px 14px;text-align:center">${escapeHtml(d.checkIn)}</td><td style="padding:9px 14px;text-align:center;color:#dc2626;font-weight:700">${fmtLate(lateMin)}</td></tr>`;}).join('')}</tbody>
+    <tfoot><tr style="background:#fef2f2"><td colspan="2" style="padding:8px 14px;font-weight:700;color:#991b1b">${L('Total','รวม')}</td><td style="padding:8px 14px;text-align:center;font-weight:700;color:#dc2626">${fmtLate(totalMin)}</td></tr></tfoot></table>`;
+  }
+
+  const leaveDays=days.filter(d=>leaveLabel[d.status]);
+  if (leaveDays.length>0) {
+    html+=`<div style="padding:10px 16px 6px;font-weight:700;font-size:13px;color:#5b21b6;background:#f5f3ff;border-top:2px solid #e2e8f0;border-bottom:1px solid #ddd6fe">📅 ${L('Leave','วันลา')} — ${leaveDays.length} ${L('days','วัน')}</div>
+    <table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:#faf9ff">${TH(L('Date','วันที่'),'#ddd6fe')}${THC(L('Leave Type','ประเภทการลา'),'#ddd6fe')}</tr></thead>
+    <tbody>${leaveDays.map(d=>`<tr style="border-bottom:1px solid #f1f5f9"><td style="padding:9px 14px;font-weight:600">${fmtDate(new Date(d.date+'T12:00:00'))}</td><td style="padding:9px 14px;text-align:center">${leaveLabel[d.status]}</td></tr>`).join('')}</tbody></table>`;
+  }
+
+  const _rdA = APP_SETTINGS.allowances || {};
+  const earlyThr1 = _rdA.earlyThreshold1Min || 450;
+  const earlyThr2 = _rdA.earlyThreshold2Min || 390;
+  const lnThr2 = _rdA.lateNightThreshold2Hour || _rdA.lateNightThresholdHour || 20;
+  const earlyDays=canEarlyLateRpt?days.filter(d=>{if(!d.checkIn||(d.status!=='present'&&d.status!=='late')||!isDeviceScanSource(d.checkInSource))return false;const[h,m]=d.checkIn.split(':').map(Number);return h*60+m<=earlyThr1;}):[];
+  if (earlyDays.length>0) {
+    let tot=0;
+    const rows=earlyDays.map(d=>{const[h,m]=d.checkIn.split(':').map(Number);const p=h*60+m<=earlyThr2?2:1;tot+=p;return`<tr style="border-bottom:1px solid #f1f5f9"><td style="padding:9px 14px;font-weight:600">${fmtDate(new Date(d.date+'T12:00:00'))}</td><td style="padding:9px 14px;text-align:center">${escapeHtml(d.checkIn)}</td><td style="padding:9px 14px;text-align:center;color:#d97706;font-weight:700">${p} ${L('times','ครั้ง')}</td></tr>`;}).join('');
+    html+=`<div style="padding:10px 16px 6px;font-weight:700;font-size:13px;color:#92400e;background:#fffbeb;border-top:2px solid #e2e8f0;border-bottom:1px solid #fde68a">🌅 ${t('rpt_early')} — ${tot} ${L('times','ครั้ง')}</div>
+    <table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:#fefdf0">${TH(L('Date','วันที่'),'#fde68a')}${THC(L('Check In','เวลาเข้า'),'#fde68a')}${THC(L('Count','จำนวนครั้ง'),'#fde68a')}</tr></thead><tbody>${rows}</tbody>
+    <tfoot><tr style="background:#fffbeb"><td colspan="2" style="padding:8px 14px;font-weight:700;color:#92400e">${L('Total','รวม')}</td><td style="padding:8px 14px;text-align:center;font-weight:700;color:#d97706">${tot} ${L('times','ครั้ง')}</td></tr></tfoot></table>`;
+  }
+
+  const lnDays=canEarlyLateRpt?days.filter(d=>d.lateOut&&d.lateApproved&&d.status!=='company-trip'&&isDeviceScanSource(d.checkOutSource)):[];
+  if (lnDays.length>0) {
+    let tot=0;
+    const rows=lnDays.map(d=>{const p=parseInt(d.lateOut)>=lnThr2?2:1;tot+=p;return`<tr style="border-bottom:1px solid #f1f5f9"><td style="padding:9px 14px;font-weight:600">${fmtDate(new Date(d.date+'T12:00:00'))}</td><td style="padding:9px 14px;text-align:center">${escapeHtml(d.lateOut)}</td><td style="padding:9px 14px;text-align:center;color:#1d4ed8;font-weight:700">${p} ${L('times','ครั้ง')}</td></tr>`;}).join('');
+    html+=`<div style="padding:10px 16px 6px;font-weight:700;font-size:13px;color:#1e40af;background:#eff6ff;border-top:2px solid #e2e8f0;border-bottom:1px solid #bfdbfe">🌙 ${t('rpt_latenight')} — ${tot} ${L('times','ครั้ง')}</div>
+    <table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:#f0f7ff">${TH(L('Date','วันที่'),'#bfdbfe')}${THC(L('Check Out','เวลาออก'),'#bfdbfe')}${THC(L('Count','จำนวนครั้ง'),'#bfdbfe')}</tr></thead><tbody>${rows}</tbody>
+    <tfoot><tr style="background:#eff6ff"><td colspan="2" style="padding:8px 14px;font-weight:700;color:#1e40af">${L('Total','รวม')}</td><td style="padding:8px 14px;text-align:center;font-weight:700;color:#1d4ed8">${tot} ${L('times','ครั้ง')}</td></tr></tfoot></table>`;
+  }
+
+  if (otLeaves.length>0) {
+    let tot=0;
+    const rows=otLeaves.sort((a,b)=>a.dateFrom.localeCompare(b.dateFrom)).map(l=>{const h=l.otHours||0;tot+=h;const om=Number(l.otMultiplier);const mult=om===3?L('×3 (Holiday)','×3 (วันหยุด)'):om===2?L('×2 (Holiday)','×2 (วันหยุด)'):L('×1.5 (Weekday)','×1.5 (วันธรรมดา)');return`<tr style="border-bottom:1px solid #f1f5f9"><td style="padding:9px 14px;font-weight:600">${fmtDate(new Date(l.dateFrom+'T12:00:00'))}</td><td style="padding:9px 14px;text-align:center;color:#ea580c;font-weight:700">${fmtHrs(h)}</td><td style="padding:9px 14px;text-align:center;font-size:12px;color:#64748b">${mult}</td></tr>`;}).join('');
+    html+=`<div style="padding:10px 16px 6px;font-weight:700;font-size:13px;color:#c2410c;background:#fff7ed;border-top:2px solid #e2e8f0;border-bottom:1px solid #fed7aa">⏱️ OT — ${otLeaves.length} ${L('days','วัน')}</div>
+    <table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:#fffbf7">${TH(L('Date','วันที่'),'#fed7aa')}${THC(L('OT Hours','ชั่วโมง OT'),'#fed7aa')}${THC(L('Rate','อัตรา'),'#fed7aa')}</tr></thead><tbody>${rows}</tbody>
+    <tfoot><tr style="background:#fff7ed"><td style="padding:8px 14px;font-weight:700;color:#c2410c">${L('Total','รวม')}</td><td style="padding:8px 14px;text-align:center;font-weight:700;color:#ea580c">${fmtHrs(tot)}</td><td></td></tr></tfoot></table>`;
+  }
+
+  if (pcLeaves.length > 0) {
+    const rows = pcLeaves.sort((a,b)=>a.dateFrom.localeCompare(b.dateFrom)).map(l=>
+      `<tr style="border-bottom:1px solid #f1f5f9"><td style="padding:9px 14px;font-weight:600">${fmtDate(new Date(l.dateFrom+'T12:00:00'))}</td><td style="padding:9px 14px;text-align:center;color:#854d0e;font-weight:700">฿${Number(l.personalCarRate!=null?l.personalCarRate:(APP_SETTINGS.allowances.personalCar!=null?APP_SETTINGS.allowances.personalCar:1000)).toLocaleString()}</td><td style="padding:9px 14px;text-align:center;font-size:12px;color:#64748b">${escapeHtml(l.reason||'—')}</td></tr>`
+    ).join('');
+    html += `<div style="padding:10px 16px 6px;font-weight:700;font-size:13px;color:#854d0e;background:#fefce8;border-top:2px solid #e2e8f0;border-bottom:1px solid #fde68a">🚙 ${L('Personal Car','รถส่วนตัว')} — ${pcCount} ${L('times','ครั้ง')}</div>
+    <table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:#fffef0">${TH(L('Date','วันที่'),'#fde68a')}${THC(L('Amount','ยอด'),'#fde68a')}${THC(L('Reason','เหตุผล'),'#fde68a')}</tr></thead><tbody>${rows}</tbody>
+    <tfoot><tr style="background:#fefce8"><td style="padding:8px 14px;font-weight:700;color:#854d0e">${L('Total','รวม')}</td><td style="padding:8px 14px;text-align:center;font-weight:700;color:#854d0e">฿${pcTotal.toLocaleString()}</td><td></td></tr></tfoot></table>`;
+  }
+
+  return html;
+}
+
+function showReportDetail(userId) {
+  const u = DATA_USERS.find(x => x.id === userId);
+  if (!u) return;
+  const { start, end } = getPeriodBounds(selectedPeriodIndex);
+  const days = generatePeriodDays(start, end, selectedPeriodIndex === 0, u.id);
+
+  // Compute all stats
+  // 2026-07-31: all six replaced from hardcoded isDriver/isAcctMkt checks with the settings-
+  // driven eligibility table (see server.js computePayroll() for the actual pay-affecting
+  // gate; this modal must show the SAME truth, not its own separate role rule -- previously
+  // this zeroed upcountry/early/late for drivers even though computePayroll() never excluded
+  // them, so a driver's real Early Morning pay was invisible here. Fixed by reading the same
+  // config computePayroll() uses, per the 2026-07-31 decision to keep pay-neutral and let the
+  // report tell the truth rather than changing what anyone is paid).
+  const canUpcountryRpt   = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'upcountry');
+  const canEarlyLateRpt   = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'earlyLate');
+  const canOTRpt          = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'ot');
+  const canLongDistRpt    = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'longDistance');
+  const canPersonalCarRpt = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'personalCar') && u.personalCarEligible === true;
+  const isDriverU = u.role === 'driver';
+  const work      = days.filter(d => d.status==='present'||d.status==='late'||d.status==='not-clocked-in').length;
+  const lateCount = isDriverU ? 0 : days.filter(d => d.status==='late' && d.checkIn).length;
+  const annual    = days.filter(d => d.status==='leave-annual').length;
+  const sick      = days.filter(d => d.status==='leave-sick').length;
+  const upcountry   = canUpcountryRpt ? days.filter(d => d.upcountry && d.status !== 'company-trip').length : 0;
+  const _rdSA=APP_SETTINGS.allowances; let earlyCount=0; if (canEarlyLateRpt) days.filter(d=>d.checkIn&&(d.status==='present'||d.status==='late')&&isDeviceScanSource(d.checkInSource)).forEach(d=>{const[h,m]=d.checkIn.split(':').map(Number);const mins=h*60+m;const p=mins<=(_rdSA.earlyThreshold2Min||390)?2:mins<=(_rdSA.earlyThreshold1Min||450)?1:0;earlyCount+=p;});
+  const _cardLn2=APP_SETTINGS.allowances.lateNightThreshold2Hour||APP_SETTINGS.allowances.lateNightThresholdHour||20;
+  let lateNightCount=0; if (canEarlyLateRpt) days.filter(d=>d.lateOut&&d.lateApproved&&d.status!=='company-trip'&&isDeviceScanSource(d.checkOutSource)).forEach(d=>{lateNightCount+=parseInt(d.lateOut)>=_cardLn2?2:1;});
+  const pad2=(n)=>String(n).padStart(2,'0');
+  const startStr=`${start.getFullYear()}-${pad2(start.getMonth()+1)}-${pad2(start.getDate())}`;
+  const endStr  =`${end.getFullYear()}-${pad2(end.getMonth()+1)}-${pad2(end.getDate())}`;
+  const otLeaves = canOTRpt ? DATA_LEAVES.filter(l=>l.userId===u.id&&l.type==='ot'&&l.status==='approved'&&l.dateFrom>=startStr&&l.dateFrom<=endStr&&!isCompanyTripDay(l.dateFrom)) : [];
+  const otDays   = otLeaves.length;
+  const ldLeaves = canLongDistRpt ? DATA_LEAVES.filter(l=>l.userId===u.id&&l.type==='long-distance'&&l.status==='approved'&&l.dateFrom>=startStr&&l.dateFrom<=endStr&&!isCompanyTripDay(l.dateFrom)) : [];
+  const ldCount  = ldLeaves.length;
+  const pcLeaves = canPersonalCarRpt ? DATA_LEAVES.filter(l=>l.userId===u.id&&l.type==='personal-car'&&l.status==='approved'&&l.dateFrom>=startStr&&l.dateFrom<=endStr&&!isCompanyTripDay(l.dateFrom)) : [];
+  const pcCount  = pcLeaves.length;
+
+  // Summary stats grid
+  const sb = (icon,label,val,color) =>
+    `<div style="text-align:center;padding:10px 6px;background:#f8fafc;border-radius:10px">
+      <div style="font-size:18px">${icon}</div>
+      <div style="font-size:16px;font-weight:800;color:${color};line-height:1.2">${val}</div>
+      <div style="font-size:10px;color:#94a3b8;margin-top:2px">${label}</div>
+    </div>`;
+
+  let html = `
+    <div style="padding:14px 18px;background:linear-gradient(135deg,#1e3a5f,#2563eb);color:white">
+      <div style="font-weight:700;font-size:16px">${escapeHtml(u.name)}</div>
+      <div style="font-size:12px;opacity:0.8;margin-top:2px">${escapeHtml(u.position)} — ${L('Period', 'รอบ')} ${getPeriodLabel(start,end)}</div>
+    </div>
+    <div class="rpt-stat-grid">
+      ${sb('📅',L('Work Days','วันทำงาน'),work+' '+L('days','วัน'),'#059669')}
+      ${sb('⏰',L('Late','มาสาย'),lateCount>0?lateCount+' '+L('times','ครั้ง'):'—','#dc2626')}
+      ${sb('🏖️',L('Annual','ลาพักร้อน'),annual>0?annual+' '+L('days','วัน'):'—','#2563eb')}
+      ${sb('🤒',L('Sick','ลาป่วย'),sick>0?sick+' '+L('days','วัน'):'—','#dc2626')}
+      ${canUpcountryRpt ? sb('🗺️',L('Upcountry','Upcountry'),upcountry>0?upcountry+' '+L('times','ครั้ง'):'—','#7c3aed') : ''}
+      ${canEarlyLateRpt ? sb('🌅', t('rpt_early'),earlyCount>0?earlyCount+' '+L('times','ครั้ง'):'—','#d97706') : ''}
+      ${canEarlyLateRpt ? sb('🌙', t('rpt_latenight'),lateNightCount>0?lateNightCount+' '+L('times','ครั้ง'):'—','#1d4ed8') : ''}
+      ${canOTRpt ? sb('⏱️','OT',otDays>0?otDays+' '+L('days','วัน'):'—','#ea580c') : ''}
+      ${canLongDistRpt ? sb('🚗','Long Distance',ldCount>0?ldCount+' '+L('times','ครั้ง'):'—','#0369a1') : ''}
+      ${canPersonalCarRpt ? sb('🚙',L('Personal Car','รถส่วนตัว'),pcCount>0?pcCount+' '+L('times','ครั้ง'):'—','#854d0e') : ''}
+    </div>`;
+
+  html += buildReportDetailTables(u, days, startStr, endStr);
+
+  if (!html.includes('<table')) html += `<p style="text-align:center;padding:28px;color:#94a3b8">${L('No data for this period', 'ไม่มีข้อมูลในรอบนี้')}</p>`;
+
+  const title = document.getElementById('late-detail-title');
+  const body  = document.getElementById('late-detail-body');
+  if (title) title.textContent = `📋 ${u.name}`;
+  if (body)  body.innerHTML = html;
+  document.getElementById('late-detail-modal')?.classList.add('show');
+}
+
+// รายละเอียดรายปี — คลิกแถวในตารางรายปี: ยอดรวมทั้งปี + ตารางรายรอบ + ตารางรายวันแบบเดียวกับรายเดือน
+// (มาสาย / ลา / Early / Late Night / OT / รถส่วนตัว) รวมทั้งปี
+function showReportDetailYearly(userId, year) {
+  const u = DATA_USERS.find(x => x.id === userId);
+  if (!u) return;
+  const { totals: s, periods } = computeReportYearlyStats(u, year);
+
+  const canUpcountryRpt   = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'upcountry');
+  const canEarlyLateRpt   = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'earlyLate');
+  const canOTRpt          = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'ot');
+  const canLongDistRpt    = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'longDistance');
+  const canPersonalCarRpt = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'personalCar') && u.personalCarEligible === true;
+  const yearStartStr = periods[0]?.stats.startStr;
+  const yearEndStr   = periods.length ? periods[periods.length - 1].stats.endStr : '';
+  const ldCount = (canLongDistRpt && yearStartStr) ? DATA_LEAVES.filter(l =>
+    l.userId === u.id && l.type === 'long-distance' && l.status === 'approved' &&
+    l.dateFrom >= yearStartStr && l.dateFrom <= yearEndStr && !isCompanyTripDay(l.dateFrom)
+  ).length : 0;
+
+  const sb = (icon, label, val, color) =>
+    `<div style="text-align:center;padding:10px 6px;background:#f8fafc;border-radius:10px">
+      <div style="font-size:18px">${icon}</div>
+      <div style="font-size:16px;font-weight:800;color:${color};line-height:1.2">${val}</div>
+      <div style="font-size:10px;color:#94a3b8;margin-top:2px">${label}</div>
+    </div>`;
+
+  let html = `
+    <div style="padding:14px 18px;background:linear-gradient(135deg,#1e3a5f,#2563eb);color:white">
+      <div style="font-weight:700;font-size:16px">${escapeHtml(u.name)}</div>
+      <div style="font-size:12px;opacity:0.8;margin-top:2px">${escapeHtml(u.position)} — ${L('Year', 'ปี')} ${year}</div>
+    </div>
+    <div class="rpt-stat-grid">
+      ${sb('📅', L('Work Days', 'วันทำงาน'), s.work + ' ' + L('days', 'วัน'), '#059669')}
+      ${sb('⏰', L('Late', 'มาสาย'), s.lateCount > 0 ? s.lateCount + ' ' + L('times', 'ครั้ง') + ' (' + fmtHM(s.lateMin) + ')' : '—', '#dc2626')}
+      ${sb('🏖️', L('Annual', 'ลาพักร้อน'), s.annual > 0 ? s.annual + ' ' + L('days', 'วัน') + ' (' + fmtHM(s.annualMin) + ')' : (s.annualMin > 0 ? '(' + fmtHM(s.annualMin) + ')' : '—'), '#2563eb')}
+      ${sb('🤒', L('Sick', 'ลาป่วย'), s.sick > 0 ? s.sick + ' ' + L('days', 'วัน') + ' (' + fmtHM(s.sickMin) + ')' : (s.sickMin > 0 ? '(' + fmtHM(s.sickMin) + ')' : '—'), '#dc2626')}
+      ${canUpcountryRpt ? sb('🗺️', L('Upcountry', 'Upcountry'), s.upcountry > 0 ? s.upcountry + ' ' + L('times', 'ครั้ง') : '—', '#7c3aed') : ''}
+      ${canEarlyLateRpt ? sb('🌅', t('rpt_early'), s.earlyCount > 0 ? s.earlyCount + ' ' + L('times', 'ครั้ง') : '—', '#d97706') : ''}
+      ${canEarlyLateRpt ? sb('🌙', t('rpt_latenight'), s.lateNightCount > 0 ? s.lateNightCount + ' ' + L('times', 'ครั้ง') : '—', '#1d4ed8') : ''}
+      ${canOTRpt ? sb('⏱️', 'OT', s.otDays > 0 ? s.otDays + ' ' + L('days', 'วัน') : '—', '#ea580c') : ''}
+      ${canLongDistRpt ? sb('🚗', 'Long Distance', ldCount > 0 ? ldCount + ' ' + L('times', 'ครั้ง') : '—', '#0369a1') : ''}
+      ${canPersonalCarRpt ? sb('🚙', L('Personal Car', 'รถส่วนตัว'), s.pcCount > 0 ? s.pcCount + ' ' + L('times', 'ครั้ง') : '—', '#854d0e') : ''}
+    </div>`;
+
+  if (periods.length) {
+    // ⚠️ tfoot ใช้ background:#f8fafc คงที่ (ไม่ปรับตามธีม) -- ต้องใส่ color บน <td> โดยตรง (ไม่ใช่ <tr>)
+    // เพราะ [data-theme="dark"] table td { color: var(--text) } specificity สูงกว่า inherited color
+    // จาก parent เสมอ ไม่งั้นตัวเลขรวมจะเป็นสีขาวเกือบขาวบนพื้นเกือบขาวในโหมดมืด (มองไม่เห็น)
+    const TH  = (txt, c) => `<th style="padding:8px 10px;text-align:left;border-bottom:2px solid ${c};font-size:11px;font-weight:700;color:#64748b;white-space:nowrap">${txt}</th>`;
+    const THC = (txt, c) => `<th style="padding:8px 10px;text-align:center;border-bottom:2px solid ${c};font-size:11px;font-weight:700;color:#64748b;white-space:nowrap">${txt}</th>`;
+    const TDC = v => `<td style="padding:7px 10px;text-align:center;font-size:12px;white-space:nowrap">${v}</td>`;
+    const TDF = v => `<td style="padding:8px 10px;text-align:center;font-size:12px;color:#1e293b;white-space:nowrap">${v}</td>`;
+    const rows = periods.map(p => {
+      const ps = p.stats;
+      const label = `${_monthShort()[p.end.getMonth()]} ${p.end.getFullYear()}`;
+      return `<tr style="border-bottom:1px solid #f1f5f9">
+        <td style="padding:7px 10px;font-weight:600;font-size:12px;white-space:nowrap">${label}</td>
+        ${TDC(ps.work)}
+        ${TDC(ps.lateCount > 0 ? ps.lateCount : '—')}
+        ${TDC(ps.annual > 0 ? ps.annual : '—')}
+        ${TDC(ps.sick > 0 ? ps.sick : '—')}
+        ${canUpcountryRpt ? TDC(ps.upcountry > 0 ? ps.upcountry : '—') : ''}
+        ${canEarlyLateRpt ? TDC(ps.earlyCount > 0 ? ps.earlyCount : '—') : ''}
+        ${canEarlyLateRpt ? TDC(ps.lateNightCount > 0 ? ps.lateNightCount : '—') : ''}
+        ${canOTRpt ? TDC(ps.otDays > 0 ? ps.otDays : '—') : ''}
+        ${canPersonalCarRpt ? TDC(ps.pcCount > 0 ? ps.pcCount : '—') : ''}
+      </tr>`;
+    }).join('');
+    html += `<div style="padding:10px 16px 6px;font-weight:700;font-size:13px;color:#374151;background:#f8fafc;border-top:2px solid #e2e8f0;border-bottom:1px solid #e2e8f0">📆 ${L('Period Detail', 'รายละเอียดรายรอบ')}</div>
+    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse">
+      <thead><tr style="background:#f8fafc">
+        ${TH(L('Period', 'รอบ'), '#e2e8f0')}
+        ${THC(L('Work Days', 'วันทำงาน'), '#e2e8f0')}
+        ${THC(L('Late', 'มาสาย'), '#e2e8f0')}
+        ${THC(L('Annual', 'ลาพักร้อน'), '#e2e8f0')}
+        ${THC(L('Sick', 'ลาป่วย'), '#e2e8f0')}
+        ${canUpcountryRpt ? THC(L('Upcountry', 'Upcountry'), '#e2e8f0') : ''}
+        ${canEarlyLateRpt ? THC(t('rpt_early'), '#e2e8f0') : ''}
+        ${canEarlyLateRpt ? THC(t('rpt_latenight'), '#e2e8f0') : ''}
+        ${canOTRpt ? THC('OT', '#e2e8f0') : ''}
+        ${canPersonalCarRpt ? THC(L('Personal Car', 'รถส่วนตัว'), '#e2e8f0') : ''}
+      </tr></thead>
+      <tbody>${rows}</tbody>
+      <tfoot><tr style="background:#f8fafc;font-weight:700">
+        <td style="padding:8px 10px;font-size:12px;color:#1e293b">${L('Total', 'รวม')}</td>
+        ${TDF(s.work)}
+        ${TDF(s.lateCount)}
+        ${TDF(s.annual)}
+        ${TDF(s.sick)}
+        ${canUpcountryRpt ? TDF(s.upcountry) : ''}
+        ${canEarlyLateRpt ? TDF(s.earlyCount) : ''}
+        ${canEarlyLateRpt ? TDF(s.lateNightCount) : ''}
+        ${canOTRpt ? TDF(s.otDays) : ''}
+        ${canPersonalCarRpt ? TDF(s.pcCount) : ''}
+      </tr></tfoot>
+    </table></div>`;
+
+    const yearDays = [];
+    periods.forEach(p => {
+      yearDays.push(...generatePeriodDays(p.start, p.end, p.idx === 0, u.id));
+    });
+    yearDays.sort((a, b) => String(a.date).localeCompare(String(b.date)));
+    const rangeStart = periods[0].stats.startStr;
+    const rangeEnd = periods[periods.length - 1].stats.endStr;
+    const detailHtml = buildReportDetailTables(u, yearDays, rangeStart, rangeEnd);
+    if (detailHtml) {
+      html += `<div style="padding:10px 16px 6px;font-weight:700;font-size:13px;color:#1e3a5f;background:#eff6ff;border-top:2px solid #e2e8f0;border-bottom:1px solid #bfdbfe">📋 ${L('Full-year detail', 'รายละเอียดทั้งปี')}</div>` + detailHtml;
+    }
+  } else {
+    html += `<p style="text-align:center;padding:28px;color:#94a3b8">${L('No data for this year', 'ไม่มีข้อมูลสำหรับปีนี้')}</p>`;
+  }
+
+  const title = document.getElementById('late-detail-title');
+  const body  = document.getElementById('late-detail-body');
+  if (title) title.textContent = `📋 ${u.name} — ${year}`;
+  if (body)  body.innerHTML = html;
+  document.getElementById('late-detail-modal')?.classList.add('show');
+}
+
+// ===== PAYROLL ENGINE (single source of truth for all payroll calculations) =====
+function computePayroll(user, start, end, periodIndex) {
+  const S = APP_SETTINGS;
+  const base = user.salary || 0;
+  const transport = user.transport || 0;
+  const posAllowance = user.positionAllowance || 0;
+  const housingAllowance = user.housing || 0;
+  // 2026-07-31: phone allowance centralized (Settings -> Allowance Rates -> Phone) and gated on
+  // role eligibility AND the per-employee flag, mirroring personalCar. Previously this read
+  // user.allowance3 raw with no gate of any kind. Flag is named phoneAllowanceEligible, not
+  // phoneEligible, because user.phone is already the employee's phone NUMBER.
+  // `!= null` not `||`: an admin deliberately zeroing the central rate must yield 0, not fall
+  // back to 1000 (same footgun fixed in personalCarTotal below).
+  const phoneEligible = isAllowanceEligible(S.allowanceEligibility, user.role, 'phone') &&
+    user.phoneAllowanceEligible === true;
+  const allowance3val = phoneEligible
+    ? (S.allowances.phone != null ? S.allowances.phone : 1000) : 0;
+
+  const finKey = getFinalizeKey(start, user.id);
+  const diligencePaidThisPeriod = finalizeData[finKey]?.diligencePaid !== false;
+  // 2026-07-31: role gate moved from UI-only (Finalize Payroll toggle visibility, payslip row
+  // visibility) into the calculation itself -- previously a non-eligible role with a stray
+  // nonzero user.diligenceAllowance would have been paid it silently, since this line only
+  // checked the finalize.json flag, never the role.
+  // 2026-07-31: amount now centralized (Settings -> Allowance Rates -> Diligence), not per-employee.
+  const diligenceAllowance = (diligencePaidThisPeriod && isAllowanceEligible(S.allowanceEligibility, user.role, 'diligence'))
+    ? (S.allowances.diligence || 0) : 0;
+
+  const isCurrent = periodIndex === 0;
+  const pDays = generatePeriodDays(start, end, isCurrent, user.id);
+
+  const canUpcountry = isAllowanceEligible(S.allowanceEligibility, user.role, 'upcountry');
+  const canEarlyLate = isAllowanceEligible(S.allowanceEligibility, user.role, 'earlyLate');
+  const canOT = isAllowanceEligible(S.allowanceEligibility, user.role, 'ot');
+
+  const upcountryCount = canUpcountry ? pDays.filter(d => d.upcountry && d.status !== 'company-trip').length : 0;
+
+  let earlyCount = 0, earlyLateBonus = 0, lateNightCount = 0;
+  // 2026-08-05 (Opus audit, M2): earlyCount/lateNightCount blend two different-rate tiers into
+  // one number each (a "very early" arrival adds 2 to earlyCount at rate earlyMorning2, a merely
+  // "early" one adds 1 at the different rate earlyMorning1; late-night is similar with
+  // lateNight1/lateNight2), so `allowance2 / (earlyCount+lateNightCount)` (the web Payslip page's
+  // former "Calculation Details" footnote) computed a meaningless blended rate that matched
+  // nothing in Settings. Tracked separately per tier here so that footnote can show each tier's
+  // REAL flat rate x its own real occurrence count -- both genuinely constant within a tier, so
+  // this breakdown is exact, not an approximation. Web-only (renderPayslip()'s Calculation
+  // Details); not mirrored to server.js's computePayroll() since server.js's payslipXlsx.js
+  // dropped this footnote section entirely (2026-08-02) and never reads these fields -- doesn't
+  // affect grossIncome/allowance2/any paid amount either way, purely additional diagnostic detail.
+  let early2Count = 0, early2Amount = 0, early1Count = 0, early1Amount = 0;
+  let lateNight2Count = 0, lateNight2Amount = 0, lateNight1Count = 0, lateNight1Amount = 0;
+  if (canEarlyLate) {
+    const _ln1Thr = S.allowances.lateNightThreshold1Hour || S.allowances.lateNightThresholdHour || 19;
+    const _ln2Thr = S.allowances.lateNightThreshold2Hour || S.allowances.lateNightThresholdHour || 20;
+    pDays.forEach(d => {
+      if (d.checkIn && (d.status === 'present' || d.status === 'late') && isDeviceScanSource(d.checkInSource)) {
+        const [h, m] = d.checkIn.split(':').map(Number);
+        const mins = h * 60 + m;
+        if (mins <= S.allowances.earlyThreshold2Min) { earlyCount += 2; earlyLateBonus += S.allowances.earlyMorning2; early2Count++; early2Amount += S.allowances.earlyMorning2; }
+        else if (mins <= S.allowances.earlyThreshold1Min) { earlyCount += 1; earlyLateBonus += S.allowances.earlyMorning1; early1Count++; early1Amount += S.allowances.earlyMorning1; }
+      }
+      if (d.lateOut && d.lateApproved && d.status !== 'company-trip' && isDeviceScanSource(d.checkOutSource)) {
+        const lnHr = parseInt(d.lateOut);
+        // 2026-08-16 (Opus audit M-8 + user confirmation): count matches Reports/Dashboard's
+        // definition (crossed the ×2 threshold counts as 2, since it also crossed the ×1
+        // threshold on the way) rather than a flat +1 per day -- display-only, does not affect
+        // earlyLateBonus/any paid amount either way.
+        if (lnHr >= _ln2Thr) { lateNightCount += 2; earlyLateBonus += S.allowances.lateNight2; lateNight2Count++; lateNight2Amount += S.allowances.lateNight2; }
+        else { lateNightCount += 1; earlyLateBonus += S.allowances.lateNight1; lateNight1Count++; lateNight1Amount += S.allowances.lateNight1; }
+      }
+    });
+  }
+
+  const pad2 = n => String(n).padStart(2, '0');
+  const periodStartStr = `${start.getFullYear()}-${pad2(start.getMonth()+1)}-${pad2(start.getDate())}`;
+  const periodEndStr   = `${end.getFullYear()}-${pad2(end.getMonth()+1)}-${pad2(end.getDate())}`;
+
+  const approvedOTs = canOT ? DATA_LEAVES.filter(l =>
+    l.userId === user.id && l.type === 'ot' && l.status === 'approved' &&
+    l.dateFrom >= periodStartStr && l.dateFrom <= periodEndStr &&
+    !isCompanyTripDay(l.dateFrom)
+  ) : [];
+
+  // 2026-07-31: now role-gated at the calc layer (previously ungated here -- only hidden
+  // downstream in renderPayslip()/payslipXlsx.js -- so an ineligible role with an approved
+  // long-distance leave record would have been paid it silently).
+  const approvedLD = isAllowanceEligible(S.allowanceEligibility, user.role, 'longDistance') ? DATA_LEAVES.filter(l =>
+    l.userId === user.id && l.type === 'long-distance' && l.status === 'approved' &&
+    l.dateFrom >= periodStartStr && l.dateFrom <= periodEndStr &&
+    !isCompanyTripDay(l.dateFrom)
+  ) : [];
+  const longDistanceCount = approvedLD.filter(l => (l.longDistanceAllowance || 0) > 0).length;
+  const longDistanceTotal = approvedLD.reduce((sum, l) => sum + (l.longDistanceAllowance || 0), 0);
+
+  // 2026-08-02: was gated on role eligibility only -- eligibility.personalCar (below) has
+  // always additionally required user.personalCarEligible===true, so a role-eligible-but-not-
+  // flagged employee's XLSX hid the row while grossIncome still silently included the money.
+  // Gate matches eligibility.personalCar exactly now. Mirrors identical fix in server.js.
+  const approvedPC = (isAllowanceEligible(S.allowanceEligibility, user.role, 'personalCar') && user.personalCarEligible === true) ? DATA_LEAVES.filter(l =>
+    l.userId === user.id && l.type === 'personal-car' && l.status === 'approved' &&
+    l.dateFrom >= periodStartStr && l.dateFrom <= periodEndStr &&
+    !isCompanyTripDay(l.dateFrom)
+  ) : [];
+  const personalCarCount = approvedPC.length;
+  // 2026-07-31 fix: `||` treats a legitimate 0 (ineligible/refused, or admin deliberately
+  // zeroing the rate) as "missing" and substitutes the fallback anyway. `!= null` only falls
+  // back when truly absent. Mirrors the identical fix in server.js.
+  const personalCarTotal = approvedPC.reduce((sum, l) =>
+    sum + (l.personalCarRate != null ? l.personalCarRate : (S.allowances.personalCar != null ? S.allowances.personalCar : 1000)), 0);
+
+  const hourlyRate = base / 30 / 8;
+  let otAmount = 0, otTotalHours = 0;
+  let ot15Amount = 0, ot15Hours = 0;
+  let ot20Amount = 0, ot20Hours = 0;
+  let ot30Amount = 0, ot30Hours = 0;
+  approvedOTs.forEach(l => {
+    const mult = Number(l.otMultiplier) || 1.5;
+    const hrs = l.otHours || 0;
+    const amt = Math.round(hourlyRate * mult * hrs);
+    otAmount += amt;
+    otTotalHours += hrs;
+    if (mult === 1.5)    { ot15Amount += amt; ot15Hours += hrs; }
+    else if (mult === 2) { ot20Amount += amt; ot20Hours += hrs; }
+    else if (mult === 3) { ot30Amount += amt; ot30Hours += hrs; }
+  });
+  // 2026-07-31: gated on canOT too -- previously this topped up OT hours even for a role with
+  // OT disabled entirely, since guaranteedOT sits outside the isAcctMkt-style check above.
+  const guaranteedOT = user.guaranteedOT || 0;
+  if (canOT && guaranteedOT > ot15Hours) {
+    const extraH = guaranteedOT - ot15Hours;
+    const extraA = Math.round(hourlyRate * 1.5 * extraH);
+    ot15Hours += extraH; ot15Amount += extraA; otAmount += extraA; otTotalHours += extraH;
+  }
+
+  const allowance1 = S.allowances.upcountry * upcountryCount;
+  const allowance2 = earlyLateBonus;
+  const grossIncome = base + transport + posAllowance + housingAllowance + diligenceAllowance +
+    allowance1 + allowance2 + allowance3val + otAmount + longDistanceTotal + personalCarTotal;
+
+  // SSO — rate and caps from APP_SETTINGS (updates when law changes)
+  // SECURITY/CORRECTNESS FIX 2026-08-17 (user report, dual-sync twin of server.js's copy): MD is
+  // exempt from SSO/SSF the same way they're already exempt from PVD just below -- had no role
+  // check at all before, only ever computed 0 for the live MD account by coincidence (their
+  // salary happens to sit under the threshold). MUST stay byte-identical with server.js.
+  const ssoRate = (S.sso.rate || 5) / 100;
+  const ssf = user.role === 'md' || base < (S.sso.minSalary || 1650)
+    ? 0
+    : Math.min(Math.round(base * ssoRate), S.sso.maxAmount || 875);
+
+  // PVD
+  const pvdRate = user.role === 'md' ? 0 : (user.pvdRate !== undefined ? user.pvdRate : 5);
+  const pvd = Math.round(base * pvdRate / 100);
+
+  // Progressive income tax (Thai ม.40(1)) — estimate only; Accounting can override before Confirm.
+  // 2026-08-23: annualize recurring pay only. Variable items (OT, one-off allowances, bonus,
+  // manual income) are added for THIS period and must not be ×12 — that over-withheld months
+  // with lots of OT and under-withheld months with a bonus.
+  const finRec = finalizeData[finKey] || {};
+  const bonusForPit = Number(finRec.bonus) || 0;
+  const manualIncomeForPit = (finRec.manualAllowances || []).reduce((s, ma) => s + (Number(ma.amount) || 0), 0);
+  const regularIncome = base + transport + posAllowance + housingAllowance + diligenceAllowance + allowance3val;
+  const variableIncome = allowance1 + allowance2 + otAmount + longDistanceTotal + personalCarTotal + bonusForPit + manualIncomeForPit;
+  const annualGross = regularIncome * 12 + variableIncome;
+  const expenseDeduct = Math.min(annualGross * 0.5, 100000);
+  const personalAllow = S.tax.personalAllowanceAnnual || 60000;
+  const annualTaxable = Math.max(0, annualGross - expenseDeduct - personalAllow - ssf * 12 - pvd * 12);
+  const autoPit = Math.round(calcAnnualTax(annualTaxable) / 12);
+
+  return {
+    base, transport, posAllowance, housingAllowance, diligenceAllowance,
+    allowance1, allowance2, allowance3: allowance3val,
+    otAmount, longDistanceTotal, personalCarTotal,
+    grossIncome, ssf, pvd, autoPit,
+    upcountryCount, earlyLateBonus, earlyCount, lateNightCount,
+    early2Count, early2Amount, early1Count, early1Amount, lateNight2Count, lateNight2Amount, lateNight1Count, lateNight1Amount,
+    ot15Amount, ot15Hours, ot20Amount, ot20Hours, ot30Amount, ot30Hours, otTotalHours,
+    longDistanceCount, personalCarCount,
+    approvedOTs, approvedLD, approvedPC,
+    periodStartStr, periodEndStr, hourlyRate, pDays
+  };
+}
+
+// ===== FREEZING PAID PAYROLL PERIODS (2026-08-01) =====
+// getSnapshotKey/deriveAttendanceCounts/getPayrollView must stay logically identical between
+// app.js and server.js -- same dual-sync standing rule as computePayroll() itself. Verify with a
+// diff before deploying either file (two documented, legitimate divergences: computePayroll()'s
+// own return shape already differs between the two files -- see the comment on this file's copy
+// -- and getPayrollView()'s `display` block below is filled straight from `calc` here since this
+// file's computePayroll() already returns the raw approved-leave arrays server.js's doesn't).
+function getSnapshotKey(periodStart, userId) {
+  const pad2 = n => String(n).padStart(2, '0');
+  return `snap_${periodStart.getFullYear()}${pad2(periodStart.getMonth() + 1)}${pad2(periodStart.getDate())}_${userId}`;
+}
+
+// Lifts the attendance-summary counts renderPayslip() used to build inline from pDays (and
+// server.js's XLSX endpoint built a near-identical, differently-named version of) into one
+// shared shape, so the live path and the frozen-snapshot path can never diverge from each other.
+function deriveAttendanceCounts(pDays, calc) {
+  return {
+    workingDays:   pDays.filter(d => !d.isWeekend && d.status !== 'holiday' && d.status !== 'company-trip').length,
+    daysWorked:    pDays.filter(d => d.status === 'present' || d.status === 'late' || d.status === 'not-clocked-in').length,
+    leaveDays:     pDays.filter(d => d.status === 'leave-annual' || d.status === 'leave-sick' || d.status === 'leave-business').length,
+    lateTimes:     pDays.filter(d => d.status === 'late').length,
+    otHours:       calc.otTotalHours || 0,
+    absentDays:    pDays.filter(d => d.status === 'absent').length,
+    paidHoliday:   pDays.filter(d => d.status === 'leave-annual').length,
+    sickLeave:     pDays.filter(d => d.status === 'leave-sick').length,
+    businessLeave: pDays.filter(d => d.status === 'leave-business').length,
+    upcountryCount:  calc.upcountryCount || 0,
+    earlyCount:      calc.earlyCount || 0,
+    lateNightCount:  calc.lateNightCount || 0,
+  };
+}
+
+// The single read path every payroll-numbers consumer (payslip web view, Finalize Payroll, CSV
+// exports, 50 Tawi, Payroll History) goes through instead of calling computePayroll() directly.
+// Once MD has approved a period AND a snapshot exists for it (written server-side by POST
+// /api/md-approve -- this file never writes a snap_ key itself, only reads one), returns the
+// FROZEN numbers captured at approval -- immune to a later salary raise, Settings edit, or
+// attendance/leave record edit. Otherwise builds the identical shape live.
+//
+// Frozen `fin` is intentionally NOT re-derived from live finalizeData even though edits to
+// bonus/pit/manualAllowances/diligencePaid are ALSO blocked once approved (PUT /api/finalize) --
+// this is defense in depth against that lock ever being bypassed, and is what makes
+// revoke-then-reapprove's superseded[] history meaningful.
+function getPayrollView(user, start, end, periodIndex) {
+  const mdApproval = finalizeData[getMdApprovalKey(start, user.id)];
+  const snapshot = finalizeData[getSnapshotKey(start, user.id)];
+  if (mdApproval?.approved === true && snapshot) {
+    return { ...snapshot, frozen: true, approvedBy: mdApproval.approvedBy, approvedAt: mdApproval.approvedAt };
+  }
+
+  const S = APP_SETTINGS;
+  const calc = computePayroll(user, start, end, periodIndex);
+  const attendance = deriveAttendanceCounts(calc.pDays || [], calc);
+
+  const finKey = getFinalizeKey(start, user.id);
+  const finRaw = finalizeData[finKey] || {};
+  const fin = {
+    bonus: finRaw.bonus || 0,
+    pit: finRaw.pit !== undefined ? finRaw.pit : calc.autoPit,
+    manualAllowances: finRaw.manualAllowances || [],
+    diligencePaid: finRaw.diligencePaid !== false,
+  };
+
+  const eligibility = {};
+  ALLOWANCE_KEYS.forEach(key => { eligibility[key] = isAllowanceEligible(S.allowanceEligibility, user.role, key); });
+  eligibility.personalCar = eligibility.personalCar && user.personalCarEligible === true;
+  eligibility.phone = eligibility.phone && user.phoneAllowanceEligible === true;
+
+  // This file's computePayroll() already returns the raw approved-leave arrays, so these are read
+  // straight from `calc` -- server.js's copy recomputes them independently instead (see its comment).
+  // The rest of `display` exists so a FROZEN payslip's footnote text (rate-per-item, PVD %, SSF
+  // detail line) stays consistent with the frozen totals above it -- without these, an approved
+  // payslip's dollar amounts would be correctly frozen but the "×rate" footnotes would silently
+  // follow whatever Settings/user.pvdRate say TODAY, contradicting the numbers right above them.
+  const policy = S.lateDeductPolicy;
+  let lateDeductMinutes = 0;
+  // 2026-08-09 (Opus audit finding 4.1, payroll-facing): this loop used to ignore leave/holiday/
+  // company-trip/driver status entirely -- computeLateDeductMinutes() (the leave-BALANCE
+  // deduction, ~line 2083) already exempts any day touched by an approved annual/sick/business
+  // leave, a company-trip day, a public holiday, or a driver's record, but this SEPARATE
+  // payslip-display calculation didn't mirror any of that. Concrete case this caused: an approved
+  // hourly leave that covers a late arrival (e.g. 08:30-10:00 leave, 09:55 check-in) reads
+  // "not late" everywhere else in the app (attendance badge, late-minute detail, leave-balance
+  // card) but this loop still deducted minutes onto the payslip -- and once MD-approved, that
+  // wrong number freezes into the snapshot with no way to correct it. `d.partialLeave` is truthy
+  // exactly on the set of days generatePeriodDays() treats as leave-touched-but-checkIn-kept
+  // ('am'/'pm'/'partial' coverage); a FULL-day leave already wipes `d.checkIn` to null, so it's
+  // already excluded by the guard below without needing a separate check.
+  if (policy?.enabled && user.role !== 'driver') {
+    const effStr = policy.effectiveFromPeriod
+      ? `${policy.effectiveFromPeriod.slice(0,4)}-${policy.effectiveFromPeriod.slice(4,6)}-${policy.effectiveFromPeriod.slice(6,8)}` : '';
+    const _ws4 = S.workSchedule;
+    const stdStartMin4 = (_ws4?.standardStartHour ?? 8) * 60 + (_ws4?.standardStartMinute ?? 30);
+    (calc.pDays || []).forEach(d => {
+      if (!d.checkIn || d.date < effStr) return;
+      // 2026-08-09 (2nd-pass audit finding 4 follow-up): a FULL-day leave normally wipes
+      // d.checkIn to null (already excluded by the `!d.checkIn` guard above) -- EXCEPT when an
+      // approved same-date time-correction record happens to be processed after the full-day
+      // leave in generatePeriodDays()'s overlay loop, which restores a real checkIn on what is
+      // still, per `status`, a full leave day. computeLateDeductMinutes() exempts any
+      // leave-touched day unconditionally; check `status` directly too, not just `partialLeave`,
+      // so this loop can't diverge from its sibling in that narrow order-dependent case.
+      if (d.isPubHoliday || d.status === 'company-trip' || d.partialLeave ||
+          ['leave-annual','leave-sick','leave-business'].includes(d.status)) return;
+      const [hh, mm] = d.checkIn.split(':').map(Number);
+      const lm = hh * 60 + mm - stdStartMin4;
+      if (lm <= 0) return;
+      const tier = (policy.tiers || []).find(t => lm >= t.fromMin && lm <= t.toMin);
+      if (tier) lateDeductMinutes += tier.deductMin;
+    });
+  }
+  const display = {
+    otCount: (calc.approvedOTs || []).length,
+    personalCarRateDisplay: calc.approvedPC?.[0]?.personalCarRate != null
+      ? calc.approvedPC[0].personalCarRate : (S.allowances.personalCar != null ? S.allowances.personalCar : 1000),
+    lateDeductMinutes,
+    rates: { upcountry: S.allowances.upcountry || 240, longDistance: S.allowances.longDistance, personalCar: S.allowances.personalCar },
+    ssoDisplay: { rate: S.sso.rate || 5, maxAmount: S.sso.maxAmount || 875, minSalary: S.sso.minSalary || 1650 },
+    pvdRate: user.role === 'md' ? 0 : (user.pvdRate !== undefined ? user.pvdRate : 5),
+  };
+
+  return {
+    calc, attendance, fin, eligibility, display,
+    labels: {}, // not consumed by any current app.js caller (period/company info comes from
+                // getPeriodBounds()/APP_SETTINGS.company directly) -- present only so a frozen
+                // snapshot's shape (which DOES fill this in server-side) isn't a special case.
+    frozen: false, approvedBy: '', approvedAt: ''
+  };
+}
+
+// ===== PAYSLIP =====
+function renderPayslipEmployeeList() {
+  const sel = document.getElementById('payslip-employee');
+  if (!sel) return;
+  const prev = sel.value;
+  sel.innerHTML = '';
+  const isAdminView = currentUser && isMdAccountingView();
+  const usersToList = isAdminView
+    ? DATA_USERS.filter(u => u.active && isEmployeeRecord(u))
+    : DATA_USERS.filter(u => u.active && u.id === currentUser?.id);
+  usersToList.forEach(u => {
+    const opt = document.createElement('option');
+    opt.value = u.id;
+    opt.textContent = u.name;
+    sel.appendChild(opt);
+  });
+  if (isAdminView) {
+    const inactive = DATA_USERS.filter(u => isEmployeeRecord(u) && !u.active);
+    if (inactive.length > 0) {
+      const sep = document.createElement('option');
+      sep.disabled = true;
+      sep.textContent = '── ' + L('Former Employees', 'พนักงานเก่า') + ' ──';
+      sel.appendChild(sep);
+      inactive.forEach(u => {
+        const opt = document.createElement('option');
+        opt.value = u.id;
+        opt.textContent = u.name + L(' (inactive)', ' (ออกแล้ว)');
+        sel.appendChild(opt);
+      });
+    }
+  }
+  if (prev && sel.querySelector(`option[value="${prev}"]`)) sel.value = prev;
+}
+
+async function renderPayslip() {
+  await loadFinalizeData();
+  const isStaff = ['user', 'driver', 'manager', 'marketing'].includes(effectiveRole());
+
+  // BUG FIX 2026-08-05 (Opus audit, L1): the header's company name/address/Tax ID used to be
+  // static text in index.html, never written by any app.js code -- a comment nearby claimed the
+  // opposite ("company info comes from ... APP_SETTINGS.company directly"), but that was only
+  // true for the Excel export (payslipXlsx.js reads it via view.labels.company from Settings).
+  // Editing Company Name/Tax ID/Address in Settings changed the Excel and silently left the web
+  // payslip showing the old values forever. Falls back to the original hardcoded text when a
+  // Settings field is genuinely empty (default company.address/taxId are '' until an admin fills
+  // Settings in), so this can't blank the header for anyone who hasn't touched that page yet.
+  const _co = APP_SETTINGS.company || {};
+  const _coNameEl = document.getElementById('payslip-company-name');
+  const _coAddrEl = document.getElementById('payslip-company-address');
+  const _coTaxEl  = document.getElementById('payslip-company-taxid');
+  if (_coNameEl) _coNameEl.textContent = _co.name || 'Tozai Boeki Kaisha (Thailand) Ltd.';
+  if (_coAddrEl) _coAddrEl.textContent = _co.address || '88 Paso Tower 14 floor, Silom Rd., Suriyawong, Bangrak, Bangkok 10500';
+  if (_coTaxEl)  _coTaxEl.textContent  = _co.taxId ? `Tax ID: ${_co.taxId}` : 'Tax ID: 0105552006771';
+
+  // Show/hide the admin control bar
+  // Staff: show period selector but hide employee selector + calc button
+  const empSelectorEl = document.getElementById('payslip-emp-selector');
+  if (empSelectorEl) empSelectorEl.style.display = isStaff ? 'none' : '';
+  // "Download All" (2026-08-02) -- accounting/MD only, matches the server-side requireRole gate.
+  const xlsxAllBtn = document.getElementById('payslip-btn-xlsx-all');
+  if (xlsxAllBtn) xlsxAllBtn.style.display = isStaff ? 'none' : '';
+
+
+  const sel = document.getElementById('payslip-employee');
+  if (!sel) return;
+
+  // Staff always see own payslip — force selector to their ID
+  if (isStaff) sel.value = currentUser.id;
+
+  const user = isStaff ? currentUser : DATA_USERS.find(u => u.id === parseInt(sel.value));
+  if (!user) return;
+  const isMD = user.role === 'md';
+
+  // Staff: gate check depends on whether viewing current or past period
+  if (isStaff) {
+    const isCurrent = payslipPeriodIndex === 0;
+    const { start, end } = getPeriodBounds(payslipPeriodIndex);
+    const mdKey = getMdApprovalKey(start, user.id);
+    const mdApproved = !!(finalizeData[mdKey]?.approved);
+    const payDay = getPayDay(end);
+    const today = new Date(); today.setHours(0,0,0,0);
+    const payDayDisplay = fmtDate(payDay);
+
+    const lockEl = document.getElementById('payslip-emp-lock');
+    const printBtn = document.getElementById('payslip-btn-print');
+    const xlsxBtn = document.getElementById('payslip-btn-xlsx');
+    const locked = !mdApproved || (isCurrent && today < payDay);
+    if (printBtn) printBtn.disabled = locked;
+    if (xlsxBtn) xlsxBtn.disabled = locked;
+    if (locked) {
+      if (lockEl) {
+        lockEl.style.display = '';
+        lockEl.innerHTML = `
+          <div style="text-align:center;padding:48px 24px">
+            <div style="font-size:48px;margin-bottom:16px">${mdApproved ? '📅' : '⏳'}</div>
+            <div style="font-size:17px;font-weight:700;color:#1e3a5f;margin-bottom:8px">
+              ${mdApproved
+                ? L('Payslip will be available on pay day', 'Payslip จะแสดงในวันจ่ายเงินเดือน')
+                : L('Payslip not yet approved by Managing Director', 'รอ Managing Director อนุมัติ Payroll ก่อน')}
+            </div>
+            ${mdApproved ? `<div style="font-size:14px;color:#64748b">
+              ${currentLang === 'ja' ? `支給日: ${payDayDisplay}` : L(`Pay day: ${payDayDisplay}`, `วันจ่ายเงินเดือน: ${payDayDisplay}`)}
+            </div>` : ''}
+          </div>`;
+      }
+      const payslipDoc = document.querySelector('#page-payslip .payslip');
+      if (payslipDoc) payslipDoc.style.display = 'none';
+      const approvalCard = document.getElementById('payslip-md-approval');
+      if (approvalCard) approvalCard.innerHTML = '';
+      return;
+    }
+    // Available — show payslip
+    if (lockEl) lockEl.style.display = 'none';
+    const payslipDoc = document.querySelector('#page-payslip .payslip');
+    if (payslipDoc) payslipDoc.style.display = '';
+  } else {
+    // Non-staff (accounting/md/admin) — always show payslip, no gate
+    const lockEl = document.getElementById('payslip-emp-lock');
+    if (lockEl) lockEl.style.display = 'none';
+    const payslipDoc = document.querySelector('#page-payslip .payslip');
+    if (payslipDoc) payslipDoc.style.display = '';
+    const printBtn = document.getElementById('payslip-btn-print');
+    if (printBtn) printBtn.disabled = false;
+    const xlsxBtn = document.getElementById('payslip-btn-xlsx');
+    if (xlsxBtn) xlsxBtn.disabled = false;
+  }
+  const { start, end } = getPeriodBounds(payslipPeriodIndex);
+  // 2026-08-02: moved here from the old standalone updatePayslipDates() (called once from
+  // initApp() and never again) -- switching the period dropdown re-runs renderPayslip() but
+  // never touched that function, so Period/Payment Date stayed frozen on the CURRENT period no
+  // matter which past period was actually being viewed. Also fixed the Payment Date itself: was
+  // `periodEnd + 5 days` (naive, ignores weekends/company holidays), now uses the same
+  // getPayDay() business-rule function the XLSX export and the staff payslip-lock check already
+  // use -- previously the web page and the Excel file could show two different pay dates for the
+  // same period.
+  const pLabel = document.getElementById('payslip-period-label');
+  if (pLabel) pLabel.textContent = `${fmtDate(start)} — ${fmtDate(end)}`;
+  const pPayDate = document.getElementById('payslip-pay-date');
+  if (pPayDate) pPayDate.textContent = fmtDate(getPayDay(end));
+  const createdDateEl = document.getElementById('payslip-created-date');
+  if (createdDateEl) createdDateEl.textContent = fmtDate(new Date());
+  // 2026-08-01: routed through getPayrollView() instead of calling computePayroll() and
+  // separately reading live finalizeData -- once MD has approved this period, this now reads the
+  // FROZEN snapshot captured at approval time, immune to a later salary raise, Settings edit, or
+  // attendance/leave record edit. An unapproved period computes live exactly as before.
+  const view = getPayrollView(user, start, end, payslipPeriodIndex);
+  const pvdRate = view.display.pvdRate;
+  const { base, transport, posAllowance, housingAllowance, diligenceAllowance,
+          allowance1, allowance2, allowance3, otAmount, longDistanceTotal, personalCarTotal,
+          grossIncome, ssf, pvd, autoPit, upcountryCount, earlyLateBonus, earlyCount, lateNightCount,
+          ot15Amount, ot15Hours, ot20Amount, ot20Hours, ot30Amount, ot30Hours, otTotalHours,
+          longDistanceCount, personalCarCount } = view.calc;
+  const pit = view.fin.pit;
+  const manualAllowances = view.fin.manualAllowances;
+  const manualIncomeTotal = manualAllowances.reduce((s, ma) => s + (ma.amount || 0), 0);
+  const manualAdvanceTotal = manualAllowances.reduce((s, ma) => s + (ma.advance || 0), 0);
+  const bonus = view.fin.bonus;
+  const totalDeduct = ssf + pvd + pit + manualAdvanceTotal;
+  const totalEarn = grossIncome + manualIncomeTotal + bonus;
+  const netPay = totalEarn - totalDeduct;
+  const el = id => document.getElementById(id);
+  if (!el('payslip-name')) return;
+  // update i18n labels
+  const _si = id => { const e=document.getElementById(id); return e; };
+  const _sl = (id, txt, keepChild) => {
+    const e = _si(id); if (!e) return;
+    if (keepChild) { e.childNodes[0].textContent = txt; } else { e.textContent = txt; }
+  };
+  _sl('payslip-lbl-income',  currentLang==='en' ? '💰 Income' : '💰 รายได้ (Income)');
+  _sl('payslip-lbl-base',    currentLang==='en' ? 'Base Salary' : 'เงินเดือน (Base Salary)');
+  _sl('payslip-lbl-transport', currentLang==='en' ? 'Transport Allowance' : 'ค่าเดินทาง (Transportation)', true);
+  _sl('payslip-lbl-pos',     currentLang==='en' ? 'Position Allowance' : 'ค่าตำแหน่ง (Position Allowance)');
+  _sl('payslip-lbl-housing', currentLang==='en' ? 'Housing Allowance' : 'ค่าที่พัก (Housing Allowance)');
+  _sl('payslip-lbl-diligence', currentLang==='en' ? 'Perfect Attendance' : 'เบี้ยขยัน (Perfect Attendance)');
+  _sl('payslip-lbl-ot15',    currentLang==='en' ? 'OT ×1.5 (Weekday)' : 'OT ×1.5 (วันธรรมดา)', true);
+  _sl('payslip-lbl-ot30',    currentLang==='en' ? 'OT ×3.0 (Holiday)' : 'OT ×3.0 (วันหยุด)', true);
+  _sl('payslip-lbl-a1',      currentLang==='en' ? 'Allowance 1 — Upcountry' : 'Allowance 1 — Upcountry', true);
+  _sl('payslip-lbl-a3',      currentLang==='en' ? 'Allowance 3 — Phone' : 'Allowance 3 — ค่าโทรศัพท์');
+  _sl('payslip-lbl-deduct',  currentLang==='en' ? '📉 Deductions' : '📉 รายการหัก (Deductions)');
+  _sl('payslip-lbl-ssf',     currentLang==='en' ? 'Social Security (SSF)' : 'ประกันสังคม (SSF)', true);
+  // Built from live APP_SETTINGS.sso instead of a static i18n string -- this label used to
+  // hardcode "5% max ฿875 (min salary ฿1,650)" even after an admin changed the SSO rate/caps
+  // in Settings (they're editable there specifically because the law changes periodically),
+  // so it could silently show the wrong numbers on every payslip until someone noticed.
+  const _ssoRateDisp = view.display.ssoDisplay.rate;
+  const _ssoMaxDisp = view.display.ssoDisplay.maxAmount.toLocaleString();
+  const _ssoMinDisp = view.display.ssoDisplay.minSalary.toLocaleString();
+  const _ssfDetailText = currentLang === 'ja'
+    ? `${_ssoRateDisp}%・上限${_ssoMaxDisp}バーツ（最低賃金${_ssoMinDisp}バーツ）`
+    : L(`${_ssoRateDisp}% max ฿${_ssoMaxDisp} (min salary ฿${_ssoMinDisp})`, `${_ssoRateDisp}% สูงสุด ฿${_ssoMaxDisp} (ขั้นต่ำเงินเดือน ฿${_ssoMinDisp})`);
+  _sl('payslip-lbl-ssf-detail', _ssfDetailText);
+  _sl('payslip-lbl-pvd',     currentLang==='en' ? 'Provident Fund (PVD)' : 'กองทุนสำรองเลี้ยงชีพ (PVD)', true);
+  _sl('payslip-lbl-pit',     currentLang==='en' ? 'Income Tax (PIT)' : 'ภาษีเงินได้บุคคล (PIT)', true);
+  _sl('payslip-lbl-pit-detail', t('pay_pit_detail'));
+  _sl('payslip-lbl-total-deduct', t('pay_total_deduct'));
+  _sl('payslip-lbl-net',     currentLang==='en' ? '💵 Net Salary' : '💵 เงินเดือนสุทธิ / Net Salary');
+  _sl('payslip-lbl-net-sub', currentLang==='en' ? 'After tax and social security deductions' : 'หลังหักภาษีและประกันสังคม');
+
+  el('payslip-name').textContent = user.name;
+  el('payslip-position').textContent = user.position;
+  const startDateEl = el('payslip-start-date');
+  if (startDateEl) startDateEl.textContent = user.startDate ? fmtDate(user.startDate) : '—';
+  // 2026-08-18: mirrors payslipXlsx.js's "Tax ID No." row (user.idCard) which already shows this
+  // on the Excel payslip -- the on-screen/print payslip had no equivalent field at all. Reuses
+  // the existing idType-aware label/format helpers (idCardFieldLabel()/formatIdCardValue()) from
+  // the profile views instead of hardcoding "Tax ID No." so passport/foreign-tax-ID employees see
+  // the correct label here too, not just National ID. English specifically is pinned to the
+  // fixed "TAX ID No.:" wording (user-requested, matches the Excel payslip's own fixed English
+  // label) -- TH/JA stay dynamic per idType since only English was asked to change.
+  const idcardLabelEl = el('payslip-idcard-label');
+  // NOTE: idCardFieldLabel()'s own emoji-strip regex (used elsewhere, e.g. line ~5896) is
+  // `[🛂🪪]` without the `u` flag -- since these are astral-plane chars, an unflagged class
+  // matches lone surrogate halves and silently fails to strip anything. Using \S+ instead here
+  // (strip the whole leading non-space token, whatever it is) sidesteps that bug rather than
+  // repeating it.
+  if (idcardLabelEl) idcardLabelEl.textContent = currentLang === 'en'
+    ? 'TAX ID No.:'
+    : idCardFieldLabel(user.idType).replace(/^\S+\s+/, '') + ':';
+  el('payslip-idcard').textContent = formatIdCardValue(user.idType, user.idCard);
+  el('payslip-base').textContent = fmtB(base);
+  el('payslip-transport').textContent = transport > 0 ? fmtB(transport) : '—';
+  el('payslip-pos-allowance').textContent = posAllowance > 0 ? fmtB(posAllowance) : '—';
+  el('payslip-housing').textContent = housingAllowance > 0 ? fmtB(housingAllowance) : '—';
+  el('payslip-diligence').textContent = diligenceAllowance > 0 ? fmtB(diligenceAllowance) : '—';
+  const fmtOtHrs = h => { const hh = Math.floor(h), mm = Math.round((h - hh) * 60); return currentLang === 'ja' ? (mm > 0 ? `${hh}時間${mm}分` : `${hh}時間`) : (mm > 0 ? L(`${hh}h${mm}m`, `${hh}ชม.${mm}น.`) : L(`${hh}h`, `${hh}ชม.`)); };
+  el('payslip-ot15').textContent = ot15Amount > 0 ? fmtB(ot15Amount) : '—';
+  el('payslip-ot15-detail').textContent = ot15Hours > 0
+    ? (ot15Hours === 100 ? L('100 Hours Guaranteed', '100 Hours Guaranteed') : fmtOtHrs(ot15Hours))
+    : '—';
+  el('payslip-ot20').textContent = ot20Amount > 0 ? fmtB(ot20Amount) : '—';
+  el('payslip-ot20-detail').textContent = ot20Hours > 0 ? fmtOtHrs(ot20Hours) : '—';
+  el('payslip-ot30').textContent = ot30Amount > 0 ? fmtB(ot30Amount) : '—';
+  el('payslip-ot30-detail').textContent = ot30Hours > 0 ? fmtOtHrs(ot30Hours) : '—';
+  el('payslip-a1').textContent = allowance1 > 0 ? fmtB(allowance1) : '—';
+  el('payslip-a1-detail').textContent = upcountryCount > 0 ? `${upcountryCount} ${t('pay_times')} × ฿${view.display.rates.upcountry.toLocaleString()}` : '—';
+  el('payslip-a2').textContent = earlyLateBonus > 0 ? fmtB(allowance2) : '—';
+  el('payslip-a2-detail').textContent = (earlyCount + lateNightCount) > 0 ? `${t('rpt_early')} ${earlyCount} + ${t('rpt_latenight')} ${lateNightCount} ${t('pay_times')}` : '—';
+  el('payslip-a3').textContent = allowance3 > 0 ? fmtB(allowance3) : '—';
+  // 2026-08-02: row visibility for every remaining Earnings row now mirrors payslipXlsx.js's
+  // canShow() exactly -- eligibility-gated, not activity-gated, so an eligible employee with no
+  // activity this period still sees the row (as "—"), and an ineligible role/employee never sees
+  // it at all. Previously only Bonus was gated (via display:none) here; Diligence/OT/Allowance
+  // 1-3 were always rendered regardless of role, which is how an accounting/marketing employee
+  // never granted Upcountry/Early-Late/OT eligibility in Settings could still see those rows.
+  const rowVis = (id, show) => { const r = el(id); if (r) r.style.display = show ? '' : 'none'; };
+  rowVis('payslip-diligence-row', view.eligibility.diligence);
+  rowVis('payslip-ot15-row', view.eligibility.ot);
+  rowVis('payslip-ot20-row', view.eligibility.ot);
+  rowVis('payslip-ot30-row', view.eligibility.ot);
+  rowVis('payslip-a1-row', view.eligibility.upcountry);
+  rowVis('payslip-a2-row', view.eligibility.earlyLate);
+  rowVis('payslip-a3-row', view.eligibility.phone);
+  // 2026-08-02: row visibility changed from activity-gated (longDistanceCount > 0) to
+  // eligibility-gated (view.eligibility.longDistance), matching payslipXlsx.js's canShow() and
+  // Allowance 1/2/3 above -- an eligible employee with zero trips THIS period still sees the row
+  // (showing "—"), same as every other allowance row; only a genuinely ineligible role/employee
+  // has the row hidden entirely. Previously an eligible driver with no long-distance activity
+  // this period saw the row vanish, inconsistent with how every other allowance row behaves.
+  const ldRowEl = document.getElementById('payslip-longdistance-row');
+  if (ldRowEl) ldRowEl.style.display = view.eligibility.longDistance ? '' : 'none';
+  el('payslip-longdistance').textContent = longDistanceTotal > 0 ? fmtB(longDistanceTotal) : '—';
+  el('payslip-longdistance-detail').textContent = longDistanceCount > 0 ? `${longDistanceCount} ${t('pay_times')} × ฿${view.display.rates.longDistance || LONG_DISTANCE_ALLOWANCE}` : '—';
+  const pcRowEl = document.getElementById('payslip-personalcar-row');
+  if (pcRowEl) pcRowEl.style.display = view.eligibility.personalCar ? '' : 'none';
+  el('payslip-personalcar').textContent = personalCarTotal > 0 ? fmtB(personalCarTotal) : '—';
+  el('payslip-personalcar-detail').textContent = personalCarCount > 0 ? `${personalCarCount} ${t('pay_times')} × ฿${Number(view.display.personalCarRateDisplay).toLocaleString()}` : '—';
+  // Manual allowances — dynamic rows in income section
+  // 2026-08-06 (L2 cosmetic fix): filtered to amount>0, matching payslipXlsx.js's identical
+  // filter -- an advance-only manual entry (amount:0) no longer shows a noise "฿0.00" income row
+  // here that the Excel export never showed either.
+  const maContainer = el('payslip-manual-allowances');
+  if (maContainer) {
+    maContainer.innerHTML = manualAllowances.filter(ma => (ma.amount || 0) > 0).map(ma => `
+      <div class="pay-row">
+        <span class="item">${escapeHtml(ma.type)}</span>
+        <span class="amount plus">${fmtB(ma.amount || 0)}</span>
+      </div>`).join('');
+  }
+  // Advance deductions — shown in deductions section
+  const maAdvContainer = el('payslip-manual-advance-deductions');
+  if (maAdvContainer) {
+    maAdvContainer.innerHTML = manualAllowances.filter(ma => (ma.advance||0) > 0).map(ma => `
+      <div class="pay-row">
+        <span class="item" style="color:#991b1b">${L('Advance Deducted','เบิกล่วงหน้า')} ${escapeHtml(ma.type)}</span>
+        <span class="amount minus">${fmtB(ma.advance)}</span>
+      </div>`).join('');
+  }
+  // 2026-08-06 (L2 cosmetic fix): Bonus row now always shown, matching payslipXlsx.js which
+  // treats Bonus as a recurring "genuinely can apply to any employee in a different period" row
+  // (zero prints as "—" via the amount text below, same as the real paper payslip) instead of
+  // hiding the whole row at zero.
+  const bonusRowEl = el('payslip-bonus-row');
+  if (bonusRowEl) bonusRowEl.style.display = '';
+  if (el('payslip-bonus')) el('payslip-bonus').textContent = bonus > 0 ? fmtB(bonus) : '—';
+  if (el('payslip-lbl-bonus')) el('payslip-lbl-bonus').textContent = currentLang === 'ja' ? '🎁 ボーナス (Bonus)' : L('🎁 Bonus', '🎁 โบนัส (Bonus)');
+  el('payslip-ssf').textContent = fmtB(ssf);
+  // 2026-08-06 (L2 cosmetic fix): PVD now shows the real value (฿0.00 for MD, since pvd is
+  // already computed as 0 for MD) instead of "—", matching payslipXlsx.js's deductionItems which
+  // always prints an explicit 0.00 for SSF/PVD/PIT as recurring line items -- the "% of salary"
+  // rate label below (payslip-pvd-rate) still says N/A for MD, that part is unchanged.
+  el('payslip-pvd').textContent = fmtB(pvd);
+  el('payslip-pvd-rate').textContent = isMD ? (currentLang==='en'?'N/A':'ไม่มี') : `${pvdRate}%`;
+  el('payslip-pit').textContent = fmtB(pit);
+  const totalEarnEl = el('payslip-total-earn');
+  if (totalEarnEl) totalEarnEl.textContent = fmtB(totalEarn);
+  el('payslip-total-deduct').textContent = fmtB(totalDeduct);
+  el('payslip-net').textContent = fmtB(netPay) + (currentLang==='en' ? ' THB' : ' บาท');
+
+  // Calculation Details — web-only (2026-08-02, user request: show this on the web page instead
+  // of the Excel export, which had it before and now drops it -- same session, opposite move).
+  // Logic mirrors payslipXlsx.js's calcLines exactly (rate x quantity = amount footnotes), only
+  // printing lines for tiers/allowances actually earned this period.
+  const calcDetailsEl = el('payslip-calc-details');
+  const calcDetailsLinesEl = el('payslip-calc-details-lines');
+  if (calcDetailsEl && calcDetailsLinesEl) {
+    const fmt2 = n => (Math.round((n || 0) * 100) / 100).toFixed(2);
+    const hourlyRate = view.calc.hourlyRate;
+    const calcLines = [];
+    // 2026-08-05 (Opus audit, M2): "=" changed to "≈" for the OT lines -- each OT request is
+    // independently rounded server/app-side (Math.round(hourlyRate x mult x hrs) PER record, see
+    // computePayroll()), so once there is more than one approved OT request in a tier, the simple
+    // hourlyRate x totalHours x mult product can differ from the true summed amount by a cent or
+    // two of rounding drift. The total above (ot15Amount etc.) is always the real, correct figure
+    // either way -- this line is illustrative, not a re-derivation.
+    if (ot15Hours > 0) calcLines.push(`* Overtime: ${fmt2(hourlyRate)} x ${ot15Hours}h x 1.5 (weekday OT) ≈ ${fmt2(ot15Amount)}`);
+    if (ot20Hours > 0) calcLines.push(`* Overtime: ${fmt2(hourlyRate)} x ${ot20Hours}h x 2.0 (weekend OT) ≈ ${fmt2(ot20Amount)}`);
+    if (ot30Hours > 0) calcLines.push(`* Overtime: ${fmt2(hourlyRate)} x ${ot30Hours}h x 3.0 (holiday OT) ≈ ${fmt2(ot30Amount)}`);
+    if (upcountryCount > 0) {
+      const rate1 = Math.round(allowance1 / upcountryCount);
+      calcLines.push(`* Allowance 1 (Upcountry): ${rate1}/day x ${upcountryCount} days = ${fmt2(allowance1)}`);
+    }
+    // BUG FIX 2026-08-05 (Opus audit, M2): this used to divide the combined allowance2 by
+    // (earlyCount + lateNightCount) and print that as one blended "rate/count" -- meaningless,
+    // because earlyCount/lateNightCount mix two DIFFERENT-rate tiers each (a "very early" arrival
+    // adds 2 to earlyCount at one rate, a merely "early" one adds 1 at a different rate; late-night
+    // is the same with two hour-thresholds). Concrete failure the audit found: one 06:00 arrival +
+    // one 21:00 late-out produced "320/count x 3 times = 960.00" -- a rate that matches nothing in
+    // Settings. Now prints one line per tier actually earned, each with its REAL flat Settings rate
+    // x its own real occurrence count -- exact, not approximated, since the rate genuinely is
+    // constant within a tier. Falls back to nothing printed (not the old wrong line) on an already-
+    // frozen payslip approved before this fix, since those snapshots don't carry the new per-tier
+    // fields -- silence is safer than a formula that was never right.
+    const c = view.calc;
+    if (c.early2Count > 0) calcLines.push(`* Allowance 2 (Early Morning, before ${APP_SETTINGS.allowances.earlyThreshold2Min != null ? Math.floor(APP_SETTINGS.allowances.earlyThreshold2Min/60)+':'+String(APP_SETTINGS.allowances.earlyThreshold2Min%60).padStart(2,'0') : ''}): ${fmt2(APP_SETTINGS.allowances.earlyMorning2)}/day x ${c.early2Count} days = ${fmt2(c.early2Amount)}`);
+    if (c.early1Count > 0) calcLines.push(`* Allowance 2 (Early Morning): ${fmt2(APP_SETTINGS.allowances.earlyMorning1)}/day x ${c.early1Count} days = ${fmt2(c.early1Amount)}`);
+    if (c.lateNight2Count > 0) calcLines.push(`* Allowance 2 (Late Night): ${fmt2(APP_SETTINGS.allowances.lateNight2)}/day x ${c.lateNight2Count} days = ${fmt2(c.lateNight2Amount)}`);
+    if (c.lateNight1Count > 0) calcLines.push(`* Allowance 2 (Late Night): ${fmt2(APP_SETTINGS.allowances.lateNight1)}/day x ${c.lateNight1Count} days = ${fmt2(c.lateNight1Amount)}`);
+    const _legacyA2Count = (earlyCount || 0) + (lateNightCount || 0);
+    if (_legacyA2Count > 0 && c.early2Count === undefined) {
+      // Frozen payslip from before this fix -- old blended fields exist, new per-tier ones don't.
+      const rate2 = Math.round(allowance2 / _legacyA2Count);
+      calcLines.push(`* Allowance 2 (Early Morning / Late Night): ${rate2}/count x ${_legacyA2Count} times = ${fmt2(allowance2)}`);
+    }
+    calcDetailsEl.style.display = calcLines.length > 0 ? '' : 'none';
+    calcDetailsLinesEl.innerHTML = calcLines.map(l => `<div>${escapeHtml(l)}</div>`).join('');
+  }
+
+  // Attendance Summary grid — 2026-08-02: tiles pulled from view.attendance (frozen once
+  // approved, same as the XLSX). Days Worked/Late/Absent Days are universal attendance facts
+  // (always shown); Over Time/Upcountry/Early Morning/Late Night are tied to a specific
+  // allowance type and eligibility-gated, per user report (a role with that eligibility just
+  // revoked in Settings should not still see the tile, even at 0); Paid Holiday/Sick/Business
+  // Leave are also universal. MD has no work-day/late/leave/OT tracking at all (no checkin page,
+  // exempt from these business rules) — hide the whole grid for MD instead of a row of zeros.
+  const summaryGrid = el('payslip-summary-grid');
+  if (summaryGrid) summaryGrid.style.display = isMD ? 'none' : '';
+  if (!isMD) {
+    const a = view.attendance;
+    el('payslip-sum-workdays').textContent = a.daysWorked;
+    el('payslip-sum-late').textContent = a.lateTimes;
+    el('payslip-sum-annual').textContent = a.paidHoliday;
+    el('payslip-sum-sick').textContent = a.sickLeave;
+    el('payslip-sum-business').textContent = a.businessLeave;
+    el('payslip-sum-absent').textContent = a.absentDays;
+    // 2026-08-02: shows view.display.otCount (number of approved OT requests), not otHours --
+    // matches every other tile here (Late/Upcountry/Early Morning/Late Night are all counts);
+    // the hours themselves now only appear in Calculation Details below.
+    el('payslip-sum-ot').textContent = view.display.otCount;
+    el('payslip-sum-a1').textContent = a.upcountryCount;
+    el('payslip-sum-early').textContent = a.earlyCount;
+    el('payslip-sum-latenight').textContent = a.lateNightCount;
+    // Late deduction sub-label — web only (no-print), not part of the Excel template. 2026-08-01:
+    // minutes precomputed into view.display.lateDeductMinutes (frozen once approved) instead of
+    // recomputed from pDays live.
+    const lateDeductEl = el('payslip-sum-late-deduct');
+    if (lateDeductEl) {
+      const pdMin = view.display.lateDeductMinutes;
+      lateDeductEl.style.display = pdMin > 0 ? '' : 'none';
+      lateDeductEl.textContent = pdMin > 0
+        ? (currentLang === 'ja' ? `−${pdMin}分の有給` : L(`−${pdMin}min leave`, `หัก ${pdMin} นาที`)) : '';
+    }
+    // 2026-08-02: explicitly place the eligible tiles into row1/row2 (ceil(n/2) top, rest
+    // bottom) instead of relying on flex-wrap's width-based line breaking -- that gave lopsided
+    // splits (e.g. 5-top/1-bottom for a driver with only Absent Days eligible in the old "row 2"
+    // group) once tiles started being hidden by eligibility ("มันตลก" per user report). Order
+    // mirrors payslipXlsx.js's priority: identity/absence facts first, then eligible
+    // allowance-tied tiles, then leave-day facts last -- same rule for both mediums.
+    // "Over Time" tile hidden ONLY for driver (2026-08-02, user request -- explicitly driver-only,
+    // not a blanket removal for every role, corrected after an earlier overly-broad pass): a
+    // driver's guaranteedOT reads as a flat "100" here with no context, confusing next to real
+    // worked-hour counts; the real OT money/hours breakdown already shows in the Earnings section
+    // below (OT×1.5/2.0/3.0 rows). Every other eligible role still sees this tile as normal.
+    // Money/eligibility unaffected either way -- display only, `view.eligibility.ot` still gates
+    // the Earnings OT rows exactly as before.
+    const TILE_ORDER = [
+      { id: 'payslip-sumbox-workdays', show: true },
+      { id: 'payslip-sumbox-late', show: true },
+      { id: 'payslip-sumbox-absent', show: true },
+      { id: 'payslip-sumbox-ot', show: view.eligibility.ot && user.role !== 'driver' },
+      { id: 'payslip-sumbox-a1', show: view.eligibility.upcountry },
+      { id: 'payslip-sumbox-early', show: view.eligibility.earlyLate },
+      { id: 'payslip-sumbox-latenight', show: view.eligibility.earlyLate },
+      { id: 'payslip-sumbox-holiday', show: true },
+      { id: 'payslip-sumbox-sick', show: true },
+      { id: 'payslip-sumbox-business', show: true },
+    ];
+    const visibleTiles = TILE_ORDER.filter(t => t.show);
+    // 2026-08-02: the 6 universal tiles (Days Worked/Late/Absent/Paid Holiday/Sick/Business) are
+    // the floor -- when none of the 4 eligibility-gated ones apply, that's exactly 6 tiles, which
+    // reads better as one full row than an artificial 3/3 split. 7+ tiles still split ceil(n/2).
+    const splitAt = visibleTiles.length <= 6 ? visibleTiles.length : Math.ceil(visibleTiles.length / 2);
+    const row1El = el('payslip-summary-row1'), row2El = el('payslip-summary-row2');
+    if (row1El && row2El) {
+      visibleTiles.forEach((t, i) => {
+        const box = document.getElementById(t.id);
+        if (!box) return;
+        box.style.display = '';
+        (i < splitAt ? row1El : row2El).appendChild(box);
+      });
+      TILE_ORDER.filter(t => !t.show).forEach(t => {
+        const box = document.getElementById(t.id);
+        if (box) box.style.display = 'none';
+      });
+      row2El.style.display = splitAt >= visibleTiles.length ? 'none' : '';
+    }
+  }
+
+  el('payslip-sig-name').textContent = user.name;
+  const sigPositionEl = el('payslip-sig-position');
+  if (sigPositionEl) sigPositionEl.textContent = user.position || '';
+  // Authorized Signatory must show whoever actually approved THIS payslip, not a hardcoded
+  // placeholder name — approval is per-employee (see mdApprovePayrollForEmployee()).
+  // 2026-08-01: reads view.approvedBy/frozen directly -- getPayrollView() already resolves this
+  // from the mdApproval record (only non-empty when frozen === true, i.e. actually approved).
+  el('payslip-sig-md-name').textContent = view.frozen ? view.approvedBy : '—';
+  renderPayslipApprovalCard();
+}
+
+function fmtB(n) { return '฿' + n.toLocaleString('th-TH', { minimumFractionDigits: 2 }); }
+
+// Recomputes a leave record's display time text from raw fields using the CURRENT language,
+// instead of `l.timePart` which was frozen in whatever language was active at submission time.
+// Falls back to the frozen `l.timePart` for older records saved before the raw fields existed.
+function formatTimePart(l) {
+  if (l.hourlyStart && l.hourlyEnd) {
+    const [sh, sm] = l.hourlyStart.split(':').map(Number);
+    const [eh, em] = l.hourlyEnd.split(':').map(Number);
+    const totalMin = (eh * 60 + em) - (sh * 60 + sm);
+    const h = Math.floor(totalMin / 60), m = totalMin % 60;
+    // SECURITY FIX 2026-08-06 (Opus audit): hourlyStart/hourlyEnd come straight from the leave
+    // request POST body with no format validation -- this return value is interpolated into
+    // innerHTML by every caller (approval cards, leave detail, etc.), so an unescaped value here
+    // is a stored-XSS sink reachable by any authenticated employee, shown to every approver.
+    const hs = escapeHtml(l.hourlyStart), he = escapeHtml(l.hourlyEnd);
+    return currentLang === 'ja'
+      ? `${hs}–${he} (${h > 0 ? h+'時間' : ''}${m > 0 ? m+'分' : ''})`
+      : L(`${hs}–${he} (${h > 0 ? h+'h' : ''}${m > 0 ? m+'m' : ''})`,
+          `${hs}–${he} (${h > 0 ? h+'ชม.' : ''}${m > 0 ? m+'น.' : ''})`);
+  }
+  if (l.type === 'late-out' && l.lateOutTime) {
+    const allowance = lateOutAllowanceForHour(parseInt(l.lateOutTime));
+    // SECURITY FIX 2026-08-09 (Opus audit finding 1.4): lateOutTime is client-controlled and this
+    // return value is interpolated into innerHTML by every caller (approval cards, leave detail) --
+    // unescaped here was a stored-XSS sink, same class as the hourlyStart/hourlyEnd fix above.
+    const lot = escapeHtml(l.lateOutTime);
+    return currentLang === 'ja' ? `帰宅 ${lot} (฿${allowance})` : L(`Return ${lot} (฿${allowance})`, `กลับ ${lot} (฿${allowance})`);
+  }
+  return escapeHtml(l.timePart || '');
+}
+
+// ===== APPROVALS =====
+function leaveTypeLabel(l) {
+  if (l.type === 'time-correction') {
+    return l.correctionField === 'checkIn'
+      ? (currentLang==='en' ? '✏️ Request Check-In Time Edit' : '✏️ ขออนุมัติแก้ไขเวลาเข้างาน')
+      : (currentLang==='en' ? '✏️ Request Check-Out Time Edit' : '✏️ ขออนุมัติแก้ไขเวลาเลิกงาน');
+  }
+  if (l.type === 'ot') {
+    const h = Math.floor(l.otHours || 0);
+    const m = Math.round(((l.otHours || 0) - h) * 60);
+    const dur = currentLang==='en' ? (m>0?`${h}h${m}m`:`${h}h`) : (m>0?`${h}ชม.${m}น.`:`${h}ชม.`);
+    if (l.otEndTime) {
+      const oet = escapeHtml(l.otEndTime);
+      return currentLang==='en' ? `⏱️ Request OT ${dur} (until ${oet})` : `⏱️ ขอ OT ${dur} (ถึง ${oet})`;
+    }
+    return currentLang==='en' ? `⏱️ Request OT ${dur} (×${Number(l.otMultiplier)})` : `⏱️ ขอ OT ${dur} (×${Number(l.otMultiplier)})`;
+  }
+  if (l.type === 'comp') {
+    const wd = l.workedDate ? fmtDate(new Date(l.workedDate + 'T12:00:00')) : l.dateFrom;
+    return currentLang==='en' ? `🔄 Compensatory Day Request (worked ${wd})` : `🔄 ขอวันหยุดชดเชย (ทำงาน ${wd})`;
+  }
+  if (l.type === 'long-distance') {
+    // 2026-08-09 (2nd-pass audit finding 1): missed sink -- distanceKm wasn't Number()-coerced
+    // here like the other mileage/distance render sites, even though this return value reaches
+    // buildApprovalCard()'s innerHTML.
+    const km = Number(l.distanceKm) || 0;
+    const bonus = l.longDistanceAllowance || 0;
+    return currentLang==='en'
+      ? `🚗 Long Distance ${km} km${bonus > 0 ? ` (+฿${bonus})` : ''}`
+      : `🚗 แจ้ง Long Distance ${km} กม.${bonus > 0 ? ` (+฿${bonus})` : ''}`;
+  }
+  if (l.type === 'clear-attachments') {
+    const n = Number(l.fileCount) || 0;
+    return currentLang==='en'
+      ? `🗑️ Clear Old Attachments — ${n} file(s)`
+      : `🗑️ ล้างไฟล์แนบเก่า — ${n} ไฟล์`;
+  }
+  if (l.type === 'personal-car') {
+    const rate = Number(l.personalCarRate != null ? l.personalCarRate : (APP_SETTINGS.allowances.personalCar != null ? APP_SETTINGS.allowances.personalCar : 1000));
+    if (currentLang === 'ja') return `🚙 自家用車 (+฿${rate.toLocaleString()})`;
+    return currentLang === 'en'
+      ? `🚙 Personal Car (+฿${rate.toLocaleString()})`
+      : `🚙 รถส่วนตัว (+฿${rate.toLocaleString()})`;
+  }
+  const map = {
+    th: { annual:'🏖️ ขอลาพักร้อน', sick:'🤒 ขอลาป่วย', business:'📋 ขอลากิจ', upcountry:'🗺️ Upcountry', 'late-out':'🌙 แจ้งกลับดึก' },
+    en: { annual:'🏖️ Annual Leave', sick:'🤒 Sick Leave', business:'📋 Business Leave', upcountry:'🗺️ Upcountry', 'late-out':'🌙 Late Night Out' },
+  };
+  // SECURITY FIX 2026-08-13 (re-audit, F-2 defense-in-depth): the server now whitelists `type`
+  // against a known set (VALID_LEAVE_TYPES), so this fallback should be unreachable for any new
+  // record -- escaped anyway, matching every other free-text-turned-innerHTML sink in this file,
+  // in case a legacy/pre-fix record still has a bogus type.
+  return (map[currentLang] || map.th)[l.type] || ('📋 ' + escapeHtml(String(l.type)));
+}
+
+function getApprovalTabs() {
+  return [
+    { id:'all',             label:t('appr_all'),    icon:'📋', types:null },
+    { id:'late-out',        label:t('appr_lateout'),icon:'🌙', types:['late-out'] },
+    { id:'ot',              label:t('appr_ot'),     icon:'⏱️', types:['ot'] },
+    { id:'leave',           label:t('appr_leave'),  icon:'🏖️', types:['annual','sick','business'] },
+    { id:'upcountry',         label:t('appr_upcountry'),icon:'🗺️', types:['upcountry'] },
+    { id:'time-correction', label:t('appr_timecor'),icon:'✏️', types:['time-correction'] },
+    { id:'comp',            label:t('appr_comp'),   icon:'🔄', types:['comp'] },
+    { id:'long-distance',   label:t('appr_longdistance'), icon:'🚗', types:['long-distance'] },
+    { id:'personal-car',    label:t('appr_personalcar'), icon:'🚙', types:['personal-car'] },
+    { id:'clear-attachments', label:t('appr_clearattachments'), icon:'🗑️', types:['clear-attachments'] },
+  ];
+}
+const APPROVAL_TABS = getApprovalTabs();
+
+const LEAVE_TYPE_ICON = { annual:'🏖️', sick:'🤒', business:'📋', upcountry:'🗺️', 'late-out':'🌙', 'time-correction':'✏️', ot:'⏱️', comp:'🔄', 'long-distance':'🚗', 'personal-car':'🚙', 'clear-attachments':'🗑️' };
+
+let _approvalTab = 'all';
+
+function switchApprovalTab(id) {
+  _approvalTab = id;
+  renderApprovals();
+}
+
+function buildApprovalCard(l, role) {
+  const emp = DATA_USERS.find(u => u.id === l.userId);
+  const empName = emp ? emp.name : `User #${l.userId}`;
+  const dateLine = l.dateFrom === l.dateTo
+    ? fmtDate(new Date(l.dateFrom + 'T12:00:00'))
+    : `${fmtDate(new Date(l.dateFrom + 'T12:00:00'))} – ${fmtDate(new Date(l.dateTo + 'T12:00:00'))}`;
+  const daysPart = l.days ? (currentLang === 'ja' ? ` (${Number(l.days)}日)` : L(` (${Number(l.days)}d)`, ` (${Number(l.days)} วัน)`)) : l.timePart ? ` — ${formatTimePart(l)}` : '';
+  const typeLabel = leaveTypeLabel(l);
+  const icon = LEAVE_TYPE_ICON[l.type] || '📋';
+  let detail = '';
+  let reasonLine = '';
+  if (l.type === 'time-correction') {
+    const fieldTh  = l.correctionField === 'checkIn' ? L('check-in time', 'เวลาเข้างาน') : L('check-out time', 'เวลาเลิกงาน');
+    const arrow    = l.correctionField === 'checkIn' ? '⬆️' : '⬇️';
+    const origTxt  = l.originalTime && l.originalTime !== '—' ? (currentLang === 'ja' ? `変更前 ${escapeHtml(l.originalTime)}` : L(`was ${escapeHtml(l.originalTime)}`, `เดิม ${escapeHtml(l.originalTime)}`)) : L('no original data', 'ไม่มีข้อมูลเดิม');
+    detail      = `<div style="font-size:13px;color:var(--text);margin-top:6px">${arrow} ${fieldTh} (${origTxt}) → <strong>${escapeHtml(l.correctedTime)}</strong></div>`;
+    reasonLine  = `<div style="font-size:13px;color:var(--text-muted);margin-top:4px">📝 ${L('Reason', 'เหตุผล')}: ${escapeHtml(l.reason)}</div>`;
+  } else if (l.type === 'upcountry') {
+    // 2026-08-06: up to 6 separate time+customer/location stops -- shows only the ones actually
+    // filled in, one line each.
+    reasonLine = upcountryLocationsOf(l).map(loc =>
+      `<div style="font-size:13px;color:var(--text-muted);margin-top:4px">🗺️ ${loc.time ? `<strong>${escapeHtml(loc.time)}</strong> ` : ''}${L('Travel to', 'เดินทางไป')} ${escapeHtml(loc.name)}</div>`
+    ).join('');
+  } else if (l.type === 'long-distance') {
+    // SECURITY FIX 2026-08-09 (Opus audit finding 1.4): mileage/distance are client-controlled and
+    // .toLocaleString() only stays safe when the value is actually a Number -- Number(...) here
+    // guarantees that (a malicious string becomes NaN -> renders "NaN", never executes).
+    detail     = `<div style="font-size:13px;color:var(--text);margin-top:6px">🚗 ${L('Mileage','เลขไมล์')}: <strong>${Number(l.mileageStart||0).toLocaleString()}</strong> → <strong>${Number(l.mileageEnd||0).toLocaleString()}</strong> | ${L('Distance','ระยะทาง')}: <strong>${Number(l.distanceKm||0).toLocaleString()} ${L('km','กม.')}</strong></div>`;
+    reasonLine = `<div style="font-size:13px;color:${l.longDistanceAllowance > 0 ? (document.documentElement.getAttribute('data-theme')==='dark' ? '#4ade80' : '#166534') : 'var(--text-muted)'};margin-top:4px">${l.longDistanceAllowance > 0 ? `✅ ${L('Allowance','เบี้ยเลี้ยง')} +฿${l.longDistanceAllowance}` : `❌ ${(()=>{const th=APP_SETTINGS.allowances.longDistanceThresholdKm||LONG_DISTANCE_THRESHOLD_KM; return currentLang === 'ja' ? `${th}km未満` : L(`Under ${th} km`,`ไม่ถึง ${th} กม.`);})()}`}</div>`;
+  } else {
+    reasonLine  = `<div style="font-size:13px;color:var(--text-muted);margin-top:4px">📝 ${escapeHtml(l.reason)}</div>`;
+  }
+  // This card (default Card View) had no attachment display at all — showApprovalDetail()'s
+  // attachment link only reaches Quick Mode/history rows, never this view, so an approver had
+  // no way to even know a file was attached without switching modes.
+  const attachLine = l.attachment
+    ? `<div onclick="event.stopPropagation()" style="font-size:13px;margin-top:4px">📎 ${buildAttachmentLinkHtml(l)}</div>`
+    : '';
+  const _routeType = l.type === 'ot' ? ((l.isDriverOT || DATA_USERS.find(u => u.id === l.userId)?.role === 'driver') ? 'driver-ot' : 'ot') : l.type;
+  const isPendingForMe = isMyTurnNow(l, _routeType);
+  const approveLabel = l.type === 'time-correction' ? L('✅ Approve + Save Time', '✅ อนุมัติ + บันทึกเวลา') : L('✅ Approve', '✅ อนุมัติ');
+  const actionHtml = isPendingForMe
+    ? `<div class="approval-actions" onclick="event.stopPropagation()">
+         <button class="btn btn-success btn-sm" onclick="approveMockLeave(${l.id})">${approveLabel}</button>
+         <button class="btn btn-danger btn-sm" onclick="rejectMockLeave(${l.id})">${L('❌ Reject', '❌ ปฏิเสธ')}</button>
+       </div>` : '';
+  const card = document.createElement('div');
+  card.className = 'approval-card pending';
+  card.style.cssText = 'margin-bottom:10px;cursor:pointer';
+  // Card View never opened the detail modal at all (only Quick Mode's rows/icon did) — clicking
+  // anywhere on the card now opens the same showApprovalDetail() modal Quick Mode uses, with the
+  // nested Approve/Reject buttons and attachment link stopping propagation so they still act on
+  // themselves instead of also popping the modal open underneath.
+  card.onclick = () => showApprovalDetail(l.id);
+  card.innerHTML = `
+    <div class="approval-header" style="margin-bottom:6px">
+      <h4>${icon} ${typeLabel.replace(/^[^\s]+ /,'')}</h4>
+    </div>
+    <div class="approval-meta">
+      <span style="font-weight:600;color:var(--text)">👤 ${escapeHtml(empName)}</span>
+      <span>📅 ${dateLine}${daysPart}</span>
+      <span style="color:var(--text-muted);font-size:12px">${L('Submitted', 'ยื่นเมื่อ')} ${escapeHtml(_fmtDtStr(l.submittedAt))}</span>
+    </div>
+    ${detail}
+    ${reasonLine}
+    ${attachLine}
+    ${actionHtml}`;
+  return card;
+}
+
+let _approvalQuickMode = false;
+let _approvalSelected = new Set();
+
+function renderApprovals() {
+  const catEl  = document.getElementById('approval-categories');
+  const histEl = document.getElementById('approval-history-section');
+  const summEl = document.getElementById('approval-summary-bar');
+  if (!catEl) return;
+  catEl.innerHTML  = '';
+  if (histEl) histEl.innerHTML = '';
+  if (summEl) summEl.innerHTML = '';
+  const role = effectiveRole();
+  const canQuickApprove = actingRoles().some(r => r === 'md' || r === 'manager' || r === 'accounting');
+
+  // Strict routing — every role (including MD) can only act when it's genuinely their turn per
+  // STATUS_TO_ROLE, and only if their role actually appears in this type's configured route.
+  // No override: if the route is Manager->MD or Accounting->MD, MD must wait its turn.
+  // 2026-08-16 (Opus re-audit of M-4): was a local copy of the shared top-level
+  // effectiveRouteType() (see ~line 889) -- semantically identical, but shadowing the global
+  // inside this function's scope was the exact "landmine" class of bug that produced today's FAQ
+  // ReferenceError (a local `const` shadow is silently correct until something above its
+  // declaration line tries to call the name and hits the temporal dead zone instead).
+  const isPendingForRole  = l => isMyTurnNow(l);
+
+  const pendingAll = DATA_LEAVES.filter(isPendingForRole);
+  const tabCfg     = getApprovalTabs().find(t => t.id === _approvalTab) || getApprovalTabs()[0];
+  const matchTab   = l => !tabCfg.types || tabCfg.types.includes(l.type);
+
+  const pendingFiltered = pendingAll.filter(matchTab).sort((a,b) => b.id - a.id);
+  const decidedFiltered = DATA_LEAVES
+    .filter(l => (l.status === 'approved' || l.status === 'rejected') && matchTab(l))
+    .sort((a,b) => b.id - a.id)
+    .slice(0, 20);
+
+  // ── Summary bar: tab + toolbar ──
+  if (summEl) {
+    // Tab bar
+    const tabBar = document.createElement('div');
+    tabBar.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px';
+    getApprovalTabs().forEach(tab => {
+      const cnt = pendingAll.filter(l => !tab.types || tab.types.includes(l.type)).length;
+      const active = tab.id === _approvalTab;
+      const btn = document.createElement('button');
+      btn.style.cssText = [
+        'padding:7px 16px;border-radius:24px;font-size:13px;cursor:pointer;transition:all .15s;white-space:nowrap',
+        `font-weight:${active ? 700 : 500}`,
+        `border:2px solid ${active ? '#3b82f6' : 'var(--border)'}`,
+        `background:${active ? '#3b82f6' : 'var(--bg-card)'}`,
+        `color:${active ? '#fff' : 'var(--text-muted)'}`,
+      ].join(';');
+      btn.innerHTML = `${tab.icon} ${tab.label}` + (cnt > 0
+        ? ` <span style="display:inline-block;background:${active ? 'rgba(255,255,255,0.35)' : '#ef4444'};color:#fff;font-size:10px;font-weight:800;min-width:18px;padding:1px 5px;border-radius:10px;margin-left:4px">${cnt}</span>`
+        : '');
+      btn.onclick = () => switchApprovalTab(tab.id);
+      tabBar.appendChild(btn);
+    });
+    summEl.appendChild(tabBar);
+
+    // Toolbar: Quick Mode + Approve All are available to every approver role (MD/Manager/
+    // Accounting) — Settings + Flow Chart stay MD-only (routing config affects everyone).
+    if (canQuickApprove && pendingFiltered.length > 0) {
+      const toolbar = document.createElement('div');
+      const _isDarkToolbar = document.documentElement.getAttribute('data-theme') === 'dark';
+      // Light-mode mint-green banner (#f0fdf4/#bbf7d0/#166534) was hardcoded and stayed a bright
+      // pastel-green box floating in the middle of an otherwise dark page — matches the
+      // dark-tinted "success" pattern already used elsewhere in this file (e.g. setLeaveType()).
+      toolbar.style.cssText = `display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;padding:10px 14px;background:${_isDarkToolbar ? 'rgba(16,185,129,0.15)' : '#f0fdf4'};border:1px solid ${_isDarkToolbar ? 'rgba(16,185,129,0.3)' : '#bbf7d0'};border-radius:10px`;
+      toolbar.innerHTML = `
+        <span style="font-size:13px;font-weight:600;color:${_isDarkToolbar ? '#6ee7b7' : '#166534'};flex:1">⚡ ${currentLang === 'ja' ? `このタブで保留中 ${pendingFiltered.length}件` : L(`${pendingFiltered.length} pending in this tab`, `รออนุมัติ ${pendingFiltered.length} รายการในแท็บนี้`)}</span>
+        <button onclick="toggleQuickMode()" style="padding:6px 14px;border-radius:8px;border:2px solid ${_approvalQuickMode ? '#3b82f6' : 'var(--border)'};background:${_approvalQuickMode ? (_isDarkToolbar ? 'rgba(59,130,246,0.25)' : '#eff6ff') : 'var(--bg-card)'};color:${_approvalQuickMode ? (_isDarkToolbar ? '#93c5fd' : '#1d4ed8') : 'var(--text-muted)'};font-size:12px;font-weight:700;cursor:pointer">
+          ${_approvalQuickMode ? '📋 Card View' : '⚡ Quick Mode'}
+        </button>
+        <button onclick="approveAllFiltered()" style="padding:6px 14px;border-radius:8px;background:#10b981;color:#fff;border:none;font-size:12px;font-weight:700;cursor:pointer">
+          ${L('✅ Approve All', '✅ Approve ทั้งหมด')} (${pendingFiltered.length})
+        </button>
+        <button onclick="openApprovalFlowChart()" style="padding:6px 14px;border-radius:8px;background:var(--bg-card);border:1px solid var(--border);color:var(--text-muted);font-size:12px;font-weight:700;cursor:pointer">
+          📊 ${L('Flow Chart', 'ผังการอนุมัติ')}
+        </button>
+        <button onclick="openClearAttachmentsModal()" style="padding:6px 14px;border-radius:8px;background:var(--bg-card);border:1px solid var(--border);color:var(--text-muted);font-size:12px;font-weight:700;cursor:pointer">
+          🗑️ ${L('Clear Old Attachments', 'ล้างไฟล์แนบเก่า')}
+        </button>
+        ${role === 'md' || role === 'manager' ? `
+        <button onclick="openApprovalSettings()" style="padding:6px 14px;border-radius:8px;background:var(--bg-card);border:1px solid var(--border);color:var(--text-muted);font-size:12px;font-weight:700;cursor:pointer">
+          ⚙️ ${L('Settings', 'ตั้งค่า')}
+        </button>` : ''}`;
+      summEl.appendChild(toolbar);
+
+      // Batch bar (shown only in quick mode)
+      if (_approvalQuickMode) {
+        const batchBar = document.createElement('div');
+        batchBar.id = 'approval-batch-bar';
+        batchBar.style.cssText = 'display:none;gap:8px;align-items:center;margin-bottom:8px';
+        batchBar.innerHTML = `
+          <button id="btn-approve-sel" onclick="approveSelected()" style="padding:6px 14px;border-radius:8px;background:#3b82f6;color:#fff;border:none;font-size:12px;font-weight:700;cursor:pointer">${L('✅ Approve Selected', '✅ Approve ที่เลือก')}</button>
+          <button id="btn-reject-sel"  onclick="rejectSelected()"  style="padding:6px 14px;border-radius:8px;background:#ef4444;color:#fff;border:none;font-size:12px;font-weight:700;cursor:pointer">${L('❌ Reject Selected', '❌ Reject ที่เลือก')}</button>`;
+        summEl.appendChild(batchBar);
+      }
+    }
+
+    // Flow chart button (even when no pending) — available to every approver role;
+    // Settings: route dropdowns stay MD-only inside the modal, but Manager can also open it now
+    // to toggle Accounting stand-in for whichever request types Manager's own route covers.
+    if (canQuickApprove && pendingFiltered.length === 0) {
+      const settingsBtn = document.createElement('div');
+      settingsBtn.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-bottom:8px';
+      settingsBtn.innerHTML = `
+        <button onclick="openApprovalFlowChart()" style="padding:6px 14px;border-radius:8px;background:var(--bg-card);border:1px solid var(--border);color:var(--text-muted);font-size:12px;font-weight:700;cursor:pointer">${L('📊 Flow Chart', '📊 ผังการอนุมัติ')}</button>
+        <button onclick="openClearAttachmentsModal()" style="padding:6px 14px;border-radius:8px;background:var(--bg-card);border:1px solid var(--border);color:var(--text-muted);font-size:12px;font-weight:700;cursor:pointer">🗑️ ${L('Clear Old Attachments', 'ล้างไฟล์แนบเก่า')}</button>
+        ${role === 'md' || role === 'manager' ? `<button onclick="openApprovalSettings()" style="padding:6px 14px;border-radius:8px;background:var(--bg-card);border:1px solid var(--border);color:var(--text-muted);font-size:12px;font-weight:700;cursor:pointer">${L('⚙️ Approval Settings', '⚙️ ตั้งค่าการอนุมัติ')}</button>` : ''}`;
+      summEl.appendChild(settingsBtn);
+    }
+  }
+
+  // ── Pending: Card View or Quick Table ──
+  if (pendingFiltered.length === 0) {
+    catEl.innerHTML = `<div style="text-align:center;padding:48px 24px;color:var(--text-muted)">
+      <div style="font-size:44px;margin-bottom:12px">✅</div>
+      <div style="font-size:15px;font-weight:700;color:var(--text);margin-bottom:4px">${L('No pending requests', 'ไม่มีคำขอที่รออนุมัติ')}</div>
+    </div>`;
+  } else if (_approvalQuickMode && canQuickApprove) {
+    // Quick Table
+    _approvalSelected.clear();
+    const table = document.createElement('div');
+    table.style.cssText = 'background:var(--bg-card);border:1px solid var(--border);border-radius:12px;overflow:hidden';
+    table.innerHTML = `
+      <div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
+      <table style="width:100%;min-width:580px;border-collapse:collapse;font-size:13px">
+        <thead style="background:var(--bg)">
+          <tr>
+            <th style="padding:10px 12px;text-align:center;width:36px"><input type="checkbox" id="chk-select-all" onchange="toggleSelectAll(this.checked)" style="width:16px;height:16px;cursor:pointer" title="${L('Select all','เลือกทั้งหมด')}"></th>
+            <th style="padding:10px 12px;text-align:left;color:var(--text-muted)">${L('Employee', 'ชื่อพนักงาน')}</th>
+            <th style="padding:10px 12px;text-align:left;color:var(--text-muted)">${L('Type', 'ประเภท')}</th>
+            <th style="padding:10px 12px;text-align:left;color:var(--text-muted)">${L('Date', 'วันที่')}</th>
+            <th style="padding:10px 12px;text-align:left;color:var(--text-muted)">${L('Details', 'รายละเอียด')}</th>
+            <th style="padding:10px 12px;text-align:center;width:120px;color:var(--text-muted)">${L('Action', 'ดำเนินการ')}</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${pendingFiltered.map(l => {
+            const emp = DATA_USERS.find(u => u.id === l.userId);
+            const icon = LEAVE_TYPE_ICON[l.type] || '📋';
+            const dateLine = l.dateFrom === l.dateTo
+              ? fmtDate(new Date(l.dateFrom + 'T12:00:00'))
+              : `${fmtDate(new Date(l.dateFrom + 'T12:00:00'))}–${fmtDate(new Date(l.dateTo + 'T12:00:00'))}`;
+            const typeLabelShort = escapeHtml(getLEAVE_TYPE_CFG()[l.type]?.label || l.type);
+            const detailValueRaw = l.days > 0 ? `${Number(l.days)} ${L('days', 'วัน')}`
+              : l.otHours ? `${Number(l.otHours)||0} ${L('h', 'ชม.')} ×${l.otMultiplier}`
+              : l.type === 'long-distance' ? `${Number(l.mileageStart||0).toLocaleString()} → ${Number(l.mileageEnd||0).toLocaleString()} (${Number(l.distanceKm||0).toLocaleString()} ${L('km','กม.')})`
+              : formatTimePart(l) || l.reason || '—';
+            // Prefixed with the type label so this cell is self-explanatory even when the
+            // adjacent Type column scrolls out of view on narrow screens (table has
+            // overflow-x:auto) — user reported not being able to tell what was requested from
+            // "Details" alone (e.g. "2.5 h ×1.5" alone doesn't say OT vs driver OT vs anything).
+            const detailMain = `<strong>${typeLabelShort}</strong> — ${escapeHtml(detailValueRaw)}`;
+            const detailReason = l.reason && detailValueRaw !== l.reason
+              ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">${escapeHtml(l.reason)}</div>` : '';
+            return `<tr onclick="showApprovalDetail(${l.id})" style="border-top:1px solid var(--border);cursor:pointer" onmouseover="this.style.background=document.documentElement.getAttribute('data-theme')==='dark'?'#1e293b':'#f8fafc'" onmouseout="this.style.background=''">
+              <td onclick="event.stopPropagation()" style="padding:10px 12px;text-align:center">
+                <input type="checkbox" class="chk-item" data-id="${l.id}" onchange="onItemCheck()" style="width:16px;height:16px">
+              </td>
+              <td style="padding:10px 12px;font-weight:600;color:var(--text)">${escapeHtml(emp?.name || '—')}</td>
+              <td style="padding:10px 12px;color:var(--text)">${icon} ${escapeHtml(getLEAVE_TYPE_CFG()[l.type]?.label || l.type)}</td>
+              <td style="padding:10px 12px;color:var(--text-muted)">${dateLine}</td>
+              <td style="padding:10px 12px;color:var(--text-muted)">${detailMain}${detailReason}</td>
+              <td onclick="event.stopPropagation()" style="padding:8px 12px;text-align:center">
+                <button onclick="approveMockLeave(${l.id})" style="padding:4px 10px;border-radius:6px;background:#10b981;color:#fff;border:none;font-size:11px;font-weight:700;cursor:pointer;margin-right:4px">✅</button>
+                <button onclick="rejectMockLeave(${l.id})" style="padding:4px 10px;border-radius:6px;background:#ef4444;color:#fff;border:none;font-size:11px;font-weight:700;cursor:pointer">❌</button>
+              </td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+      </div>`;
+    catEl.appendChild(table);
+  } else {
+    pendingFiltered.forEach(l => catEl.appendChild(buildApprovalCard(l, role)));
+  }
+
+  // ── Manager Info Section: คำขอที่ MD กำลังพิจารณา ──
+  if (role === 'manager') {
+    const infoItems = DATA_LEAVES
+      .filter(l => l.status === 'pending-md' && matchTab(l))
+      .sort((a,b) => b.id - a.id)
+      .slice(0, 30);
+    if (infoItems.length > 0 && histEl) {
+      histEl.style.marginTop = '16px';
+      histEl.innerHTML = `
+        <div style="font-size:13px;font-weight:700;color:var(--text-muted);margin-bottom:8px;padding:6px 12px;background:var(--bg);border-radius:8px;border:1px solid var(--border)">
+          📋 ${currentLang === 'ja' ? `Managing Director審査中の項目（${infoItems.length}件）— 参考情報` : L(`Items under Managing Director review (${infoItems.length}) — for your information`, `รายการที่อยู่ระหว่าง Managing Director พิจารณา (${infoItems.length} รายการ) — ข้อมูลเพื่อทราบ`)}
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          ${infoItems.map(l => {
+            const emp  = DATA_USERS.find(u => u.id === l.userId);
+            const icon = LEAVE_TYPE_ICON[l.type] || '📋';
+            const dateLine = l.dateFrom === l.dateTo
+              ? fmtDate(new Date(l.dateFrom + 'T12:00:00'))
+              : `${fmtDate(new Date(l.dateFrom + 'T12:00:00'))} – ${fmtDate(new Date(l.dateTo + 'T12:00:00'))}`;
+            return `<div onclick="showApprovalDetail(${l.id})" style="background:${document.documentElement.getAttribute('data-theme')==='dark'?'#0f172a':'#f8fafc'};border:1px solid var(--border);border-radius:10px;padding:10px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;cursor:pointer" onmouseover="this.style.background=document.documentElement.getAttribute('data-theme')==='dark'?'#334155':'#f1f5f9'" onmouseout="this.style.background=document.documentElement.getAttribute('data-theme')==='dark'?'#0f172a':'#f8fafc'">
+              <span>${icon}</span>
+              <span style="font-size:13px;font-weight:600;color:var(--text);flex:1">${escapeHtml(emp?.name || '—')}</span>
+              <span style="font-size:12px;color:var(--text-muted)">${dateLine}</span>
+              <span class="badge badge-info" style="font-size:11px">⏳ ${L('Pending Managing Director', 'รอ Managing Director')}</span>
+            </div>`;
+          }).join('')}
+        </div>`;
+    }
+  }
+
+  // ── MD Info Section: รายการที่ Accounting กำลังพิจารณา (เพื่อทราบ ไม่ต้อง action) ──
+  if (role === 'md') {
+    const acctItems = DATA_LEAVES
+      .filter(l => l.status === 'pending-accounting' && matchTab(l))
+      .sort((a,b) => b.id - a.id)
+      .slice(0, 30);
+    if (acctItems.length > 0 && histEl) {
+      histEl.style.marginTop = '16px';
+      histEl.innerHTML = (histEl.innerHTML || '') + `
+        <div style="font-size:13px;font-weight:700;color:var(--text-muted);margin-bottom:8px;padding:6px 12px;background:var(--bg);border-radius:8px;border:1px solid var(--border)">
+          💼 ${currentLang === 'ja' ? `Accounting審査中の項目（${acctItems.length}件）— 参考情報` : L(`Items under Accounting review (${acctItems.length}) — for your information`, `รายการที่อยู่ระหว่าง Accounting พิจารณา (${acctItems.length} รายการ) — ข้อมูลเพื่อทราบ`)}
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          ${acctItems.map(l => {
+            const emp  = DATA_USERS.find(u => u.id === l.userId);
+            const icon = LEAVE_TYPE_ICON[l.type] || '📋';
+            const dateLine = l.dateFrom === l.dateTo
+              ? fmtDate(new Date(l.dateFrom + 'T12:00:00'))
+              : `${fmtDate(new Date(l.dateFrom + 'T12:00:00'))} – ${fmtDate(new Date(l.dateTo + 'T12:00:00'))}`;
+            return `<div onclick="showApprovalDetail(${l.id})" style="background:${document.documentElement.getAttribute('data-theme')==='dark'?'#0f172a':'#f8fafc'};border:1px solid var(--border);border-radius:10px;padding:10px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;cursor:pointer" onmouseover="this.style.background=document.documentElement.getAttribute('data-theme')==='dark'?'#334155':'#f1f5f9'" onmouseout="this.style.background=document.documentElement.getAttribute('data-theme')==='dark'?'#0f172a':'#f8fafc'">
+              <span>${icon}</span>
+              <span style="font-size:13px;font-weight:600;color:var(--text);flex:1">${escapeHtml(emp?.name || '—')}</span>
+              <span style="font-size:12px;color:var(--text-muted)">${dateLine}</span>
+              <span class="badge badge-info" style="font-size:11px">⏳ ${L('Pending Accounting', 'รอ Accounting')}</span>
+            </div>`;
+          }).join('')}
+        </div>`;
+    }
+  }
+
+  // ── History ──
+  if (histEl && decidedFiltered.length > 0 && role !== 'manager') {
+    histEl.style.marginTop = '8px';
+    histEl.innerHTML = (histEl.innerHTML || '') + `
+      <button onclick="toggleApprovalHistory()" style="background:none;border:1px solid var(--border);border-radius:8px;padding:8px 16px;font-size:13px;color:var(--text-muted);cursor:pointer;width:100%;text-align:left;margin-top:8px">
+        📂 ${currentLang === 'ja' ? `承認履歴（${decidedFiltered.length}件）` : L(`Approval History (${decidedFiltered.length})`, `ประวัติการอนุมัติ (${decidedFiltered.length} รายการ)`)} ▾
+      </button>
+      <div id="approval-history-list" style="display:none;margin-top:8px;display:flex;flex-direction:column;gap:6px">
+        ${decidedFiltered.map(l => {
+          const emp = DATA_USERS.find(u => u.id === l.userId);
+          const icon = LEAVE_TYPE_ICON[l.type] || '📋';
+          const dateLine = l.dateFrom === l.dateTo
+            ? fmtDate(new Date(l.dateFrom + 'T12:00:00'))
+            : `${fmtDate(new Date(l.dateFrom + 'T12:00:00'))} – ${fmtDate(new Date(l.dateTo + 'T12:00:00'))}`;
+          const ok = l.status === 'approved';
+          return `<div onclick="showApprovalDetail(${l.id})" style="background:${document.documentElement.getAttribute('data-theme')==='dark'?'#0f172a':'#f8fafc'};border:1px solid var(--border);border-radius:10px;padding:10px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;cursor:pointer" onmouseover="this.style.background=document.documentElement.getAttribute('data-theme')==='dark'?'#334155':'#f1f5f9'" onmouseout="this.style.background=document.documentElement.getAttribute('data-theme')==='dark'?'#0f172a':'#f8fafc'">
+            <span>${icon}</span>
+            <span style="font-size:13px;font-weight:600;color:var(--text);flex:1">${escapeHtml(emp?.name || '—')}</span>
+            <span style="font-size:12px;color:var(--text-muted)">${dateLine}</span>
+            <span class="badge ${ok ? 'badge-success' : 'badge-danger'}">${ok ? L('✅ Approved', '✅ อนุมัติ') : L('❌ Rejected', '❌ ปฏิเสธ')}</span>
+          </div>`;
+        }).join('')}
+      </div>`;
+  }
+}
+
+function toggleQuickMode() {
+  _approvalQuickMode = !_approvalQuickMode;
+  _approvalSelected.clear();
+  renderApprovals();
+}
+
+function onItemCheck() {
+  _approvalSelected.clear();
+  document.querySelectorAll('.chk-item:checked').forEach(c => _approvalSelected.add(parseInt(c.dataset.id)));
+  const n = _approvalSelected.size;
+  const bb = document.getElementById('approval-batch-bar');
+  const ba = document.getElementById('btn-approve-sel');
+  const br = document.getElementById('btn-reject-sel');
+  if (bb) bb.style.display = n > 0 ? 'flex' : 'none';
+  if (ba) ba.textContent = currentLang === 'ja' ? `✅ 選択項目を承認 (${n})` : L(`✅ Approve Selected (${n})`, `✅ Approve ที่เลือก (${n})`);
+  if (br) br.textContent = currentLang === 'ja' ? `❌ 選択項目を却下 (${n})` : L(`❌ Reject Selected (${n})`, `❌ Reject ที่เลือก (${n})`);
+  const allChk = document.getElementById('chk-select-all');
+  if (allChk) allChk.checked = n > 0 && n === document.querySelectorAll('.chk-item').length;
+}
+
+function toggleSelectAll(checked) {
+  document.querySelectorAll('.chk-item').forEach(c => { c.checked = checked; });
+  onItemCheck();
+}
+
+function toastBatchLeaveResult(ok, total, enVerb, thVerb) {
+  const failed = total - ok;
+  if (ok && failed) {
+    showToast(currentLang === 'ja'
+      ? `⚠️ ${ok}件成功・${failed}件失敗`
+      : L(`⚠️ ${ok} ${enVerb}, ${failed} could not be processed`, `⚠️ ${thVerb} ${ok} รายการ, ไม่สำเร็จ ${failed} รายการ`),
+      'warning');
+  } else if (ok) {
+    showToast(currentLang === 'ja'
+      ? `✅ ${ok}件を処理しました`
+      : L(`✅ ${ok} item(s) ${enVerb}`, `✅ ${thVerb} ${ok} รายการ`),
+      'success');
+  } else {
+    showToast(currentLang === 'ja' ? '⚠️ 処理できた項目はありません' : L('⚠️ No items were processed', '⚠️ ไม่มีรายการที่ดำเนินการได้'), 'warning');
+  }
+}
+
+async function approveSelected() {
+  if (blockIfObserver()) return;
+  const ids = [..._approvalSelected];
+  if (!ids.length) return;
+  let ok = 0;
+  for (const id of ids) { try { if (await approveMockLeaveInternal(id)) ok++; } catch(e) {} }
+  toastBatchLeaveResult(ok, ids.length, 'approved', 'อนุมัติ');
+  _approvalSelected.clear();
+  renderApprovals();
+  renderDashboard();
+}
+
+async function rejectSelected() {
+  if (blockIfObserver()) return;
+  const ids = [..._approvalSelected];
+  if (!ids.length) return;
+  let ok = 0;
+  for (const id of ids) { try { if (await rejectMockLeaveInternal(id)) ok++; } catch(e) {} }
+  toastBatchLeaveResult(ok, ids.length, 'rejected', 'ปฏิเสธ');
+  _approvalSelected.clear();
+  renderApprovals();
+  renderDashboard();
+}
+
+async function approveAllFiltered() {
+  if (blockIfObserver()) return;
+  const tabCfg = APPROVAL_TABS.find(t => t.id === _approvalTab) || APPROVAL_TABS[0];
+  const matchTab = l => !tabCfg.types || tabCfg.types.includes(l.type);
+  const isPendingForRole = l => isMyTurnNow(l);
+  const items = DATA_LEAVES.filter(l => isPendingForRole(l) && matchTab(l));
+  if (!items.length) return;
+  if (!confirm(currentLang === 'ja' ? `全${items.length}件を承認しますか？` : L(`Approve all ${items.length} item(s)?`, `ยืนยัน Approve ทั้งหมด ${items.length} รายการ?`))) return;
+  let ok = 0;
+  for (const l of items) { try { if (await approveMockLeaveInternal(l.id)) ok++; } catch(e) {} }
+  toastBatchLeaveResult(ok, items.length, 'approved', 'อนุมัติ');
+  renderApprovals();
+  renderDashboard();
+  renderAttendanceTable();
+}
+
+// Internal version — no toast, no re-render (used by batch functions)
+async function approveMockLeaveInternal(id) {
+  const l = DATA_LEAVES.find(x => x.id === id);
+  if (!l) return false;
+  if (isSuperAdmin()) {
+    const ok = await requireSuperAdminConfirm(L('approve/reject this request', 'อนุมัติ/ปฏิเสธคำขอนี้'));
+    if (!ok) { showToast(L('Cancelled — type CONFIRM to proceed on system account', 'ยกเลิก — บัญชีระบบต้องพิมพ์ CONFIRM'), 'warning'); return false; }
+  }
+  // Block approval when the leave's pay period is locked
+  if (l.dateFrom) {
+    const ps = getPeriodStartForDate(l.dateFrom);
+    if (isPeriodLocked(ps)) {
+      showToast(L('🔒 This pay period is locked — cannot approve/reject', '🔒 รอบเงินเดือนนี้ล็อคแล้ว — ไม่สามารถอนุมัติได้'), 'warning');
+      return false;
+    }
+    // 2026-08-02: this employee's payroll for that period may already be MD-approved (frozen
+    // snapshot) even though the whole-period lock above isn't set yet — that only trips once
+    // EVERYONE in the period is approved. Server enforces this too (409); this is just an
+    // early, friendlier Thai toast when we happen to already have the data loaded.
+    if (mdApprovedPeriodInRange(l.dateFrom, l.dateTo, l.userId)) {
+      showToast(L('🔒 This employee\'s payroll for this period is already MD-approved — ask them to revoke approval first', '🔒 เงินเดือนของพนักงานคนนี้ในรอบนี้ถูกอนุมัติแล้ว — ต้องให้ MD ยกเลิกอนุมัติก่อน'), 'warning');
+      return false;
+    }
+  }
+  // Strict routing, no override — must follow the configured route exactly (Manager->MD /
+  // Accounting->MD / MD only / etc). Each role can only act when it's genuinely their turn —
+  // UNLESS Accounting is standing in during the delegation window (isMyTurnOrDelegate()).
+  // When delegating, advance the route AS the role whose turn it actually is (turnRole), not
+  // as 'accounting' literally — Accounting is standing in for that step, not inserted into it.
+  // 2026-08-16 (Opus re-audit of M-4): was a local shadow of the shared top-level
+  // effectiveRouteType() -- removed for the same shadowing-landmine reason as renderApprovals().
+  if (!isMyTurnNow(l)) return false;
+  const turnRole = STATUS_TO_ROLE[l.status];
+  const newStatus = computeNextStatus(l.type, l.status, turnRole, l.approvalRoute);
+  if (!newStatus) return false;
+  // SECURITY/CORRECTNESS FIX 2026-08-13 (M-4, Opus retrospective audit): was calling
+  // /api/attachments/clear (irreversible fs.unlinkSync) BEFORE this PUT -- if the PUT failed
+  // (e.g. the period-lock/MD-freeze check below), the files were already permanently gone while
+  // the record still showed pending. Reordered to match the same fix already applied to
+  // submitClearAttachments()'s MD-direct path: persist the approval FIRST, then delete. The
+  // server also now rejects /api/attachments/clear for a record that isn't 'approved' yet, so
+  // this order is the only one that can succeed.
+  const res = await apiFetch(`/api/leaves/${id}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: newStatus, approver: currentUser.name, approvedAt: fmtDateTime(new Date()) })
+  });
+  const data = await res.json();
+  if (!data.success) throw new Error(data.message);
+  Object.assign(l, data.leave);
+  // Clear Old Attachments: the actual file deletion only happens once MD's approval lands —
+  // a Manager/Accounting-submitted request never touches disk until this point.
+  // SECURITY FIX 2026-08-13 (Opus audit, C-1): was `{leaveIds: l.targetIds || []}` -- passed the
+  // submitter's own targetIds straight through as the delete instruction, with nothing checking
+  // it matched l.targetSnapshot/l.dateFrom (what THIS approval modal actually displayed a few
+  // lines up). Now sends the record's own id; the server re-derives the delete set from that
+  // record's OWN stored dateFrom/targetIds, so a forged targetIds can only ever match records
+  // that genuinely satisfy the record's own cutoff/type filter.
+  if (newStatus === 'approved' && l.type === 'clear-attachments') {
+    const clearRes = await apiFetch(`/api/attachments/clear`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ leaveId: l.id })
+    });
+    const clearData = await clearRes.json();
+    if (!clearData.success) throw new Error(clearData.message || 'Clear attachments failed');
+    const clearedIds = clearData.clearedIds || [];
+    DATA_LEAVES.forEach(x => { if (clearedIds.includes(x.id)) { delete x.attachment; delete x.attachmentName; } });
+  }
+  if (newStatus === 'approved') applyApprovalToLog(l);
+  updateMyRequestsBadge();
+  updateApprovalBadge();
+  return true;
+}
+
+async function rejectMockLeaveInternal(id) {
+  const l = DATA_LEAVES.find(x => x.id === id);
+  if (!l) return false;
+  if (l.dateFrom) {
+    const ps = getPeriodStartForDate(l.dateFrom);
+    if (isPeriodLocked(ps)) {
+      showToast(L('🔒 This pay period is locked — cannot approve/reject', '🔒 รอบเงินเดือนนี้ล็อคแล้ว — ไม่สามารถปฏิเสธได้'), 'warning');
+      return false;
+    }
+  }
+  const res = await apiFetch(`/api/leaves/${id}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'rejected', approver: currentUser.name, approvedAt: fmtDateTime(new Date()) })
+  });
+  const data = await res.json();
+  if (!data.success) throw new Error(data.message);
+  Object.assign(l, data.leave);
+  updateMyRequestsBadge();
+  updateApprovalBadge();
+  return true;
+}
+
+// ── Approval Settings Modal ──
+// Function, not a frozen const object — must re-evaluate L() fresh on every call so it reflects
+// the current language, not whatever currentLang was at page-load time (bug fixed 2026-07-04).
+function getApprovalTypeLabels() {
+  return {
+    annual: L('🏖️ Annual Leave','🏖️ ลาพักร้อน'), sick: L('🤒 Sick Leave','🤒 ลาป่วย'), business: L('📋 Business Leave','📋 ลากิจ'),
+    upcountry: L('🗺️ Upcountry','🗺️ Upcountry'), 'late-out': L('🌙 Late Night','🌙 กลับดึก'),
+    'time-correction': L('✏️ Time Edit','✏️ แก้ไขเวลา'), ot: L('⏱️ OT', '⏱️ OT'), comp: L('🔄 Compensatory Day','🔄 วันหยุดชดเชย'),
+    'driver-ot': L('🚚 Driver OT', '🚚 OT ของ Driver'),
+    'long-distance': L('🚗 Long Distance', '🚗 Long Distance'),
+    'personal-car': L('🚙 Personal Car', '🚙 รถส่วนตัว'),
+    'clear-attachments': L('🗑️ Clear Old Attachments', '🗑️ ล้างไฟล์แนบเก่า'),
+  };
+}
+
+// 5 route presets, covering every combination currently supported by the routing model.
+function getRoutePresets() {
+  return [
+    { value: '["md"]',              label: L('Managing Director only', 'Managing Director เท่านั้น') },
+    { value: '["manager","md"]',    label: L('Manager → Managing Director', 'Manager → Managing Director') },
+    { value: '["manager"]',         label: L('Manager only', 'Manager เท่านั้น') },
+    { value: '["accounting"]',      label: L('Accounting only', 'Accounting เท่านั้น') },
+    { value: '["accounting","md"]', label: L('Accounting → Managing Director', 'Accounting → Managing Director') },
+  ];
+}
+
+function openApprovalSettings() {
+  const modal = document.getElementById('approval-settings-modal');
+  if (!modal) return;
+  const isMdViewer = isMdView();
+  const presets = getRoutePresets();
+  const typeLabels = getApprovalTypeLabels();
+  const windowOpen = isApprovalDelegationWindowOpen();
+  const rows = Object.keys(APPROVAL_ROUTING).map(type => {
+    const route = getApprovalRoute(type);
+    const currentRoute = JSON.stringify(route);
+    const options = presets.map(p =>
+      `<option value='${p.value}' ${p.value === currentRoute ? 'selected' : ''}>${p.label}</option>`
+    ).join('');
+    // Route itself (who approves) stays MD-only to edit — Manager sees it as read-only text.
+    const routeCell = isMdViewer
+      // 2026-08-16 (Opus audit L-7, sibling site): plain HTML attribute context here (not an
+      // inline JS-string like the onclick above), so escapeHtml() is the correct function, not
+      // escapeJsAttr().
+      ? `<select data-type="${escapeHtml(type)}" onchange="onApprovalRouteChange(this)" style="padding:6px 10px;border:1.5px solid var(--border);border-radius:var(--radius-sm);font-size:13px;font-family:inherit;cursor:pointer">${options}</select>`
+      : `<span style="font-size:13px;color:#475569">${presets.find(p => p.value === currentRoute)?.label || route.join(' → ')}</span>`;
+
+    // Accounting stand-in column: MD can toggle every type; Manager only the types where
+    // Manager's own route currently gives them authority — everyone else sees it read-only.
+    const canToggle = canToggleApprovalDelegationForType(type);
+    const enabled = isDelegationEnabledForType(type);
+    const delegateCell = canToggle
+      // 2026-08-16 (Opus audit L-7): escapeJsAttr() (not plain interpolation) for an inline
+      // onclick JS-string argument, matching this file's own established pattern (see the
+      // comment on escapeJsAttr() itself). Not currently exploitable -- server.js whitelists
+      // approvalRouting's key names -- but this closes the frontend half of that defense so a
+      // future key-whitelist regression doesn't silently become XSS again.
+      ? `<div class="toggle-switch ${enabled ? 'on' : ''}" onclick="toggleApprovalDelegationForType('${escapeJsAttr(type)}')" style="margin:0 auto"></div>`
+      : `<span style="font-size:11px;color:#cbd5e1">${enabled ? L('On','เปิด') : L('Off','ปิด')}</span>`;
+    const statusBadge = enabled
+      ? (windowOpen ? `<div style="font-size:10px;color:#059669;margin-top:2px">${L('🟢 active now','🟢 ใช้งานอยู่')}</div>` : `<div style="font-size:10px;color:#94a3b8;margin-top:2px">${L('from the 21st','ตั้งแต่วันที่ 21')}</div>`)
+      : `<div style="font-size:10px;color:#94a3b8;margin-top:2px">${L('turned off','ปิดไว้')}</div>`;
+
+    return `<tr style="border-bottom:1px solid #f1f5f9">
+      <td style="padding:10px 14px;font-size:14px">${typeLabels[type] || type}</td>
+      <td style="padding:10px 14px;text-align:center">${routeCell}</td>
+      <td style="padding:10px 14px;text-align:center">${delegateCell}${statusBadge}</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('approval-settings-body').innerHTML = `
+    <p style="font-size:13px;color:#64748b;margin-bottom:12px">${L('Choose the approval route for each request type', 'เลือกเส้นทางการอนุมัติของคำขอแต่ละประเภท')}</p>
+    <table style="width:100%;border-collapse:collapse">
+      <thead><tr style="background:#f8fafc">
+        <th style="padding:10px 14px;text-align:left;font-size:12px;color:#94a3b8">${L('Request Type', 'ประเภทคำขอ')}</th>
+        <th style="padding:10px 14px;text-align:center;font-size:12px;color:#94a3b8">${L('Approval Route', 'เส้นทางการอนุมัติ')}</th>
+        <th style="padding:10px 14px;text-align:center;font-size:12px;color:#94a3b8">${L('🤝 Accounting Stand-in', '🤝 Accounting อนุมัติแทน')}</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <p style="font-size:12px;color:#94a3b8;margin-top:12px">${L('💡 Driver OT is submitted differently from other OT (direct hours, not end-time)', '💡 OT ของ Driver กรอกต่างจาก OT ทั่วไป (ระบุชั่วโมงตรง ไม่ใช่เวลาเลิกงาน)')}</p>
+    <p style="font-size:12px;color:#94a3b8;margin-top:6px">${(() => {
+      const _sd = APP_SETTINGS.payroll.periodStartDay || 21;
+      if (currentLang === 'ja') {
+        return `🤝 会計代理承認は、直前に締めた給与期間の${_sd}日から支給日まで自動的に有効になり、ルート上の担当者が対応できない場合に会計が代わりに承認できます。Managing Directorはすべての種別をオフにでき、Managerは自分がルートに含まれる種別のみオフにできます。`;
+      }
+      return L(`🤝 Accounting Stand-in turns on automatically from day ${_sd} through pay day of the just-closed period, so Accounting can cover for whoever the route says is up if they're unavailable. Managing Director can turn it off for any type; Manager can only turn it off for types where Manager is in that type's own route.`, `🤝 Accounting อนุมัติแทน จะเปิดอัตโนมัติตั้งแต่วันที่ ${_sd} ถึงวันจ่ายเงินเดือนของรอบที่เพิ่งปิด เพื่อให้ Accounting ช่วยได้เมื่อคนที่ route กำหนดไว้ไม่ว่าง Managing Director ปิดได้ทุกประเภท ส่วน Manager ปิดได้เฉพาะประเภทที่ตัวเองอยู่ใน route เท่านั้น`);
+    })()}</p>`;
+  modal.classList.add('show');
+}
+
+async function onApprovalRouteChange(el) {
+  // The dropdown itself is only ever rendered for MD (see openApprovalSettings()), but guard
+  // here too — Manager can now open this same modal for the delegate toggle, never the route.
+  if (!isMdView()) { openApprovalSettings(); return; }
+  const type = el.dataset.type;
+  APPROVAL_ROUTING[type] = JSON.parse(el.value);
+  await saveApprovalRouting();
+  openApprovalSettings();
+}
+
+function closeApprovalSettings() {
+  document.getElementById('approval-settings-modal').classList.remove('show');
+  renderApprovals();
+}
+
+// Function, not a frozen const object — same reason as getApprovalTypeLabels() above.
+function getRoleFlowLabels() {
+  return {
+    manager: L('👤 Manager', '👤 Manager'),
+    accounting: L('💼 Accounting', '💼 Accounting'),
+    md: L('👑 Managing Director', '👑 Managing Director'),
+  };
+}
+
+function openApprovalFlowChart() {
+  const modal = document.getElementById('approval-flowchart-modal');
+  const body  = document.getElementById('approval-flowchart-body');
+  if (!modal || !body) return;
+  const employeeLabel = L('👤 Employee', '👤 พนักงาน');
+  const typeLabels = getApprovalTypeLabels();
+  const roleLabels = getRoleFlowLabels();
+  const rows = Object.keys(APPROVAL_ROUTING).map(type => {
+    const route = getApprovalRoute(type);
+    const chain = [employeeLabel, ...route.map(r => roleLabels[r] || r)].join(' → ');
+    return `<div style="display:flex;align-items:center;gap:12px;padding:10px 14px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px">
+      <span style="font-size:13px;font-weight:700;color:#374151;min-width:150px">${typeLabels[type] || type}</span>
+      <span style="font-size:13px;color:#475569">${chain}</span>
+    </div>`;
+  }).join('');
+  body.innerHTML = `
+    <p style="font-size:13px;color:#64748b;margin-bottom:12px">${L('Current approval route for each request type — change it via ⚙️ Approval Settings', 'เส้นทางการอนุมัติปัจจุบันของคำขอแต่ละประเภท — เปลี่ยนได้ที่ ⚙️ ตั้งค่าการอนุมัติ')}</p>
+    <div style="display:flex;flex-direction:column;gap:8px">${rows}</div>`;
+  modal.classList.add('show');
+}
+
+function closeApprovalFlowChart() {
+  document.getElementById('approval-flowchart-modal').classList.remove('show');
+}
+
+function applyApprovalToLog(l) {
+  const ensureKey = (uid, dateStr) => {
+    const k = attKey(uid, dateStr);
+    if (!attendanceLog[k]) attendanceLog[k] = { checkIn: null, checkOut: null, status: 'present', checkInSource: 'web' };
+    return k;
+  };
+
+  if (l.type === 'time-correction') {
+    const k = ensureKey(l.userId, l.dateFrom);
+    if (l.correctionField === 'checkIn' || l.correctionField === 'checkOut') {
+      attendanceLog[k][l.correctionField] = l.correctedTime;
+    }
+
+  } else if (l.type === 'upcountry') {
+    const k = ensureKey(l.userId, l.dateFrom);
+    attendanceLog[k].upcountry = true;
+
+  } else if (l.type === 'long-distance') {
+    const k = ensureKey(l.userId, l.dateFrom);
+    attendanceLog[k].longDistance = true;
+    attendanceLog[k].longDistanceKm = l.distanceKm || 0;
+    attendanceLog[k].longDistanceAllowance = l.longDistanceAllowance || 0;
+
+  } else if (l.type === 'late-out') {
+    const k = ensureKey(l.userId, l.dateFrom);
+    const time = l.lateOutTime || (l.timePart?.match(/(\d{1,2}:\d{2})/) || [])[1] || '';
+    attendanceLog[k].lateOut     = time;
+    attendanceLog[k].lateApproved = true;
+
+  } else if (['annual', 'sick', 'business'].includes(l.type)) {
+    // 2026-08-06 (fixes the pre-existing partial-leave bug alongside generatePeriodDays()): only
+    // a 'full' coverage leave wipes attendanceLog -- an approved half-day/partial hourly leave
+    // must NOT blank the real checkIn/checkOut here, or the day shows fully blanked-out until the
+    // next loadAttendanceFromBackend() reload even though generatePeriodDays()'s overlay (which
+    // runs on every render) would correctly keep the real scan data. Nothing to do for a partial
+    // leave -- the overlay handles the badge/status entirely at render time.
+    const ws3 = APP_SETTINGS.workSchedule;
+    const stdStartMin3 = (ws3?.standardStartHour ?? 8) * 60 + (ws3?.standardStartMinute ?? 30);
+    if (leaveDayCoverage(l, l.dateFrom, stdStartMin3) === 'full') {
+      let d = new Date(l.dateFrom + 'T12:00:00');
+      const endDate = new Date(l.dateTo   + 'T12:00:00');
+      const leaveStatus = l.type === 'annual' ? 'leave-annual' : l.type === 'sick' ? 'leave-sick' : 'leave-business';
+      while (d <= endDate) {
+        const dow = d.getDay();
+        if (dow !== 0 && dow !== 6 && !isPublicHoliday(localDateStr(d))) {
+          const k = attKey(l.userId, localDateStr(d));
+          attendanceLog[k] = { checkIn: null, checkOut: null, status: leaveStatus, checkInSource: 'web' };
+        }
+        d.setDate(d.getDate() + 1);
+      }
+    }
+  }
+  saveSession();
+}
+
+function updateApprovalBadge() {
+  const el = document.getElementById('approval-badge');
+  const bellDot = document.getElementById('topbar-approval-dot');
+  if (!currentUser) return;
+  const count = DATA_LEAVES.filter(l => {
+    const _t = l.type === 'ot' && (l.isDriverOT || DATA_USERS.find(u => u.id === l.userId)?.role === 'driver') ? 'driver-ot' : l.type;
+    return isMyTurnNow(l, _t);
+  }).length;
+  if (el) {
+    if (count > 0) { el.textContent = count; el.style.display = ''; }
+    else el.style.display = 'none';
+  }
+  // Topbar bell icon used to show a permanently-visible static dot regardless of whether
+  // anything was actually pending — wire it to the same count so it only lights up (with the
+  // real number) when there's something to review, same source of truth as the sidebar badge.
+  if (bellDot) {
+    if (count > 0) { bellDot.textContent = count > 99 ? '99+' : count; bellDot.style.display = 'flex'; }
+    else bellDot.style.display = 'none';
+  }
+}
+
+function updateMyRequestsBadge() {
+  const el = document.getElementById('my-requests-badge');
+  if (!el || !currentUser) return;
+  const count = DATA_LEAVES.filter(l =>
+    l.userId === currentUser.id && (l.status === 'pending' || l.status === 'pending-md' || l.status === 'pending-accounting')
+  ).length;
+  if (count > 0) {
+    el.textContent = count;
+    el.style.display = 'inline-flex';
+  } else {
+    el.style.display = 'none';
+  }
+}
+
+function toggleApprovalHistory() {
+  const el = document.getElementById('approval-history-list');
+  if (!el) return;
+  el.style.display = el.style.display === 'none' ? 'flex' : 'none';
+}
+
+async function approveMockLeave(id) {
+  if (blockIfObserver()) return;
+  const l = DATA_LEAVES.find(x => x.id === id);
+  if (!l) return;
+  try {
+    const did = await approveMockLeaveInternal(id);
+    if (!did) return;
+  } catch(e) {
+    showToast(L('❌ Could not save: ', '❌ ไม่สามารถบันทึกได้: ') + e.message, 'danger');
+    return;
+  }
+  // Re-check status after internal call updated it — correctly reflects the actual route
+  // (e.g. Accounting -> MD means Accounting's approval is NOT final).
+  if (l.status === 'approved') {
+    renderAttendanceTable();
+    showToast(L('✅ Approved successfully', '✅ อนุมัติสำเร็จ'), 'success');
+  } else {
+    const nextRole  = STATUS_TO_ROLE[l.status];
+    const nextLabel = nextRole === 'md' ? L('Managing Director', 'Managing Director')
+                     : nextRole === 'accounting' ? L('Accounting', 'Accounting')
+                     : L('Manager', 'Manager');
+    showToast(currentLang === 'ja' ? `✅ 承認済み — ${nextLabel}の確認待ち` : L(`✅ Approved — awaiting ${nextLabel} confirmation`, `✅ อนุมัติแล้ว — รอ ${nextLabel} ยืนยัน`), 'success');
+  }
+  renderApprovals();
+  renderDashboard();
+  if (currentPage === 'my-requests') renderMyRequests();
+}
+
+async function rejectMockLeave(id) {
+  if (blockIfObserver()) return;
+  try {
+    const did = await rejectMockLeaveInternal(id);
+    if (!did) return;
+  } catch(e) {
+    showToast(L('❌ Could not save: ', '❌ ไม่สามารถบันทึกได้: ') + e.message, 'danger');
+    return;
+  }
+  showToast(L('❌ Request rejected', '❌ ปฏิเสธคำขอเรียบร้อย'), 'danger');
+  renderApprovals();
+  renderDashboard();
+  if (currentPage === 'my-requests') renderMyRequests();
+}
+
+// kept for backward-compat
+function approveTimeCorrection(id) { approveMockLeave(id); }
+function rejectTimeCorrection(id)  { rejectMockLeave(id);  }
+
+// BUG FIX 2026-08-06 (user report: attachments can't be opened): this used to be a plain
+// `<a href="NAS_BACKEND/api/upload/...">` / `<img src="...">` pointing straight at the backend.
+// That route requires a valid JWT (SECURITY FIX 2026-07-19, F-04 -- /api/upload was public before,
+// deliberately closed), but auth in this app is Bearer-token-only (apiFetch() attaches
+// `Authorization: Bearer ...` in JS) -- a plain browser navigation or <img> load sends NO such
+// header, so every attachment link/thumbnail has 401'd since that security fix and just never got
+// noticed. Fixed the same way this app already solves it for payslip downloads
+// (downloadPayslipXlsx() below): fetch the file through apiFetch() (auth header attached), turn
+// the response into a blob: URL, then open/render THAT instead of the raw backend URL.
+// - Non-image files: `.att-open-link` + a delegated click listener (added once, right below)
+//   calls openAttachment(), which fetches+opens the blob in a new tab.
+// - Images: `src` is still set to the real backend URL first (so it renders immediately for
+//   anyone who somehow already has a valid session cookie/proxy in front, and so nothing changes
+//   if this app's auth model ever stops being Bearer-only) -- `onerror` (fires on the 401, since
+//   the plain <img> load has no auth header) swaps in an authenticated blob URL via
+//   hydrateAttachmentImg(). `data-hydrated` stops that from ever looping.
+// Filenames go through escapeHtml() for the data-* attributes (server-generated `l.attachment` is
+// already sanitized to [a-zA-Z0-9.-_], but `l.attachmentName` is the client-supplied ORIGINAL
+// filename via the x-filename header at upload time -- untrusted, must not be interpolated
+// unescaped into any HTML attribute).
+function buildAttachmentLinkHtml(l) {
+  if (!l.attachment) return '';
+  const ext = (l.attachmentName || l.attachment).split('.').pop().toLowerCase();
+  const isImg = ['jpg','jpeg','png','gif','webp'].includes(ext);
+  const _attUrl = `${NAS_BACKEND}/api/upload/${encodeURIComponent(l.attachment)}`;
+  const attAttr = escapeHtml(l.attachment);
+  const nameAttr = escapeHtml(l.attachmentName || l.attachment);
+  return isImg
+    ? `<a href="javascript:void(0)" class="att-open-link" data-attachment="${attAttr}" data-attachment-name="${nameAttr}" style="display:block;margin-top:4px"><img src="${_attUrl}" data-attachment="${attAttr}" onerror="hydrateAttachmentImg(this)" style="max-width:100%;max-height:200px;border-radius:8px;border:1px solid #e2e8f0"></a>`
+    : `<a href="javascript:void(0)" class="att-open-link" data-attachment="${attAttr}" data-attachment-name="${nameAttr}" style="color:#3b82f6;text-decoration:underline">📄 ${nameAttr}</a>`;
+}
+
+// Fetches an attachment through apiFetch() (so the auth header actually gets attached, see the
+// comment above buildAttachmentLinkHtml) and opens it as a blob: URL in a new tab. Revoked after a
+// minute -- long enough for the new tab to finish loading it, short enough not to leak memory on a
+// long session with many attachments opened.
+async function openAttachment(filename, displayName) {
+  if (!filename) return;
+  try {
+    const res = await apiFetch(`/api/upload/${encodeURIComponent(filename)}`);
+    if (!res.ok) {
+      showToast(L('❌ Could not open the attachment', '❌ ไม่สามารถเปิดไฟล์แนบได้'), 'danger');
+      return;
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    window.open(url, '_blank');
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (e) {
+    showToast(L('❌ Could not open the attachment', '❌ ไม่สามารถเปิดไฟล์แนบได้'), 'danger');
+  }
+}
+
+// Same idea as openAttachment() but for the inline image thumbnail -- swaps the <img>'s src to an
+// authenticated blob: URL. `data-hydrated` is set BEFORE the fetch so a second onerror (e.g. the
+// blob URL itself somehow failing) can't loop back into this function again.
+async function hydrateAttachmentImg(imgEl) {
+  const filename = imgEl.dataset.attachment;
+  if (!filename || imgEl.dataset.hydrated) return;
+  imgEl.dataset.hydrated = '1';
+  try {
+    const res = await apiFetch(`/api/upload/${encodeURIComponent(filename)}`);
+    if (!res.ok) return;
+    const blob = await res.blob();
+    imgEl.src = URL.createObjectURL(blob);
+  } catch (e) { /* leave the broken-image icon -- nothing else useful to show */ }
+}
+
+// Delegated click handler for every `.att-open-link` rendered by buildAttachmentLinkHtml() --
+// added once here (not per-render) since these links get inserted via innerHTML in several
+// different places (approval detail views, My Requests cards) with no single shared re-render hook.
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('.att-open-link');
+  if (!el) return;
+  e.preventDefault();
+  openAttachment(el.dataset.attachment, el.dataset.attachmentName);
+});
+
+// 2026-08-17 (M-4): Escape closes whichever modal is open, the same way tapping the backdrop
+// does -- .click() on the overlay itself makes event.target===this true, so it reuses each
+// modal's own onclick-declared close function (which resets that modal's own state vars) instead
+// of a separate lookup table that would drift out of sync as modals are added.
+// 2026-08-17 (review fix, corrected): initDatePickers() converts every date/time input to
+// flatpickr, which handles Escape itself (via listeners on the input and on
+// calendarContainer -- NOT document, checked against the actual flatpickr 4.6.13 source) to
+// dismiss just the calendar, with no stopPropagation(). The guard below only helps if it sees
+// the calendar as still open -- but flatpickr's own handler runs at the TARGET phase and closes
+// the calendar (removes .open) synchronously, so a bubble-phase document listener like this one
+// would always see it already closed by the time the event reached here, whenever Escape was
+// pressed with focus INSIDE the popup (the time-picker's hour/minute boxes, its "Done" button, or
+// the date-picker's month/year controls) -- exactly the common case, and exactly the case this
+// guard exists to catch. Registering in the CAPTURE phase (the trailing `true`) makes this
+// listener run before the event ever reaches the input/calendar element, so it still sees the
+// calendar open, backs off, and lets the event continue on to flatpickr's own handler -- which
+// then closes only the calendar, leaving the modal (and whatever the user had already typed)
+// untouched.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (document.querySelector('.flatpickr-calendar.open')) return;
+  const open = document.querySelectorAll('.modal-overlay.show');
+  if (open.length) open[open.length - 1].click();
+}, true);
+
+// SECURITY FIX 2026-08-09 (2nd-pass audit finding 1): the invalid-date fallback returned the raw
+// string `s` verbatim -- since `submittedAt` is client-supplied (`...body` on the server, no
+// validation) and every caller of this function interpolates the result into innerHTML, an
+// unparseable `submittedAt` rendered as stored-XSS. Returns a plain (unescaped) string -- callers
+// that interpolate into innerHTML must escapeHtml() the result themselves; callers that assign to
+// .textContent (e.g. showLeaveDetail()) don't need to, and escaping here would double-encode there.
+function _fmtDtStr(s) { if (!s) return '—'; const d = new Date(s); return isNaN(d.getTime()) ? String(s) : fmtDateTime(d); }
+
+function showApprovalDetail(id) {
+  const l = DATA_LEAVES.find(x => x.id === id);
+  if (!l) return;
+  const emp  = DATA_USERS.find(u => u.id === l.userId);
+  const icon = LEAVE_TYPE_ICON[l.type] || '📋';
+  const label = leaveTypeLabel(l);
+  // Short, type-only label (e.g. "ขอ OT", "ลาป่วย") for the new Request Type row below — using
+  // the full leaveTypeLabel() here instead would duplicate what the type-specific detailHtml
+  // already spells out (e.g. OT's exact hours/end-time), so this stays a plain type name only.
+  const typeShortLabel = getLEAVE_TYPE_CFG()[l.type]?.label || escapeHtml(l.type);
+  const dateLine = l.dateFrom === l.dateTo
+    ? fmtDate(new Date(l.dateFrom + 'T12:00:00'))
+    : `${fmtDate(new Date(l.dateFrom + 'T12:00:00'))} – ${fmtDate(new Date(l.dateTo + 'T12:00:00'))}`;
+  const daysPart = l.days ? (currentLang === 'ja' ? ` (${Number(l.days)}日)` : L(` (${Number(l.days)}d)`, ` (${Number(l.days)} วัน)`)) : l.timePart ? ` — ${formatTimePart(l)}` : '';
+
+  // Type-specific detail block
+  let detailHtml = '';
+  if (l.type === 'time-correction') {
+    const fieldTh = l.correctionField === 'checkIn' ? L('check-in time', 'เวลาเข้างาน') : L('check-out time', 'เวลาเลิกงาน');
+    const arrow   = l.correctionField === 'checkIn' ? '⬆️' : '⬇️';
+    const origTxt = l.originalTime && l.originalTime !== '—' ? escapeHtml(l.originalTime) : L('no original data', 'ไม่มีข้อมูลเดิม');
+    detailHtml = row(L('Details', 'รายละเอียด'), `${arrow} ${fieldTh}: ${origTxt} → <strong>${escapeHtml(l.correctedTime)}</strong>`);
+  } else if (l.type === 'upcountry') {
+    detailHtml = upcountryLocationsOf(l).map(loc =>
+      row(L('Location', 'สถานที่'), `🗺️ ${loc.time ? `${escapeHtml(loc.time)} — ` : ''}${L('Travel to', 'เดินทางไป')} ${escapeHtml(loc.name)}`)
+    ).join('');
+  } else if (l.type === 'late-out') {
+    detailHtml = row(L('Return Time', 'เวลากลับ'), `🌙 ${formatTimePart(l)}`);
+  } else if (['annual','sick','business'].includes(l.type)) {
+    const durText = l.days ? (currentLang === 'ja' ? `${Number(l.days)}日` : L(`${Number(l.days)} day(s)`, `${Number(l.days)} วัน`)) : (l.timePart ? formatTimePart(l) : '—');
+    detailHtml = row(L('Duration', 'ระยะเวลา'), durText);
+  } else if (l.type === 'ot') {
+    const otMultNum = Number(l.otMultiplier);
+    const mult = otMultNum === 3 ? L('×3 (Holiday)', '×3 (วันหยุด)') : otMultNum === 2 ? L('×2 (Holiday)', '×2 (วันหยุด)') : L('×1.5 (Weekday)', '×1.5 (วันธรรมดา)');
+    detailHtml = (l.otEndTime ? row(L('End Work', 'เวลาเลิกงาน'), `⏱️ ${escapeHtml(l.otEndTime)}`) : '') + row(L('OT Hours', 'ชั่วโมง OT'), `${Number(l.otHours)||0} ${L('h', 'ชม.')} ${mult}`);
+  } else if (l.type === 'comp') {
+    const wd = l.workedDate ? fmtDate(new Date(l.workedDate + 'T12:00:00')) : dateLine;
+    detailHtml = row(L('Worked Date', 'วันที่ไปทำงาน'), `📅 ${wd}`) + row(L('Result if approved', 'ผลเมื่ออนุมัติ'), L('➕ Add 1 annual leave day', '➕ เพิ่ม 1 วันลาพักร้อน'));
+  } else if (l.type === 'long-distance') {
+    const ldThreshDisp = APP_SETTINGS.allowances.longDistanceThresholdKm || LONG_DISTANCE_THRESHOLD_KM;
+    detailHtml = row(L('Mileage', 'เลขไมล์'), `${Number(l.mileageStart||0).toLocaleString()} → ${Number(l.mileageEnd||0).toLocaleString()} (${Number(l.distanceKm||0).toLocaleString()} ${L('km','กม.')})`)
+      + row(L('Allowance', 'เบี้ยเลี้ยง'), l.longDistanceAllowance > 0 ? `✅ +฿${l.longDistanceAllowance}` : (currentLang === 'ja' ? `❌ ${ldThreshDisp}km未満` : L(`❌ Under ${ldThreshDisp} km`, `❌ ไม่ถึง ${ldThreshDisp} กม.`)));
+  } else if (l.type === 'clear-attachments') {
+    // SECURITY FIX 2026-08-13 (Opus audit, C-1 companion): was rendering `l.targetSnapshot` — a
+    // plain client-authored field the submitter fully controls, independent of `l.targetIds` (the
+    // field that actually decides what gets deleted server-side, see POST /api/attachments/clear).
+    // Nothing stopped those two from describing different files. Re-resolving from `targetIds`
+    // against live DATA_LEAVES — using the SAME filter the server now applies at delete time —
+    // means this preview can no longer show the approver something other than what will actually
+    // be deleted.
+    const targetIdSet = new Set(l.targetIds || []);
+    const resolvedTargets = DATA_LEAVES.filter(x =>
+      targetIdSet.has(x.id) && x.attachment && x.type !== 'clear-attachments' && x.dateFrom < l.dateFrom);
+    const listHtml = resolvedTargets.length === 0 ? L('(no matching files — may already be cleared)', '(ไม่พบไฟล์ที่ตรงเงื่อนไข — อาจถูกล้างไปแล้ว)') : `
+      <div style="max-height:220px;overflow-y:auto;border:1px solid #e2e8f0;border-radius:8px">
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          <thead><tr style="background:#f8fafc;position:sticky;top:0"><th style="padding:6px 10px;text-align:left">${L('Date','วันที่')}</th><th style="padding:6px 10px;text-align:left">${L('Employee','พนักงาน')}</th><th style="padding:6px 10px;text-align:left">${L('File','ไฟล์')}</th></tr></thead>
+          <tbody>${resolvedTargets.map(x => {
+            const emp = DATA_USERS.find(u => u.id === x.userId);
+            return `<tr style="border-top:1px solid #f1f5f9"><td style="padding:6px 10px">${fmtDate(new Date(x.dateFrom + 'T12:00:00'))}</td><td style="padding:6px 10px">${escapeHtml(emp?.name || ('#'+x.userId))}</td><td style="padding:6px 10px">${escapeHtml(x.attachmentName || x.attachment || '')}</td></tr>`;
+          }).join('')}</tbody>
+        </table>
+      </div>`;
+    detailHtml = row(L('Cutoff Date', 'วันที่ตัด'), L('Before ', 'ก่อน ') + fmtDate(new Date(l.dateFrom + 'T12:00:00')))
+      + row(L('Files (verified live)', 'ไฟล์ (ตรวจสอบล่าสุด)'), `${resolvedTargets.length} ${L('file(s)', 'ไฟล์')}`)
+      + `<div style="margin-top:8px">${listHtml}</div>`;
+  }
+  if (l.attachment) {
+    detailHtml += row(L('Attachment', 'ไฟล์แนบ'), buildAttachmentLinkHtml(l));
+  }
+
+  const statusMap = {
+    approved:   `<span class="badge badge-success">✅ ${L('Approved', 'อนุมัติแล้ว')}</span>`,
+    rejected:   `<span class="badge badge-danger">❌ ${L('Rejected', 'ปฏิเสธ')}</span>`,
+    'pending-md':`<span class="badge badge-info">⏳ ${L('Pending Managing Director', 'รอ Managing Director')}</span>`,
+    'pending-accounting': `<span class="badge badge-info">⏳ ${L('Pending Accounting', 'รอ Accounting')}</span>`,
+    pending:    `<span class="badge badge-warning">⏳ ${L('Pending', 'รออนุมัติ')}</span>`,
+  };
+
+  // Same light-pastel-banner-hardcoded-in-dark-mode issue as the toolbar above — these status
+  // banners stayed bright light-green/red/amber regardless of theme since they never checked
+  // data-theme, unlike most of the rest of this modal which now reads CSS variables.
+  const _isDarkDetail = document.documentElement.getAttribute('data-theme') === 'dark';
+  const decisionSection = (l.status === 'approved' || l.status === 'rejected') && l.approver
+    ? `<div style="background:${l.status==='approved'?(_isDarkDetail?'rgba(16,185,129,0.15)':'#f0fdf4'):(_isDarkDetail?'rgba(239,68,68,0.15)':'#fff5f5')};border:1px solid ${l.status==='approved'?(_isDarkDetail?'rgba(16,185,129,0.3)':'#86efac'):(_isDarkDetail?'rgba(239,68,68,0.3)':'#fca5a5')};border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:6px">
+        <div style="font-size:12px;font-weight:700;color:${l.status==='approved'?(_isDarkDetail?'#6ee7b7':'#16a34a'):(_isDarkDetail?'#fca5a5':'#dc2626')};letter-spacing:.4px">
+          ${l.status==='approved'?L('✅ Approval Result','✅ ผลการอนุมัติ'):L('❌ Rejection Result','❌ ผลการปฏิเสธ')}
+        </div>
+        ${row(L('Handled by', 'ผู้ดำเนินการ'), escapeHtml(l.approver))}
+        ${l.approvedAt ? row(L('Handled at', 'เวลาดำเนินการ'), escapeHtml(_fmtDtStr(l.approvedAt))) : ''}
+      </div>`
+    : `<div style="background:${_isDarkDetail?'rgba(245,158,11,0.15)':'#fffbeb'};border:1px solid ${_isDarkDetail?'rgba(245,158,11,0.3)':'#fcd34d'};border-radius:10px;padding:12px 16px;font-size:13px;color:${_isDarkDetail?'#fcd34d':'#b45309'};font-weight:600">${statusMap[l.status] || ''} ${L('still pending', 'ยังรออนุมัติอยู่')}</div>`;
+
+  // Only show Approve/Reject here if it's actually this viewer's turn (same check the Quick
+  // Mode table/badges use) — an MD looking at an Accounting-pending item, for example, should
+  // still see the status banner above but never get action buttons for a step that isn't theirs.
+  const _effectiveType = l.type === 'ot' && (l.isDriverOT || DATA_USERS.find(u => u.id === l.userId)?.role === 'driver') ? 'driver-ot' : l.type;
+  const canAct = ['pending', 'pending-md', 'pending-accounting'].includes(l.status) && isMyTurnNow(l, _effectiveType);
+  const actionButtons = canAct
+    ? `<div style="display:flex;gap:10px">
+        <button onclick="approveMockLeave(${l.id});closeApprovalDetail();" style="flex:1;padding:11px;border-radius:8px;background:#10b981;color:#fff;border:none;font-size:14px;font-weight:700;cursor:pointer">✅ ${L('Approve', 'อนุมัติ')}</button>
+        <button onclick="rejectMockLeave(${l.id});closeApprovalDetail();" style="flex:1;padding:11px;border-radius:8px;background:#ef4444;color:#fff;border:none;font-size:14px;font-weight:700;cursor:pointer">❌ ${L('Reject', 'ไม่อนุมัติ')}</button>
+      </div>`
+    : '';
+
+  document.getElementById('adetail-title').textContent = `${icon} ${label.replace(/^[^\s]+ /,'')}`;
+  document.getElementById('adetail-body').innerHTML = `
+    <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:6px">
+      <div style="font-size:12px;font-weight:700;color:var(--text-muted);letter-spacing:.4px">${L('Requester Info', 'ข้อมูลผู้ยื่นคำขอ')}</div>
+      ${row(L('Employee', 'ชื่อพนักงาน'), emp ? `👤 ${escapeHtml(emp.name)}` : `User #${l.userId}`)}
+      ${row(L('Position', 'ตำแหน่ง'), escapeHtml(emp?.position || '—'))}
+      ${row(L('Submitted', 'ยื่นเมื่อ'), escapeHtml(_fmtDtStr(l.submittedAt)))}
+    </div>
+    <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:6px">
+      <div style="font-size:12px;font-weight:700;color:var(--text-muted);letter-spacing:.4px">${L('Request Details', 'รายละเอียดคำขอ')}</div>
+      ${row(L('Request Type', 'คำขอ'), `${icon} ${typeShortLabel}`)}
+      ${row(L('Date', 'วันที่'), dateLine)}
+      ${detailHtml}
+      ${l.type !== 'upcountry' ? row(L('Reason', 'เหตุผล'), `📝 ${escapeHtml(l.reason)}`) : ''}
+    </div>
+    ${decisionSection}
+    ${actionButtons}`;
+  document.getElementById('approval-detail-modal').classList.add('show');
+}
+
+function row(label, value) {
+  // Uses the theme's own --text/--text-muted tokens instead of hardcoded hex — the old fixed
+  // #94a3b8/#1e293b pair was tuned for light mode and read too faint there while also never
+  // adapting for dark mode, since inline styles don't respond to [data-theme="dark"] overrides.
+  return `<div style="display:flex;gap:8px;font-size:13px;align-items:baseline">
+    <span style="color:var(--text-muted);min-width:88px;flex-shrink:0">${label}</span>
+    <span style="color:var(--text)">${value}</span>
+  </div>`;
+}
+
+function closeApprovalDetail() {
+  document.getElementById('approval-detail-modal').classList.remove('show');
+}
+
+// ===== MODALS =====
+let _leaveMode = 'days';
+
+// ===== EDIT (in place) FOR PENDING REQUESTS =====
+// When set, the next submit*() call for the currently-open modal updates this existing record
+// instead of creating a new one. Every closeXModal() must reset this to null — otherwise a
+// cancelled edit would silently turn the NEXT unrelated "new request" submission into an
+// overwrite of someone else's old record.
+let editingLeaveId = null;
+
+// Shared by every submit*() function's edit branch. PUT merges (see server.js — it's
+// `{...existing, ...updates}`, not a full replace) the given fields onto the existing record.
+// Always resets status back to the route's first step and clears any prior approver — editing
+// content must invalidate a partial approval that was given against the OLD content, not the
+// edited one. Returns true/false so callers can bail out on failure the same way the create
+// path already does.
+async function saveLeaveEdit(id, type, fields) {
+  if (blockIfObserver()) return;
+  const body = { ...fields, status: getInitialStatus(type), approvalRoute: getApprovalRoute(type), approver: null, approvedAt: null };
+  try {
+    const res = await apiFetch(`/api/leaves/${id}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.message || 'Server error');
+    const idx = DATA_LEAVES.findIndex(l => l.id === id);
+    if (idx >= 0) DATA_LEAVES[idx] = data.leave; else DATA_LEAVES.push(data.leave);
+  } catch(e) {
+    showToast(L('❌ Could not save changes: ', '❌ ไม่สามารถบันทึกการแก้ไขได้: ') + e.message, 'danger');
+    return false;
+  }
+  editingLeaveId = null;
+  updateMyRequestsBadge();
+  updateApprovalBadge();
+  return true;
+}
+
+// Opens the correct request modal pre-filled with an existing pending request's data, so the
+// submitter can amend it instead of cancelling + resubmitting from scratch. Only reachable while
+// still pending (any pending-* status) — once approved/rejected the record is final.
+const EDITABLE_LEAVE_TYPES = new Set(['annual', 'sick', 'business', 'upcountry', 'long-distance', 'late-out', 'comp', 'ot', 'personal-car']);
+
+function editLeaveRequest(id) {
+  if (blockIfObserver()) return;
+  const l = DATA_LEAVES.find(x => x.id === id);
+  if (!l || !l.status.startsWith('pending')) return;
+  // Defense-in-depth: the button only ever renders for the owner's own requests, but this
+  // function is reachable directly too — never trust the UI gate alone (matches the pattern
+  // used elsewhere in this codebase, e.g. canApprovePayrollFor()/canToggleApprovalDelegationForType()).
+  if (l.userId !== currentUser.id) {
+    showToast(L('⛔ You can only edit your own requests', '⛔ คุณแก้ไขได้เฉพาะคำขอของตัวเองเท่านั้น'), 'danger');
+    return;
+  }
+  if (!EDITABLE_LEAVE_TYPES.has(l.type)) {
+    showToast(L('⚠️ This request type cannot be edited — cancel and submit a new one instead', '⚠️ คำขอประเภทนี้แก้ไขไม่ได้ — กรุณายกเลิกแล้วยื่นใหม่'), 'warning');
+    return;
+  }
+  editingLeaveId = id;
+
+  if (['annual', 'sick', 'business'].includes(l.type)) {
+    openLeaveModal(l.type);
+    document.getElementById('leave-form-reason').value = l.reason || '';
+    if (l.hourlyStart) {
+      setLeaveMode('hours');
+      document.getElementById('leave-form-date').value = l.dateFrom;
+      document.getElementById('leave-form-start').value = l.hourlyStart;
+      document.getElementById('leave-form-end').value = l.hourlyEnd;
+      calcLeaveHours();
+    } else {
+      setLeaveMode('days');
+      document.getElementById('leave-form-from').value = l.dateFrom;
+      // openLeaveModal() already defaulted the checkbox to checked/hidden — override to
+      // unchecked/visible only if this record actually spans more than one day.
+      if (l.dateTo && l.dateTo !== l.dateFrom) {
+        document.getElementById('leave-single-day-check').checked = false;
+        toggleLeaveSingleDay();
+        document.getElementById('leave-form-to').value = l.dateTo;
+      }
+      calcLeaveDays();
+    }
+    if (l.attachment) {
+      const fn = document.getElementById('leave-medical-filename');
+      if (fn) fn.innerHTML = buildAttachmentLinkHtml(l);
+    }
+  } else if (l.type === 'upcountry') {
+    openUpcountryModal(l.dateFrom);
+    // 2026-08-06: falls back to treating the old single `reason` string as one location entry --
+    // no record in production actually has this shape (structured `locations` shipped before any
+    // real request existed), but kept for safety against any future data shape drift.
+    const locs = upcountryLocationsOf(l);
+    locs.forEach((loc, i) => {
+      if (i >= 6) return;
+      document.getElementById(`upcountry-loc-time-${i + 1}`).value = loc.time || '';
+      document.getElementById(`upcountry-loc-name-${i + 1}`).value = loc.name || '';
+    });
+  } else if (l.type === 'long-distance') {
+    openLongDistanceModal(l.dateFrom);
+    document.getElementById('longdistance-mileage-start').value = l.mileageStart || '';
+    document.getElementById('longdistance-mileage-end').value = l.mileageEnd || '';
+    document.getElementById('longdistance-reason').value = l.reason && l.reason !== '-' ? l.reason : '';
+    calcLongDistance();
+  } else if (l.type === 'late-out') {
+    openLateOutModal(l.dateFrom);
+    // No free-text time field — return time is chosen via the 19:00/20:00 tier buttons.
+    // skipGate:true -- see selectLateOutTime()'s own comment (2026-08-09, Opus audit finding 1.1).
+    if (l.lateOutTime) selectLateOutTime(parseInt(l.lateOutTime), true);
+    document.getElementById('lateout-reason').value = l.reason && l.reason !== '-' ? l.reason : '';
+  } else if (l.type === 'comp') {
+    openCompModal();
+    // dateFrom/dateTo/workedDate are all the same date in this record shape — one field only.
+    document.getElementById('comp-worked-date').value = l.workedDate || l.dateFrom;
+    document.getElementById('comp-reason').value = l.reason || '';
+  } else if (l.type === 'personal-car') {
+    openPersonalCarModal(l.dateFrom);
+    document.getElementById('personalcar-reason').value = l.reason && l.reason !== '-' ? l.reason : '';
+  } else if (l.type === 'ot') {
+    openOTModal(l.dateFrom);
+    if (l.isDriverOT) {
+      // Only the tier matching this record's own multiplier gets filled — driver OT records
+      // are one-per-tier, so editing one must not resurrect the other (unrelated) tiers.
+      const tierIds = { 1.5: ['ot-hours-15','ot-mins-15'], 2: ['ot-hours-20','ot-mins-20'], 3: ['ot-hours-30','ot-mins-30'] };
+      const [hId, mId] = tierIds[l.otMultiplier] || tierIds[1.5];
+      const hrs = Math.floor(l.otHours || 0);
+      const mins = Math.round(((l.otHours || 0) - hrs) * 60);
+      document.getElementById(hId).value = hrs;
+      document.getElementById(mId).value = mins;
+      updateDriverOTFieldsVisibility();
+    } else {
+      if (l.otEndTime) document.getElementById('ot-end-time').value = l.otEndTime;
+      calcOTHours();
+    }
+    document.getElementById('ot-reason').value = l.reason && l.reason !== '-' ? l.reason : '';
+  }
+}
+
+function openLeaveModal(type) {
+  const t = type || 'annual';
+  document.getElementById('leave-form-type').value = t;
+  // reset form fields
+  ['leave-form-from','leave-form-to','leave-form-date','leave-form-start','leave-form-end','leave-form-reason'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.value = '';
+  });
+  const mf = document.getElementById('leave-medical-file');
+  if (mf) mf.value = '';
+  const fn = document.getElementById('leave-medical-filename');
+  if (fn) fn.textContent = L('No file attached', 'ยังไม่ได้แนบไฟล์');
+  document.getElementById('leave-days-summary').style.display = 'none';
+  document.getElementById('leave-hours-summary').style.display = 'none';
+  _leaveMode = 'days';
+  setLeaveMode('days');
+  setLeaveType(t);
+  document.getElementById('leave-single-day-check').checked = true;
+  toggleLeaveSingleDay();
+
+  // lock type when opened from a specific button; allow switching when opened generically
+  const typePills = document.getElementById('leave-type-pills');
+  if (typePills) typePills.style.display = type ? 'none' : '';
+
+  document.getElementById('leave-modal').classList.add('show');
+}
+
+function closeLeaveModal() { document.getElementById('leave-modal').classList.remove('show'); editingLeaveId = null; }
+
+function setLeaveType(type) {
+  document.getElementById('leave-form-type').value = type;
+  const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+  const cfgs = {
+    annual:   { id:'ltab-annual',   border:'#bfdbfe', bg: isDark ? 'rgba(59,130,246,0.15)'  : '#eff6ff', color: isDark ? '#93c5fd' : '#1d4ed8', title:L('🏖️ Annual Leave','🏖️ ขอลาพักร้อน') },
+    sick:     { id:'ltab-sick',     border:'#fca5a5', bg: isDark ? 'rgba(239,68,68,0.15)'   : '#fff1f2', color: isDark ? '#fca5a5' : '#b91c1c', title:L('🤒 Sick Leave','🤒 ขอลาป่วย')   },
+    business: { id:'ltab-business', border:'#a78bfa', bg: isDark ? 'rgba(139,92,246,0.15)'  : '#f5f3ff', color: isDark ? '#c4b5fd' : '#6d28d9', title:L('📋 Business Leave','📋 ขอลากิจ')    },
+  };
+  ['annual','sick','business'].forEach(k => {
+    const btn = document.getElementById('ltab-' + k);
+    if (!btn) return;
+    if (k === type) {
+      btn.style.borderColor = cfgs[k].border;
+      btn.style.background  = cfgs[k].bg;
+      btn.style.color       = cfgs[k].color;
+    } else {
+      btn.style.borderColor = isDark ? '#334155' : '#e2e8f0';
+      btn.style.background  = isDark ? '#0f172a' : '#f8fafc';
+      btn.style.color       = isDark ? '#94a3b8' : '#64748b';
+    }
+  });
+  const titleEl = document.getElementById('leave-modal-title');
+  if (titleEl && cfgs[type]) titleEl.textContent = cfgs[type].title;
+  // show/hide medical row
+  const medRow = document.getElementById('leave-medical-row');
+  if (medRow) medRow.style.display = type === 'sick' ? '' : 'none';
+  const noteEl = document.getElementById('leave-approval-note');
+  if (noteEl) noteEl.textContent = approvalRouteNoteText(type);
+}
+
+function setLeaveMode(mode) {
+  _leaveMode = mode;
+  const dayDiv  = document.getElementById('leave-mode-days');
+  const hourDiv = document.getElementById('leave-mode-hours');
+  const dayBtn  = document.getElementById('lmode-days-btn');
+  const hrBtn   = document.getElementById('lmode-hours-btn');
+  const _dm = document.documentElement.getAttribute('data-theme') === 'dark';
+  const active  = `background:${_dm?'#334155':'white'};color:${_dm?'var(--text)':'#1e3a5f'};box-shadow:0 1px 3px rgba(0,0,0,.1)`;
+  const inactive = 'background:transparent;color:#94a3b8;box-shadow:none';
+  if (mode === 'days') {
+    dayDiv.style.display  = '';
+    hourDiv.style.display = 'none';
+    dayBtn.style.cssText  += ';' + active;
+    hrBtn.style.cssText   += ';' + inactive;
+  } else {
+    dayDiv.style.display  = 'none';
+    hourDiv.style.display = '';
+    dayBtn.style.cssText  += ';' + inactive;
+    hrBtn.style.cssText   += ';' + active;
+  }
+}
+
+// Single-day checkbox just hides the End Date field and clears its value — submitLeave()/
+// calcLeaveDays() already fall back to dateFrom when leave-form-to is empty, so no other
+// change is needed for the single-day case to submit/calc correctly.
+function toggleLeaveSingleDay() {
+  const chk = document.getElementById('leave-single-day-check');
+  const toField = document.getElementById('leave-to-field');
+  if (chk.checked) {
+    toField.style.display = 'none';
+    document.getElementById('leave-form-to').value = '';
+  } else {
+    toField.style.display = '';
+  }
+  calcLeaveDays();
+}
+
+function calcLeaveDays() {
+  const from = document.getElementById('leave-form-from').value;
+  const to   = document.getElementById('leave-form-to').value || from;
+  const sumEl = document.getElementById('leave-days-summary');
+  if (!from) { sumEl.style.display = 'none'; return; }
+  let days = 0, d = new Date(from + 'T12:00:00');
+  const end = new Date((to || from) + 'T12:00:00');
+  while (d <= end) { if (d.getDay() !== 0 && d.getDay() !== 6) days++; d.setDate(d.getDate()+1); }
+  const isPast = from < todayDateStr();
+  const backLabel = isPast ? ' <span style="background:#fef3c7;color:#92400e;padding:1px 7px;border-radius:20px;font-size:11px;margin-left:4px">' + L('Backdated','ย้อนหลัง') + '</span>' : '';
+  sumEl.style.display = '';
+  sumEl.innerHTML = days > 0
+    ? (currentLang === 'ja' ? `📅 合計${days}稼働日（祝日除く）${backLabel}` : L(`📅 Total ${days} working day(s) (excl. holidays)${backLabel}`, `📅 รวม ${days} วันทำงาน (ไม่นับวันหยุด)${backLabel}`))
+    : L('⚠️ No working days in the selected range', '⚠️ ไม่มีวันทำงานในช่วงที่เลือก');
+  const _isDarkLD = document.documentElement.getAttribute('data-theme') === 'dark';
+  sumEl.style.color      = _isDarkLD ? (days > 0 ? '#6ee7b7' : '#fcd34d') : (days > 0 ? '#166534' : '#92400e');
+  sumEl.style.background = _isDarkLD ? (days > 0 ? 'rgba(16,185,129,0.15)' : 'rgba(245,158,11,0.15)') : (days > 0 ? '#f0fdf4' : '#fef3c7');
+  sumEl.style.borderColor = _isDarkLD ? (days > 0 ? 'rgba(16,185,129,0.3)' : 'rgba(245,158,11,0.3)') : (days > 0 ? '#bbf7d0' : '#fde68a');
+}
+
+function calcLeaveHours() {
+  const start = document.getElementById('leave-form-start').value;
+  const end   = document.getElementById('leave-form-end').value;
+  const sumEl = document.getElementById('leave-hours-summary');
+  if (!start || !end) { sumEl.style.display = 'none'; return; }
+  const [sh, sm] = start.split(':').map(Number);
+  const [eh, em] = end.split(':').map(Number);
+  const totalMin = (eh * 60 + em) - (sh * 60 + sm);
+  if (totalMin <= 0) {
+    sumEl.style.display = '';
+    sumEl.textContent = L('⚠️ End time must be after start time', '⚠️ เวลาสิ้นสุดต้องหลังเวลาเริ่ม');
+    if (document.documentElement.getAttribute('data-theme') === 'dark') {
+      sumEl.style.color = '#fcd34d'; sumEl.style.background = 'rgba(245,158,11,0.15)'; sumEl.style.borderColor = 'rgba(245,158,11,0.3)';
+    } else {
+      sumEl.style.color = '#92400e'; sumEl.style.background = '#fef3c7'; sumEl.style.borderColor = '#fde68a';
+    }
+    return;
+  }
+  const h = Math.floor(totalMin / 60), m = totalMin % 60;
+  const dateVal = document.getElementById('leave-form-date').value;
+  const isPast  = dateVal && dateVal < todayDateStr();
+  const backLabel = isPast ? ' <span style="background:#fef3c7;color:#92400e;padding:1px 7px;border-radius:20px;font-size:11px;margin-left:4px">' + L('Backdated','ย้อนหลัง') + '</span>' : '';
+  sumEl.style.display = '';
+  if (document.documentElement.getAttribute('data-theme') === 'dark') {
+    sumEl.style.color = '#6ee7b7'; sumEl.style.background = 'rgba(16,185,129,0.15)'; sumEl.style.borderColor = 'rgba(16,185,129,0.3)';
+  } else {
+    sumEl.style.color = '#166534'; sumEl.style.background = '#f0fdf4'; sumEl.style.borderColor = '#bbf7d0';
+  }
+  sumEl.innerHTML = currentLang === 'ja'
+    ? `⏰ 合計 ${h > 0 ? h + '時間' : ''}${m > 0 ? m + '分' : ''}${backLabel}`
+    : L(`⏰ Total ${h > 0 ? h + 'h ' : ''}${m > 0 ? m + 'm' : ''}${backLabel}`, `⏰ รวม ${h > 0 ? h + ' ชั่วโมง ' : ''}${m > 0 ? m + ' นาที' : ''}${backLabel}`);
+}
+
+// 2026-08-06: half-day AM/PM shortcut buttons for the hourly leave mode -- pre-fills the exact
+// 08:30-12:00 / 13:00-17:30 boundary leaveDayCoverage() classifies as a clean 'am'/'pm' half-day
+// (vs. 'partial', which would silently reintroduce the "late"/blank-day bug this feature exists
+// to fix if someone fat-fingers the manual time fields by even a minute).
+function setHalfDayLeave(half) {
+  const startEl = document.getElementById('leave-form-start');
+  const endEl   = document.getElementById('leave-form-end');
+  if (!startEl || !endEl) return;
+  const _ws = APP_SETTINGS.workSchedule;
+  const stdStart = `${String(_ws?.standardStartHour ?? 8).padStart(2,'0')}:${String(_ws?.standardStartMinute ?? 30).padStart(2,'0')}`;
+  if (half === 'am') { startEl.value = stdStart; endEl.value = '12:00'; }
+  else { startEl.value = '13:00'; endEl.value = '17:30'; }
+  calcLeaveHours();
+}
+
+function showMedicalFilename() {
+  const file = document.getElementById('leave-medical-file').files[0];
+  const el   = document.getElementById('leave-medical-filename');
+  if (el) el.textContent = file ? `📄 ${file.name}` : L('No file attached', 'ยังไม่ได้แนบไฟล์');
+}
+
+async function submitLeave() {
+  if (blockIfObserver()) return;
+  const type   = document.getElementById('leave-form-type')?.value || 'annual';
+  const reason = document.getElementById('leave-form-reason')?.value.trim();
+  if (!reason) { showToast(L('⚠️ Please specify a reason for leave', '⚠️ กรุณาระบุเหตุผลการลา'), 'warning'); return; }
+
+  let dateFrom, dateTo, days, timePart = '', hourlyStart, hourlyEnd;
+
+  if (_leaveMode === 'days') {
+    dateFrom = document.getElementById('leave-form-from').value;
+    dateTo   = document.getElementById('leave-form-to').value || dateFrom;
+    if (!dateFrom) { showToast(L('⚠️ Please specify the start date', '⚠️ กรุณาระบุวันที่เริ่มลา'), 'warning'); return; }
+    days = 0;
+    let d = new Date(dateFrom + 'T12:00:00');
+    const end = new Date(dateTo + 'T12:00:00');
+    while (d <= end) { if (d.getDay() !== 0 && d.getDay() !== 6 && !isPublicHoliday(localDateStr(d))) days++; d.setDate(d.getDate()+1); }
+    if (days === 0) { showToast(L('⚠️ No working days in the selected range', '⚠️ ไม่มีวันทำงานในช่วงที่เลือก'), 'warning'); return; }
+  } else {
+    dateFrom = document.getElementById('leave-form-date').value;
+    dateTo   = dateFrom;
+    const start = document.getElementById('leave-form-start').value;
+    const end   = document.getElementById('leave-form-end').value;
+    if (!dateFrom) { showToast(L('⚠️ Please specify the leave date', '⚠️ กรุณาระบุวันที่ลา'), 'warning'); return; }
+    if (!start || !end) { showToast(L('⚠️ Please specify start and end time', '⚠️ กรุณาระบุเวลาเริ่มและสิ้นสุด'), 'warning'); return; }
+    const [sh, sm] = start.split(':').map(Number);
+    const [eh, em] = end.split(':').map(Number);
+    const totalMin = (eh * 60 + em) - (sh * 60 + sm);
+    if (totalMin <= 0) { showToast(L('⚠️ End time must be after start time', '⚠️ เวลาสิ้นสุดต้องหลังเวลาเริ่ม'), 'warning'); return; }
+    const h = Math.floor(totalMin / 60), m = totalMin % 60;
+    days = 0;
+    hourlyStart = start;
+    hourlyEnd = end;
+    // timePart kept as a frozen fallback for backward compat with old records; display code
+    // should prefer recomputing from hourlyStart/hourlyEnd (see formatLeaveTimePart()) so the
+    // text follows the current language instead of the one active at submission time.
+    timePart = currentLang === 'ja'
+      ? `${start}–${end} (${h > 0 ? h+'時間' : ''}${m > 0 ? m+'分' : ''})`
+      : L(`${start}–${end} (${h > 0 ? h+'h' : ''}${m > 0 ? m+'m' : ''})`, `${start}–${end} (${h > 0 ? h+'ชม.' : ''}${m > 0 ? m+'น.' : ''})`);
+  }
+
+  // Upload medical certificate if provided
+  let attachment = null, attachmentName = null;
+  const medFile = document.getElementById('leave-medical-file')?.files[0];
+  if (medFile) {
+    if (medFile.size > 10 * 1024 * 1024) { showToast(L('⚠️ File must not exceed 10MB', '⚠️ ไฟล์ต้องไม่เกิน 10MB'), 'warning'); return; }
+    try {
+      const uploadRes = await apiFetch(`/api/upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': medFile.type || 'application/octet-stream', 'x-filename': encodeURIComponent(medFile.name) },
+        body: medFile,
+      });
+      const uploadData = await uploadRes.json();
+      if (!uploadData.success) throw new Error(uploadData.message || 'upload failed');
+      attachment = uploadData.filename;
+      attachmentName = medFile.name;
+    } catch(e) { showToast(L('❌ File attachment failed: ', '❌ แนบไฟล์ไม่สำเร็จ: ') + e.message, 'danger'); return; }
+  }
+
+  // Overlap validation — block duplicate leaves on same date
+  if (['annual','sick','business','comp'].includes(type)) {
+    const overlap = DATA_LEAVES.find(l =>
+      l.userId === currentUser.id &&
+      l.id !== editingLeaveId &&
+      ['annual','sick','business','comp'].includes(l.type) &&
+      !['rejected','cancelled'].includes(l.status) &&
+      l.dateFrom <= dateTo && (l.dateTo || l.dateFrom) >= dateFrom
+    );
+    if (overlap) {
+      showToast(currentLang === 'ja' ? `⚠️ 重複：${overlap.dateFrom}に「${overlap.type}」の申請が既にあります` : L(`⚠️ Overlap: you already have a "${overlap.type}" request on ${overlap.dateFrom}`, `⚠️ วันซ้ำ: มีคำขอ "${overlap.type}" อยู่แล้วในวันที่ ${overlap.dateFrom}`), 'warning');
+      return;
+    }
+  }
+
+  // Balance gate for annual and business leave (runs on both new submissions and edits)
+  if (['annual', 'business'].includes(type)) {
+    const u = currentUser;
+    const thisYear = new Date().getFullYear();
+    const yStart = `${thisYear}-01-01`, yEnd = `${thisYear}-12-31`;
+    const cfDays   = type === 'annual' ? getCarryForwardDays(thisYear, u.id) : 0;
+    const compDays = type === 'annual' ? getApprovedCompDays(thisYear, u.id) + getCarryForwardCompDays(thisYear, u.id) : 0;
+    const totalEntitlement = { annual: u.annualLeave, business: u.businessLeave }[type] || 0;
+    const totalMin = (totalEntitlement + cfDays + compDays) * 8 * 60;
+    const committedLeaves = DATA_LEAVES.filter(l =>
+      l.userId === u.id && l.type === type &&
+      !['rejected','cancelled'].includes(l.status) &&
+      l.id !== editingLeaveId &&
+      l.dateFrom >= yStart && l.dateFrom <= yEnd
+    );
+    let usedMin = 0;
+    committedLeaves.forEach(l => {
+      if ((l.days || 0) > 0) usedMin += l.days * 8 * 60;
+      else if (l.hourlyStart && l.hourlyEnd) {
+        const [sh, sm] = l.hourlyStart.split(':').map(Number);
+        const [eh, em] = l.hourlyEnd.split(':').map(Number);
+        usedMin += Math.max(0, (eh*60+em) - (sh*60+sm));
+      } else if (l.timePart) {
+        const hM = l.timePart.match(/(\d+)\s*(?:ชม\.|h|時間)/); const mM = l.timePart.match(/(\d+)\s*(?:น\.|m|分)/);
+        usedMin += (hM ? parseInt(hM[1]) : 0) * 60 + (mM ? parseInt(mM[1]) : 0);
+      }
+    });
+    const lateDeductMin = type === 'annual' ? computeLateDeductMinutes(u.id, thisYear).deductMin : 0;
+    const remMin = Math.max(0, totalMin - usedMin - lateDeductMin);
+    const reqMin = _leaveMode === 'days'
+      ? days * 8 * 60
+      : (() => { const [sh,sm] = hourlyStart.split(':').map(Number); const [eh,em] = hourlyEnd.split(':').map(Number); return (eh*60+em)-(sh*60+sm); })();
+    if (reqMin > remMin) {
+      showToast(currentLang === 'ja'
+        ? `⚠️ 有給残日数が不足しています — 残り: ${minToStr(remMin)}`
+        : L(`⚠️ Insufficient leave balance — remaining: ${minToStr(remMin)}`, `⚠️ วันลาไม่พอ — คงเหลือ: ${minToStr(remMin)}`), 'warning');
+      return;
+    }
+  }
+
+  const leaveData = {
+    userId: currentUser.id, type, dateFrom, dateTo, days, timePart,
+    ...(hourlyStart ? { hourlyStart, hourlyEnd } : {}),
+    reason, status: getInitialStatus(type), approvalRoute: getApprovalRoute(type), approver: null, submittedAt: fmtDateTime(new Date()), note: '',
+    ...(attachment ? { attachment, attachmentName } : {}),
+  };
+  const isEdit = !!editingLeaveId;
+  if (isEdit) {
+    const ok = await saveLeaveEdit(editingLeaveId, type, leaveData);
+    if (!ok) return;
+  } else {
+    try {
+      const res = await apiFetch(`/api/leaves`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(leaveData)
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message || 'Server error');
+      if (!DATA_LEAVES.find(l => l.id === data.leave.id)) {
+        DATA_LEAVES.push(data.leave);
+        nextLeaveId = Math.max(nextLeaveId, data.leave.id + 1);
+      }
+    } catch(e) {
+      showToast(L('❌ Could not save the request: ', '❌ ไม่สามารถบันทึกคำขอได้: ') + e.message, 'danger');
+      return;
+    }
+  }
+
+  updateMyRequestsBadge();
+  updateApprovalBadge();
+  closeLeaveModal();
+  if (currentPage === 'leave') renderLeaveHistory();
+  renderDashboard();
+  showToast(isEdit
+    ? L('✏️ Request updated — awaiting approval', '✏️ แก้ไขคำขอเรียบร้อย — รอการอนุมัติ')
+    : L('📋 Leave request submitted — awaiting approval', '📋 ยื่นคำขอลาเรียบร้อย — รอการอนุมัติ'), 'success');
+}
+// 2026-08-06: returns the [{time, name}] entries actually filled in for an upcountry-type leave
+// record -- falls back to treating the old single `reason` string as one location entry for any
+// pre-2026-08-06 record shape.
+function upcountryLocationsOf(l) {
+  if (Array.isArray(l.locations) && l.locations.length) return l.locations.filter(x => x && x.name);
+  return l.reason ? [{ time: '', name: l.reason }] : [];
+}
+function openUpcountryModal(date) {
+  document.getElementById('upcountry-date').value = date || businessDateStr();
+  for (let i = 1; i <= 6; i++) {
+    document.getElementById(`upcountry-loc-time-${i}`).value = '';
+    document.getElementById(`upcountry-loc-name-${i}`).value = '';
+  }
+  const noteEl = document.getElementById('upcountry-approval-note');
+  if (noteEl) noteEl.textContent = approvalRouteNoteText('upcountry');
+  document.getElementById('upcountry-modal').classList.add('show');
+}
+function closeUpcountryModal() { document.getElementById('upcountry-modal').classList.remove('show'); editingLeaveId = null; }
+// 2026-08-06: reads the 6 optional time+customer/location row pairs -- at least one (any of the
+// 6, not necessarily row 1) must have a name filled in. Time is optional per row.
+function readUpcountryLocations() {
+  const locs = [];
+  for (let i = 1; i <= 6; i++) {
+    const time = document.getElementById(`upcountry-loc-time-${i}`).value.trim();
+    const name = document.getElementById(`upcountry-loc-name-${i}`).value.trim();
+    if (name) locs.push({ time, name });
+  }
+  return locs;
+}
+async function submitUpcountry() {
+  if (blockIfObserver()) return;
+  // Defense-in-depth: the button visibility already matches this, but never trust the UI gate
+  // alone. 2026-07-31: reads allowanceEligibility instead of a hardcoded role check, so granting
+  // 'upcountry' to a new role via Settings doesn't leave the button visible but submission
+  // rejected.
+  if (!isAllowanceEligible(APP_SETTINGS.allowanceEligibility, effectiveRole(), 'upcountry')) {
+    showToast(L('⛔ This role cannot submit Upcountry requests', '⛔ Role นี้ไม่สามารถส่งคำขอ Upcountry ได้'), 'danger');
+    return;
+  }
+  const date = document.getElementById('upcountry-date').value;
+  // 2026-08-09 (Opus audit finding 2.1): every other request type's submit function guards
+  // against an empty date (e.g. submitLateOut()); this one didn't -- an empty dateFrom reaches
+  // POST /api/leaves where the whole period-lock/MD-freeze guard is wrapped in `if (body.dateFrom)`
+  // and gets silently skipped, producing a permanently-broken record with no period protection.
+  if (!date) { showToast(L('⚠️ Please specify the date', '⚠️ กรุณาระบุวันที่'), 'warning'); return; }
+  if (blockIfCompanyTrip(date)) return;
+  // 2026-08-06: was one free-text "Customer / Location" field -- now up to 6 separate
+  // time+customer/location pairs, stored structured (`locations`) instead of jammed into one
+  // string, so a future feature can pull individual stops back out. `reason` is still populated
+  // (joined summary) so any older code path that only reads `reason` keeps working unchanged.
+  const locations = readUpcountryLocations();
+  if (locations.length === 0) { showToast(L('⚠️ Please specify at least one customer / location', '⚠️ กรุณาระบุชื่อลูกค้า / สถานที่อย่างน้อย 1 แห่ง'), 'warning'); return; }
+  // 2026-08-09 (Opus audit finding 2.3): ', ' is indistinguishable from a comma inside a location
+  // name itself (the placeholder text literally suggests "ABC Co., Korat") -- e.g. two stops
+  // "ABC Co., Korat" + "Amata" used to join into "ABC Co., Korat, Amata", reading as three stops
+  // everywhere `reason` (not the structured `locations`) is displayed. ' | ' can't collide with
+  // ordinary address/company-name punctuation.
+  const reason = locations.map(l => l.time ? `${l.time} ${l.name}` : l.name).join(' | ');
+  const leaveData = {
+    userId: currentUser.id, type: 'upcountry', dateFrom: date, dateTo: date,
+    days: 0, timePart: '', reason, locations, status: getInitialStatus('upcountry'), approvalRoute: getApprovalRoute('upcountry'),
+    approver: null, submittedAt: fmtDateTime(new Date()), note: '',
+  };
+  const isEdit = !!editingLeaveId;
+  if (isEdit) {
+    const ok = await saveLeaveEdit(editingLeaveId, 'upcountry', leaveData);
+    if (!ok) return;
+  } else {
+    try {
+      const res = await apiFetch(`/api/leaves`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(leaveData)
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message || 'Server error');
+      if (!DATA_LEAVES.find(l => l.id === data.leave.id)) {
+        DATA_LEAVES.push(data.leave);
+        nextLeaveId = Math.max(nextLeaveId, data.leave.id + 1);
+      }
+    } catch(e) {
+      showToast(L('❌ Could not save: ', '❌ ไม่สามารถบันทึกได้: ') + e.message, 'danger');
+      return;
+    }
+  }
+  updateMyRequestsBadge();
+  updateApprovalBadge();
+  closeUpcountryModal();
+  if (currentPage === 'my-requests') renderMyRequests();
+  renderDashboard();
+  showToast(isEdit
+    ? L('✏️ Request updated — awaiting approval', '✏️ แก้ไขคำขอเรียบร้อย — รอการอนุมัติ')
+    : L('🗺️ Upcountry work reported — awaiting approval', '🗺️ ส่งคำขอ Upcountry แล้ว — รอการอนุมัติ'), 'success');
+}
+
+// ===== LONG DISTANCE (Driver) =====
+// Distance over 250km/day earns a flat ฿150 allowance — paid out via the payslip's Long
+// Distance line (see renderPayslip() / calcFinalizeEmployee()).
+const LONG_DISTANCE_THRESHOLD_KM = 250;
+const LONG_DISTANCE_ALLOWANCE = 150;
+
+function openLongDistanceModal(date) {
+  document.getElementById('longdistance-date').value = date || businessDateStr();
+  document.getElementById('longdistance-mileage-start').value = '';
+  document.getElementById('longdistance-mileage-end').value = '';
+  document.getElementById('longdistance-reason').value = '';
+  document.getElementById('longdistance-result-display').style.display = 'none';
+  const noteEl = document.getElementById('longdistance-approval-note');
+  if (noteEl) noteEl.textContent = approvalRouteNoteText('long-distance');
+  const threshold = APP_SETTINGS.allowances.longDistanceThresholdKm || LONG_DISTANCE_THRESHOLD_KM;
+  const rate      = APP_SETTINGS.allowances.longDistance || LONG_DISTANCE_ALLOWANCE;
+  const thresholdEl = document.getElementById('longdistance-threshold-note');
+  if (thresholdEl) thresholdEl.textContent = currentLang === 'ja' ? `📌 走行距離が${threshold}kmを超えると1日あたり฿${rate}の追加手当が支給されます。` : L(`📌 Distance over ${threshold} km gets an extra ฿${rate}/day allowance.`, `📌 ถ้าระยะทางเกิน ${threshold} กม. จะได้รับเบี้ยเลี้ยงเพิ่ม ${rate} บาท/วัน`);
+  document.getElementById('longdistance-modal').classList.add('show');
+}
+function closeLongDistanceModal() { document.getElementById('longdistance-modal').classList.remove('show'); editingLeaveId = null; }
+
+// ===== PERSONAL CAR =====
+function openPersonalCarModal(date) {
+  document.getElementById('personalcar-date').value = date || businessDateStr();
+  const rate = APP_SETTINGS.allowances.personalCar != null ? APP_SETTINGS.allowances.personalCar : 1000;
+  document.getElementById('personalcar-rate-display').textContent =
+    currentLang === 'ja' ? `🚙 レート: ฿${rate.toLocaleString()} / 回` : L(`🚙 Rate: ฿${rate.toLocaleString()} / time`, `🚙 อัตรา: ฿${rate.toLocaleString()} / ครั้ง`);
+  document.getElementById('personalcar-reason').value = '';
+  const noteEl = document.getElementById('personalcar-approval-note');
+  if (noteEl) noteEl.textContent = approvalRouteNoteText('personal-car');
+  document.getElementById('personalcar-modal').classList.add('show');
+}
+function closePersonalCarModal() { document.getElementById('personalcar-modal').classList.remove('show'); editingLeaveId = null; }
+
+async function submitPersonalCar() {
+  if (blockIfObserver()) return;
+  // Defense-in-depth: never trust the UI gate alone. 2026-07-31: reads allowanceEligibility AND
+  // the per-employee personalCarEligible flag (role alone isn't enough for this one -- it's
+  // also gated per-employee, unlike the other five allowance types).
+  if (!isAllowanceEligible(APP_SETTINGS.allowanceEligibility, effectiveRole(), 'personalCar') || currentUser.personalCarEligible !== true) {
+    showToast(L('⛔ This role cannot submit Personal Car requests', '⛔ Role นี้ไม่สามารถแจ้งใช้รถส่วนตัวได้'), 'danger');
+    return;
+  }
+  const date = document.getElementById('personalcar-date').value;
+  const reason = document.getElementById('personalcar-reason').value.trim();
+  if (!date) { showToast(L('Please select a date', 'กรุณาระบุวันที่'), 'error'); return; }
+  if (blockIfCompanyTrip(date)) return;
+  const ps = getPeriodStartForDate(date);
+  if (isPeriodLocked(ps)) {
+    showToast(L('🔒 This pay period is locked', '🔒 รอบเงินเดือนนี้ล็อคแล้ว'), 'warning');
+    return;
+  }
+  const leaveData = {
+    userId: currentUser.id, type: 'personal-car',
+    dateFrom: date, dateTo: date,
+    reason: reason || L('Personal car use', 'ใช้รถส่วนตัว'),
+    status: getInitialStatus('personal-car'), approvalRoute: getApprovalRoute('personal-car'), approver: null,
+    submittedAt: fmtDateTime(new Date()), note: '',
+  };
+  const isEdit = !!editingLeaveId;
+  if (isEdit) {
+    const ok = await saveLeaveEdit(editingLeaveId, 'personal-car', leaveData);
+    if (!ok) return;
+  } else {
+    try {
+      await postOTLeave(leaveData);
+    } catch(e) {
+      showToast(L('❌ Could not save: ', '❌ ไม่สามารถบันทึกได้: ') + e.message, 'danger');
+      return;
+    }
+  }
+  updateMyRequestsBadge();
+  updateApprovalBadge();
+  closePersonalCarModal();
+  if (currentPage === 'attendance') renderAttendanceTable();
+  if (currentPage === 'my-requests') renderMyRequests();
+  renderDashboard();
+  showToast(isEdit
+    ? L('✏️ Request updated — awaiting approval', '✏️ แก้ไขคำขอเรียบร้อย — รอการอนุมัติ')
+    : L('🚙 Personal car reported — awaiting approval', '🚙 แจ้งใช้รถส่วนตัวเรียบร้อย — รอการอนุมัติ'), 'success');
+}
+
+function calcLongDistance() {
+  const mStart = parseFloat(document.getElementById('longdistance-mileage-start').value);
+  const mEnd   = parseFloat(document.getElementById('longdistance-mileage-end').value);
+  const display = document.getElementById('longdistance-result-display');
+  const textEl  = document.getElementById('longdistance-result-text');
+  if (isNaN(mStart) || isNaN(mEnd) || mEnd <= mStart) { display.style.display = 'none'; return; }
+  const threshold = APP_SETTINGS.allowances.longDistanceThresholdKm || LONG_DISTANCE_THRESHOLD_KM;
+  const rate      = APP_SETTINGS.allowances.longDistance || LONG_DISTANCE_ALLOWANCE;
+  const km = mEnd - mStart;
+  const qualifies = km > threshold;
+  textEl.textContent = currentLang === 'ja'
+    ? (qualifies
+        ? `🚗 距離: ${km.toLocaleString()}km — +฿${rate}の手当対象です`
+        : `🚗 距離: ${km.toLocaleString()}km — ${threshold}km未満のため追加手当なし`)
+    : (qualifies
+        ? L(`🚗 Distance: ${km.toLocaleString()} km — qualifies for +฿${rate} allowance`, `🚗 ระยะทาง: ${km.toLocaleString()} กม. — ได้รับเบี้ยเลี้ยงเพิ่ม +฿${rate}`)
+        : L(`🚗 Distance: ${km.toLocaleString()} km — under ${threshold} km, no extra allowance`, `🚗 ระยะทาง: ${km.toLocaleString()} กม. — ไม่ถึง ${threshold} กม. ไม่ได้รับเบี้ยเลี้ยงเพิ่ม`));
+  display.style.background = qualifies ? '#f0fdf4' : '#f8fafc';
+  display.style.borderColor = qualifies ? '#86efac' : '#e2e8f0';
+  display.style.color = qualifies ? '#166534' : '#64748b';
+  display.style.display = 'block';
+}
+
+async function submitLongDistance() {
+  if (blockIfObserver()) return;
+  const date   = document.getElementById('longdistance-date').value;
+  const reason = document.getElementById('longdistance-reason').value.trim();
+  const mStart = parseFloat(document.getElementById('longdistance-mileage-start').value);
+  const mEnd   = parseFloat(document.getElementById('longdistance-mileage-end').value);
+  if (!date) { showToast(L('⚠️ Please specify the date', '⚠️ กรุณาระบุวันที่'), 'warning'); return; }
+  if (blockIfCompanyTrip(date)) return;
+  if (isNaN(mStart) || isNaN(mEnd)) { showToast(L('⚠️ Please fill in both mileage fields', '⚠️ กรุณากรอกเลขไมล์ให้ครบทั้ง 2 ช่อง'), 'warning'); return; }
+  if (mEnd <= mStart) { showToast(L('⚠️ Ending mileage must be greater than starting mileage', '⚠️ เลขไมล์สุดท้ายต้องมากกว่าเลขไมล์เริ่มต้น'), 'warning'); return; }
+  const distanceKm = mEnd - mStart;
+  const threshold = APP_SETTINGS.allowances.longDistanceThresholdKm || LONG_DISTANCE_THRESHOLD_KM;
+  const rate      = APP_SETTINGS.allowances.longDistance || LONG_DISTANCE_ALLOWANCE;
+  const longDistanceAllowance = distanceKm > threshold ? rate : 0;
+  const leaveData = {
+    userId: currentUser.id, type: 'long-distance', dateFrom: date, dateTo: date, days: 0,
+    mileageStart: mStart, mileageEnd: mEnd, distanceKm, longDistanceAllowance,
+    reason: reason || '-', status: getInitialStatus('long-distance'), approvalRoute: getApprovalRoute('long-distance'), approver: null,
+    submittedAt: fmtDateTime(new Date()), note: '',
+  };
+  const isEdit = !!editingLeaveId;
+  if (isEdit) {
+    const ok = await saveLeaveEdit(editingLeaveId, 'long-distance', leaveData);
+    if (!ok) return;
+  } else {
+    try {
+      await postOTLeave(leaveData);
+    } catch(e) {
+      showToast(L('❌ Could not save: ', '❌ ไม่สามารถบันทึกได้: ') + e.message, 'danger');
+      return;
+    }
+  }
+  updateMyRequestsBadge();
+  updateApprovalBadge();
+  closeLongDistanceModal();
+  if (currentPage === 'my-requests') renderMyRequests();
+  renderDashboard();
+  showToast(isEdit
+    ? L('✏️ Request updated — awaiting approval', '✏️ แก้ไขคำขอเรียบร้อย — รอการอนุมัติ')
+    : L('🚗 Long Distance reported — awaiting approval', '🚗 แจ้ง Long Distance เรียบร้อย — รอการอนุมัติ'), 'success');
+}
+
+// ===== CLEAR OLD ATTACHMENTS (MD / Manager / Accounting) =====
+// Deletes only the physical file — the leave/OT/etc. record it was attached to is always kept
+// for history. Manager/Accounting can only submit a request; the file is untouched until MD
+// approves it (see the 'clear-attachments' branch in approveMockLeaveInternal()). MD can also
+// select + delete directly in one sitting without the extra approval round-trip.
+let _caCandidates = [];
+
+function openClearAttachmentsModal() {
+  document.getElementById('ca-cutoff-date').value = '';
+  document.getElementById('ca-result-area').innerHTML = '';
+  document.getElementById('ca-modal-footer').style.display = 'none';
+  document.getElementById('clear-attachments-modal').classList.add('show');
+}
+function closeClearAttachmentsModal() {
+  document.getElementById('clear-attachments-modal').classList.remove('show');
+}
+
+function fmtFileSize(b) {
+  if (b < 1024) return `${b} B`;
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+  return `${(b / 1024 / 1024).toFixed(1)} MB`;
+}
+
+async function searchOldAttachments() {
+  const cutoff = document.getElementById('ca-cutoff-date').value;
+  const resultArea = document.getElementById('ca-result-area');
+  const footer = document.getElementById('ca-modal-footer');
+  if (!cutoff) { showToast(L('⚠️ Please select a cutoff date', '⚠️ กรุณาเลือกวันที่ตัด'), 'warning'); return; }
+
+  const candidates = DATA_LEAVES.filter(l => l.attachment && l.type !== 'clear-attachments' && l.dateFrom < cutoff);
+  if (candidates.length === 0) {
+    resultArea.innerHTML = `<div style="text-align:center;padding:24px;color:#94a3b8">${L('No attachments found before this date', 'ไม่พบไฟล์แนบก่อนวันที่นี้')}</div>`;
+    footer.style.display = 'none';
+    return;
+  }
+
+  resultArea.innerHTML = `<div style="text-align:center;padding:16px;color:#94a3b8">${L('Loading file sizes...', 'กำลังโหลดขนาดไฟล์...')}</div>`;
+
+  let sizes = {};
+  try {
+    const res = await apiFetch(`/api/attachments/info`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filenames: candidates.map(l => l.attachment) })
+    });
+    const data = await res.json();
+    if (data.success) sizes = data.files;
+  } catch(e) {}
+
+  _caCandidates = candidates.map(l => {
+    const emp = DATA_USERS.find(u => u.id === l.userId);
+    const info = sizes[l.attachment] || { exists: true, size: 0 };
+    return {
+      leaveId: l.id, date: l.dateFrom, employeeName: emp?.name || `#${l.userId}`,
+      requestType: leaveTypeLabel(l), attachmentName: l.attachmentName || l.attachment,
+      size: info.size || 0, exists: info.exists !== false,
+    };
+  });
+
+  const totalSize = _caCandidates.reduce((s, c) => s + c.size, 0);
+
+  resultArea.innerHTML = `
+    <div style="font-size:13px;font-weight:600;color:#166534;margin-bottom:8px">
+      ${currentLang === 'ja' ? `${_caCandidates.length}件のファイルが見つかりました。合計 ${fmtFileSize(totalSize)}` : L(`Found ${_caCandidates.length} file(s), ${fmtFileSize(totalSize)} total`, `พบ ${_caCandidates.length} ไฟล์ รวม ${fmtFileSize(totalSize)}`)}
+    </div>
+    <div style="overflow-x:auto;border:1px solid #e2e8f0;border-radius:10px">
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr style="background:#f8fafc">
+          <th style="padding:8px 12px;text-align:center"><input type="checkbox" id="ca-select-all" checked onchange="toggleCaSelectAll(this.checked)"></th>
+          <th style="padding:8px 12px;text-align:left">${L('Date','วันที่')}</th>
+          <th style="padding:8px 12px;text-align:left">${L('Employee','พนักงาน')}</th>
+          <th style="padding:8px 12px;text-align:left">${L('Type','ประเภท')}</th>
+          <th style="padding:8px 12px;text-align:left">${L('File','ไฟล์')}</th>
+          <th style="padding:8px 12px;text-align:right">${L('Size','ขนาด')}</th>
+        </tr></thead>
+        <tbody>
+          ${_caCandidates.map((c, i) => `<tr style="border-top:1px solid #f1f5f9">
+            <td style="padding:8px 12px;text-align:center"><input type="checkbox" class="ca-row-chk" data-idx="${i}" checked></td>
+            <td style="padding:8px 12px">${fmtDate(new Date(c.date + 'T12:00:00'))}</td>
+            <td style="padding:8px 12px">${escapeHtml(c.employeeName||'')}</td>
+            <td style="padding:8px 12px">${escapeHtml(c.requestType||'')}</td>
+            <td style="padding:8px 12px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(c.attachmentName||'')}">${escapeHtml(c.attachmentName||'')}${!c.exists ? ` <span style="color:#ef4444">(${L('missing','ไม่พบไฟล์')})</span>` : ''}</td>
+            <td style="padding:8px 12px;text-align:right;color:#64748b">${fmtFileSize(c.size)}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+
+  const isMd = isMdView();
+  // 2026-08-11 (Opus re-audit, LOW-1): button label hardcoded "Managing Director" like the toast
+  // above (fixed in submitClearAttachments()) -- same route-aware derivation.
+  const _caBtnRoleLabel = { manager: L('Manager','Manager'), accounting: L('Accounting','Accounting'), md: L('Managing Director','Managing Director') };
+  const _caBtnApproverName = _caBtnRoleLabel[STATUS_TO_ROLE[getInitialStatus('clear-attachments')]] || STATUS_TO_ROLE[getInitialStatus('clear-attachments')];
+  document.getElementById('ca-submit-btn').textContent = isMd ? L('🗑️ Delete Now', '🗑️ ลบทันที') : L(`📤 Submit for ${_caBtnApproverName} Approval`, `📤 ส่งให้ ${_caBtnApproverName} อนุมัติ`);
+  footer.style.display = '';
+}
+
+function toggleCaSelectAll(checked) {
+  document.querySelectorAll('.ca-row-chk').forEach(chk => chk.checked = checked);
+}
+
+async function submitClearAttachments() {
+  if (blockIfObserver()) return;
+  const selected = [];
+  document.querySelectorAll('.ca-row-chk').forEach(chk => {
+    if (chk.checked) selected.push(_caCandidates[parseInt(chk.dataset.idx)]);
+  });
+  if (selected.length === 0) { showToast(L('⚠️ Please select at least one file', '⚠️ กรุณาเลือกไฟล์อย่างน้อย 1 ไฟล์'), 'warning'); return; }
+
+  const isMd = isMdView();
+  const cutoff = document.getElementById('ca-cutoff-date').value;
+  const targetIds = selected.map(c => c.leaveId);
+  const totalSize = selected.reduce((s, c) => s + c.size, 0);
+
+  if (isMd) {
+    if (!confirm(currentLang === 'ja' ? `${selected.length}件のファイルを完全に削除しますか？元に戻せません。` : L(`Delete ${selected.length} file(s) permanently? This cannot be undone.`, `ลบไฟล์ ${selected.length} ไฟล์ถาวร? การลบนี้ย้อนกลับไม่ได้`))) return;
+  }
+
+  const leaveData = {
+    userId: currentUser.id, type: 'clear-attachments', dateFrom: cutoff, dateTo: cutoff, days: 0,
+    targetIds, targetSnapshot: selected, fileCount: selected.length, totalSize,
+    reason: '-', status: isMd ? 'approved' : getInitialStatus('clear-attachments'),
+    approvalRoute: getApprovalRoute('clear-attachments'),
+    approver: isMd ? currentUser.name : null,
+    submittedAt: fmtDateTime(new Date()), note: '',
+  };
+
+  try {
+    // SECURITY FIX 2026-08-13 (Opus audit, C-1/C-3): was delete-files-first, create-audit-record-
+    // second -- if postOTLeave() failed afterward, the files were already gone with NO record of
+    // it anywhere (the clear-attachments request is the only audit trail this feature produces).
+    // Also, the old /api/attachments/clear trusted a raw `targetIds` array with no server-side
+    // check that it matched what this modal actually showed (`selected`/`targetSnapshot`) -- now
+    // the record is created FIRST, then the server re-derives the delete set from THAT record's
+    // own stored dateFrom/targetIds (see POST /api/attachments/clear), so what gets deleted can
+    // never diverge from what was actually submitted.
+    const created = await postOTLeave(leaveData);
+    if (isMd) {
+      const clearRes = await apiFetch(`/api/attachments/clear`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ leaveId: created.id })
+      });
+      const clearData = await clearRes.json();
+      if (!clearData.success) throw new Error(clearData.message || 'Clear failed');
+      const clearedIds = clearData.clearedIds || [];
+      DATA_LEAVES.forEach(x => { if (clearedIds.includes(x.id)) { delete x.attachment; delete x.attachmentName; } });
+    }
+  } catch(e) {
+    showToast(L('❌ Could not process: ', '❌ ไม่สามารถดำเนินการได้: ') + e.message, 'danger');
+    return;
+  }
+
+  updateMyRequestsBadge();
+  updateApprovalBadge();
+  closeClearAttachmentsModal();
+  renderApprovals();
+  // 2026-08-11 (Opus re-audit, LOW-1): non-MD branch hardcoded "Managing Director" even though
+  // this type's status a few lines above already correctly uses getInitialStatus() -- same class
+  // as MEDIUM-1/F4. Role label derived the same way.
+  const _caRoleLabel = { manager: L('Manager','Manager'), accounting: L('Accounting','Accounting'), md: L('Managing Director','Managing Director') };
+  const _caApproverName = _caRoleLabel[STATUS_TO_ROLE[getInitialStatus('clear-attachments')]] || STATUS_TO_ROLE[getInitialStatus('clear-attachments')];
+  showToast(
+    isMd
+      ? (currentLang === 'ja' ? `✅ ${selected.length}件のファイルを削除しました` : L(`✅ Deleted ${selected.length} file(s)`, `✅ ลบไฟล์ ${selected.length} ไฟล์เรียบร้อย`))
+      : (currentLang === 'ja'
+          ? `📤 申請を送信しました — ${_caApproverName}の承認待ちです`
+          : L(`📤 Request submitted — awaiting ${_caApproverName} approval`, `📤 ส่งคำขอเรียบร้อย — รอ ${_caApproverName} อนุมัติ`)),
+    'success'
+  );
+}
+
+// Reads the live-configured late-night hour/amount for a tier (1 or 2) instead of the
+// hardcoded 19:00/20:00/฿240/฿480 this feature used to assume everywhere -- keeps the
+// late-out feature in sync with Settings -> Late Night Allowance thresholds.
+function lateOutThresholdHour(tier) {
+  const S = APP_SETTINGS.allowances;
+  return tier === 2 ? (S.lateNightThreshold2Hour || S.lateNightThresholdHour || 20) : (S.lateNightThreshold1Hour || 19);
+}
+function lateOutAllowanceForHour(hour) {
+  const S = APP_SETTINGS.allowances;
+  const thr2 = S.lateNightThreshold2Hour || S.lateNightThresholdHour || 20;
+  return hour >= thr2 ? (S.lateNight2 || 480) : (S.lateNight1 || 240);
+}
+
+function canSubmitLateNightForDate(dateStr, userId) {
+  const uid = userId || (currentUser && currentUser.id);
+  if (!uid || !dateStr) return { ok: false, reason: 'missing' };
+  const d = new Date(dateStr + 'T12:00:00');
+  if (Number.isNaN(d.getTime())) return { ok: false, reason: 'missing' };
+  const days = generatePeriodDays(d, d, false, uid);
+  const row = days[0];
+  if (!row || !row.checkOut) return { ok: false, reason: 'no-checkout', row };
+  if (!isDeviceScanSource(row.checkOutSource)) {
+    return { ok: false, reason: row.checkOutSource === 'web' ? 'web' : 'no-checkout', row };
+  }
+  const hour = parseInt(row.checkOut, 10);
+  const thr1 = lateOutThresholdHour(1);
+  if (!Number.isFinite(hour) || hour < thr1) return { ok: false, reason: 'too-early', thr1, row };
+  return { ok: true, row, thr1 };
+}
+
+function lateNightSubmitBlockedMessage(result) {
+  const thr1 = result.thr1 || lateOutThresholdHour(1);
+  const t = String(thr1).padStart(2, '0') + ':00';
+  if (result.reason === 'web') {
+    return currentLang === 'ja'
+      ? '深夜退勤は顔認証端末での退勤が必要です（Webアプリの退勤では申請できません）'
+      : L('Late Night Out requires check-out at the face scanner, not the web app',
+          'แจ้งกลับดึกได้เฉพาะเมื่อสแกนออกที่เครื่อง ไม่ใช่ปุ่ม Check Out บนเว็บ');
+  }
+  if (result.reason === 'too-early') {
+    return currentLang === 'ja'
+      ? `顔認証端末で${t}以降に退勤してから申請してください`
+      : L(`Scan out at the face terminal at or after ${t} before submitting`,
+          `ต้องสแกนออกที่เครื่องตั้งแต่ ${t} ขึ้นไป ถึงจะแจ้งกลับดึกได้`);
+  }
+  return currentLang === 'ja'
+    ? '先に顔認証端末で退勤してください。事前申請はできません'
+    : L('Scan out at the face terminal first — Late Night Out cannot be submitted in advance',
+        'ต้องสแกนออกที่เครื่องก่อน จึงจะแจ้งกลับดึกได้ — ยื่นล่วงหน้าไม่ได้');
+}
+
+function updateLateOutEntryVisibility() {
+  const el = document.getElementById('checkin-lateout-btn');
+  if (!el || !currentUser) return;
+  const eligible = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, effectiveRole(), 'earlyLate');
+  el.style.display = (eligible && canSubmitLateNightForDate(businessDateStr(), currentUser.id).ok) ? '' : 'none';
+}
+
+let _lateOutSelected = 0; // the actual configured hour for whichever tier was clicked (e.g. 19 or 20)
+
+// BUG FIX 2026-08-06: this used to always read attendanceLog for todayDateStr(), regardless of
+// which date's 🌙 button was actually clicked (row.date) or which date was being edited
+// (l.dateFrom) -- e.g. clicking the button on a past date's row would gate the 19:00/20:00
+// buttons against TODAY's checkout time instead of that date's, blocking a legitimate request
+// (or silently allowing one) based on the wrong day's data entirely. Extracted so it can be
+// re-run both when the modal opens AND if the user manually edits the date field afterward.
+function refreshLateOutGate() {
+  const targetDate = document.getElementById('lateout-date').value || businessDateStr();
+  const gate = canSubmitLateNightForDate(targetDate);
+  const checkOutStr = gate.row?.checkOut || '';
+  let checkOutMins = 0;
+  if (checkOutStr) {
+    const [h, m] = checkOutStr.split(':').map(Number);
+    checkOutMins = h * 60 + m;
+  }
+  const deviceOk = isDeviceScanSource(gate.row?.checkOutSource);
+
+  const thr1 = lateOutThresholdHour(1);
+  const thr2 = lateOutThresholdHour(2);
+  const amt1 = lateOutAllowanceForHour(thr1);
+  const amt2 = lateOutAllowanceForHour(thr2);
+  const can19 = deviceOk && checkOutMins >= thr1 * 60;
+  const can20 = deviceOk && checkOutMins >= thr2 * 60;
+
+  const btn19 = document.getElementById('lateout-btn-19');
+  const btn20 = document.getElementById('lateout-btn-20');
+  const noteEl = document.getElementById('lateout-time-note');
+
+  const _lateAmtText = amt => currentLang === 'ja' ? `深夜手当 ฿${amt}` : L(`Late allowance ฿${amt}`, `ค่าทำงานดึก ฿${amt}`);
+  document.getElementById('lateout-btn-19-time').textContent = `${String(thr1).padStart(2,'0')}:00`;
+  document.getElementById('lateout-btn-19-amt').textContent = _lateAmtText(amt1);
+  document.getElementById('lateout-btn-20-time').textContent = `${String(thr2).padStart(2,'0')}:00`;
+  document.getElementById('lateout-btn-20-amt').textContent = _lateAmtText(amt2);
+
+  // Reset selection style
+  const _isDarkLO = document.documentElement.getAttribute('data-theme') === 'dark';
+  [btn19, btn20].forEach(b => {
+    b.style.borderColor = _isDarkLO ? '#334155' : '#e2e8f0';
+    b.style.background  = _isDarkLO ? '#0f172a' : '#f8fafc';
+    b.style.opacity     = '1';
+    b.style.cursor      = 'pointer';
+  });
+
+  if (!can19) {
+    btn19.style.opacity = '0.4';
+    btn19.style.cursor  = 'not-allowed';
+  }
+  if (!can20) {
+    btn20.style.opacity = '0.4';
+    btn20.style.cursor  = 'not-allowed';
+  }
+
+  if (!can19 && !can20) {
+    if (gate.reason === 'web' || gate.reason === 'no-checkout' || gate.reason === 'missing') {
+      noteEl.textContent = lateNightSubmitBlockedMessage(gate);
+    } else {
+      const thr1Str = `${String(thr1).padStart(2,'0')}:00`;
+      noteEl.textContent = checkOutStr
+        ? (currentLang === 'ja'
+            ? `⏰ 退勤時刻 ${checkOutStr} — 深夜勤務の条件を満たしていません（${thr1Str}以降である必要があります）`
+            : L(`⏰ Check-out ${checkOutStr} — does not meet late-night criteria (must be after ${thr1Str})`, `⏰ เวลาออก ${checkOutStr} — ยังไม่ถึงเงื่อนไขกลับดึก (ต้องหลัง ${thr1Str})`))
+        : lateNightSubmitBlockedMessage({ reason: 'no-checkout' });
+    }
+  } else {
+    noteEl.textContent = checkOutStr
+      ? (currentLang === 'ja' ? `⏰ 退勤時刻: ${checkOutStr}` : L(`⏰ Check-out time: ${checkOutStr}`, `⏰ เวลาออกงาน: ${checkOutStr}`))
+      : '';
+  }
+  _lateOutSelected = 0;
+}
+
+function openLateOutModal(date) {
+  const targetDate = date || businessDateStr();
+  if (!editingLeaveId) {
+    const gate = canSubmitLateNightForDate(targetDate);
+    if (!gate.ok) {
+      showToast(lateNightSubmitBlockedMessage(gate), 'warning');
+      return;
+    }
+  }
+  document.getElementById('lateout-date').value = targetDate;
+  document.getElementById('lateout-reason').value = '';
+  _lateOutSelected = 0;
+
+  refreshLateOutGate();
+
+  const approvalNoteEl = document.getElementById('lateout-approval-note');
+  if (approvalNoteEl) approvalNoteEl.textContent = approvalRouteNoteText('late-out');
+
+  document.getElementById('lateout-modal').classList.add('show');
+}
+
+// 2026-08-09 (Opus audit finding 1.1): `skipGate` lets editLeaveRequest()'s pre-fill call bypass
+// the checkout-mismatch gate below -- without it, re-opening an already-pending late-out request
+// for edit (e.g. just to fix a typo in the reason) would spuriously re-validate the ORIGINALLY
+// selected tier against whatever the real checkout time has become SINCE submission, blocking the
+// edit with a toast and leaving _lateOutSelected at 0 even though the request was valid when
+// first submitted. A genuine live click on a tier button during that same edit session (the user
+// actively changing their answer) is still fully gated as before -- only the automatic
+// pre-fill-from-existing-record call skips it.
+function selectLateOutTime(hour, skipGate = false) {
+  // Same fix as openLateOutModal() -- read the modal's own date field (which the user can also
+  // edit manually), not always today.
+  const targetDate = document.getElementById('lateout-date').value || businessDateStr();
+  const gate = canSubmitLateNightForDate(targetDate);
+  const checkOutStr = gate.row?.checkOut || '';
+  let checkOutMins = 0;
+  if (checkOutStr) {
+    const [h, m] = checkOutStr.split(':').map(Number);
+    checkOutMins = h * 60 + m;
+  }
+  if (!skipGate && !gate.ok) {
+    showToast(lateNightSubmitBlockedMessage(gate), 'warning');
+    return;
+  }
+  // Block if checkout time is clearly before the selected tier
+  if (checkOutStr && checkOutMins < hour * 60 && !skipGate) {
+    showToast(currentLang === 'ja' ? `⚠️ 退勤時刻 ${checkOutStr} は ${hour}:00 より前です` : L(`⚠️ Check-out time ${checkOutStr} is before ${hour}:00`, `⚠️ เวลาออกงาน ${checkOutStr} ยังไม่ถึง ${hour}:00`), 'warning');
+    return;
+  }
+  _lateOutSelected = hour;
+  const btn19 = document.getElementById('lateout-btn-19');
+  const btn20 = document.getElementById('lateout-btn-20');
+  const _isDarkSL = document.documentElement.getAttribute('data-theme') === 'dark';
+  // Reset both
+  btn19.style.borderColor = _isDarkSL ? '#334155' : '#e2e8f0'; btn19.style.background = _isDarkSL ? '#0f172a' : '#f8fafc';
+  btn20.style.borderColor = _isDarkSL ? '#334155' : '#e2e8f0'; btn20.style.background = _isDarkSL ? '#0f172a' : '#f8fafc';
+  // Highlight selected -- compare against the live-configured tier-1 hour, not a hardcoded 19,
+  // so this still picks the right button if the threshold hours are ever changed in Settings.
+  const sel = document.getElementById(`lateout-btn-${hour === lateOutThresholdHour(1) ? '19' : '20'}`);
+  sel.style.borderColor = '#6ee7b7';
+  sel.style.background  = _isDarkSL ? 'rgba(16,185,129,0.15)' : '#f0fdf4';
+}
+
+function closeLateOutModal() { document.getElementById('lateout-modal').classList.remove('show'); editingLeaveId = null; }
+
+async function submitLateOut() {
+  if (blockIfObserver()) return;
+  // Defense-in-depth: never trust the UI gate alone. 2026-07-31: reads allowanceEligibility
+  // instead of a hardcoded role check.
+  if (!isAllowanceEligible(APP_SETTINGS.allowanceEligibility, effectiveRole(), 'earlyLate')) {
+    showToast(L('⛔ This role cannot submit Late Night Out requests', '⛔ Role นี้ไม่สามารถแจ้งกลับดึกได้'), 'danger');
+    return;
+  }
+  const date   = document.getElementById('lateout-date').value;
+  const gate = canSubmitLateNightForDate(date);
+  if (!gate.ok) {
+    showToast(lateNightSubmitBlockedMessage(gate), 'warning');
+    return;
+  }
+  const reason = document.getElementById('lateout-reason').value.trim();
+  if (!date)            { showToast(L('⚠️ Please specify the date', '⚠️ กรุณาระบุวันที่'), 'warning'); return; }
+  if (blockIfCompanyTrip(date)) return;
+  if (!_lateOutSelected){ showToast(L('⚠️ Please select a return time', '⚠️ กรุณาเลือกเวลาที่กลับ'), 'warning'); return; }
+  const timeLabel = `${String(_lateOutSelected).padStart(2,'0')}:00`;
+  const allowance = lateOutAllowanceForHour(_lateOutSelected);
+  const leaveData = {
+    userId: currentUser.id, type: 'late-out', dateFrom: date, dateTo: date,
+    days: 0, lateOutTime: timeLabel, timePart: currentLang === 'ja' ? `帰宅 ${timeLabel} (฿${allowance})` : L(`Return ${timeLabel} (฿${allowance})`, `กลับ ${timeLabel} (฿${allowance})`),
+    reason: reason || '-', status: getInitialStatus('late-out'), approvalRoute: getApprovalRoute('late-out'), approver: null,
+    submittedAt: fmtDateTime(new Date()), note: '',
+  };
+  const isEdit = !!editingLeaveId;
+  if (isEdit) {
+    const ok = await saveLeaveEdit(editingLeaveId, 'late-out', leaveData);
+    if (!ok) return;
+  } else {
+    try {
+      const res = await apiFetch(`/api/leaves`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(leaveData)
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message || 'Server error');
+      if (!DATA_LEAVES.find(l => l.id === data.leave.id)) {
+        DATA_LEAVES.push(data.leave);
+        nextLeaveId = Math.max(nextLeaveId, data.leave.id + 1);
+      }
+    } catch(e) {
+      showToast(L('❌ Could not save: ', '❌ ไม่สามารถบันทึกได้: ') + e.message, 'danger');
+      return;
+    }
+  }
+  updateMyRequestsBadge();
+  updateApprovalBadge();
+  closeLateOutModal();
+  if (currentPage === 'leave') renderLeaveHistory();
+  renderDashboard();
+  showToast(isEdit
+    ? L('✏️ Request updated — awaiting approval', '✏️ แก้ไขคำขอเรียบร้อย — รอการอนุมัติ')
+    : (currentLang === 'ja' ? `🌙 深夜退勤 ${timeLabel} を提出しました — 承認待ち` : L(`🌙 Late-night out ${timeLabel} submitted — awaiting approval`, `🌙 แจ้งกลับดึก ${timeLabel} เรียบร้อย — รอการอนุมัติ`)), 'success');
+}
+
+// ===== OT =====
+function openOTModal(date) {
+  document.getElementById('ot-date').value = date || businessDateStr();
+  document.getElementById('ot-end-time').value = '';
+  document.getElementById('ot-reason').value = '';
+  document.getElementById('ot-hours-display').style.display = 'none';
+  document.getElementById('ot-file').value = '';
+  document.getElementById('ot-file-name').textContent = '';
+  document.getElementById('ot-file-clear').style.display = 'none';
+
+  const inspectUser = (isSuperAdmin() && currentPage === 'attendance')
+    ? qaAttendanceInspectUser(DATA_USERS.find(u => u.id === selectedAttUserId) || currentUser)
+    : currentUser;
+  const isDriver = inspectUser.role === 'driver';
+  document.getElementById('ot-standard-fields').style.display = isDriver ? 'none' : '';
+  document.getElementById('ot-driver-fields').style.display = isDriver ? '' : 'none';
+  ['ot-hours-15', 'ot-hours-20', 'ot-hours-30'].forEach(id => { document.getElementById(id).value = ''; });
+  ['ot-mins-15', 'ot-mins-20', 'ot-mins-30'].forEach(id => { document.getElementById(id).value = '0'; });
+  updateDriverOTFieldsVisibility();
+  // Reason is required for standard staff, optional for drivers (their OT is a manual
+  // declaration of hours, not tied to a specific task write-up like regular OT requests).
+  const reasonMark = document.getElementById('ot-reason-required-mark');
+  if (reasonMark) reasonMark.style.display = isDriver ? 'none' : '';
+
+  const noteEl = document.getElementById('ot-approval-note');
+  if (noteEl) noteEl.textContent = approvalRouteNoteText(isDriver ? 'driver-ot' : 'ot');
+  document.getElementById('ot-modal').classList.add('show');
+}
+function closeOTModal() { document.getElementById('ot-modal').classList.remove('show'); editingLeaveId = null; }
+
+// x2.0/x3.0 are the weekend/holiday OT tiers — only weekdays get x1.5, so hide the other two
+// on weekdays and clear their values so a stale weekend entry can't sneak into a weekday submit.
+function updateDriverOTFieldsVisibility() {
+  const dateStr = document.getElementById('ot-date').value;
+  if (!dateStr) return;
+  const d = new Date(dateStr + 'T12:00:00');
+  // 2026-08-16 POLICY CHANGE: isCompanyTripDay() removed from this check (was added 2026-08-13,
+  // reversed by explicit user instruction the same day this comment was written -- Company Trip
+  // is a paid day off with no work expected of anyone, drivers included; see blockIfCompanyTrip()
+  // below in submitDriverOT(), which now rejects the date outright regardless of which tier
+  // fields are showing here).
+  const isHoliday = d.getDay() === 0 || d.getDay() === 6 || isPublicHoliday(dateStr);
+  const holidayFields = document.getElementById('ot-driver-holiday-fields');
+  const weekdayFields = document.getElementById('ot-driver-weekday-fields');
+  if (holidayFields) holidayFields.style.display = isHoliday ? '' : 'none';
+  // 2026-08-13: x1.5 only applies to a normal weekday -- Sat/Sun/public-holiday/company-trip
+  // days are ×2/×3 only, per explicit user request, mirrors how the holiday fields already
+  // hide+clear themselves on a weekday.
+  if (weekdayFields) weekdayFields.style.display = isHoliday ? 'none' : '';
+  if (isHoliday) {
+    document.getElementById('ot-hours-15').value = '';
+    document.getElementById('ot-mins-15').value = '0';
+  } else {
+    document.getElementById('ot-hours-20').value = '';
+    document.getElementById('ot-hours-30').value = '';
+    document.getElementById('ot-mins-20').value = '0';
+    document.getElementById('ot-mins-30').value = '0';
+  }
+}
+function onOTFileChange() {
+  const file = document.getElementById('ot-file').files[0];
+  document.getElementById('ot-file-name').textContent = file ? file.name : '';
+  document.getElementById('ot-file-clear').style.display = file ? '' : 'none';
+}
+function clearOTFile() {
+  document.getElementById('ot-file').value = '';
+  document.getElementById('ot-file-name').textContent = '';
+  document.getElementById('ot-file-clear').style.display = 'none';
+}
+
+function calcOTHours() {
+  const date    = document.getElementById('ot-date').value;
+  const endTime = document.getElementById('ot-end-time').value;
+  const display  = document.getElementById('ot-hours-display');
+  const hoursText = document.getElementById('ot-hours-text');
+  if (!endTime) { display.style.display = 'none'; return; }
+  const [eh, em] = endTime.split(':').map(Number);
+  const otMins = (eh * 60 + em) - (17 * 60 + 30);
+  if (otMins <= 0) { display.style.display = 'none'; return; }
+  const h = Math.floor(otMins / 60);
+  const m = otMins % 60;
+  const durStr = currentLang === 'ja' ? (m > 0 ? `${h}時間${m}分` : `${h}時間`) : (m > 0 ? L(`${h}h ${m}m`, `${h} ชม. ${m} น.`) : L(`${h}h`, `${h} ชม.`));
+  const d = date ? new Date(date + 'T12:00:00') : new Date();
+  // 2026-08-16 (Opus audit L-2): was weekend-only, unlike submitOT()/server.js which both also
+  // check isPublicHoliday() -- on a weekday public holiday this preview under-quoted ×1.5 for OT
+  // that's actually stored and paid at ×3.
+  const isHolidayOT = d.getDay() === 0 || d.getDay() === 6 || (date && isPublicHoliday(date));
+  const mult = isHolidayOT ? 3 : 1.5;
+  const multLabel = isHolidayOT ? L('×3 (Holiday)', '×3 (วันหยุด)') : L('×1.5 (Weekday)', '×1.5 (วันธรรมดา)');
+  const salary = currentUser?.salary || 0;
+  const hourlyRate = salary > 0 ? salary / 30 / 8 : 0;
+  const amount = salary > 0 ? Math.round(hourlyRate * mult * otMins / 60) : 0;
+  const amountStr = salary > 0 ? ` ≈ ฿${amount.toLocaleString()}` : '';
+  hoursText.textContent = `${durStr} ${multLabel}${amountStr}`;
+  display.style.display = 'block';
+}
+
+async function uploadOTAttachment() {
+  const fileInput = document.getElementById('ot-file');
+  const file = fileInput?.files[0];
+  if (!file) return { attachment: null, attachmentName: null };
+  if (file.size > 10 * 1024 * 1024) throw new Error(L('File must not exceed 10MB', 'ไฟล์ต้องไม่เกิน 10MB'));
+  const uploadRes = await apiFetch(`/api/upload`, {
+    method: 'POST',
+    headers: { 'Content-Type': file.type || 'application/octet-stream', 'x-filename': encodeURIComponent(file.name) },
+    body: file,
+  });
+  const uploadData = await uploadRes.json();
+  if (!uploadData.success) throw new Error(uploadData.message || 'upload failed');
+  return { attachment: uploadData.filename, attachmentName: file.name };
+}
+
+async function postOTLeave(leaveData) {
+  const res = await apiFetch(`/api/leaves`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(leaveData),
+  });
+  const data = await res.json();
+  if (!data.success) throw new Error(data.message || 'Server error');
+  if (!DATA_LEAVES.find(l => l.id === data.leave.id)) {
+    DATA_LEAVES.push(data.leave);
+    nextLeaveId = Math.max(nextLeaveId, data.leave.id + 1);
+  }
+  // 2026-08-13: return the created record so callers that need its id right away (e.g.
+  // submitClearAttachments()'s MD-direct path) don't have to re-find it in DATA_LEAVES.
+  return data.leave;
+}
+
+async function submitOT() {
+  if (blockIfObserver()) return;
+  if (effectiveRole() === 'driver') { await submitDriverOT(); return; }
+  // Defense-in-depth: never trust the UI gate alone. 2026-07-31: reads allowanceEligibility
+  // instead of a hardcoded role check.
+  if (!isAllowanceEligible(APP_SETTINGS.allowanceEligibility, effectiveRole(), 'ot')) {
+    showToast(L('⛔ This role cannot submit OT requests', '⛔ Role นี้ไม่สามารถขอ OT ได้'), 'danger');
+    return;
+  }
+
+  const date    = document.getElementById('ot-date').value;
+  const endTime = document.getElementById('ot-end-time').value;
+  const reason  = document.getElementById('ot-reason').value.trim();
+  if (!date)    { showToast(L('⚠️ Please specify the date', '⚠️ กรุณาระบุวันที่'), 'warning'); return; }
+  if (blockIfCompanyTrip(date)) return;
+  if (!editingLeaveId) {
+    const dup = DATA_LEAVES.find(l => l.userId === currentUser.id && l.type === 'ot' && l.dateFrom === date && l.status !== 'rejected');
+    if (dup) {
+      showToast(L('⚠️ An OT request for this date already exists', '⚠️ มีคำขอ OT ของวันนี้แล้ว'), 'warning');
+      return;
+    }
+  }
+  if (!endTime) { showToast(L('⚠️ Please specify the end time', '⚠️ กรุณาระบุเวลาเลิกงาน'), 'warning'); return; }
+  if (!reason)  { showToast(L('⚠️ Please specify the reason/task', '⚠️ กรุณาระบุเหตุผล/งานที่ทำ'), 'warning'); return; }
+  const [eh, em] = endTime.split(':').map(Number);
+  const otMins = (eh * 60 + em) - (17 * 60 + 30);
+  if (otMins <= 0) { showToast(L('⚠️ End time must be after 17:30', '⚠️ เวลาเลิกงานต้องหลัง 17:30'), 'warning'); return; }
+  const otHours = Math.round(otMins / 60 * 100) / 100;
+  const dow = new Date(date + 'T12:00:00').getDay();
+  const otMultiplier = (isPublicHoliday(date) || dow === 0 || dow === 6) ? 3 : 1.5;
+
+  let attachment = null, attachmentName = null;
+  try {
+    ({ attachment, attachmentName } = await uploadOTAttachment());
+  } catch(e) { showToast(L('❌ File attachment failed: ', '❌ แนบไฟล์ไม่สำเร็จ: ') + e.message, 'danger'); return; }
+
+  // 2026-08-10 (Opus re-audit, F3): was a hardcoded `status: 'pending-md'` alongside a
+  // config-derived `approvalRoute` -- inert today only because the server always re-derives both
+  // from the same routeKey and saveLeaveEdit()/postOTLeave() replace this object with the server's
+  // response, but it's the exact status/approvalRoute divergence pattern this whole day's audit
+  // chain was chasing, left dormant in the one client object nobody happened to trust yet.
+  const status = getInitialStatus('ot');
+  const leaveData = {
+    userId: currentUser.id,
+    type: 'ot',
+    dateFrom: date, dateTo: date, days: 0,
+    otEndTime: endTime, otHours, otMultiplier,
+    reason, status, approvalRoute: getApprovalRoute('ot'), approver: null,
+    submittedAt: fmtDateTime(new Date()), note: '',
+    ...(attachment ? { attachment, attachmentName } : {}),
+  };
+  const isEdit = !!editingLeaveId;
+  if (isEdit) {
+    const ok = await saveLeaveEdit(editingLeaveId, 'ot', leaveData);
+    if (!ok) return;
+  } else {
+    try {
+      await postOTLeave(leaveData);
+    } catch(e) { showToast(L('❌ Could not save: ', '❌ ไม่สามารถบันทึกได้: ') + e.message, 'danger'); return; }
+  }
+  updateMyRequestsBadge();
+  updateApprovalBadge();
+  closeOTModal();
+  if (currentPage === 'my-requests') renderMyRequests();
+  if (currentPage === 'leave') renderLeaveHistory();
+  renderDashboard();
+  // 2026-08-10 (Opus re-audit, F4): was a hardcoded "awaiting Managing Director approval" message
+  // regardless of what OT's route is actually configured to -- contradicted the same modal's own
+  // route-aware submit hint (approvalRouteNoteText('ot')) whenever OT was routed elsewhere.
+  // Interpolated JA needs its own explicit branch (see approvalRouteNoteText() above for why) --
+  // roleLabel's own L() calls already resolve each role name into the current language correctly.
+  const roleLabel = { manager: L('Manager','Manager'), accounting: L('Accounting','Accounting'), md: L('Managing Director','Managing Director') };
+  const approverName = roleLabel[STATUS_TO_ROLE[status]] || STATUS_TO_ROLE[status];
+  const submittedMsg = currentLang === 'ja'
+    ? `⏱️ OT申請を送信しました — ${approverName}の承認待ちです`
+    : L(`⏱️ OT request submitted — awaiting ${approverName} approval`, `⏱️ ยื่นขอ OT เรียบร้อย — รอ ${approverName} อนุมัติ`);
+  showToast(isEdit
+    ? L('✏️ Request updated — awaiting approval', '✏️ แก้ไขคำขอเรียบร้อย — รอการอนุมัติ')
+    : submittedMsg, 'success');
+}
+
+// Driver OT: hours entered directly per multiplier tier (1.5 / 2.0 / 3.0), no end-time auto-calc.
+// Approved by Accounting by default, or MD if APPROVAL_ROUTING['driver-ot'] is toggled on.
+async function submitDriverOT() {
+  if (blockIfObserver()) return;
+  const date   = document.getElementById('ot-date').value;
+  const reason = document.getElementById('ot-reason').value.trim();
+  const hm = (hId, mId) => (parseInt(document.getElementById(hId).value)||0) + (parseInt(document.getElementById(mId).value)||0)/60;
+  const h15 = hm('ot-hours-15', 'ot-mins-15');
+  const h20 = hm('ot-hours-20', 'ot-mins-20');
+  const h30 = hm('ot-hours-30', 'ot-mins-30');
+  if (!date)   { showToast(L('⚠️ Please specify the date', '⚠️ กรุณาระบุวันที่'), 'warning'); return; }
+  // 2026-08-16 POLICY CHANGE (user-confirmed): reverses the 2026-08-13 exception a few lines
+  // below. Company Trip is a paid day off with no work expected of anyone, drivers included --
+  // now blocked the same as every other request-submission flow (submitOT, leave, upcountry,
+  // etc.), matching blockIfCompanyTrip()'s own "confirmed business rule" comment, which already
+  // listed Driver OT as a flow this should apply to even before this fix closed the actual gap.
+  if (blockIfCompanyTrip(date)) return;
+  const officeOt = DATA_LEAVES.find(l =>
+    l.userId === currentUser.id && l.type === 'ot' && !l.isDriverOT &&
+    l.dateFrom === date && l.status !== 'rejected' && l.id !== editingLeaveId
+  );
+  if (officeOt) {
+    showToast(L('⚠️ An OT request for this date already exists', '⚠️ มีคำขอ OT ของวันนี้แล้ว'), 'warning');
+    return;
+  }
+  if (h15 <= 0 && h20 <= 0 && h30 <= 0) { showToast(L('⚠️ Please specify at least one OT hour field', '⚠️ กรุณาระบุชั่วโมง OT อย่างน้อย 1 ช่อง'), 'warning'); return; }
+
+  const DRIVER_OT_HOURS_MAX = 20;
+  const existingDriverOt = DATA_LEAVES.filter(l =>
+    l.userId === currentUser.id && l.type === 'ot' && l.isDriverOT &&
+    l.dateFrom === date && l.status !== 'rejected' && l.id !== editingLeaveId
+  );
+  const takenTiers = new Set(existingDriverOt.map(l => Number(l.otMultiplier)));
+  const usedHours = existingDriverOt.reduce((s, l) => s + (Number(l.otHours) || 0), 0);
+
+  let attachment = null, attachmentName = null;
+  try {
+    ({ attachment, attachmentName } = await uploadOTAttachment());
+  } catch(e) { showToast(L('❌ File attachment failed: ', '❌ แนบไฟล์ไม่สำเร็จ: ') + e.message, 'danger'); return; }
+
+  // Was checking truthiness of the whole APPROVAL_ROUTING['driver-ot'] array, which is always
+  // a non-empty array (always truthy) — silently forced every driver OT to MD regardless of
+  // the configured route. getInitialStatus() reads the actual first role in the route.
+  const status = getInitialStatus('driver-ot');
+  const filledTiers = [[h15, 1.5], [h20, 2], [h30, 3]].filter(([hrs]) => hrs > 0);
+  const isEdit = !!editingLeaveId;
+  const tiers = isEdit ? filledTiers.slice(0, 1) : filledTiers.filter(([, mul]) => !takenTiers.has(mul));
+  if (!isEdit && filledTiers.length && tiers.length === 0) {
+    showToast(L('⚠️ A driver OT request for this date and rate already exists', '⚠️ มีคำขอ OT คนขับของวันนี้ในอัตรานี้แล้ว'), 'warning');
+    return;
+  }
+  const newHours = tiers.reduce((s, [h]) => s + h, 0);
+  if (usedHours + newHours > DRIVER_OT_HOURS_MAX) {
+    showToast(currentLang === 'ja'
+      ? `⚠️ この日の運転手残業は合計${DRIVER_OT_HOURS_MAX}時間を超えられません`
+      : L(`⚠️ Driver OT for this date cannot exceed ${DRIVER_OT_HOURS_MAX} hours in total`, `⚠️ OT คนขับวันนี้รวมกันได้ไม่เกิน ${DRIVER_OT_HOURS_MAX} ชั่วโมง`), 'warning');
+    return;
+  }
+  if (isEdit) {
+    // Driver OT records are one-per-tier — editing must only ever touch the single record
+    // being edited (editLeaveRequest() pre-fills only its matching tier), never create or
+    // touch sibling tier records for the same date.
+    const [otHours, otMultiplier] = tiers[0] || [0, 1.5];
+    const ok = await saveLeaveEdit(editingLeaveId, 'driver-ot', {
+      dateFrom: date, dateTo: date, otHours, otMultiplier,
+      reason: reason || '-', ...(attachment ? { attachment, attachmentName } : {}),
+    });
+    if (!ok) return;
+  } else {
+    try {
+      for (const [otHours, otMultiplier] of tiers) {
+        await postOTLeave({
+          userId: currentUser.id,
+          type: 'ot', isDriverOT: true,
+          dateFrom: date, dateTo: date, days: 0,
+          otHours, otMultiplier,
+          reason: reason || '-', status, approvalRoute: getApprovalRoute('driver-ot'), approver: null,
+          submittedAt: fmtDateTime(new Date()), note: '',
+          ...(attachment ? { attachment, attachmentName } : {}),
+        });
+      }
+    } catch(e) { showToast(L('❌ Could not save: ', '❌ ไม่สามารถบันทึกได้: ') + e.message, 'danger'); return; }
+  }
+  updateMyRequestsBadge();
+  updateApprovalBadge();
+  closeOTModal();
+  if (currentPage === 'my-requests') renderMyRequests();
+  if (currentPage === 'leave') renderLeaveHistory();
+  renderDashboard();
+  // 2026-08-11 (Opus re-audit, MEDIUM-1): only handled 2 of the 3 possible outcomes -- 'driver-ot'
+  // can also route to Manager (a real preset in ⚙️ Approval Settings), which used to fall through
+  // to the Accounting message. Same derivation as submitOT()'s F4 fix.
+  const _otRoleLabel = { manager: L('Manager','Manager'), accounting: L('Accounting','Accounting'), md: L('Managing Director','Managing Director') };
+  const _otApproverName = _otRoleLabel[STATUS_TO_ROLE[status]] || STATUS_TO_ROLE[status];
+  const toMsg = isEdit
+    ? L('✏️ Request updated — awaiting approval', '✏️ แก้ไขคำขอเรียบร้อย — รอการอนุมัติ')
+    : currentLang === 'ja'
+    ? `⏱️ OT申請を送信しました — ${_otApproverName}の承認待ちです`
+    : L(`⏱️ OT request submitted — awaiting ${_otApproverName} approval`, `⏱️ ยื่นขอ OT เรียบร้อย — รอ ${_otApproverName} อนุมัติ`);
+  showToast(toMsg, 'success');
+}
+
+// ===== COMP (COMPENSATORY LEAVE) =====
+let _compUploadFilename = null;
+
+function openCompModal() {
+  document.getElementById('comp-worked-date').value = businessDateStr();
+  document.getElementById('comp-reason').value = '';
+  clearCompFile();
+  const noteEl = document.getElementById('comp-approval-note');
+  if (noteEl) noteEl.textContent = approvalRouteNoteText('comp');
+  document.getElementById('comp-modal').classList.add('show');
+}
+
+function closeCompModal() {
+  document.getElementById('comp-modal').classList.remove('show');
+  editingLeaveId = null;
+}
+
+function onCompFileChange(input) {
+  const file = input.files[0];
+  if (!file) return;
+  document.getElementById('comp-file-name').textContent = file.name;
+  document.getElementById('comp-file-clear').style.display = '';
+}
+
+function clearCompFile() {
+  const inp = document.getElementById('comp-file');
+  if (inp) inp.value = '';
+  const nm = document.getElementById('comp-file-name');
+  if (nm) nm.textContent = L('No file selected', 'ยังไม่ได้เลือกไฟล์');
+  const cl = document.getElementById('comp-file-clear');
+  if (cl) cl.style.display = 'none';
+  _compUploadFilename = null;
+}
+
+async function submitComp() {
+  if (blockIfObserver()) return;
+  const workedDate = document.getElementById('comp-worked-date').value;
+  const reason = document.getElementById('comp-reason').value.trim();
+  if (!workedDate) { showToast(L('⚠️ Please specify the worked date', '⚠️ กรุณาระบุวันที่ไปทำงาน'), 'warning'); return; }
+  if (blockIfCompanyTrip(workedDate)) return;
+  if (!reason)     { showToast(L('⚠️ Please specify the reason', '⚠️ กรุณาระบุเหตุผล'), 'warning'); return; }
+
+  let attachment = null, attachmentName = null;
+  const fileInput = document.getElementById('comp-file');
+  if (fileInput && fileInput.files[0]) {
+    try {
+      const file = fileInput.files[0];
+      const resp = await apiFetch(`/api/upload`, {
+        method: 'POST',
+        headers: { 'x-filename': encodeURIComponent(file.name), 'Content-Type': file.type || 'application/octet-stream' },
+        body: file,
+      });
+      const uData = await resp.json();
+      if (!uData.success) throw new Error(uData.message || 'Upload failed');
+      attachment = uData.filename;
+      attachmentName = file.name;
+    } catch(e) {
+      showToast(L('❌ File upload failed: ', '❌ อัพโหลดไฟล์ไม่สำเร็จ: ') + e.message, 'danger');
+      return;
+    }
+  }
+
+  const now = new Date();
+  const leaveData = {
+    userId: currentUser.id,
+    type: 'comp',
+    status: getInitialStatus('comp'),
+    approvalRoute: getApprovalRoute('comp'),
+    dateFrom: workedDate,
+    dateTo: workedDate,
+    workedDate,
+    days: 1,
+    reason,
+    submittedAt: now.toLocaleString('th-TH', { dateStyle:'short', timeStyle:'short' }),
+    timePart: '',
+    ...(attachment && { attachment, attachmentName }),
+  };
+
+  const isEdit = !!editingLeaveId;
+  if (isEdit) {
+    const ok = await saveLeaveEdit(editingLeaveId, 'comp', leaveData);
+    if (!ok) return;
+  } else {
+    try {
+      const res = await apiFetch(`/api/leaves`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(leaveData),
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message || 'Server error');
+      if (!DATA_LEAVES.find(l => l.id === data.leave.id)) {
+        DATA_LEAVES.push(data.leave);
+        nextLeaveId = Math.max(nextLeaveId, data.leave.id + 1);
+      }
+    } catch(e) {
+      showToast(L('❌ Could not save: ', '❌ ไม่สามารถบันทึกได้: ') + e.message, 'danger');
+      return;
+    }
+  }
+  updateMyRequestsBadge();
+  updateApprovalBadge();
+  closeCompModal();
+  if (currentPage === 'my-requests') renderMyRequests();
+  renderDashboard();
+  showToast(isEdit
+    ? L('✏️ Request updated — awaiting approval', '✏️ แก้ไขคำขอเรียบร้อย — รอการอนุมัติ')
+    : L('🔄 Compensatory Day Request submitted — awaiting approval', '🔄 ยื่นขอวันหยุดชดเชยเรียบร้อย — รอการอนุมัติ'), 'success');
+}
+
+// ===== TIME CORRECTION =====
+// Set by openQuickFixCheckIn() when MD/Accounting fixes a ⚠️-flagged check-in directly —
+// makes submitTimeCorrection() save the record as already-approved instead of pending-md.
+let _tcQuickFixTarget = null;
+
+function openTimeCorrectionModal(date, checkIn, checkOut) {
+  _tcQuickFixTarget = null;
+  document.getElementById('tc-date').value = date;
+  document.getElementById('tc-current-in').textContent  = checkIn  || L('— (no data)', '— (ไม่มีข้อมูล)');
+  document.getElementById('tc-current-out').textContent = checkOut || L('— (no data)', '— (ไม่มีข้อมูล)');
+  document.getElementById('tc-field').value = '';
+  document.getElementById('tc-corrected-time').value = '';
+  document.getElementById('tc-reason').value = '';
+  const _isDarkTC = document.documentElement.getAttribute('data-theme') === 'dark';
+  ['tc-btn-in','tc-btn-out'].forEach(id => {
+    const b = document.getElementById(id);
+    b.style.borderColor = _isDarkTC ? '#334155' : '#e2e8f0'; b.style.background = _isDarkTC ? '#0f172a' : '#f8fafc';
+  });
+  // Reset to default (non-quick-fix) UI — openQuickFixCheckIn() overrides these right after calling this
+  document.getElementById('tc-modal-title').textContent = L('✏️ Request Time Correction', '✏️ ขอแก้ไขเวลาย้อนหลัง');
+  // 2026-08-10 (Opus re-audit, F5 -- user confirmed time-correction's route is genuinely
+  // configurable, same as every other type, NOT a fixed MD-only rule): was hardcoded to always
+  // name "Managing Director" regardless of what ⚙️ Approval Settings actually routes it to.
+  // Interpolated JA needs its own explicit branch, same reasoning as approvalRouteNoteText().
+  const _tcRoleLabel = { manager: L('Manager','Manager'), accounting: L('Accounting','Accounting'), md: L('Managing Director','Managing Director') };
+  const _tcApprover = _tcRoleLabel[getApprovalRoute('time-correction')[0]] || getApprovalRoute('time-correction')[0];
+  const banner = document.getElementById('tc-warning-banner');
+  banner.className = 'alert alert-warning';
+  banner.innerHTML = currentLang === 'ja'
+    ? `⚠️ 勤怠修正は<strong>${_tcApprover}</strong>の承認が必要です`
+    : L(`⚠️ Time corrections must be approved by <strong>${_tcApprover}</strong>`, `⚠️ การแก้ไขเวลาต้องได้รับการอนุมัติจาก <strong>${_tcApprover}</strong>`);
+  document.getElementById('tc-employee-line').style.display = 'none';
+  document.getElementById('tc-submit-btn').textContent = L('📤 Submit Request', '📤 ยื่นคำร้อง');
+  document.getElementById('time-correction-modal').classList.add('show');
+}
+function closeTimeCorrectionModal() { document.getElementById('time-correction-modal').classList.remove('show'); }
+
+// Opened from the ⚠️ warning badge (table row or detail modal) — lets MD/Accounting fix a
+// suspicious check-in (< 06:00) immediately with no separate approval step, since they are
+// already the approval authority. Any other time edit (this button doesn't apply) still goes
+// through the normal pending-md flow via openTimeCorrectionModal() unchanged.
+function openQuickFixCheckIn(date, userId, currentCheckIn) {
+  const user = DATA_USERS.find(u => u.id === userId);
+  openTimeCorrectionModal(date, currentCheckIn, null);
+  selectCorrectionField('checkIn');
+  _tcQuickFixTarget = user ? { userId, name: user.name } : null;
+
+  document.getElementById('tc-modal-title').textContent = L('🔧 Quick Fix Check-In Time', '🔧 แก้ไขเวลาเข้างานด่วน');
+  const banner = document.getElementById('tc-warning-banner');
+  banner.className = 'alert alert-info';
+  banner.innerHTML = L('✅ You are correcting this as Managing Director/Accounting — it takes effect immediately, no separate approval needed', '✅ คุณกำลังแก้ไขในฐานะ Managing Director/Accounting — มีผลทันที ไม่ต้องรออนุมัติซ้ำ');
+  const empLine = document.getElementById('tc-employee-line');
+  if (user) { empLine.style.display = ''; empLine.textContent = currentLang === 'ja' ? `👤 従業員: ${user.name}` : L(`👤 Employee: ${user.name}`, `👤 พนักงาน: ${user.name}`); }
+  document.getElementById('tc-submit-btn').textContent = L('✅ Save & Apply Now', '✅ บันทึกและมีผลทันที');
+}
+
+function selectCorrectionField(field) {
+  document.getElementById('tc-field').value = field;
+  const isIn = field === 'checkIn';
+  const inBtn  = document.getElementById('tc-btn-in');
+  const outBtn = document.getElementById('tc-btn-out');
+  inBtn.style.borderColor  = isIn  ? '#93c5fd' : '#e2e8f0';
+  inBtn.style.background   = isIn  ? '#eff6ff' : '#f8fafc';
+  outBtn.style.borderColor = !isIn ? '#93c5fd' : '#e2e8f0';
+  outBtn.style.background  = !isIn ? '#eff6ff' : '#f8fafc';
+}
+
+async function submitTimeCorrection() {
+  if (blockIfObserver()) return;
+  const date   = document.getElementById('tc-date').value;
+  const field  = document.getElementById('tc-field').value;
+  const time   = document.getElementById('tc-corrected-time').value;
+  const reason = document.getElementById('tc-reason').value.trim();
+  // 2026-08-09 (2nd-pass audit, same consistency note as submitUpcountry()'s 2.1 fix): every
+  // other submit function guards against an empty date; the server now rejects one anyway (see
+  // DATE_RE/isValidDateStr), but failing fast client-side avoids a needless round trip.
+  if (!date)   { showToast(L('⚠️ Please specify the date', '⚠️ กรุณาระบุวันที่'), 'warning'); return; }
+  if (!field)  { showToast(L('⚠️ Please choose check-in or check-out to edit', '⚠️ กรุณาเลือกว่าจะแก้ไขเวลาเข้าหรือออก'), 'warning'); return; }
+  if (!time)   { showToast(L('⚠️ Please enter a valid time', '⚠️ กรุณาระบุเวลาที่ถูกต้อง'), 'warning'); return; }
+  if (!reason) { showToast(L('⚠️ Please specify the reason', '⚠️ กรุณาระบุเหตุผล'), 'warning'); return; }
+  const originalRaw = field === 'checkIn'
+    ? document.getElementById('tc-current-in').textContent
+    : document.getElementById('tc-current-out').textContent;
+  const originalTime = (originalRaw === L('— (no data)', '— (ไม่มีข้อมูล)')) ? '—' : originalRaw;
+  const isQuickFix = !!_tcQuickFixTarget;
+  const leaveData = {
+    userId: isQuickFix ? _tcQuickFixTarget.userId : currentUser.id,
+    type: 'time-correction', dateFrom: date, dateTo: date,
+    days: 0, correctionField: field, originalTime, correctedTime: time,
+    reason,
+    // 2026-08-11 (Opus re-audit, HIGH-1): was hardcoded 'pending-md' next to a config-derived
+    // approvalRoute -- same divergence pattern as everything else fixed this week. The real bug
+    // this masked was server-side (userId not reaching the target employee for quick-fix); fixed
+    // there too (server.js).
+    status: isQuickFix ? 'approved' : getInitialStatus('time-correction'),
+    approvalRoute: getApprovalRoute('time-correction'),
+    approver: isQuickFix ? currentUser.name : null,
+    submittedAt: fmtDateTime(new Date()), note: '',
+  };
+  try {
+    const res = await apiFetch(`/api/leaves`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(leaveData)
+    });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.message || 'Server error');
+    if (!DATA_LEAVES.find(l => l.id === data.leave.id)) {
+      DATA_LEAVES.push(data.leave);
+      nextLeaveId = Math.max(nextLeaveId, data.leave.id + 1);
+    }
+  } catch(e) {
+    showToast(L('❌ Could not save: ', '❌ ไม่สามารถบันทึกได้: ') + e.message, 'danger');
+    return;
+  }
+  const quickFixName = _tcQuickFixTarget?.name || '';
+  _tcQuickFixTarget = null;
+  updateMyRequestsBadge();
+  updateApprovalBadge();
+  closeTimeCorrectionModal();
+  if (currentPage === 'my-requests') renderMyRequests();
+  if (currentPage === 'attendance')  renderAttendanceTable();
+  renderDashboard();
+  // 2026-08-11 (Opus re-audit, HIGH-1 cleanup): the non-quick-fix branch hardcoded "Managing
+  // Director" regardless of what time-correction's route is actually configured to -- same class
+  // as F4's submitOT() fix. Role label derived the same way (STATUS_TO_ROLE + roleLabel dict).
+  const _tcRoleLabel = { manager: L('Manager','Manager'), accounting: L('Accounting','Accounting'), md: L('Managing Director','Managing Director') };
+  const _tcApproverName = _tcRoleLabel[STATUS_TO_ROLE[getInitialStatus('time-correction')]] || STATUS_TO_ROLE[getInitialStatus('time-correction')];
+  showToast(
+    isQuickFix
+      ? (currentLang === 'ja' ? `✅ ${quickFixName}の${field === 'checkIn' ? '出勤' : '退勤'}時刻を修正しました — 即時反映` : L(`✅ ${field === 'checkIn' ? 'Check-in' : 'Check-out'} time fixed for ${quickFixName} — applied immediately`, `✅ แก้ไขเวลา${field === 'checkIn' ? 'เข้างาน' : 'ออกงาน'}ของ ${quickFixName} เรียบร้อย — มีผลทันที`))
+      : (currentLang === 'ja'
+          ? `✏️ 勤怠修正を送信しました — ${_tcApproverName}の承認待ちです`
+          : L(`✏️ Time correction submitted — awaiting ${_tcApproverName} approval`, `✏️ ยื่นคำร้องแก้ไขเวลาแล้ว — รอ ${_tcApproverName} อนุมัติ`)),
+    'success'
+  );
+}
+
+// ===== LEAVE BALANCE SUMMARY =====
+function renderLeaveBalanceSummary() {
+  const el = document.getElementById('leave-balance-cards');
+  if (!el || !currentUser) return;
+
+  updateLeaveBalanceDate();
+  const yr = document.getElementById('leave-balance-year');
+  if (yr) yr.textContent = new Date().getFullYear();
+  checkCarryForwardNotification();
+
+  const u = currentUser;
+  const CONFIGS = [
+    { type: 'annual',   emoji: '🏖️', label: L('Annual Leave', 'วันพักร้อน (Annual Leave)'), max: 10, cls: 'annual',   color: '#2563eb' },
+    { type: 'sick',     emoji: '🤒', label: L('Sick Leave', 'วันลาป่วย (Sick Leave)'),     max: 30, cls: 'sick',     color: '#ef4444' },
+    { type: 'business', emoji: '📋', label: L('Business Leave', 'วันลากิจ (Business Leave)'),   max: 3,  cls: 'business', color: '#8b5cf6' },
+  ];
+
+  const thisYear = new Date().getFullYear();
+  el.innerHTML = CONFIGS.map(cfg => {
+    const { cfDays, compDays, effectiveMax, usedMin, lateDeduct, totalMin, remMin, remDays } =
+      computeLeaveBalance(u, cfg.type, cfg.max, thisYear);
+    const pct     = totalMin > 0 ? Math.round((remMin / totalMin) * 100) : 0;
+    const usedStr = usedMin > 0 ? minToStr(usedMin) : L('0d', '0 วัน');
+    const remStr  = minToStr(remMin);
+
+    const cfBadge = cfDays > 0
+      ? `<div style="margin-top:3px;font-size:11px;color:#7c3aed">↩ ${currentLang === 'ja' ? `繰越+${cfDays}日` : L(`+${cfDays}d carry-forward`,`+${cfDays} วันยกยอด`)}</div>` : '';
+    const compBadge = compDays > 0
+      ? `<div style="margin-top:3px;font-size:11px;color:#059669">🔄 ${currentLang === 'ja' ? `代休+${compDays}日` : L(`+${compDays}d compensatory`,`+${compDays} วันชดเชย`)}</div>` : '';
+    const lateDeductBadge = lateDeduct.count > 0
+      ? `<div style="margin-top:3px;font-size:11px;color:#dc2626">⏰ ${currentLang === 'ja'
+          ? `遅刻 ${lateDeduct.count}回、控除 ${minToStr(lateDeduct.deductMin)}`
+          : (currentLang === 'ja' ? `遅刻${lateDeduct.count}回、${minToStr(lateDeduct.deductMin)}控除` : L(`Late ${lateDeduct.count}×, deducted ${minToStr(lateDeduct.deductMin)}`, `มาสาย ${lateDeduct.count} ครั้ง หัก ${minToStr(lateDeduct.deductMin)}`))
+        }</div>` : '';
+    const usedLabel = usedMin > 0
+      ? (currentLang === 'ja' ? `年間${effectiveMax}日中 <strong>${usedStr}</strong> 使用済み` : L(`Used <strong>${usedStr}</strong> of ${effectiveMax} days/year`, `ใช้ไปแล้ว <strong>${usedStr}</strong> จากสิทธิ์ ${effectiveMax} วัน/ปี`))
+      : (currentLang === 'ja' ? `未使用 — 年間${effectiveMax}日` : L(`Unused — ${effectiveMax} days/year`, `ยังไม่ได้ใช้สิทธิ์ ${effectiveMax} วัน/ปี`));
+
+    return `<div class="leave-card ${cfg.cls}">
+      <div class="emoji">${cfg.emoji}</div>
+      <div class="type">${cfg.label}</div>
+      <div class="amount">${remDays}</div>
+      <div class="detail" style="font-size:12px;color:#64748b;margin-top:2px">${L('Remaining', 'คงเหลือ')} <strong>${remStr}</strong></div>
+      ${cfBadge}
+      ${compBadge}
+      ${lateDeductBadge}
+      <div class="detail" style="margin-top:5px;color:${usedMin > 0 ? cfg.color : '#10b981'};font-size:11px">${usedLabel}</div>
+      <div class="leave-bar"><div class="leave-bar-fill" style="width:${pct}%"></div></div>
+    </div>`;
+  }).join('');
+}
+
+// ===== LEAVE HISTORY =====
+function getLEAVE_TYPE_CFG() {
+  return {
+    annual:          { icon:'🏖️', label:L('Annual Leave','ลาพักร้อน'),           badgeClass:'badge-info'    },
+    sick:            { icon:'🤒', label:L('Sick Leave','ลาป่วย'),                badgeClass:'badge-danger'  },
+    business:        { icon:'📋', label:L('Business Leave','ลากิจ'),                  badgeClass:'badge-purple'  },
+    'late-out':      { icon:'🌙', label:L('Late Night Out','แจ้งกลับดึก'),           badgeClass:'badge-warning' },
+    'time-correction':{ icon:'✏️', label:L('Time Correction','ขอแก้ไขเวลาย้อนหลัง'), badgeClass:'badge-amber'   },
+    ot:              { icon:'⏱️', label:L('Request OT','ขอ OT'),                 badgeClass:'badge-amber'   },
+    comp:            { icon:'🔄', label:L('Compensatory Day','ขอวันหยุดชดเชย'),        badgeClass:'badge-success' },
+    upcountry:         { icon:'🗺️', label:L('Upcountry','Upcountry'),         badgeClass:'badge-info'    },
+    'long-distance': { icon:'🚗', label:L('Long Distance','แจ้ง Long Distance'),  badgeClass:'badge-purple'  },
+    'clear-attachments': { icon:'🗑️', label:L('Clear Old Attachments','ล้างไฟล์แนบเก่า'), badgeClass:'badge-amber' },
+  };
+}
+
+function renderLeaveHistory() {
+  renderLeaveBalanceSummary();
+  const tbody = document.getElementById('leave-history-tbody');
+  if (!tbody) return;
+  const LEAVE_TYPES = new Set(['annual','sick','business']);
+  const myLeaves = DATA_LEAVES.filter(l => l.userId === currentUser.id && LEAVE_TYPES.has(l.type))
+    .sort((a, b) => b.id - a.id);
+
+  if (myLeaves.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:30px;color:#94a3b8">${L('No leave history yet', 'ยังไม่มีประวัติการลา')}</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = myLeaves.map(l => {
+    let cfg = getLEAVE_TYPE_CFG()[l.type] || { icon:'📋', label: l.type, badgeClass:'badge-info' };
+    if (l.type === 'time-correction') {
+      cfg = { ...cfg, label: l.correctionField === 'checkIn' ? L('Check-In Time Edit','ขออนุมัติแก้ไขเวลาเข้างาน') : L('Check-Out Time Edit','ขออนุมัติแก้ไขเวลาเลิกงาน') };
+    }
+    // 2026-08-16 (Opus audit L-10): was a generic "Pending" for every pending-* status, unlike
+    // renderMyRequests() which already names the specific approver -- same map, copied verbatim.
+    const statusBadge = l.status === 'approved'
+      ? `<span class="badge badge-success">✅ ${L('Approved', 'อนุมัติ')}</span>`
+      : l.status === 'rejected'
+      ? `<span class="badge badge-danger">❌ ${L('Rejected', 'ปฏิเสธ')}</span>`
+      : l.status === 'pending-md'
+      ? `<span class="badge badge-info">⏳ ${L('Pending Managing Director', 'รอ Managing Director')}</span>`
+      : l.status === 'pending-accounting'
+      ? `<span class="badge badge-info">⏳ ${L('Pending Accounting', 'รอ Accounting')}</span>`
+      // 2026-08-16 (Opus re-audit): was a generic "Pending" -- renderMyRequests() names this
+      // exact state "Pending Manager" (its bare-'pending' badge), now matching verbatim.
+      : `<span class="badge badge-warning">⏳ ${L('Pending Manager', 'รอ Manager')}</span>`;
+
+    const dateLabel = l.dateFrom === l.dateTo
+      ? fmtDate(l.dateFrom)
+      : `${fmtDate(l.dateFrom)} — ${fmtDate(l.dateTo)}`;
+
+    const actionBtn = l.status.startsWith('pending')
+      ? `<div style="display:flex;gap:6px;justify-content:flex-end">
+           <button class="btn btn-ghost btn-sm" onclick="editLeaveRequest(${l.id})">${L('✏️ Edit', '✏️ แก้ไข')}</button>
+           <button class="btn btn-danger btn-sm" onclick="cancelLeave(${l.id})">${L('Cancel', 'ยกเลิก')}</button>
+         </div>`
+      : `<button class="btn btn-ghost btn-sm" onclick="showLeaveDetail(${l.id})">${L('Details', 'รายละเอียด')}</button>`;
+
+    return `<tr>
+      <td><span class="badge ${cfg.badgeClass}">${cfg.icon} ${escapeHtml(cfg.label)}</span></td>
+      <td>${dateLabel}</td>
+      <td>${Number(l.days)} ${L('days', 'วัน')}</td>
+      <td class="col-hide-mobile">${escapeHtml(l.reason)}${l.attachment ? ` <a href="javascript:void(0)" class="att-open-link" data-attachment="${escapeHtml(l.attachment)}" data-attachment-name="${escapeHtml(l.attachmentName || l.attachment)}" title="${L('Open attachment', 'เปิดไฟล์แนบ')}">📎</a>` : ''}</td>
+      <td>${statusBadge}</td>
+      <td class="col-hide-mobile">${escapeHtml(l.approver || '—')}</td>
+      <td>${actionBtn}</td>
+    </tr>`;
+  }).join('');
+}
+
+let currentLeaveDetailId = null;
+
+function showLeaveDetail(id) {
+  const l = DATA_LEAVES.find(x => x.id === id);
+  if (!l) return;
+  currentLeaveDetailId = id;
+  const cfg = getLEAVE_TYPE_CFG()[l.type] || { icon:'📋', label: l.type };
+
+  document.getElementById('leave-detail-title').textContent = `${cfg.icon} ${L('Leave Request Details', 'รายละเอียดคำขอลา')}`;
+  document.getElementById('leave-detail-icon').textContent = cfg.icon;
+  document.getElementById('leave-detail-type').textContent = cfg.label;
+
+  // 2026-08-16 (Opus audit M-3): same missing pending-md/pending-accounting keys as showApprovalDetail()'s
+  // own statusMap (line ~8514) -- copied verbatim from there, since every genuinely pending record
+  // has one of those two statuses in live routing, never the bare 'pending' this map used to only know.
+  const statusMap = {
+    approved: `<span class="badge badge-success">✅ ${L('Approved', 'อนุมัติแล้ว')}</span>`,
+    rejected:  `<span class="badge badge-danger">❌ ${L('Rejected', 'ถูกปฏิเสธ')}</span>`,
+    'pending-md': `<span class="badge badge-info">⏳ ${L('Pending Managing Director', 'รอ Managing Director')}</span>`,
+    'pending-accounting': `<span class="badge badge-info">⏳ ${L('Pending Accounting', 'รอ Accounting')}</span>`,
+    pending:   `<span class="badge badge-warning">⏳ ${L('Pending', 'รออนุมัติ')}</span>`,
+  };
+  document.getElementById('leave-detail-status-badge').innerHTML = statusMap[l.status] || '';
+
+  const fmt = s => fmtDate(s);
+  document.getElementById('leave-detail-dates').textContent = l.dateFrom === l.dateTo
+    ? fmt(l.dateFrom) : `${fmt(l.dateFrom)} — ${fmt(l.dateTo)}`;
+  document.getElementById('leave-detail-days').textContent = `${l.days} ${L('days', 'วัน')}`;
+  document.getElementById('leave-detail-reason').textContent = l.reason;
+
+  const noteRow = document.getElementById('leave-detail-note-row');
+  if (l.note) {
+    document.getElementById('leave-detail-note').textContent = l.note;
+    noteRow.style.display = 'grid';
+  } else {
+    noteRow.style.display = 'none';
+  }
+
+  const attachRow = document.getElementById('leave-detail-attachment-row');
+  if (l.attachment) {
+    document.getElementById('leave-detail-attachment').innerHTML = buildAttachmentLinkHtml(l);
+    attachRow.style.display = 'grid';
+  } else {
+    attachRow.style.display = 'none';
+  }
+
+  document.getElementById('leave-detail-approver').textContent = l.approver || L('No approver yet', 'ยังไม่มีผู้อนุมัติ');
+  document.getElementById('leave-detail-submitted').textContent = _fmtDtStr(l.submittedAt);
+
+  // BUG FIX 2026-08-13 (M-2, Opus retrospective audit): was exact-match `=== 'pending'`, not
+  // `.startsWith('pending')` like cancelLeave()/renderMyRequests() use -- with this app's live
+  // approval routing (every leave type routes through at least one non-manager stage first), the
+  // real first-touch status is 'pending-md'/'pending-accounting', so this button was hidden for
+  // EVERY request in the system regardless of type. Also missed the F-B personal-car exception
+  // (an approved personal-car opened from Leave History routes here, since renderLeaveHistory()
+  // sends every non-pending record to Details rather than a card with its own Cancel button) --
+  // mirrors cancelLeave()'s exact predicate now.
+  const cancelBtn = document.getElementById('leave-detail-cancel-btn');
+  const canCancelFromDetail = l.status.startsWith('pending') || isLegacyAutoApprovedPersonalCar(l);
+  cancelBtn.style.display = canCancelFromDetail ? '' : 'none';
+
+  document.getElementById('leave-detail-modal').classList.add('show');
+}
+
+function closeLeaveDetail() {
+  document.getElementById('leave-detail-modal').classList.remove('show');
+  currentLeaveDetailId = null;
+}
+
+async function cancelLeave(id) {
+  if (blockIfObserver()) return;
+  const l = DATA_LEAVES.find(x => x.id === id);
+  // Any pending-* status counts, not just the exact first-step 'pending' — a multi-step route
+  // (e.g. Manager->MD) that already cleared step 1 is still cancellable up until final approval.
+  // 2026-08-13 (F-B): personal-car used to auto-approve with zero human review, so approved
+  // records of this type stay cancellable afterward (legacy auto-approved rows, and any that
+  // an approver has already signed off). New submissions go through pending-* like every other
+  // request and cancel via the pending branch. Server still allows this approved-PC case
+  // (period-lock/MD-freeze guarded there), so mirror its gate instead of leaving a dead button.
+  const isCancellablePersonalCar = isLegacyAutoApprovedPersonalCar(l);
+  if (!l || (!l.status.startsWith('pending') && !isCancellablePersonalCar)) return;
+  // Defense-in-depth: the button only ever renders for the owner's own requests, but this
+  // function is reachable directly too — never trust the UI gate alone.
+  if (l.userId !== currentUser.id) {
+    showToast(L('⛔ You can only cancel your own requests', '⛔ คุณยกเลิกได้เฉพาะคำขอของตัวเองเท่านั้น'), 'danger');
+    return;
+  }
+  if (!confirm(L('Confirm cancellation of this request?', 'ยืนยันการยกเลิกคำขอนี้?'))) return;
+  try {
+    const res = await apiFetch(`/api/leaves/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.message || 'Cancel failed');
+  } catch(e) {
+    showToast(L('❌ Could not cancel: ', '❌ ยกเลิกไม่สำเร็จ: ') + e.message, 'danger');
+    return;
+  }
+  DATA_LEAVES = DATA_LEAVES.filter(x => x.id !== id);
+  updateMyRequestsBadge();
+  updateApprovalBadge();
+  if (currentPage === 'leave') renderLeaveHistory();
+  if (currentPage === 'my-requests') renderMyRequests();
+  showToast(L('🗑️ Request cancelled', '🗑️ ยกเลิกคำขอเรียบร้อยแล้ว'), 'info');
+}
+
+function cancelLeaveFromDetail() {
+  if (currentLeaveDetailId) {
+    cancelLeave(currentLeaveDetailId);
+    closeLeaveDetail();
+  }
+}
+
+// ===== ATTENDANCE DETAIL MODAL =====
+function showAttendanceDetail(date) {
+  // Defined per-call (not module-level) so it re-evaluates L() against the current language
+  // every time the modal opens, instead of freezing to whatever language was active at page load.
+  const PARTIAL_LEAVE_TYPE_LABEL_DETAIL = {
+    annual: L('🏖️ Annual Leave', '🏖️ ลาพักร้อน'),
+    sick: L('🤒 Sick Leave', '🤒 ลาป่วย'),
+    business: L('📋 Business Leave', '📋 ลากิจ'),
+  };
+  const canViewOthers = canViewOtherEmployees();
+  const targetUserId = canViewOthers ? (selectedAttUserId || currentUser.id) : currentUser.id;
+  const isViewingSelf = targetUserId === currentUser.id;
+  const targetRole = (canViewOthers ? (DATA_USERS.find(u => u.id === targetUserId) || currentUser) : currentUser).role;
+  const { start, end, isCurrent } = getPeriodBounds(selectedPeriodIndex);
+  const days = generatePeriodDays(start, end, isCurrent, targetUserId);
+  const row = days.find(d => d.date === date);
+  if (!row) return;
+
+  const d = new Date(date + 'T12:00:00');
+  const dayNamesTH = ['อาทิตย์','จันทร์','อังคาร','พุธ','พฤหัสบดี','ศุกร์','เสาร์'];
+  const dayLabel = _dayNames()[d.getDay()];
+  const fullDate = fmtDate(d);
+
+  const statusConfig = {
+    present:         { icon:'✅', label:L('Present','มาทำงาน'),       color:'#059669' },
+    late:            { icon:'⏰', label:L('Late','มาสาย'),          color:'#d97706' },
+    absent:          { icon:'⏸', label:L('Absent','ไม่มาทำงาน'),   color:'#94a3b8' },
+    'not-clocked-in':{ icon:'⏸', label:L('No morning check-in','ยังไม่ลงเวลาทำงาน'), color:'#d97706' },
+    'leave-annual':  { icon:'🏖️', label:L('Annual Leave','ลาพักร้อน'),     color:'#2563eb' },
+    'leave-sick':    { icon:'🤒', label:L('Sick Leave','ลาป่วย'),         color:'#dc2626' },
+    'leave-business':{ icon:'📋', label:L('Business Leave','ลากิจ'),          color:'#7c3aed' },
+    holiday:         { icon:'🎌', label:L('Public Holiday','วันหยุดนักขัตฤกษ์'), color:'#b45309' },
+    weekend:         { icon:'🌴', label:L('Weekend','วันหยุดสัปดาห์'), color:'#64748b' },
+    future:          { icon:'⏳', label:L('Upcoming','ยังไม่ถึงวันนี้'), color:'#94a3b8' },
+    'company-trip':  { icon:'🚌', label:'Company Trip', color:'#0369a1' },
+  };
+  const cfg = statusConfig[row.status] || { icon:'❓', label: row.status, color:'#374151' };
+
+  document.getElementById('att-detail-title').textContent = currentLang === 'en' ? `📅 ${dayLabel}, ${fullDate}` : `📅 วัน${dayNamesTH[d.getDay()]}ที่ ${fullDate}`;
+  document.getElementById('att-detail-status-icon').textContent = cfg.icon;
+  document.getElementById('att-detail-status-label').textContent = cfg.label;
+  document.getElementById('att-detail-status-label').style.color = cfg.color;
+  document.getElementById('att-detail-date-full').textContent = `${dayLabel} ${fullDate}`;
+
+  // Late minutes (hours + minutes, matching fmtLate() convention used in reports)
+  const lateMinEl = document.getElementById('att-detail-late-min');
+  const fmtLate = min => currentLang === 'ja' ? (min < 60 ? `${min}分` : `${Math.floor(min/60)}時間${min%60}分`) : (min < 60 ? L(`${min}m`, `${min} น.`) : L(`${Math.floor(min/60)}h ${min%60}m`, `${Math.floor(min/60)} ชม. ${min%60} น.`));
+  if (row.status === 'late' && row.checkIn) {
+    const STD_START_MIN = (APP_SETTINGS.workSchedule?.standardStartHour ?? 8) * 60 + (APP_SETTINGS.workSchedule?.standardStartMinute ?? 30);
+    const [h, m] = row.checkIn.split(':').map(Number);
+    // 2026-08-06: measured from lateReferenceMin(), not always STD_START_MIN — a day with an
+    // approved partial-morning leave counts lateness from the leave's end, not the standard start.
+    const lateMin = Math.max(0, (h * 60 + m) - lateReferenceMin(row, STD_START_MIN));
+    lateMinEl.textContent = lateMin > 0 ? (currentLang === 'ja' ? `${fmtLate(lateMin)}遅刻` : L(`Late by ${fmtLate(lateMin)}`, `สาย ${fmtLate(lateMin)}`)) : '';
+  } else {
+    lateMinEl.textContent = '';
+  }
+
+  // Check-in time
+  const inEl = document.getElementById('att-detail-in');
+  const inSrc = document.getElementById('att-detail-in-src');
+  const inWarn = document.getElementById('att-detail-in-warn');
+  const inFixBtn = document.getElementById('att-detail-in-fix-btn');
+  if (row.checkIn) {
+    inEl.textContent = row.checkIn;
+    inEl.style.color = document.documentElement.getAttribute('data-theme') === 'dark' ? '#6ee7b7' : '#059669';
+    inSrc.textContent = row.checkInSource === 'web' ? '🌐 Web App' : L('📷 Device', '📷 อุปกรณ์');
+    const [wh, wm] = row.checkIn.split(':').map(Number);
+    const isSuspicious = (wh * 60 + wm) < 6 * 60;
+    inWarn.textContent = isSuspicious
+      ? L('⚠️ Before 06:00 — please verify this is the real time', '⚠️ ก่อน 06:00 — กรุณาตรวจสอบว่าเป็นเวลาจริง')
+      : '';
+    if (isSuspicious && !isViewingSelf && !isSuperAdmin()) {
+      inFixBtn.style.display = '';
+      inFixBtn.onclick = () => { closeAttDetail(); openQuickFixCheckIn(date, targetUserId, row.checkIn); };
+    } else {
+      inFixBtn.style.display = 'none';
+      inFixBtn.onclick = null;
+    }
+  } else {
+    inEl.textContent = '—';
+    inEl.style.color = '#cbd5e1';
+    // 2026-08-06 (Opus audit, adjacent to finding 3): an AM half-day leave with no real check-in
+    // used to show the generic "No data" warning here with zero explanation of why. Show the
+    // actual leave type instead when that's the reason.
+    inSrc.textContent = (row.partialLeave && row.partialLeave.coverage === 'am')
+      ? (PARTIAL_LEAVE_TYPE_LABEL_DETAIL[row.partialLeave.type] || row.partialLeave.type)
+      : (row.checkOut && !row.checkIn) ? L('⚠️ No data', '⚠️ ไม่มีข้อมูล') : '';
+    inWarn.textContent = '';
+    inFixBtn.style.display = 'none';
+    inFixBtn.onclick = null;
+  }
+
+  // Check-out time
+  const outEl = document.getElementById('att-detail-out');
+  const outSrc = document.getElementById('att-detail-out-src');
+  if (row.checkOut) {
+    outEl.textContent = row.checkOut;
+    outEl.style.color = document.documentElement.getAttribute('data-theme') === 'dark' ? '#fca5a5' : '#dc2626';
+    outSrc.textContent = '';
+  } else {
+    outEl.textContent = '—';
+    outEl.style.color = '#cbd5e1';
+    outSrc.textContent = (row.partialLeave && row.partialLeave.coverage === 'pm')
+      ? (PARTIAL_LEAVE_TYPE_LABEL_DETAIL[row.partialLeave.type] || row.partialLeave.type)
+      : (row.checkIn && !row.checkOut) ? L('⚠️ No data', '⚠️ ไม่มีข้อมูล') : '';
+  }
+
+  // Work hours calculation
+  const hoursRow = document.getElementById('att-detail-hours-row');
+  const hoursEl = document.getElementById('att-detail-hours');
+  if (row.checkIn && row.checkOut) {
+    const [ih, im] = row.checkIn.split(':').map(Number);
+    const [oh, om] = row.checkOut.split(':').map(Number);
+    const totalMin = (oh * 60 + om) - (ih * 60 + im);
+    if (totalMin > 0) {
+      const h = Math.floor(totalMin / 60);
+      const m = totalMin % 60;
+      hoursEl.textContent = currentLang === 'ja' ? `勤務合計 ${h}時間${m}分` : L(`Total worked ${h}h ${m}m`, `ทำงานรวม ${h} ชั่วโมง ${m} นาที`);
+      hoursRow.style.display = 'flex';
+    } else {
+      hoursRow.style.display = 'none';
+    }
+  } else if (row.checkIn && !row.checkOut) {
+    hoursEl.textContent = L('Not checked out yet', 'ยังไม่ได้ลงเวลาออก');
+    hoursRow.style.display = 'flex';
+  } else {
+    hoursRow.style.display = 'none';
+  }
+
+  // GPS info
+  const gpsSection = document.getElementById('att-detail-gps-section');
+  const realKey = targetUserId ? attKey(targetUserId, date) : null;
+  const realRecord = realKey ? attendanceLog[realKey] : null;
+
+  function renderGpsEntry(elId, gpsStr, prefix) {
+    const el = document.getElementById(elId);
+    if (!el) return;
+    if (!gpsStr || gpsStr === 'ไม่ทราบตำแหน่ง') {
+      el.style.color = '#94a3b8';
+      el.textContent = prefix + L('Unknown location', 'ไม่ทราบตำแหน่ง');
+      return;
+    }
+    const m = gpsStr.match(/(-?\d+\.?\d*),\s*(-?\d+\.?\d*)/);
+    if (!m) { el.style.color = ''; el.textContent = prefix + gpsStr; return; }
+    const lat = parseFloat(m[1]), lng = parseFloat(m[2]);
+    const mapsUrl = `https://www.google.com/maps?q=${lat},${lng}`;
+    const uid = elId + '-name';
+    el.style.color = '';
+    el.innerHTML = `${prefix}<a href="${mapsUrl}" target="_blank" rel="noopener"
+      style="color:#2563eb;text-decoration:none;font-weight:500">
+      📍 <span id="${uid}">${L('Loading...', 'กำลังโหลด...')}</span>
+    </a>`;
+    reverseGeocode(lat, lng, name => {
+      const span = document.getElementById(uid);
+      if (span) {
+        span.textContent = name.split(',').slice(0, 3).join(',').trim();
+        span.parentElement.title = name + '\n(' + lat.toFixed(6) + ', ' + lng.toFixed(6) + ')';
+      }
+    });
+  }
+
+  // GPS only ever applies to web check-ins/outs — device scans never carry a location,
+  // so only show a row when that side was actually done via the web app (real coords or not).
+  const showGpsIn  = realRecord && realRecord.checkInSource  === 'web';
+  const showGpsOut = realRecord && realRecord.checkOutSource === 'web';
+  if (showGpsIn || showGpsOut) {
+    if (showGpsIn)  renderGpsEntry('att-detail-gps-in',  realRecord.checkInGPS,  L('⬆️ In: ', '⬆️ เข้า: '));
+    else document.getElementById('att-detail-gps-in').innerHTML = '';
+    if (showGpsOut) renderGpsEntry('att-detail-gps-out', realRecord.checkOutGPS, L('⬇️ Out: ', '⬇️ ออก: '));
+    else document.getElementById('att-detail-gps-out').innerHTML = '';
+    gpsSection.style.display = '';
+  } else {
+    gpsSection.style.display = 'none';
+  }
+
+  // Tags (early/late bonus, upcountry)
+  const tagsEl = document.getElementById('att-detail-tags');
+  tagsEl.innerHTML = '';
+  if (row.status === 'company-trip') {
+    tagsEl.innerHTML = `<span class="badge" style="background:#e0f2fe;color:#0369a1">🚌 Company Trip — ${L('no bonuses apply this day', 'ไม่มีการคิดเงินพิเศษใดๆ ในวันนี้')}</span>`;
+  }
+  // Early Morning is automatic from checkIn time (no approval needed) — computed the same
+  // way as the table's earlyBadge, not from row.earlyIn/earlyApproved (those fields are never
+  // populated anywhere in the codebase, so the old check here never fired).
+  // 2026-08-16 (Opus audit M-6 + user confirmation): read live Settings instead of hardcoded
+  // thresholds/amounts, and gate on isAllowanceEligible() like renderAttendanceTable() already
+  // does — this modal used to show a bonus badge to roles that Settings excludes from earlyLate/
+  // upcountry, promising money that would never actually be paid.
+  const _dA = APP_SETTINGS.allowances || {};
+  if (row.checkIn && row.status !== 'company-trip' && isAllowanceEligible(APP_SETTINGS.allowanceEligibility, targetRole, 'earlyLate')) {
+    const [eh, em] = row.checkIn.split(':').map(Number);
+    const mins = eh * 60 + em;
+    if (mins <= (_dA.earlyThreshold1Min ?? 450) && isDeviceScanSource(row.checkInSource)) {
+      const bonus = `฿${mins <= (_dA.earlyThreshold2Min ?? 390) ? (_dA.earlyMorning2 || 480) : (_dA.earlyMorning1 || 240)}`;
+      tagsEl.innerHTML += `<span class="badge badge-success">🌅 ${L('Early In', 'เข้าเช้า')} ${escapeHtml(row.checkIn)} (+${bonus})</span>`;
+    }
+  }
+  if (row.lateOut && row.status !== 'company-trip' && isAllowanceEligible(APP_SETTINGS.allowanceEligibility, targetRole, 'earlyLate')) {
+    const [h] = row.lateOut.split(':').map(Number);
+    const _ln2Thr = _dA.lateNightThreshold2Hour || _dA.lateNightThresholdHour || 20;
+    const bonus = `฿${h >= _ln2Thr ? (_dA.lateNight2 || 480) : (_dA.lateNight1 || 240)}`;
+    const approved = row.lateApproved;
+    tagsEl.innerHTML += `<span class="badge ${approved?'badge-success':'badge-warning'}">🌙 ${L('Late Night', 'ทำงานดึก')} ${escapeHtml(row.lateOut)} (+${bonus}) ${approved?L('✓ Approved','✓ อนุมัติแล้ว'):L('⏳ Pending','⏳ รออนุมัติ')}</span>`;
+  }
+  if (row.upcountry && row.status !== 'company-trip' && isAllowanceEligible(APP_SETTINGS.allowanceEligibility, targetRole, 'upcountry')) {
+    tagsEl.innerHTML += `<span class="badge badge-purple">🗺️ ${L('Upcountry', 'Upcountry')} (+฿${_dA.upcountry || 240})</span>`;
+  }
+  const approvedOT = DATA_LEAVES.find(l =>
+    l.userId === targetUserId && l.type === 'ot' && l.dateFrom === date && l.status === 'approved'
+  );
+  if (approvedOT && row.status !== 'company-trip') {
+    const h = Math.floor(approvedOT.otHours || 0);
+    const m = Math.round(((approvedOT.otHours || 0) - h) * 60);
+    const dur = currentLang === 'ja' ? (m > 0 ? `${h}時間${m}分` : `${h}時間`) : (m > 0 ? L(`${h}h ${m}m`, `${h} ชม. ${m} น.`) : L(`${h}h`, `${h} ชม.`));
+    tagsEl.innerHTML += `<span class="badge badge-success">⏱️ ${L('OT', 'OT')} ${dur} ×${Number(approvedOT.otMultiplier) || 1.5} ${L('✓ Approved','✓ อนุมัติแล้ว')}</span>`;
+  }
+  const pcRecord = DATA_LEAVES.find(l =>
+    l.userId === targetUserId && l.type === 'personal-car' && l.dateFrom === date && l.status === 'approved'
+  );
+  if (pcRecord) {
+    const pcRate = pcRecord.personalCarRate != null ? pcRecord.personalCarRate : (APP_SETTINGS.allowances.personalCar != null ? APP_SETTINGS.allowances.personalCar : 1000);
+    tagsEl.innerHTML += `<span class="badge" style="background:#fef9c3;color:#854d0e">🚙 ${L('Personal Car', 'รถส่วนตัว')} (+฿${pcRate.toLocaleString()})</span>`;
+  }
+  if (!tagsEl.innerHTML) {
+    tagsEl.innerHTML = `<span style="font-size:12px;color:#94a3b8">${L('No special items — only allowances your role is eligible for are shown here.', 'ไม่มีรายการพิเศษ — จะแสดงเฉพาะเบี้ยเลี้ยงที่ตำแหน่งของคุณมีสิทธิ์ได้รับ')}</span>`;
+  }
+
+  document.getElementById('att-detail-modal').classList.add('show');
+}
+
+function closeAttDetail() {
+  document.getElementById('att-detail-modal').classList.remove('show');
+}
+
+// ===== CHECK-IN STATUS (shared by dashboard live widget + modal) =====
+function getCheckinStatusLists() {
+  const todayStr = todayDateStr();
+  const activeUsers = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active && u.role !== 'md').sort((a, b) => a.name.localeCompare(b.name, 'th'));
+  const checkedIn  = [];
+  const notChecked = [];
+  activeUsers.forEach(u => {
+    const rec = attendanceLog[attKey(u.id, todayStr)];
+    if (rec && rec.checkIn) {
+      checkedIn.push({ user: u, time: rec.checkIn, checkOut: rec.checkOut || null, isLate: rec.status === 'late' });
+    } else {
+      notChecked.push(u);
+    }
+  });
+  checkedIn.sort((a, b) => a.time.localeCompare(b.time));
+  return { checkedIn, notChecked };
+}
+
+function showCheckinStatusModal() {
+  const todayLabel = fmtDateLong(new Date());
+  const { checkedIn, notChecked } = getCheckinStatusLists();
+
+  const avatar = u => u.facePhoto
+    ? `<img src="${escapeHtml(u.facePhoto)}" style="width:36px;height:36px;border-radius:50%;object-fit:cover;flex-shrink:0">`
+    : `<div style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#2563eb,#06b6d4);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:14px;flex-shrink:0">${escapeHtml(u.name.charAt(0))}</div>`;
+
+  const inRows = checkedIn.map(item => `
+    <div style="display:flex;align-items:center;gap:12px;padding:11px 20px;border-bottom:1px solid #f1f5f9">
+      ${avatar(item.user)}
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:600;color:#1e293b;font-size:13.5px">${escapeHtml(item.user.name)}</div>
+        <div style="font-size:11px;color:#64748b">${escapeHtml(item.user.position || '')}</div>
+      </div>
+      <div style="text-align:right">
+        <div style="font-weight:800;font-size:14px;color:${item.isLate ? '#d97706' : '#059669'}">${item.isLate ? '🟡' : '🟢'} ${escapeHtml(item.time)}</div>
+        ${item.isLate ? `<div style="font-size:11px;color:#d97706;font-weight:600">⏰ ${L('Late', 'มาสาย')}</div>` : ''}
+        ${item.checkOut ? `<div style="font-size:11px;color:#94a3b8">${L('Out', 'ออก')} ${escapeHtml(item.checkOut)}</div>` : `<div style="font-size:11px;color:#f59e0b">${L('Not out', 'ยังไม่ออก')}</div>`}
+      </div>
+    </div>`).join('');
+
+  const outRows = notChecked.map(u => `
+    <div style="display:flex;align-items:center;gap:12px;padding:11px 20px;border-bottom:1px solid #f1f5f9">
+      ${avatar(u)}
+      <div style="flex:1">
+        <div style="font-weight:600;color:#1e293b;font-size:13.5px">${escapeHtml(u.name)}</div>
+        <div style="font-size:11px;color:#64748b">${escapeHtml(u.position || '')}</div>
+      </div>
+      <div style="font-size:13px;color:#ef4444;font-weight:700">⏳ ${L('Not in', 'ยังไม่เข้า')}</div>
+    </div>`).join('');
+
+  const titleEl = document.getElementById('checkin-status-title');
+  const bodyEl  = document.getElementById('checkin-status-body');
+  if (titleEl) titleEl.textContent = `${L('Check-in Status', 'สถานะ Check-in')} — ${todayLabel}`;
+  if (bodyEl) bodyEl.innerHTML = `
+    <div style="padding:12px 20px 8px;background:#f0fdf4;border-bottom:2px solid #bbf7d0">
+      <div style="font-size:12px;font-weight:700;color:#059669;letter-spacing:.5px">✅ ${currentLang === 'ja' ? `出勤済み（${checkedIn.length}名）` : L(`Checked In (${checkedIn.length})`, `เข้างานแล้ว (${checkedIn.length} คน)`)}</div>
+    </div>
+    ${inRows || `<div style="padding:20px;text-align:center;color:#94a3b8;font-size:13px">${L('No one has checked in yet', 'ยังไม่มีใครเข้างาน')}</div>`}
+    ${notChecked.length > 0 ? `
+    <div style="padding:12px 20px 8px;background:#fff7ed;border-bottom:2px solid #fed7aa;border-top:1px solid #e2e8f0">
+      <div style="font-size:12px;font-weight:700;color:#ea580c;letter-spacing:.5px">⏳ ${currentLang === 'ja' ? `未出勤（${notChecked.length}名）` : L(`Not Checked In (${notChecked.length})`, `ยังไม่เข้างาน (${notChecked.length} คน)`)}</div>
+    </div>
+    ${outRows}` : ''}`;
+
+  document.getElementById('checkin-status-modal').classList.add('show');
+}
+
+function closeCheckinStatusModal() {
+  document.getElementById('checkin-status-modal').classList.remove('show');
+}
+
+// ===== DASHBOARD LIVE CHECK-IN WIDGET (always-visible, updates via the existing WS SCAN_EVENT pipeline) =====
+function renderCheckinStatusWidget() {
+  const widget = document.getElementById('dash-checkin-widget');
+  if (!widget) return;
+
+  const { checkedIn, notChecked } = getCheckinStatusLists();
+  const WIDGET_ROW_CAP = 8;
+
+  const avatar = u => u.facePhoto
+    ? `<img src="${escapeHtml(u.facePhoto)}" style="width:28px;height:28px;border-radius:50%;object-fit:cover;flex-shrink:0">`
+    : `<div style="width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,#2563eb,#06b6d4);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:12px;flex-shrink:0">${escapeHtml(u.name.charAt(0))}</div>`;
+
+  const shownIn = checkedIn.slice(0, WIDGET_ROW_CAP);
+  const inRows = shownIn.map(item => `
+    <div style="display:flex;align-items:center;gap:10px;padding:7px 4px">
+      ${avatar(item.user)}
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:600;color:#1e293b;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(item.user.name)}</div>
+        <div style="font-size:11px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(item.user.position || '')}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+        ${item.isLate ? `<span class="badge badge-warning">⏰ ${L('Late', 'มาสาย')}</span>` : `<span class="badge badge-success">✅ ${L('Present', 'มาแล้ว')}</span>`}
+        <span style="font-weight:700;font-size:12.5px;color:${item.isLate ? '#d97706' : '#059669'};min-width:44px;text-align:right">${item.isLate ? '🟡' : '🟢'} ${escapeHtml(item.time)}</span>
+      </div>
+    </div>`).join('');
+
+  const remaining = checkedIn.length - shownIn.length;
+
+  widget.innerHTML = `
+    <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+      <h3 style="flex:1">🟢 ${L('Who is In Right Now', 'ใครอยู่ในออฟฟิศตอนนี้')}</h3>
+      <span style="font-size:12px;color:#718096">${currentLang === 'ja' ? `出勤${checkedIn.length}名` : L(`${checkedIn.length} in`, `เข้างานแล้ว ${checkedIn.length}`)} · ${currentLang === 'ja' ? `未出勤${notChecked.length}名` : L(`${notChecked.length} not yet`, `ยังไม่เข้า ${notChecked.length}`)}</span>
+    </div>
+    <div class="card-body" style="padding:8px 16px">
+      ${inRows || `<div style="padding:16px 4px;text-align:center;color:#94a3b8;font-size:13px">${L('No one has checked in yet', 'ยังไม่มีใครเข้างาน')}</div>`}
+      ${remaining > 0 ? `<div style="text-align:center;padding-top:4px"><a href="#" onclick="event.preventDefault();showCheckinStatusModal()" style="font-size:12.5px;color:#2563eb;font-weight:600">${currentLang === 'ja' ? `他${remaining}名 — すべて表示` : L(`+${remaining} more — view all`, `+อีก ${remaining} คน — ดูทั้งหมด`)}</a></div>` : ''}
+      ${remaining <= 0 && (checkedIn.length > 0 || notChecked.length > 0) ? `<div style="text-align:center;padding-top:4px"><a href="#" onclick="event.preventDefault();showCheckinStatusModal()" style="font-size:12.5px;color:#2563eb;font-weight:600">${L('View full status', 'ดูสถานะทั้งหมด')}</a></div>` : ''}
+    </div>`;
+}
+
+// ===== TOAST =====
+function showToast(msg, type = 'info') {
+  const container = document.getElementById('toast-container');
+  if (!container) return;
+  const toast = document.createElement('div');
+  const colors = { success:'#059669', danger:'#dc2626', warning:'#d97706', info:'#2563eb' };
+  const _tDark = document.documentElement.getAttribute('data-theme') === 'dark';
+  toast.style.cssText = `background:${_tDark?'#1e293b':'white'};border-left:4px solid ${colors[type]};padding:14px 18px;border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,0.15);font-size:13.5px;font-weight:500;color:${_tDark?'#e2e8f0':'#1a202c'};max-width:340px;transform:translateX(120%);transition:transform 0.3s ease;`;
+  toast.textContent = msg;
+  container.appendChild(toast);
+  setTimeout(() => toast.style.transform = 'translateX(0)', 10);
+  setTimeout(() => { toast.style.transform = 'translateX(120%)'; setTimeout(() => toast.remove(), 300); }, 3200);
+}
+
+// Shared guard for every write-triggering function — Observer accounts (former employees who
+// can still log in and browse per their old role level, but have zero permissions/payroll left)
+// must never be able to persist anything. The backend enforces this too (real security
+// boundary); this is the frontend half so the user gets an immediate, clear reason instead of
+// a generic failed-save error. `silent` skips the toast for background/auto-triggered calls
+// (e.g. the Hikvision auto-sync that fires on every login) where a warning would just be noise.
+function blockIfObserver(silent = false) {
+  if (currentUser?.isObserver) {
+    if (!silent) showToast(L('👁️ Observer accounts are view-only — cannot make changes', '👁️ บัญชีนี้เป็นผู้สังเกตการณ์ — ดูได้อย่างเดียว ไม่สามารถแก้ไขได้'), 'warning');
+    return true;
+  }
+  return false;
+}
+
+// Company Trip days pay nothing extra of any kind (confirmed business rule) — the automatic
+// early/late/OT/upcountry calc already skips these dates (see generatePeriodDays()), but the
+// explicit request-submission flows (Upcountry, Long Distance, Personal Car, Late-Out, OT,
+// Driver OT, Comp) never checked isCompanyTripDay() at all, so an employee could still submit
+// and get paid for one of these on a Company Trip date. Call this at the top of each of those
+// submit functions, after the date field has been read.
+function blockIfCompanyTrip(dateStr, silent = false) {
+  if (dateStr && isCompanyTripDay(dateStr)) {
+    if (!silent) showToast(L('🚌 This date is a Company Trip day — no extra allowances or OT can be claimed for it', '🚌 วันนี้เป็นวัน Company Trip — ไม่สามารถขอเบี้ยเลี้ยงหรือ OT เพิ่มเติมสำหรับวันนี้ได้'), 'warning');
+    return true;
+  }
+  return false;
+}
+
+function printPayslip() { window.print(); }
+
+async function downloadPayslipXlsx() {
+  const isStaff = ['user', 'driver', 'manager', 'marketing'].includes(effectiveRole());
+  const sel = document.getElementById('payslip-employee');
+  const userId = isStaff ? currentUser.id : parseInt(sel.value);
+  if (!userId) return;
+  const btn = document.getElementById('payslip-btn-xlsx');
+  if (btn) btn.disabled = true;
+  try {
+    const res = await apiFetch(`/api/payslip-xlsx?userId=${userId}&periodIndex=${payslipPeriodIndex}`);
+    if (!res.ok) {
+      let msg = L('Could not generate the Excel file', 'ไม่สามารถสร้างไฟล์ Excel ได้');
+      try { const d = await res.json(); if (d.message) msg = d.message; } catch (e) {}
+      showToast(`❌ ${msg}`, 'error');
+      return;
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get('Content-Disposition') || '';
+    const m = /filename="([^"]+)"/.exec(cd);
+    const filename = m ? m[1] : 'Payslip.xlsx';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    showToast(`❌ ${L('Could not generate the Excel file', 'ไม่สามารถสร้างไฟล์ Excel ได้')}`, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// 2026-08-02: one .xlsx, every active employee, one sheet each (server.js's
+// GET /api/payslip-xlsx-all) -- accounting/MD bulk export, mirrors downloadPayslipXlsx() above.
+async function downloadAllPayslipsXlsx() {
+  const btn = document.getElementById('payslip-btn-xlsx-all');
+  if (btn) btn.disabled = true;
+  try {
+    const res = await apiFetch(`/api/payslip-xlsx-all?periodIndex=${payslipPeriodIndex}`);
+    if (!res.ok) {
+      let msg = L('Could not generate the Excel file', 'ไม่สามารถสร้างไฟล์ Excel ได้');
+      try { const d = await res.json(); if (d.message) msg = d.message; } catch (e) {}
+      showToast(`❌ ${msg}`, 'error');
+      return;
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get('Content-Disposition') || '';
+    const m = /filename="([^"]+)"/.exec(cd);
+    const filename = m ? m[1] : 'Payslips_All.xlsx';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    showToast(`❌ ${L('Could not generate the Excel file', 'ไม่สามารถสร้างไฟล์ Excel ได้')}`, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// Apply data-en / data-th attributes on static HTML so it reacts to language switching.
+// Captures original (Thai) text into data-th on first run, then swaps based on currentLang.
+function applyStaticI18n() {
+  const _ja = currentLang === 'ja', _jaM = window.LANG_JA || {};
+  document.querySelectorAll('[data-en]').forEach(el => {
+    if (el.dataset.th === undefined) el.dataset.th = el.textContent;
+    el.textContent = currentLang === 'en' ? el.dataset.en : _ja ? (_jaM[el.dataset.en] || el.dataset.en) : el.dataset.th;
+  });
+  document.querySelectorAll('[data-en-ph]').forEach(el => {
+    if (el.dataset.thPh === undefined) el.dataset.thPh = el.getAttribute('placeholder') || '';
+    el.setAttribute('placeholder', currentLang === 'en' ? el.dataset.enPh : _ja ? (_jaM[el.dataset.enPh] || el.dataset.enPh) : el.dataset.thPh);
+  });
+  document.querySelectorAll('[data-en-title]').forEach(el => {
+    if (el.dataset.thTitle === undefined) el.dataset.thTitle = el.getAttribute('title') || '';
+    el.setAttribute('title', currentLang === 'en' ? el.dataset.enTitle : _ja ? (_jaM[el.dataset.enTitle] || el.dataset.enTitle) : el.dataset.thTitle);
+  });
+}
+
+function fixStaticText() {
+  // WARNING: ฟังก์ชันนี้รันก่อน login — currentUser เป็น null เสมอ
+  // ห้าม reference currentUser ที่นี่เด็ดขาด — ใช้ CSS class (nav-no-md ฯลฯ) แทน
+  // แล้วให้ applyRolePermissions() (รันหลัง login) จัดการ show/hide
+  //
+  // The original index.html has corrupted encoding — even closing tags like </h1> </span>
+  // got mangled to /h1> /span> (missing <), breaking DOM structure throughout.
+  // Solution: rebuild broken sections entirely from JavaScript.
+
+  // 1. Rebuild entire sidebar nav from scratch (safest — avoids unclosed span issues)
+  const nav = document.querySelector('.sidebar-nav');
+  if (nav) {
+    nav.innerHTML = `
+      <div class="nav-section">${t('ns_overview')}</div>
+      <div class="nav-item nav-no-md" data-page="checkin" onclick="navigateTo('checkin')">
+        <span class="icon">⏰</span> ${t('nav_checkin')}
+      </div>
+      <div class="nav-item" data-page="dashboard" onclick="navigateTo('dashboard')">
+        <span class="icon">📊</span> ${t('nav_dashboard')}
+      </div>
+
+      <div class="nav-section">${t('ns_personal')}</div>
+      <div class="nav-item" data-page="profile" onclick="navigateTo('profile')">
+        <span class="icon">👤</span> ${t('nav_profile')}
+      </div>
+      <div class="nav-item" data-page="attendance" onclick="navigateTo('attendance')">
+        <span class="icon">📅</span> ${t('nav_attendance')}
+      </div>
+      <div class="nav-item" data-page="myattendance" onclick="navigateTo('myattendance')">
+        <span class="icon">🚪</span> ${t('nav_myattendance')}
+      </div>
+      <div class="nav-item nav-no-md" data-page="leave" onclick="navigateTo('leave')">
+        <span class="icon">🌴</span> ${t('nav_leave')}
+      </div>
+      <div class="nav-item nav-staff-only" data-page="my-requests" onclick="navigateTo('my-requests')">
+        <span class="icon">📋</span> ${t('nav_myrequests')}
+        <span id="my-requests-badge" style="display:none;background:#ef4444;color:#fff;font-size:10px;font-weight:800;min-width:18px;height:18px;padding:0 5px;border-radius:9px;margin-left:auto;align-items:center;justify-content:center;line-height:1"></span>
+      </div>
+      <div class="nav-item nav-emp-only" data-page="payslip" onclick="navigateTo('payslip')">
+        <span class="icon">💰</span> ${t('nav_mypayslip')}
+      </div>
+
+      <div class="nav-section nav-manager">${t('ns_manager')}</div>
+      <div class="nav-item nav-manager" data-page="employees" onclick="navigateTo('employees')">
+        <span class="icon">👥</span> ${t('nav_employees')}
+      </div>
+      <div class="nav-item nav-approval" data-page="approval" onclick="navigateTo('approval')">
+        <span class="icon">✅</span> ${t('nav_approval')}
+        <span id="approval-badge" class="nav-badge" style="display:none"></span>
+      </div>
+
+      <div class="nav-section">${t('ns_calendar')}</div>
+      <div class="nav-item" data-page="calendar" onclick="navigateTo('calendar')">
+        <span class="icon">📆</span> ${t('nav_calendar')}
+      </div>
+      <div class="nav-item nav-admin nav-accounting-only" data-page="holidays" onclick="navigateTo('holidays')">
+        <span class="icon">🗓️</span> ${t('nav_holidays')}
+      </div>
+
+      <div class="nav-section nav-admin">${t('ns_finance')}</div>
+      <div class="nav-item nav-admin nav-payslip" data-page="payslip" onclick="navigateTo('payslip')">
+        <span class="icon">💰</span> ${t('nav_payslip')}
+      </div>
+      <div class="nav-item nav-accounting-only nav-no-md" data-page="finalize" onclick="navigateTo('finalize')">
+        <span class="icon">✅</span> ${t('nav_finalize')}
+      </div>
+      <div class="nav-item nav-accounting-only nav-no-md" data-page="payroll-history" onclick="navigateTo('payroll-history')">
+        <span class="icon">📋</span> ${L('Payroll History','ประวัติเงินเดือน')}
+      </div>
+      <div class="nav-item nav-accounting-only" data-page="tawi50" onclick="navigateTo('tawi50')">
+        <span class="icon">📄</span> ${L('Withholding Tax','50 ทวิ')}
+      </div>
+      <div class="nav-item nav-accounting-only" data-page="archive" onclick="navigateTo('archive')">
+        <span class="icon">🗂️</span> ${L('Former Employees','อดีตพนักงาน')}
+      </div>
+      <div class="nav-item nav-admin" data-page="reports" onclick="navigateTo('reports')">
+        <span class="icon">📊</span> ${t('nav_reports')}
+      </div>
+
+      <div class="nav-section">${L('System','ระบบ')}</div>
+      <div class="nav-item" data-page="faq" onclick="navigateTo('faq')">
+        <span class="icon">❓</span> ${L('FAQ','คำถามที่พบบ่อย')}
+      </div>
+      <div class="nav-item nav-accounting-only" data-page="audit-log" onclick="navigateTo('audit-log')">
+        <span class="icon">🔍</span> ${L('Activity Log','บันทึกกิจกรรม')}
+      </div>
+      <div class="nav-item" data-page="settings" onclick="navigateTo('settings')">
+        <span class="icon">⚙️</span> ${L('Settings','การตั้งค่าระบบ')}
+      </div>
+    `;
+  }
+
+  // 2. Rebuild login card entirely — corrupted </h2> </p> tags break DOM structure
+  const loginCard = document.querySelector('.login-card');
+  if (loginCard) {
+    loginCard.innerHTML = `
+      <div class="login-logo">
+        <img src="images/logo-long.jpg" alt="Tozai Boeki Kaisha" class="login-logo-img">
+        <p>${L('Time Attendance System', 'ระบบบันทึกเวลาทำงาน')} &mdash; Tozai Boeki Kaisha (Thailand) Ltd.</p>
+      </div>
+      <div class="login-form">
+        <h2>${L('Sign In', 'เข้าสู่ระบบ')}</h2>
+        <p class="subtitle">${L('Please enter your username and password', 'กรุณากรอกชื่อผู้ใช้และรหัสผ่าน')}</p>
+        <div id="login-error" class="alert alert-warning" style="display:none">
+          ⚠️ <span></span>
+        </div>
+        <div class="form-group">
+          <label>${L('Username', 'ชื่อผู้ใช้ (Username)')}</label>
+          <div class="input-wrap">
+            <span class="icon">👤</span>
+            <input type="text" id="username" placeholder="${L('Username', 'ชื่อผู้ใช้')}" autocomplete="username">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>${L('Password', 'รหัสผ่าน (Password)')}</label>
+          <div class="input-wrap">
+            <span class="icon">🔒</span>
+            <input type="password" id="password" placeholder="${L('Password', 'รหัสผ่าน')}" autocomplete="current-password">
+          </div>
+        </div>
+        <div class="form-group" style="display:flex;align-items:center;gap:8px;margin-top:-6px">
+          <input type="checkbox" id="remember-me" style="width:16px;height:16px;cursor:pointer;flex-shrink:0">
+          <label for="remember-me" style="font-size:13px;font-weight:400;cursor:pointer;margin:0">${L('Remember me for 30 days', 'จำฉันไว้ 30 วัน')}</label>
+        </div>
+        <button class="btn btn-primary btn-login" onclick="login()">🔐 ${L('Sign In', 'เข้าสู่ระบบ')}</button>
+      </div>
+    `;
+    // Re-attach Enter key listener on rebuilt inputs
+    const _loginOnEnter = e => { if (e.key === 'Enter') login(); };
+    document.getElementById('username').addEventListener('keydown', _loginOnEnter);
+    document.getElementById('password').addEventListener('keydown', _loginOnEnter);
+  }
+
+  // 3. Rebuild #page-dashboard — corrupted </div> tags break stat-card DOM structure,
+  //    causing renderDashboard() to wipe wrong elements when setting textContent
+  const dashPage = document.getElementById('page-dashboard');
+  if (dashPage) {
+    dashPage.innerHTML = `
+      <div class="alert alert-info mb-6">
+        📡 ${L('Connected to Hikvision DS-K1T342MFX and Synology DS923+', 'ระบบเชื่อมต่อกับ Hikvision DS-K1T342MFX และ Synology DS923+ แล้ว')}
+      </div>
+
+      <div class="grid grid-4 mb-6" id="dash-stats-row">
+        <div class="stat-card" onclick="showCheckinStatusModal()" style="cursor:pointer" title="${L('Click to view details', 'คลิกเพื่อดูรายละเอียด')}">
+          <div class="stat-icon blue">👥</div>
+          <div class="stat-info">
+            <div class="value" id="dash-total-emp">—</div>
+            <div class="label">${L("Today's Check-ins", 'Check-in วันนี้')}</div>
+            <div class="sub" id="dash-total-emp-sub">${L('Loading...', 'กำลังโหลด...')}</div>
+          </div>
+        </div>
+        <div class="stat-card dash-stat-click" id="stat-pending-approvals" onclick="openDashPendingFromBadge()" style="cursor:pointer;display:none" title="${L('Click to view details', 'คลิกเพื่อดูรายละเอียด')}">
+          <div class="stat-icon amber">⏳</div>
+          <div class="stat-info">
+            <div class="value" id="dash-pending-count">0</div>
+            <div class="label">${L('Pending Approval', 'รอการอนุมัติ')}</div>
+            <div class="sub" id="dash-pending-sub"></div>
+          </div>
+        </div>
+        <div class="stat-card" id="stat-leave-today" onclick="openTodayLeaveModal()" style="cursor:pointer" title="${L('Click to view details', 'คลิกเพื่อดูรายละเอียด')}">
+          <div class="stat-icon red">🌴</div>
+          <div class="stat-info">
+            <div class="value" id="dash-today-leave-count">0</div>
+            <div class="label">${L('On Leave Today', 'วันลาวันนี้')}</div>
+            <div class="sub" id="dash-today-leave-sub"></div>
+          </div>
+        </div>
+        <div class="stat-card exrate-card" style="flex-direction:column;align-items:flex-start;gap:8px">
+          <div style="font-size:13px;color:#64748b;line-height:1.4;width:100%">${L('Exchange Rate', 'อัตราการแลกเปลี่ยน')} JPY/THB (TTB)</div>
+          <div style="display:flex;gap:12px;width:100%;padding-top:2px">
+            <div style="flex:1;min-width:0">
+              <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/9/9e/Smbc_logo.svg/960px-Smbc_logo.svg.png" alt="SMBC" title="SMBC Trust Bank" style="width:100%;height:auto;max-height:32px;object-fit:contain;object-position:left center;margin-bottom:8px">
+              <div style="font-size:26px;font-weight:800;color:#16a34a;line-height:1.1" id="dash-rate-smbc">—</div>
+              <div style="font-size:10px;color:#94a3b8;margin-top:2px" id="dash-rate-smbc-date"></div>
+            </div>
+            <div style="width:1px;background:#e2e8f0;align-self:stretch"></div>
+            <div style="flex:1;min-width:0">
+              <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/1/14/Mizuho_Bank_logo.svg/960px-Mizuho_Bank_logo.svg.png" alt="Mizuho" title="Mizuho Bank" style="width:100%;height:auto;max-height:32px;object-fit:contain;object-position:left center;margin-bottom:8px">
+              <div style="font-size:26px;font-weight:800;color:#2563eb;line-height:1.1" id="dash-rate-mizuho">—</div>
+              <div style="font-size:10px;color:#94a3b8;margin-top:2px" id="dash-rate-mizuho-date"></div>
+            </div>
+            <div style="width:1px;background:#e2e8f0;align-self:stretch"></div>
+            <div style="flex:1;min-width:0">
+              <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/d/d3/Resona_Bank_logo.svg/960px-Resona_Bank_logo.svg.png" alt="Resona" title="Resona Bank" style="width:100%;height:auto;max-height:32px;object-fit:contain;object-position:left center;margin-bottom:8px">
+              <div style="font-size:26px;font-weight:800;color:#dc2626;line-height:1.1" id="dash-rate-resona">—</div>
+              <div style="font-size:10px;color:#94a3b8;margin-top:2px" id="dash-rate-resona-date"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid grid-2 gap-4">
+        <div id="dash-left-panel"></div>
+        <div id="dash-right-panel"></div>
+      </div>
+
+      <div class="card mt-4" id="dash-checkin-widget"></div>
+
+      <div id="dash-period-stats-wrap" class="card mt-4" style="display:none">
+        <div class="card-header">
+          <h3>📊 <span id="dash-period-label"></span></h3>
+          <div class="filter-bar">
+            <select id="att-period-select" onchange="loadPeriod()"></select>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="grid grid-3" style="margin-bottom:12px">
+            <div class="stat-card dash-stat-click" style="flex-direction:column;text-align:center;gap:6px;cursor:pointer" onclick="showDashPeriodDetail('work')" title="${L('Click to view days', 'คลิกเพื่อดูวันที่')}">
+              <div style="font-size:32px;font-weight:800;color:#1e3a5f" id="dash-work-days">—</div>
+              <div style="font-size:12px;color:#718096">${L('Work Days', 'วันทำงาน')}</div>
+              <div style="font-size:11px;color:#94a3b8" id="dash-today-date"></div>
+            </div>
+            <div class="stat-card dash-stat-click" style="flex-direction:column;text-align:center;gap:6px;cursor:pointer" onclick="showDashPeriodDetail('late')" title="${L('Click to view days', 'คลิกเพื่อดูวันที่')}">
+              <div style="font-size:32px;font-weight:800;color:#ef4444" id="dash-late-days">—</div>
+              <div style="font-size:12px;color:#718096">${L('Late', 'มาสาย')}</div>
+              <div style="font-size:11px;color:#94a3b8" id="dash-late-threshold">${L('After 08:30', 'เกิน 08:30 น.')}</div>
+            </div>
+            <div class="stat-card dash-stat-click" style="flex-direction:column;text-align:center;gap:6px;cursor:pointer" onclick="showDashPeriodDetail('leave')" title="${L('Click to view days', 'คลิกเพื่อดูวันที่')}">
+              <div style="font-size:32px;font-weight:800;color:#f59e0b" id="dash-leave-days">—</div>
+              <div style="font-size:12px;color:#718096">${L('Leave', 'วันลา')}</div>
+              <div style="font-size:11px;color:#94a3b8">${L('All types', 'ทุกประเภท')}</div>
+            </div>
+          </div>
+          <div id="dash-role-stats-row"></div>
+        </div>
+      </div>
+    `;
+  }
+
+  // 4. Clear garbled default text in topbar (navigateTo will set correct text later)
+  const pageTitle = document.getElementById('page-title');
+  if (pageTitle) pageTitle.textContent = '';
+  const pageSub = document.getElementById('page-subtitle');
+  if (pageSub) pageSub.textContent = '';
+
+  // 4. Fix logout button and sidebar footer
+  const logoutBtn = document.querySelector('.btn-logout');
+  if (logoutBtn) logoutBtn.innerHTML = L('🔓 Log Out', '🔓 ออกจากระบบ');
+  const sidebarFooter = document.querySelector('.sidebar-footer > div');
+  if (sidebarFooter) sidebarFooter.innerHTML = 'v1.0.0';
+
+  // Apply data-en attributes on remaining static HTML (modals, page scaffolding)
+  applyStaticI18n();
+  // Re-populate att-period-select after dashboard HTML is rebuilt
+  populateAttPeriodDropdown();
+
+  // Step 1 above rebuilds the whole sidebar nav from scratch (including the my-requests/approval
+  // badge spans), which wipes out whatever display/count updateMyRequestsBadge()/updateApprovalBadge()
+  // had already set. Re-run them here so badges reflect real pending counts again immediately —
+  // both are safe to call before login (they no-op when currentUser is null).
+  updateMyRequestsBadge();
+  updateApprovalBadge();
+
+  // Runs at DOMContentLoaded before login, so this is the earliest point every date input
+  // (in the pre-rendered modals) exists in the DOM — first-time flatpickr init happens here;
+  // applyLanguage() re-runs it later to switch the calendar's locale on language toggle, and
+  // navigateTo() re-runs it on every page render for that page's own dynamic inputs.
+  initDatePickers();
+  // Modals (Annual Leave, OT, Time Correction, etc.) aren't reached via navigateTo() at all —
+  // each has its own openXModal() that independently toggles `.modal-overlay`'s `.show` class
+  // (no shared helper exists for this across ~20 call sites, see project memory). Rather than
+  // hunting down and patching every one of them individually — the exact mistake-prone pattern
+  // that already bit this codebase twice this session for unrelated bugs — watch the DOM itself
+  // so ANY date/time input reaching the page gets covered automatically, regardless of how it
+  // got there (modal show, page nav, a dynamically-added row from a "+" button, a future
+  // feature nobody's patched for this yet, etc.):
+  //   - attribute branch: catches a modal's `.modal-overlay` gaining `.show`.
+  //   - childList branch: catches a genuinely new, not-yet-converted `input[type="date"/"time"]`
+  //     being inserted anywhere (a plain innerHTML rebuild, a repeatable field row, etc.).
+  // The childList check deliberately excludes inputs flatpickr has already converted (its own
+  // init mutates class + adds calendar DOM as childList changes too) — without that exclusion
+  // this would re-trigger itself on every single flatpickr init, an infinite destroy/rebuild loop.
+  new MutationObserver(muts => {
+    const needsInit = muts.some(m => {
+      if (m.type === 'attributes') {
+        return m.target.classList?.contains('modal-overlay') && m.target.classList.contains('show');
+      }
+      return [...m.addedNodes].some(n => n.nodeType === 1 && (
+        n.matches?.('input[type="date"]:not(.flatpickr-input), input[type="time"]:not(.flatpickr-time-input)') ||
+        n.querySelector?.('input[type="date"]:not(.flatpickr-input), input[type="time"]:not(.flatpickr-time-input)')
+      ));
+    });
+    if (needsInit) initDatePickers();
+  }).observe(document.body, { attributes: true, attributeFilter: ['class'], subtree: true, childList: true });
+}
+
+// ===== DARK MODE =====
+function applyDarkMode(isDark) {
+  document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light');
+  const icon = document.getElementById('dark-mode-icon');
+  const lbl  = document.getElementById('dark-mode-label');
+  if (icon) icon.textContent = isDark ? '☀️' : '🌙';
+  if (lbl)  lbl.textContent  = isDark ? (currentLang==='th' ? 'โหมดสว่าง' : currentLang==='ja' ? 'ライトモード' : 'Light Mode') : (currentLang==='th' ? 'โหมดมืด' : currentLang==='ja' ? 'ダークモード' : 'Dark Mode');
+  // Re-render pages that build inline styles with theme-dependent colors at render time
+  if (typeof currentPage !== 'undefined' && currentPage === 'approval' && typeof renderApprovals === 'function') renderApprovals();
+}
+function toggleDarkMode() {
+  const isDark = document.documentElement.getAttribute('data-theme') !== 'dark';
+  localStorage.setItem('ta_dark', isDark ? '1' : '0');
+  applyDarkMode(isDark);
+}
+
+document.addEventListener('DOMContentLoaded', async () => {
+  // Restore dark mode preference before anything else renders
+  applyDarkMode(localStorage.getItem('ta_dark') === '1');
+  fixStaticText(); // Also re-attaches password Enter listener inside
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js', { scope: '/' })
+      .then(reg => { window._swReg = reg; })
+      .catch(e => console.warn('[SW]', e));
+  }
+  const _lb = document.getElementById('lang-toggle-btn');
+  if (_lb) _lb.textContent = currentLang === 'th' ? 'EN' : currentLang === 'en' ? 'JP' : 'ไทย';
+
+  const loginBox = document.getElementById('login-page');
+  const appBox   = document.getElementById('app');
+
+  // Hide app immediately (CSS default is display:flex which shows it before JS runs)
+  loginBox.style.display = 'none';
+  appBox.style.display   = 'none';
+
+  // If a session exists, show the app immediately and load users in background
+  const savedUserStr = localStorage.getItem('ta_user');
+  if (savedUserStr) {
+    try {
+      const saved = JSON.parse(savedUserStr);
+      if (saved && (saved.active !== false || saved.isObserver === true)) {
+        currentUser = saved;
+        AUTH_TOKEN = localStorage.getItem('ta_token') || null;
+        REMEMBER_ME = localStorage.getItem('ta_remember') === '1';
+        appBox.style.display = 'flex';
+        // Was passing localStorage's remembered "last page" here (e.g. whatever page the user
+        // was on when they last closed the tab) — this is exactly why the check-in page kept
+        // "disappearing": any reload or session restore silently dropped users back onto
+        // whatever page they'd last clicked, instead of their actual home page. Calling
+        // initApp() with no argument matches the manual-login path exactly (checkin for
+        // regular staff, dashboard for MD) — landing page is now always predictable.
+        initApp();
+        maybeShowForcePasswordGate(); // F-09: block until a first-login default password is changed
+        // Refresh user list then attendance from backend
+        loadUsersFromBackend().then(() => {
+          const fresh = DATA_USERS.find(u => u.id === currentUser.id);
+          if (fresh) { currentUser = fresh; updateUserUI(); applyRolePermissions(); }
+          maybeShowForcePasswordGate(); // re-check against server-fresh data (idempotent if already shown)
+          if (currentPage === 'employees') renderEmployeesTable();
+          if (currentPage === 'payslip') { renderPayslipEmployeeList(); renderPayslip(); }
+          if (currentPage === 'finalize') renderFinalize();
+          if (currentPage === 'reports') { syncReportPeriodDropdown(); renderReports(); }
+          return loadAttendanceFromBackend();
+        }).then(ok => {
+          if (ok) {
+            renderDashboard();
+            if (currentPage === 'attendance') renderAttendanceTable();
+            if (currentPage === 'checkin') { restoreTodayLog(); updateScanButton(); }
+            if (currentPage === 'reports') renderReports();
+          }
+          // Auto-sync new employees from Hikvision silently on startup
+          syncHikvisionEmployees(true);
+          if (typeof Notification !== 'undefined' && Notification.permission === 'granted') syncPushSubscription();
+        });
+        return;
+      }
+    } catch(e) { /* bad session data, fall through to login */ }
+  }
+
+  // No valid session — show login. (Used to pre-fetch DATA_USERS here for no functional
+  // reason the login form actually needs; now that GET /api/users requires a JWT that
+  // doesn't exist yet, that call always 401'd and showed a false "cannot connect to
+  // backend" warning on every single visit to the login page. login() itself loads
+  // DATA_USERS right after a successful login, so nothing here needs it beforehand.)
+  loginBox.style.display = 'flex';
+});
+
+// ===== MY REQUESTS PAGE =====
+function renderMyRequests() {
+  const container = document.getElementById('my-requests-container');
+  if (!container) return;
+
+  const NON_LEAVE = new Set(['time-correction','late-out','upcountry','ot','comp','long-distance','clear-attachments','personal-car']);
+  const items = DATA_LEAVES
+    .filter(l => l.userId === currentUser.id && NON_LEAVE.has(l.type))
+    .sort((a, b) => b.id - a.id);
+
+  if (items.length === 0) {
+    container.innerHTML = `
+      <div class="card">
+        <div class="card-body" style="text-align:center;padding:48px;color:#94a3b8">
+          <div style="font-size:36px;margin-bottom:12px">📋</div>
+          <div style="font-size:15px;font-weight:600;margin-bottom:4px">${L('No requests yet', 'ยังไม่มีคำขอ')}</div>
+          <div style="font-size:13px">${effectiveRole() === 'driver'
+            ? L('Time corrections, OT, and Long Distance requests will appear here', 'คำขอแก้ไขเวลา ขอ OT และ Long Distance จะแสดงที่นี่')
+            : L('Time corrections, late-night out, upcountry, compensatory day, and OT requests will appear here', 'คำขอแก้ไขเวลา แจ้งกลับดึก Upcountry ขอวันหยุดชดเชย และขอ OT จะแสดงที่นี่')
+          }</div>
+        </div>
+      </div>`;
+    return;
+  }
+
+  const TYPE_CFG = {
+    'time-correction': { labelFn: l => l.correctionField === 'checkIn' ? L('Check-In Time Edit','ขออนุมัติแก้ไขเวลาเข้างาน') : L('Check-Out Time Edit','ขออนุมัติแก้ไขเวลาเลิกงาน'), color:'#1d4ed8', bg:'#eff6ff', border:'#bfdbfe' },
+    'late-out':        { labelFn: () => L('Late Night Out','แจ้งกลับดึก'),           color:'#6d28d9', bg:'#f5f3ff', border:'#ddd6fe' },
+    'upcountry':         { labelFn: () => L('Upcountry','Upcountry'),     color:'#065f46', bg:'#ecfdf5', border:'#a7f3d0' },
+    'ot':              { labelFn: () => L('Request OT','ขอ OT'),                  color:'#92400e', bg:'#fffbeb', border:'#fde68a' },
+    'comp':            { labelFn: () => L('Compensatory Day','ขอวันหยุดชดเชย'),         color:'#0f766e', bg:'#f0fdfa', border:'#5eead4' },
+    // 2026-08-09 (2nd-pass audit finding 1): missed sink -- Number()-coerced now, matching every other mileage/distance render site (this labelFn's return value reaches renderMyRequests()'s innerHTML).
+    'long-distance':   { labelFn: l => `${L('Long Distance','Long Distance')} ${Number(l.distanceKm)||0} ${L('km','กม.')}`, color:'#0369a1', bg:'#f0f9ff', border:'#7dd3fc' },
+    'clear-attachments': { labelFn: l => `${L('Clear Old Attachments','ล้างไฟล์แนบเก่า')} (${Number(l.fileCount)||0})`, color:'#475569', bg:'#f8fafc', border:'#e2e8f0' },
+    'personal-car':      { labelFn: l => `🚙 ${L('Personal Car','รถส่วนตัว')} (+฿${Number(l.personalCarRate!=null?l.personalCarRate:(APP_SETTINGS.allowances.personalCar!=null?APP_SETTINGS.allowances.personalCar:1000)).toLocaleString()})`, color:'#854d0e', bg:'#fefce8', border:'#fde68a' },
+  };
+
+  const statusCfg = {
+    'pending':    { badge:`<span class="badge badge-warning">⏳ ${L('Pending Manager', 'รอ Manager')}</span>`,              dot:'#f59e0b' },
+    'pending-md': { badge:`<span class="badge badge-info">⏳ ${L('Pending Managing Director', 'รอ Managing Director')}</span>`,      dot:'#3b82f6' },
+    'pending-accounting': { badge:`<span class="badge badge-info">⏳ ${L('Pending Accounting', 'รอ Accounting')}</span>`, dot:'#3b82f6' },
+    'approved':   { badge:`<span class="badge badge-success">✅ ${L('Approved', 'อนุมัติแล้ว')}</span>`,            dot:'#10b981' },
+    'rejected':   { badge:`<span class="badge badge-danger">❌ ${L('Rejected', 'ปฏิเสธ')}</span>`,                 dot:'#ef4444' },
+  };
+
+  container.innerHTML = items.map(l => {
+    const cfg  = TYPE_CFG[l.type] || { labelFn: () => escapeHtml(l.type), color:'#475569', bg:'#f8fafc', border:'#e2e8f0' };
+    const label = cfg.labelFn(l);
+    const sc   = statusCfg[l.status] || statusCfg.pending;
+
+    const dateLine = l.dateFrom === l.dateTo
+      ? fmtDate(new Date(l.dateFrom + 'T12:00:00'))
+      : `${fmtDate(new Date(l.dateFrom + 'T12:00:00'))} – ${fmtDate(new Date(l.dateTo + 'T12:00:00'))}`;
+
+    const detail = l.type === 'time-correction'
+      ? (currentLang === 'ja' ? `<strong>${escapeHtml(l.correctedTime)}</strong> に修正` : L(`change to <strong>${escapeHtml(l.correctedTime)}</strong>`, `แก้เป็น <strong>${escapeHtml(l.correctedTime)}</strong>`))
+      : l.type === 'ot'
+      ? (() => {
+          // SECURITY FIX 2026-08-09 (Opus audit finding 1.4): otHours/otEndTime are
+          // client-controlled and were interpolated unescaped/uncoerced into innerHTML here.
+          const oh = Number(l.otHours) || 0;
+          const oet = l.timePart ? escapeHtml(l.timePart) : escapeHtml(l.otEndTime);
+          const omul = Number(l.otMultiplier);
+          return l.otEndTime
+            ? (currentLang === 'ja' ? `⏱️ ${oh}時間 ×${omul} | 終業 ${oet}` : L(`⏱️ ${oh}h ×${omul} | end ${oet}`, `⏱️ ${oh} ชม. ×${omul} | เลิก ${oet}`))
+            : (currentLang === 'ja' ? `⏱️ ${oh}時間 ×${omul}` : L(`⏱️ ${oh}h ×${omul}`, `⏱️ ${oh} ชม. ×${omul}`));
+        })()
+      : l.type === 'comp'
+      ? (currentLang === 'ja' ? `📅 出勤日: ${l.workedDate ? fmtDate(new Date(l.workedDate + 'T12:00:00')) : l.dateFrom}` : L(`📅 Worked on ${l.workedDate ? fmtDate(new Date(l.workedDate + 'T12:00:00')) : l.dateFrom}`, `📅 ทำงานวันที่ ${l.workedDate ? fmtDate(new Date(l.workedDate + 'T12:00:00')) : l.dateFrom}`))
+      : l.type === 'long-distance'
+      ? (currentLang === 'ja' ? `🚗 ${Number(l.mileageStart||0).toLocaleString()} → ${Number(l.mileageEnd||0).toLocaleString()} km (${Number(l.distanceKm||0).toLocaleString()} km)` : L(`🚗 ${Number(l.mileageStart||0).toLocaleString()} → ${Number(l.mileageEnd||0).toLocaleString()} km (${Number(l.distanceKm||0).toLocaleString()} km)`, `🚗 เลขไมล์ ${Number(l.mileageStart||0).toLocaleString()} → ${Number(l.mileageEnd||0).toLocaleString()} (${Number(l.distanceKm||0).toLocaleString()} กม.)`))
+      : formatTimePart(l);
+
+    const approverLine = (l.status === 'approved' || l.status === 'rejected') && l.approver
+      ? `<span style="color:#94a3b8">• ${l.status === 'approved' ? L('Approved', 'อนุมัติ') : L('Rejected', 'ปฏิเสธ')} ${L('by', 'โดย')} ${escapeHtml(l.approver)}</span>`
+      : l.status === 'pending-md'
+      ? `<span style="color:#94a3b8">• ${L('Pending Managing Director', 'รอ Managing Director')}</span>`
+      : l.status === 'pending-accounting'
+      ? `<span style="color:#94a3b8">• ${L('Pending Accounting', 'รอ Accounting')}</span>`
+      : `<span style="color:#94a3b8">• ${L('Pending Manager', 'รอ Manager อนุมัติ')}</span>`;
+
+    // time-correction and clear-attachments have no edit-modal support (time-correction is an
+    // MD/Accounting-driven fix, not a self-service form; clear-attachments is a batch admin
+    // action) — Cancel still applies to both, Edit only to the 5 self-submitted request types.
+    const actionRow = isLegacyAutoApprovedPersonalCar(l)
+      ? `<div style="display:flex;gap:6px;flex-shrink:0">
+           <button class="btn btn-danger btn-sm" onclick="cancelLeave(${l.id})">${L('Cancel', 'ยกเลิก')}</button>
+         </div>`
+      : l.status.startsWith('pending')
+      ? `<div style="display:flex;gap:6px;flex-shrink:0">
+           ${EDITABLE_LEAVE_TYPES.has(l.type) ? `<button class="btn btn-ghost btn-sm" onclick="editLeaveRequest(${l.id})">${L('✏️ Edit', '✏️ แก้ไข')}</button>` : ''}
+           <button class="btn btn-danger btn-sm" onclick="cancelLeave(${l.id})">${L('Cancel', 'ยกเลิก')}</button>
+         </div>`
+      : '';
+
+    return `
+      <div class="card" style="border-left:4px solid ${cfg.border};transition:box-shadow .15s" onmouseover="this.style.boxShadow='0 4px 12px rgba(0,0,0,.08)'" onmouseout="this.style.boxShadow=''">
+        <div class="card-body" style="padding:16px 20px">
+          <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap">
+            <div style="flex:1;min-width:0">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
+                <span style="font-size:13px;font-weight:700;color:${cfg.color};background:${cfg.bg};padding:3px 10px;border-radius:20px;border:1px solid ${cfg.border}">${label}</span>
+                ${sc.badge}
+              </div>
+              <div style="display:flex;align-items:center;gap:16px;font-size:13px;color:#475569;flex-wrap:wrap;margin-bottom:${l.reason ? '6px' : '0'}">
+                <span>📅 ${dateLine}</span>
+                ${detail ? `<span>${detail}</span>` : ''}
+                <span>🕐 ${L('Submitted', 'ยื่นเมื่อ')} ${escapeHtml(_fmtDtStr(l.submittedAt))}</span>
+                ${approverLine}
+              </div>
+              ${l.reason && l.reason !== '-' ? `<div style="font-size:13px;color:#64748b;margin-top:4px">📝 ${escapeHtml(l.reason)}</div>` : ''}
+              ${l.attachment ? `<div style="font-size:13px;margin-top:4px">📎 ${buildAttachmentLinkHtml(l)}</div>` : ''}
+            </div>
+            ${actionRow}
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+// ===== HOLIDAYS MANAGEMENT PAGE =====
+let _holidayYear = new Date().getFullYear();
+
+function renderHolidaysPage() {
+  const container = document.getElementById('page-holidays');
+  if (!container) return;
+
+  const years = [...new Set([_holidayYear - 1, _holidayYear, _holidayYear + 1,
+    ...DATA_HOLIDAYS.map(h => h.year || parseInt(h.date.slice(0,4)))])].sort();
+
+  const filtered = DATA_HOLIDAYS.filter(h => (h.year || parseInt(h.date.slice(0,4))) === _holidayYear)
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  const thMonths = _monthShort();
+  const thDays   = _dayNames();
+
+  container.innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:20px">
+
+      <!-- Year tabs -->
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        ${years.map(y => `
+          <button class="btn ${y === _holidayYear ? 'btn-primary' : 'btn-secondary'} btn-sm"
+            onclick="_holidayYear=${y};renderHolidaysPage()">${y}</button>
+        `).join('')}
+      </div>
+
+      <!-- Add form -->
+      <div class="card">
+        <div class="card-header"><h3>➕ ${L('Add Holiday', 'เพิ่มวันหยุด')}</h3></div>
+        <div class="card-body">
+          <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
+            <div class="form-group" style="flex:1;min-width:160px;margin:0">
+              <label class="form-label">${L('Date', 'วันที่')}</label>
+              <input type="date" id="hol-date" class="form-control"
+                min="${_holidayYear}-01-01" max="${_holidayYear}-12-31">
+            </div>
+            <div class="form-group" style="flex:2;min-width:200px;margin:0">
+              <label class="form-label">${L('Holiday Name', 'ชื่อวันหยุด')}</label>
+              <input type="text" id="hol-name" class="form-control" placeholder="${L('e.g. Songkran, National Day...', 'เช่น วันสงกรานต์, วันชาติ...')}">
+            </div>
+            <button class="btn btn-primary" onclick="addHoliday()" style="white-space:nowrap">➕ ${L('Add', 'เพิ่ม')}</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Table -->
+      <div class="card">
+        <div class="card-header">
+          <h3>🗓️ ${L('Annual Holidays', 'วันหยุดประจำปี')} ${_holidayYear} (${filtered.length} ${L('days', 'วัน')})</h3>
+        </div>
+        <div style="overflow-x:auto">
+          ${filtered.length === 0 ? `
+            <div style="text-align:center;padding:40px;color:#94a3b8">
+              <div style="font-size:36px;margin-bottom:8px">📅</div>
+              <div>${currentLang === 'ja' ? `${_holidayYear}年の祝日はまだありません` : L(`No holidays for ${_holidayYear}`, `ยังไม่มีวันหยุดสำหรับปี ${_holidayYear}`)}</div>
+            </div>
+          ` : `
+            <table style="width:100%;border-collapse:collapse">
+              <thead>
+                <tr style="background:#f8fafc;border-bottom:2px solid #e2e8f0">
+                  <th style="padding:12px 16px;text-align:left;font-size:13px;color:#64748b">#</th>
+                  <th style="padding:12px 16px;text-align:left;font-size:13px;color:#64748b">${L('Date', 'วันที่')}</th>
+                  <th style="padding:12px 16px;text-align:left;font-size:13px;color:#64748b">${L('Day', 'วัน')}</th>
+                  <th style="padding:12px 16px;text-align:left;font-size:13px;color:#64748b">${L('Holiday Name', 'ชื่อวันหยุด')}</th>
+                  <th style="padding:12px 16px;text-align:center;font-size:13px;color:#64748b">${L('Delete', 'ลบ')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${filtered.map((h, i) => {
+                  const d = new Date(h.date + 'T12:00:00');
+                  const dayLabel = thDays[d.getDay()];
+                  const dd = d.getDate().toString().padStart(2,'0');
+                  const mm = thMonths[d.getMonth()];
+                  const isWeekend = d.getDay() === 0 || d.getDay() === 6;
+                  const rowBg = i % 2 === 0 ? '' : 'background:#fafafa';
+                  const weekendNote = isWeekend ? ` <span style="font-size:11px;color:#ef4444">${L('(Weekend)', '(เสาร์/อาทิตย์)')}</span>` : '';
+                  return `<tr style="border-bottom:1px solid #f1f5f9;${rowBg}">
+                    <td style="padding:12px 16px;color:#94a3b8;font-size:13px">${i+1}</td>
+                    <td style="padding:12px 16px;font-weight:600;color:#1e3a5f">${dd} ${mm} ${_holidayYear}</td>
+                    <td style="padding:12px 16px;font-size:13px;color:#64748b">${dayLabel}${weekendNote}</td>
+                    <td style="padding:12px 16px;color:#1e293b">${escapeHtml(h.name)}</td>
+                    <td style="padding:12px 16px;text-align:center">
+                      <button class="btn btn-ghost btn-sm" style="color:#ef4444"
+                        onclick="deleteHoliday(${h.id})">🗑️</button>
+                    </td>
+                  </tr>`;
+                }).join('')}
+              </tbody>
+            </table>
+          `}
+        </div>
+      </div>
+
+      <!-- Company Trip -->
+      <div class="card">
+        <div class="card-header"><h3>🚌 ${L('Company Trip Dates', 'ตั้งค่าวันที่ไป Company Trip')}</h3></div>
+        <div class="card-body">
+          <div style="font-size:12px;color:#64748b;margin-bottom:14px">${L('On these dates, employees still scan in/out (e.g. to collect belongings) but the day earns no extra pay of any kind — Early Morning, Late Night, OT, Upcountry, Long Distance, Personal Car, Comp all included. The table just shows the "Company Trip" tag.', 'วันที่กำหนดไว้ พนักงานยังผ่านประตูเข้า-ออกได้ตามปกติ (เช่น เข้าไปเก็บของ) แต่จะไม่มีการคิดเงินเพิ่มใดๆ ทั้งสิ้นไม่ว่าประเภทไหน — Early Morning, Late Night, OT, Upcountry, Long Distance, รถส่วนตัว, วันหยุดชดเชย รวมอยู่ด้วยทั้งหมด ตารางจะขึ้นเป็น "Company Trip" แทน')}</div>
+          <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-bottom:16px">
+            <div class="form-group" style="flex:1;min-width:160px;margin:0">
+              <label class="form-label">${L('Start Date', 'วันที่เริ่มต้น')}</label>
+              <input type="date" id="ctrip-date-start" class="form-control">
+            </div>
+            <div class="form-group" style="flex:1;min-width:160px;margin:0">
+              <label class="form-label">${L('End Date', 'วันที่สิ้นสุด')}</label>
+              <input type="date" id="ctrip-date-end" class="form-control">
+            </div>
+            <button class="btn btn-primary" onclick="addCompanyTripDate()" style="white-space:nowrap">➕ ${L('Add', 'เพิ่ม')}</button>
+          </div>
+          ${DATA_COMPANY_TRIP_DATES.length === 0 ? `
+            <div style="text-align:center;padding:24px;color:#94a3b8">
+              <div style="font-size:13px">${L('No Company Trip dates set', 'ยังไม่ได้ตั้งค่าวันที่ Company Trip')}</div>
+            </div>
+          ` : `
+            <div style="overflow-x:auto">
+              <table style="width:100%;border-collapse:collapse">
+                <thead>
+                  <tr style="background:#f8fafc;border-bottom:2px solid #e2e8f0">
+                    <th style="padding:12px 16px;text-align:left;font-size:13px;color:#64748b">#</th>
+                    <th style="padding:12px 16px;text-align:left;font-size:13px;color:#64748b">${L('Date', 'วันที่')}</th>
+                    <th style="padding:12px 16px;text-align:left;font-size:13px;color:#64748b">${L('Day', 'วัน')}</th>
+                    <th style="padding:12px 16px;text-align:center;font-size:13px;color:#64748b">${L('Delete', 'ลบ')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${[...DATA_COMPANY_TRIP_DATES].sort().map((dateStr, i) => {
+                    const d = new Date(dateStr + 'T12:00:00');
+                    const dayLabel = thDays[d.getDay()];
+                    const dd = d.getDate().toString().padStart(2,'0');
+                    const mm = thMonths[d.getMonth()];
+                    const yyyy = d.getFullYear();
+                    const rowBg = i % 2 === 0 ? '' : 'background:#fafafa';
+                    return `<tr style="border-bottom:1px solid #f1f5f9;${rowBg}">
+                      <td style="padding:12px 16px;color:#94a3b8;font-size:13px">${i+1}</td>
+                      <td style="padding:12px 16px;font-weight:600;color:#1e3a5f">${dd} ${mm} ${yyyy}</td>
+                      <td style="padding:12px 16px;font-size:13px;color:#64748b">${dayLabel}</td>
+                      <td style="padding:12px 16px;text-align:center">
+                        <button class="btn btn-ghost btn-sm" style="color:#ef4444"
+                          onclick="removeCompanyTripDate('${escapeJsAttr(dateStr)}')">🗑️</button>
+                      </td>
+                    </tr>`;
+                  }).join('')}
+                </tbody>
+              </table>
+            </div>
+          `}
+        </div>
+      </div>
+    </div>`;
+}
+
+async function addCompanyTripDate() {
+  if (blockIfObserver()) return;
+  const startStr = document.getElementById('ctrip-date-start').value;
+  const endStr   = document.getElementById('ctrip-date-end').value;
+  if (!startStr || !endStr) { showToast(L('⚠️ Please select both start and end dates', '⚠️ กรุณาเลือกวันที่เริ่มต้นและสิ้นสุด'), 'warning'); return; }
+  if (endStr < startStr) { showToast(L('⚠️ End date must be on or after the start date', '⚠️ วันที่สิ้นสุดต้องไม่ก่อนวันที่เริ่มต้น'), 'warning'); return; }
+
+  const newDates = [];
+  let d = new Date(startStr + 'T12:00:00');
+  const end = new Date(endStr + 'T12:00:00');
+  while (d <= end) {
+    const ds = localDateStr(d);
+    if (!DATA_COMPANY_TRIP_DATES.includes(ds) && !newDates.includes(ds)) newDates.push(ds);
+    d.setDate(d.getDate() + 1);
+  }
+  if (newDates.length === 0) { showToast(L('⚠️ These dates are already set', '⚠️ วันที่เหล่านี้ถูกตั้งค่าไว้แล้ว'), 'warning'); return; }
+
+  DATA_COMPANY_TRIP_DATES.push(...newDates);
+  const ok = await saveCompanyTripDates();
+  if (!ok) {
+    DATA_COMPANY_TRIP_DATES = DATA_COMPANY_TRIP_DATES.filter(d => !newDates.includes(d));
+    showToast(L('❌ Could not save — you may not have permission for this', '❌ บันทึกไม่สำเร็จ — คุณอาจไม่มีสิทธิ์ทำรายการนี้'), 'danger');
+    return;
+  }
+  showToast(currentLang === 'ja' ? `✅ Company Trip日を${newDates.length}日追加しました` : L(`✅ Added ${newDates.length} Company Trip date(s)`, `✅ เพิ่มวันที่ Company Trip สำเร็จ ${newDates.length} วัน`), 'success');
+  renderHolidaysPage();
+  if (currentPage === 'calendar') renderCalendarPage();
+}
+
+async function removeCompanyTripDate(date) {
+  if (blockIfObserver()) return;
+  if (!confirm(L('Remove this Company Trip date?', 'ลบวันที่ Company Trip นี้?'))) return;
+  const before = DATA_COMPANY_TRIP_DATES;
+  DATA_COMPANY_TRIP_DATES = DATA_COMPANY_TRIP_DATES.filter(d => d !== date);
+  const ok = await saveCompanyTripDates();
+  if (!ok) {
+    DATA_COMPANY_TRIP_DATES = before;
+    showToast(L('❌ Could not save — you may not have permission for this', '❌ บันทึกไม่สำเร็จ — คุณอาจไม่มีสิทธิ์ทำรายการนี้'), 'danger');
+    return;
+  }
+  showToast(L('🗑️ Removed', '🗑️ ลบแล้ว'), 'success');
+  renderHolidaysPage();
+  if (currentPage === 'calendar') renderCalendarPage();
+}
+
+async function addHoliday() {
+  if (blockIfObserver()) return;
+  const date = document.getElementById('hol-date').value;
+  const name = document.getElementById('hol-name').value.trim();
+  if (!date) { showToast(L('⚠️ Please select a date', '⚠️ กรุณาเลือกวันที่'), 'warning'); return; }
+  if (!name) { showToast(L('⚠️ Please specify the holiday name', '⚠️ กรุณาระบุชื่อวันหยุด'), 'warning'); return; }
+  try {
+    const res = await apiFetch(`/api/holidays`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, name }),
+    });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.message || 'Server error');
+    DATA_HOLIDAYS.push(data.holiday);
+    DATA_HOLIDAYS.sort((a, b) => a.date.localeCompare(b.date));
+    document.getElementById('hol-name').value = '';
+    showToast(L('✅ Holiday added', '✅ เพิ่มวันหยุดสำเร็จ'), 'success');
+    renderHolidaysPage();
+    if (currentPage === 'calendar') renderCalendarPage();
+  } catch(e) {
+    showToast('❌ ' + e.message, 'danger');
+  }
+}
+
+async function deleteHoliday(id) {
+  if (blockIfObserver()) return;
+  if (!confirm(L('Delete this holiday?', 'ลบวันหยุดนี้?'))) return;
+  try {
+    const res = await apiFetch(`/api/holidays/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.message || 'Server error');
+    const idx = DATA_HOLIDAYS.findIndex(h => h.id === id);
+    if (idx >= 0) DATA_HOLIDAYS.splice(idx, 1);
+    showToast(L('🗑️ Holiday deleted', '🗑️ ลบวันหยุดแล้ว'), 'success');
+    renderHolidaysPage();
+    if (currentPage === 'calendar') renderCalendarPage();
+  } catch(e) {
+    showToast('❌ ' + e.message, 'danger');
+  }
+}
+
+// ===== CALENDAR PAGE =====
+let _calendarYear = new Date().getFullYear();
+
+function renderCalendarPage() {
+  const container = document.getElementById('page-calendar');
+  if (!container) return;
+
+  const thMonthsFull = _monthNames();
+  const todayStr = todayDateStr();
+  const holidayMap = {};
+  DATA_HOLIDAYS.forEach(h => { holidayMap[h.date] = h.name; });
+
+  // 2026-08-12: birthday markers, requested for the annual Holiday Calendar page. Keyed by
+  // "MM-DD" (not the full date) since a birthday recurs every year regardless of birth year --
+  // matches on month+day only. Active employees only, so a former employee's old birthday doesn't
+  // keep showing up.
+  // 2026-08-13: for any colleague's row that isn't the viewer's own (and the viewer isn't
+  // md/accounting), GET /api/users strips raw `dob` entirely (F-06 privacy fix) and instead sends
+  // `birthdayMonthDay` ("MM-DD", no year) -- fall back to that so the badge still shows for
+  // manager/user/driver viewers, without ever exposing a colleague's birth year/age.
+  const birthdayMap = {}; // 'MM-DD' -> array of employee names
+  DATA_USERS.filter(u => isEmployeeRecord(u) && (u.dob || u.birthdayMonthDay) && u.active !== false).forEach(u => {
+    const key = u.dob ? `${String(new Date(u.dob + 'T12:00:00').getMonth() + 1).padStart(2, '0')}-${String(new Date(u.dob + 'T12:00:00').getDate()).padStart(2, '0')}` : u.birthdayMonthDay;
+    (birthdayMap[key] = birthdayMap[key] || []).push(u.name);
+  });
+
+  // Build leave map for current user (approved leaves only)
+  const LEAVE_DOT = {
+    annual:   { color:'#3b82f6', label:L('Annual Leave','ลาพักร้อน') },
+    sick:     { color:'#ef4444', label:L('Sick Leave','ลาป่วย') },
+    business: { color:'#8b5cf6', label:L('Business Leave','ลากิจ') },
+  };
+  const leaveMap = {}; // date -> array of leave types
+  if (currentUser) {
+    // 2026-08-16 (Opus audit CAL-2): hourly/partial-day leaves (hourlyStart/hourlyEnd set) were
+    // rendered as an identical full-day dot to a genuine full-day leave -- excluded here since a
+    // 2-hour leave looks nothing like a full day off and this calendar has no partial-day marker
+    // to render instead.
+    DATA_LEAVES.filter(l =>
+      l.userId === currentUser.id &&
+      l.status === 'approved' &&
+      LEAVE_DOT[l.type] &&
+      !l.hourlyStart && !l.hourlyEnd
+    ).forEach(l => {
+      // 2026-08-16 (Opus audit CAL-1): missing the same `dateTo || dateFrom` fallback the server's
+      // own deriveLeaveDaysCount() uses -- a record with an absent/empty dateTo (server permits
+      // this) produced an Invalid Date end bound, so the while-loop below never ran and the leave
+      // silently never appeared on the calendar, though it displayed correctly everywhere else.
+      let d = new Date(l.dateFrom + 'T12:00:00');
+      const endD = new Date((l.dateTo || l.dateFrom) + 'T12:00:00');
+      while (d <= endD) {
+        const ds = localDateStr(d);
+        if (!leaveMap[ds]) leaveMap[ds] = [];
+        if (!leaveMap[ds].includes(l.type)) leaveMap[ds].push(l.type);
+        d.setDate(d.getDate() + 1);
+      }
+    });
+  }
+
+  // 2026-08-16 (Opus audit CAL-3): this whole page hardcoded light-theme hex colors with no
+  // data-theme branch, unlike sibling code (e.g. openTimeCorrectionModal()) -- dark mode got
+  // dark-text-on-dark-background for the weekend/holiday/company-trip/today cell backgrounds.
+  const _calDark = document.documentElement.getAttribute('data-theme') === 'dark';
+  const buildMonth = (year, month) => {
+    const firstDay = new Date(year, month, 1);
+    const lastDay  = new Date(year, month + 1, 0);
+    const startDow = firstDay.getDay(); // 0=Sun
+    let html = `
+      <div class="cal-month">
+        <div class="cal-month-title">${thMonthsFull[month]}</div>
+        <div class="cal-grid">
+          <div class="cal-dow" style="color:#ef4444">${L('Su','อา')}</div>
+          <div class="cal-dow">${L('Mo','จ')}</div>
+          <div class="cal-dow">${L('Tu','อ')}</div>
+          <div class="cal-dow">${L('We','พ')}</div>
+          <div class="cal-dow">${L('Th','พฤ')}</div>
+          <div class="cal-dow">${L('Fr','ศ')}</div>
+          <div class="cal-dow" style="color:#3b82f6">${L('Sa','ส')}</div>`;
+    for (let i = 0; i < startDow; i++) html += '<div></div>';
+    for (let d = 1; d <= lastDay.getDate(); d++) {
+      const mm = String(month + 1).padStart(2, '0');
+      const dd = String(d).padStart(2, '0');
+      const ds = `${year}-${mm}-${dd}`;
+      const dow = new Date(year, month, d).getDay();
+      const isWeekend = dow === 0 || dow === 6;
+      const holName   = holidayMap[ds];
+      const isTripDay = isCompanyTripDay(ds);
+      const leaveTypes = leaveMap[ds] || [];
+      const birthdayNames = birthdayMap[`${mm}-${dd}`] || [];
+      const isToday   = ds === todayStr;
+      let cellStyle = 'position:relative;cursor:default;border-radius:6px;';
+      let numStyle  = 'font-size:14px;font-weight:600;line-height:1;';
+      if (dow === 0)   { cellStyle += `background:${_calDark ? 'rgba(239,68,68,0.15)' : '#fef2f2'};`; numStyle += 'color:#ef4444;'; }
+      if (dow === 6)   { cellStyle += `background:${_calDark ? 'rgba(59,130,246,0.15)' : '#eff6ff'};`; numStyle += 'color:#3b82f6;'; }
+      if (holName)     { cellStyle += `background:${_calDark ? 'rgba(220,38,38,0.2)' : '#fee2e2'};`; numStyle += 'color:#dc2626;'; }
+      if (isTripDay)   { cellStyle += `background:${_calDark ? 'rgba(3,105,161,0.2)' : '#e0f2fe'};`; numStyle += `color:${_calDark ? '#38bdf8' : '#0369a1'};`; }
+      if (isToday)     { cellStyle += `background:${_calDark ? 'rgba(29,78,216,0.25)' : '#dbeafe'};border-radius:50%;outline:2px solid #3b82f6;`; numStyle += `color:${_calDark ? '#93c5fd' : '#1d4ed8'};`; }
+      const hasPopup = holName || isTripDay || leaveTypes.length > 0 || birthdayNames.length > 0;
+      if (hasPopup)    { cellStyle += 'cursor:pointer;'; }
+
+      // Build popup text
+      let popupParts = [];
+      if (holName) popupParts.push('🔴 ' + holName);
+      // 2026-08-16 (Opus audit CAL-4): raw string literal bypassed L()/LANG_JA entirely, unlike
+      // every other "Company Trip" render site in the file (which already has a JA entry) --
+      // always showed English regardless of language.
+      if (isTripDay) popupParts.push(`🚌 ${L('Company Trip', 'Company Trip')}`);
+      leaveTypes.forEach(t => {
+        const cfg = LEAVE_DOT[t];
+        if (cfg) popupParts.push('● ' + cfg.label);
+      });
+      if (birthdayNames.length > 0) popupParts.push('🎂 ' + birthdayNames.join(', '));
+      const popupText = popupParts.join(' | ');
+
+      // Leave dots
+      const dotsHtml = leaveTypes.length > 0
+        ? `<div style="display:flex;justify-content:center;gap:2px;margin-top:2px">
+            ${leaveTypes.map(t => `<span style="width:5px;height:5px;border-radius:50%;background:${LEAVE_DOT[t]?.color||'#94a3b8'};display:inline-block"></span>`).join('')}
+           </div>`
+        : '';
+      const tripBadge = isTripDay ? `<div style="font-size:10px;line-height:1;margin-top:2px">🚌</div>` : '';
+      const birthdayBadge = birthdayNames.length > 0 ? `<div style="font-size:10px;line-height:1;margin-top:2px" title="${escapeHtml(birthdayNames.join(', '))}">🎂</div>` : '';
+
+      const clickAttr = hasPopup ? `data-popup="${escapeHtml(popupText)}" onclick="showHolidayPopup(event,this.dataset.popup)"` : '';
+      html += `<div class="cal-cell" style="${cellStyle}" ${clickAttr}>
+        <span style="${numStyle}">${d}</span>
+        ${tripBadge}
+        ${birthdayBadge}
+        ${dotsHtml}
+      </div>`;
+    }
+    html += '</div></div>';
+    return html;
+  };
+
+  const totalHolidays = DATA_HOLIDAYS.filter(h => (h.year || parseInt(h.date.slice(0,4))) === _calendarYear).length;
+  const months = Array.from({length:12}, (_, i) => buildMonth(_calendarYear, i)).join('');
+
+  container.innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:20px">
+
+      <!-- Year nav -->
+      <div class="card">
+        <div class="card-body" style="display:flex;align-items:center;justify-content:space-between;padding:14px 20px">
+          <button class="btn btn-secondary btn-sm" onclick="_calendarYear--;renderCalendarPage()">← ${L('Prev Year', 'ปีที่แล้ว')}</button>
+          <div style="text-align:center">
+            <div style="font-size:20px;font-weight:700;color:var(--text)">${L('Year', 'ปี')} ${_calendarYear}</div>
+            <div style="font-size:13px;color:#64748b;margin-top:2px">🔴 ${currentLang === 'ja' ? `年間祝日 ${totalHolidays}日` : L(`${totalHolidays} Annual Holidays`, `วันหยุดประจำปี ${totalHolidays} วัน`)}</div>
+          </div>
+          <button class="btn btn-secondary btn-sm" onclick="_calendarYear++;renderCalendarPage()">${L('Next Year', 'ปีหน้า')} →</button>
+        </div>
+      </div>
+
+      <!-- Legend -->
+      <div style="display:flex;gap:12px;flex-wrap:wrap;font-size:12px;color:#475569;padding:0 4px;align-items:center">
+        <span><span style="display:inline-block;width:12px;height:12px;background:#fee2e2;border-radius:3px;margin-right:4px;vertical-align:middle"></span>${L('Annual Holiday', 'วันหยุดประจำปี')}</span>
+        <span><span style="display:inline-block;width:12px;height:12px;background:#e0f2fe;border-radius:3px;margin-right:4px;vertical-align:middle"></span>🚌 ${L('Company Trip', 'Company Trip')}</span>
+        <span>🎂 ${L('Birthday', 'วันเกิดพนักงาน')}</span>
+        <span><span style="display:inline-block;width:12px;height:12px;background:#fef2f2;border-radius:3px;margin-right:4px;vertical-align:middle"></span>${L('Sunday', 'อาทิตย์')}</span>
+        <span><span style="display:inline-block;width:12px;height:12px;background:#eff6ff;border-radius:3px;margin-right:4px;vertical-align:middle"></span>${L('Saturday', 'เสาร์')}</span>
+        <span><span style="display:inline-block;width:12px;height:12px;background:#dbeafe;border-radius:50%;margin-right:4px;vertical-align:middle"></span>${L('Today', 'วันนี้')}</span>
+        <span style="display:flex;align-items:center;gap:3px"><span style="width:6px;height:6px;border-radius:50%;background:#3b82f6;display:inline-block"></span> ${L('Annual Leave', 'ลาพักร้อน')}</span>
+        <span style="display:flex;align-items:center;gap:3px"><span style="width:6px;height:6px;border-radius:50%;background:#ef4444;display:inline-block"></span> ${L('Sick Leave', 'ลาป่วย')}</span>
+        <span style="display:flex;align-items:center;gap:3px"><span style="width:6px;height:6px;border-radius:50%;background:#8b5cf6;display:inline-block"></span> ${L('Business Leave', 'ลากิจ')}</span>
+        <span style="color:#94a3b8;font-size:11px">${L('(click a cell for details)', '(คลิกเซลล์เพื่อดูรายละเอียด)')}</span>
+      </div>
+
+      <!-- Calendar grid -->
+      <div class="cal-year-grid">
+        ${months}
+      </div>
+    </div>`;
+}
+
+function showHolidayPopup(event, name) {
+  event.stopPropagation();
+  let popup = document.getElementById('cal-holiday-popup');
+  if (!popup) {
+    popup = document.createElement('div');
+    popup.id = 'cal-holiday-popup';
+    popup.style.cssText = 'position:fixed;z-index:9999;background:#1e293b;color:#fff;padding:8px 14px;border-radius:8px;font-size:13px;font-weight:600;box-shadow:0 4px 16px rgba(0,0,0,.25);pointer-events:none;transition:opacity .15s;white-space:nowrap;';
+    document.body.appendChild(popup);
+    document.addEventListener('click', () => { popup.style.opacity = '0'; });
+  }
+  popup.textContent = name;
+  popup.style.opacity = '1';
+  const x = event.clientX, y = event.clientY;
+  popup.style.left = Math.min(x + 8, window.innerWidth - 220) + 'px';
+  popup.style.top  = (y - 40) + 'px';
+}
+
+// ===== TODAY LEAVE MODAL =====
+function getLEAVE_TYPE_LABELS() {
+  return {
+    annual:   { icon:'🏖️', label:L('Annual Leave','ลาพักร้อน')  },
+    sick:     { icon:'🤒', label:L('Sick Leave','ลาป่วย')      },
+    business: { icon:'📋', label:L('Business Leave','ลากิจ')        },
+  };
+}
+
+function formatLeaveDateRange(l) {
+  if (l.hourlyStart && l.hourlyEnd) {
+    return `${fmtDate(l.dateFrom)} ${escapeHtml(l.hourlyStart)}–${escapeHtml(l.hourlyEnd)}`;
+  }
+  const to = l.dateTo || l.dateFrom;
+  if (to && to !== l.dateFrom) {
+    return `${fmtDate(l.dateFrom)} – ${fmtDate(to)}${(l.days || 0) > 0 ? ` (${Number(l.days)} ${L('days', 'วัน')})` : ''}`;
+  }
+  return `${fmtDate(l.dateFrom)}${(l.days || 0) >= 1 ? ' ' + L('(full day)', '(ลาทั้งวัน)') : ''}`;
+}
+
+function openTodayLeaveModal() {
+  const todayLeaves = getTodayPersonalLeaves();
+  const body = document.getElementById('today-leave-modal-body');
+  if (!body) return;
+
+  if (todayLeaves.length === 0) {
+    body.innerHTML = `<div style="text-align:center;padding:30px;color:#94a3b8">
+      <div style="font-size:40px;margin-bottom:12px">✅</div>
+      <p>${L('No one on leave today', 'ไม่มีพนักงานลาวันนี้')}</p>
+    </div>`;
+  } else {
+    body.innerHTML = todayLeaves.map(l => {
+      const u = DATA_USERS.find(x => x.id === l.userId);
+      const cfg = getLEAVE_TYPE_CFG()[l.type] || { icon: '📋', label: l.type };
+      return `
+        <div style="display:flex;align-items:center;gap:14px;padding:12px 16px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px">
+          <div style="font-size:28px">${cfg.icon}</div>
+          <div style="flex:1">
+            <div style="font-weight:700;color:#1e293b;font-size:14px">${u ? escapeHtml(u.name) : L('Unknown', 'ไม่ทราบชื่อ')}</div>
+            <div style="font-size:12px;color:#64748b;margin-top:2px">${u ? escapeHtml(u.position) : ''}</div>
+            <div style="font-size:13px;color:#2563eb;margin-top:4px;font-weight:600">${cfg.label}</div>
+            <div style="font-size:12px;color:#64748b;margin-top:2px">📅 ${formatLeaveDateRange(l)}</div>
+            ${l.reason ? `<div style="font-size:11px;color:#94a3b8;margin-top:3px">${L('Reason', 'เหตุผล')}: ${escapeHtml(l.reason)}</div>` : ''}
+          </div>
+        </div>`;
+    }).join('');
+  }
+
+  document.getElementById('today-leave-modal').classList.add('show');
+}
+
+function openDashPendingFromBadge() {
+  const r = effectiveRole();
+  const canApprove = r === 'md' || r === 'accounting' || r === 'manager' || r === 'superadmin';
+  if (canApprove) {
+    navigateTo('approval');
+    return;
+  }
+  const pending = getDashPendingLeaves();
+  const title = document.getElementById('late-detail-title');
+  const body = document.getElementById('late-detail-body');
+  if (title) title.textContent = L('⏳ My pending requests', '⏳ คำขอของฉันที่รออนุมัติ');
+  if (body) {
+    if (pending.length === 0) {
+      body.innerHTML = `<p style="text-align:center;padding:28px;color:#94a3b8">${L('No pending requests', 'ไม่มีคำขอค้างอยู่')}</p>`;
+    } else {
+      body.innerHTML = pending.map(l => {
+        const cfg = getLEAVE_TYPE_CFG()[l.type] || { icon: '📋', label: l.type };
+        const st = l.status === 'pending-md' ? L('Pending Managing Director', 'รอ Managing Director')
+          : l.status === 'pending-accounting' ? L('Pending Accounting', 'รอ Accounting')
+          : L('Pending Manager', 'รอ Manager');
+        return `<div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid #f1f5f9">
+          <div style="font-size:22px">${cfg.icon}</div>
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:700;font-size:14px">${cfg.label}</div>
+            <div style="font-size:12px;color:#64748b;margin-top:2px">📅 ${formatLeaveDateRange(l)}</div>
+          </div>
+          <div style="font-size:11px;color:#d97706;font-weight:700;white-space:nowrap">${st}</div>
+        </div>`;
+      }).join('');
+    }
+  }
+  document.getElementById('late-detail-modal')?.classList.add('show');
+}
+
+function closeTodayLeaveModal() {
+  document.getElementById('today-leave-modal').classList.remove('show');
+}
+
+// ===== HIKVISION LIVE — WebSocket to NAS backend =====
+const NAS_WS = _isLan
+  ? (_isHttps ? `wss://${_nasHost}:3443/ws` : `ws://${_nasHost}:3000/ws`)
+  : `${_isHttps ? 'wss' : 'ws'}://${window.location.host}/ws`;
+let hikvisionWs = null;
+let wsReconnectTimer = null;
+
+function processLiveScanEvent(ev) {
+  if (String(ev.employeeNo) === '6344') return; // emergency office-access account on Hikvision device, not a real employee — skip attendance tracking
+  const raw = ev.eventTime || '';
+  const sep = raw.indexOf('T');
+  if (sep < 0) return;
+  const datePart = raw.substring(0, sep);
+  const timePart = raw.substring(sep + 1, sep + 6); // "HH:MM"
+  const hour = parseInt(timePart.split(':')[0]);
+
+  let businessDate = datePart;
+  if (hour < 5) {
+    const d = new Date(datePart + 'T00:00:00');
+    d.setDate(d.getDate() - 1);
+    businessDate = localDateStr(d);
+  }
+
+  const user = DATA_USERS.find(u => u.employeeNo === String(ev.employeeNo));
+
+  if (!user) return;
+
+  const key = attKey(user.id, businessDate);
+  if (!attendanceLog[key]) attendanceLog[key] = {};
+  const rec = attendanceLog[key];
+
+  const source = ev.eventType === 'WebScan' ? 'web' : 'device';
+  const gps    = ev.gps || '';
+  if (!rec.scans) rec.scans = [];
+
+  if (hour < 5) {
+    // 2026-08-16 (Opus audit L-3): was unconditional, unlike the other two checkOut-setting
+    // branches below (both guarded with `!rec.checkOut || timePart > rec.checkOut`) and unlike
+    // loadAttendanceFromBackend()'s own equivalent path -- an out-of-order live event could
+    // overwrite a later, more correct checkOut with an earlier one until the next reload
+    // re-derived it correctly, showing a different time live vs after refresh.
+    if (!rec.checkOut || timePart > rec.checkOut) {
+      rec.checkOut = timePart;
+      rec.checkOutSource = source;
+      if (gps) rec.checkOutGPS = gps;
+    }
+    rec.scans.push({ time: timePart, type: 'out', source, gps: gps || '—' });
+  } else if (!rec.checkIn && timePart >= CHECKIN_CUTOFF) {
+    // No morning check-in on record and it's already past the cutoff — this scan can't be
+    // a real arrival time, so record it as check-out instead and leave check-in blank.
+    // 2026-08-06: mirrors loadAttendanceFromBackend()'s firstScanAfterCutoff/'not-clocked-in'.
+    if (!rec.firstScanAfterCutoff) rec.firstScanAfterCutoff = timePart;
+    if (!rec.status) rec.status = 'not-clocked-in';
+    if (!rec.checkOut || timePart > rec.checkOut) {
+      rec.checkOut = timePart;
+      rec.checkOutSource = source;
+      if (gps) rec.checkOutGPS = gps;
+    }
+    rec.scans.push({ time: timePart, type: 'out', source, gps: gps || '—' });
+  } else if (!rec.checkIn) {
+    rec.checkIn = timePart;
+    rec.checkInSource = source;
+    if (gps) rec.checkInGPS = gps;
+    // 2026-08-09 (2nd-pass audit finding 4.2 follow-up): same configurable-standard-start fix as
+    // loadAttendanceFromBackend()'s copy above; this site was ALSO missing that sibling's
+    // `role !== 'driver'` exemption (drivers are never marked 'late' anywhere else in the app --
+    // see computeLateDeductMinutes()'s own comment on this).
+    const _ws6 = APP_SETTINGS.workSchedule;
+    const _stdStr6 = `${String(_ws6?.standardStartHour ?? 8).padStart(2,'0')}:${String(_ws6?.standardStartMinute ?? 30).padStart(2,'0')}`;
+    rec.status = (user.role !== 'driver' && timePart > _stdStr6) ? 'late' : 'present';
+    rec.scans.push({ time: timePart, type: 'in', source, gps: gps || '—' });
+  } else {
+    // See loadAttendanceFromBackend() for why a morning scan (< 12:00) is never accepted as check-out.
+    if (timePart >= '12:00' && (!rec.checkOut || timePart > rec.checkOut)) {
+      rec.checkOut = timePart;
+      rec.checkOutSource = source;
+      if (gps) rec.checkOutGPS = gps;
+    }
+    rec.scans.push({ time: timePart, type: 'out', source, gps: gps || '—' });
+  }
+
+  saveSession();
+  if (currentPage === 'attendance') renderAttendanceTable();
+  renderDashboard();
+  // If event is for the current user, refresh both the checkin page's button state AND the
+  // today's log timeline — previously only updateScanButton() was called here, so a live device
+  // scan (e.g. checking out at the physical terminal after checking in via the web) never showed
+  // up in the log list until a full page reload. restoreTodayLog() re-renders both.
+  if (currentUser && user.id === currentUser.id) restoreTodayLog();
+  updateLateOutEntryVisibility();
+
+}
+
+function initHikvisionLive() {
+  if (hikvisionWs) { try { hikvisionWs.close(); } catch(e) {} }
+  clearTimeout(wsReconnectTimer);
+
+  // SECURITY FIX 2026-08-13: the backend socket now requires a valid JWT (see server.js's
+  // authenticateWsRequest()) -- browsers can't set a custom Authorization header on a WebSocket
+  // handshake, so the token travels as a query param instead. If we don't have one yet (e.g. this
+  // fired before login finished restoring the session), retry shortly instead of connecting
+  // tokenless and immediately getting closed with 1008 by the server.
+  if (!AUTH_TOKEN) {
+    wsReconnectTimer = setTimeout(initHikvisionLive, 2000);
+    return;
+  }
+  const wsUrl = `${NAS_WS}${NAS_WS.includes('?') ? '&' : '?'}token=${encodeURIComponent(AUTH_TOKEN)}`;
+  try { hikvisionWs = new WebSocket(wsUrl); }
+  catch(e) {
+    updateWsStatus('offline');
+    wsReconnectTimer = setTimeout(initHikvisionLive, 5000);
+    return;
+  }
+
+  hikvisionWs.onopen = () => { updateWsStatus('online'); console.log('[WS] connected'); };
+
+  hikvisionWs.onmessage = msg => {
+    try {
+      const data = JSON.parse(msg.data);
+      if (data.type === 'SCAN_EVENT') {
+        processLiveScanEvent({ ...data, eventTime: data.event_time || data.eventTime });
+        if (currentPage === 'myattendance') {
+          const picker = document.getElementById('ma-date-picker');
+          const d = picker ? picker.value : localDateStr(new Date());
+          if (d === localDateStr(new Date())) {
+            if (typeof window._maTriggerLoad === 'function') window._maTriggerLoad();
+          }
+        }
+      }
+      if (data.type === 'TODAY_EVENTS') {
+        (data.events || []).forEach(e => {
+          // Normalize field names: WebSocket uses event_time, processLiveScanEvent expects eventTime
+          processLiveScanEvent({ ...e, eventTime: e.event_time || e.eventTime });
+        });
+        if (currentPage === 'myattendance') {
+          if (typeof window._maTriggerLoad === 'function') window._maTriggerLoad();
+        }
+      }
+      if (data.type === 'USERS_SYNCED') {
+        loadUsersFromBackend().then(() => {
+          if (currentPage === 'employees') renderEmployeesTable();
+          showToast(currentLang === 'ja' ? `✅ 別のブラウザで新規従業員${data.added?.length || 0}名が追加されました` : L(`✅ ${data.added?.length || 0} new employee(s) added by another browser`, `✅ พนักงานใหม่ ${data.added?.length || 0} คนถูกเพิ่มโดย browser อื่น`), 'info');
+        });
+      }
+      if (data.type === 'USER_UPDATED') {
+        const idx = DATA_USERS.findIndex(u => u.employeeNo === data.user?.employeeNo);
+        if (idx >= 0) { DATA_USERS[idx] = { ...DATA_USERS[idx], ...data.user }; }
+        if (currentPage === 'employees') renderEmployeesTable();
+      }
+      if (data.type === 'USER_CREATED') {
+        // SECURITY FIX 2026-08-04: the backend now broadcasts a stripped public projection (no
+        // salary/idCard/bankAccount/password) instead of the full record -- pushing it straight
+        // into DATA_USERS would leave those fields missing locally until the next reload. Do a
+        // full authenticated refetch instead, same pattern USERS_SYNCED already uses above.
+        if (data.user && !DATA_USERS.find(u => u.id === data.user.id)) {
+          nextUserId = Math.max(nextUserId, data.user.id + 1);
+          loadUsersFromBackend().then(() => {
+            if (currentPage === 'employees') renderEmployeesTable();
+          });
+        }
+      }
+      if (data.type === 'LEAVE_CREATED') {
+        // SECURITY FIX 2026-08-13 (re-audit, F-1): the backend now broadcasts a stripped projection
+        // (no reason/note/attachment) instead of the full record, since this socket has no auth --
+        // pushing it straight into DATA_LEAVES would leave those fields missing locally for an
+        // approver until their next reload. Full authenticated refetch instead, same pattern
+        // USER_CREATED already uses above.
+        if (data.leave && !DATA_LEAVES.find(l => l.id === data.leave.id)) {
+          nextLeaveId = Math.max(nextLeaveId, (data.leave.id || 0) + 1);
+          loadLeavesFromBackend().then(() => {
+            updateMyRequestsBadge(); updateApprovalBadge();
+            renderDashboard();
+            if (currentPage === 'leave') renderLeaveHistory();
+            if (currentPage === 'my-requests') renderMyRequests();
+            if (currentPage === 'approval') renderApprovals();
+          });
+        }
+      }
+      if (data.type === 'LEAVE_UPDATED') {
+        // SECURITY FIX 2026-08-13 (re-audit, F-1): merge instead of replace, so a stripped broadcast
+        // (see LEAVE_CREATED above) can't wipe out reason/note/attachment this session already
+        // legitimately loaded via the authenticated GET /api/leaves -- same pattern USER_UPDATED
+        // already uses above.
+        const lIdx = DATA_LEAVES.findIndex(l => l.id === data.leave?.id);
+        if (lIdx >= 0) DATA_LEAVES[lIdx] = { ...DATA_LEAVES[lIdx], ...data.leave };
+        updateMyRequestsBadge(); updateApprovalBadge();
+        renderDashboard();
+        if (currentPage === 'leave') renderLeaveHistory();
+        if (currentPage === 'my-requests') renderMyRequests();
+        if (currentPage === 'approval') renderApprovals();
+      }
+      if (data.type === 'LEAVE_DELETED') {
+        const dIdx = DATA_LEAVES.findIndex(l => l.id === data.id);
+        if (dIdx >= 0) DATA_LEAVES.splice(dIdx, 1);
+        updateMyRequestsBadge(); updateApprovalBadge();
+        renderDashboard();
+        if (currentPage === 'leave') renderLeaveHistory();
+        if (currentPage === 'my-requests') renderMyRequests();
+        if (currentPage === 'approval') renderApprovals();
+      }
+      // 2026-08-13 (Opus audit, C-1 fallout): this event existed on the backend already but had
+      // NO handler here at all -- every other open tab kept stale attachment/attachmentName
+      // fields (dead links to now-deleted files) until a manual reload. Only ids, no other data,
+      // so no merge-vs-replace concern like LEAVE_CREATED/LEAVE_UPDATED above.
+      if (data.type === 'LEAVES_ATTACHMENTS_CLEARED') {
+        (data.clearedIds || []).forEach(id => {
+          const l = DATA_LEAVES.find(x => x.id === id);
+          if (l) { delete l.attachment; delete l.attachmentName; }
+        });
+        if (currentPage === 'leave') renderLeaveHistory();
+        if (currentPage === 'my-requests') renderMyRequests();
+        if (currentPage === 'approval') renderApprovals();
+      }
+      if (data.type === 'FINALIZE_UPDATED') {
+        // Accounting confirming/editing PIT, or MD approving/revoking, should update the other
+        // side's screen immediately — no broadcast payload needed, both renderers reload
+        // finalizeData themselves via loadFinalizeData().
+        // 2026-08-05 (Opus audit, M3): this used to call ONLY renderPayslipApprovalCard() (the MD/
+        // Accounting overview banner), never renderPayslip() itself (the actual payslip document
+        // below it) -- so an MD approving a payslip left "Paid by" blank on-screen until a manual
+        // reload, a revoke left the frozen numbers AND the former approver's name showing even
+        // though the record was no longer approved, and a staff member sitting on their own locked
+        // payslip never saw it unlock the moment MD approved. renderPayslip() is idempotent/no-arg
+        // (reads current employee+period selection itself), safe to call on every broadcast.
+        if (currentPage === 'payslip') { renderPayslipApprovalCard(); renderPayslip(); }
+        if (currentPage === 'finalize') renderFinalize();
+      }
+    } catch(e) { console.error('[WS] parse error:', e); }
+  };
+
+  hikvisionWs.onclose = () => {
+    updateWsStatus('offline');
+    console.log('[WS] disconnected — retry 5s');
+    wsReconnectTimer = setTimeout(initHikvisionLive, 5000);
+  };
+
+  hikvisionWs.onerror = err => { console.error('[WS] error:', err); updateWsStatus('offline'); };
+}
+
+function updateWsStatus(state) {
+  const dot = document.getElementById('ws-status-dot');
+  if (!dot) return;
+  dot.className = 'ws-dot ' + state;
+  dot.title = state === 'online' ? L('Scanner: Connected (Live)', 'สแกนเนอร์: เชื่อมต่อแล้ว (Live)') : L('Scanner: Disconnected', 'สแกนเนอร์: ไม่ได้เชื่อมต่อ');
+}
+
+// ===== SYNC NAME TO HIKVISION =====
+async function syncNameToHikvision(employeeNo, newName) {
+  if (blockIfObserver()) return { success: false, message: 'Observer accounts are read-only' };
+  if (!employeeNo) return { success: false, message: L('No employeeNo', 'ไม่มี employeeNo') };
+  try {
+    const res = await apiFetch(`/api/sync-name`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ employeeNo, name: newName })
+    });
+    return await res.json();
+  } catch(e) {
+    return { success: false, message: e.message };
+  }
+}
+
+// ===== MY ATTENDANCE PAGE =====
+let myAttLiveTimer = null;
+let myAttCurrentDate = null;
+
+function renderMyAttendance() {
+  const container = document.getElementById('page-myattendance');
+  if (!container) return;
+  clearInterval(myAttLiveTimer);
+
+  const u = currentUser;
+  const canViewAll = isMdAccountingView();
+  const today = localDateStr(new Date());
+
+  const photo = u.facePhoto
+    ? `<img src="${escapeHtml(u.facePhoto)}" alt="${escapeHtml(u.name)}" style="width:72px;height:72px;border-radius:50%;object-fit:cover;border:3px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.15)">`
+    : `<div style="width:72px;height:72px;border-radius:50%;background:#1e3a5f;display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:700;color:#fff;border:3px solid #fff">${escapeHtml(u.name.charAt(0))}</div>`;
+
+  // Employee selector for MD/Accounting
+  let empSelectorHtml = '';
+  if (canViewAll) {
+    const sortedUsers = [...DATA_USERS]
+      .filter(x => isEmployeeRecord(x) && x.employeeNo)
+      .sort((a, b) => a.name.localeCompare(b.name, 'th'));
+    const opts = sortedUsers.map(x =>
+      `<option value="${escapeHtml(x.employeeNo)}"${x.id === u.id ? ' selected' : ''}>${escapeHtml(x.name)}</option>`
+    ).join('');
+    empSelectorHtml = `
+      <span style="font-weight:600;color:#1e3a5f;font-size:14px;white-space:nowrap">👤 ${L('Employee', 'พนักงาน')}</span>
+      <select id="ma-emp-picker" style="border:1px solid #e2e8f0;border-radius:8px;padding:6px 12px;font-size:14px;color:#1e3a5f;font-family:inherit;min-width:180px">
+        <option value="all">${L('Everyone', 'ทุกคน')}</option>
+        ${opts}
+      </select>`;
+  }
+
+  container.innerHTML = `
+    <div class="ma-profile-card">
+      <div class="ma-profile-inner">
+        ${photo}
+        <div>
+          <div class="ma-profile-name">${escapeHtml(u.name)}</div>
+          <div class="ma-profile-sub">${escapeHtml(u.position)} &nbsp;•&nbsp; ID: ${escapeHtml(u.employeeNo) || '—'}</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-body" style="display:flex;align-items:center;gap:12px;padding:14px 20px;flex-wrap:wrap">
+        ${empSelectorHtml}
+        <span style="font-weight:600;color:#1e3a5f;font-size:14px;white-space:nowrap">📅 ${L('Date', 'วันที่')}</span>
+        <input type="date" id="ma-date-picker" value="${today}" max="${today}"
+               style="border:1px solid #e2e8f0;border-radius:8px;padding:6px 12px;font-size:14px;color:#1e3a5f;font-family:inherit">
+        <button class="btn btn-ghost btn-sm" onclick="(function(){var t=localDateStr(new Date());document.getElementById('ma-date-picker').value=t;_maTriggerLoad();})()">${L('Today', 'วันนี้')}</button>
+      </div>
+    </div>
+
+    <div id="ma-summary-card"></div>
+    <div id="ma-door-events"><div style="text-align:center;padding:32px;color:#94a3b8">${L('⏳ Loading...', '⏳ กำลังโหลด...')}</div></div>
+  `;
+
+  function _getSelectedEmp() {
+    const sel = document.getElementById('ma-emp-picker');
+    return sel ? sel.value : (u.employeeNo || null);
+  }
+  window._maTriggerLoad = function() {
+    const d = document.getElementById('ma-date-picker')?.value || today;
+    loadDoorEvents(d, _getSelectedEmp());
+  };
+
+  document.getElementById('ma-date-picker').addEventListener('change', () => window._maTriggerLoad());
+  if (canViewAll) {
+    document.getElementById('ma-emp-picker').addEventListener('change', () => window._maTriggerLoad());
+  }
+
+  // Default: show own events for today
+  loadDoorEvents(today, u.employeeNo || null);
+}
+
+function startMaTimer(todayRec) {
+  clearInterval(myAttLiveTimer);
+  if (!todayRec.checkIn || todayRec.checkOut) return;
+  const [h, m] = todayRec.checkIn.split(':').map(Number);
+  const inMs = h * 3600000 + m * 60000;
+  myAttLiveTimer = setInterval(() => {
+    const now = new Date();
+    const nowMs = now.getHours() * 3600000 + now.getMinutes() * 60000 + now.getSeconds() * 1000;
+    const diff = Math.max(0, nowMs - inMs);
+    const hh = Math.floor(diff / 3600000);
+    const mm = Math.floor((diff % 3600000) / 60000);
+    const ss = Math.floor((diff % 60000) / 1000);
+    const el = document.getElementById('ma-working-time');
+    if (el) el.textContent = currentLang === 'ja' ? `勤務中 ${hh}時間${mm}分${ss}秒` : L(`Working ${hh}h ${mm}m ${ss}s`, `กำลังทำงาน ${hh} ชม. ${mm} น. ${ss} วิ`);
+  }, 1000);
+}
+
+async function loadDoorEvents(dateStr, targetEmpNo) {
+  const u = currentUser;
+  if (!dateStr) return;
+  const today    = localDateStr(new Date());
+  const isToday  = dateStr === today;
+  const showAll  = targetEmpNo === 'all';
+  // Non-MD/Accounting always see only themselves
+  const canViewAll = isMdAccountingView();
+  const ownEmpNo   = u.employeeNo || null;
+  // Effective target: if not canViewAll force own; if canViewAll respect selection
+  const effTarget  = canViewAll ? (targetEmpNo || ownEmpNo) : ownEmpNo;
+
+  const summaryEl = document.getElementById('ma-summary-card');
+  const eventsEl  = document.getElementById('ma-door-events');
+  if (!eventsEl) return;
+
+  eventsEl.innerHTML = `<div style="text-align:center;padding:32px;color:#94a3b8">${L('⏳ Loading...', '⏳ กำลังโหลด...')}</div>`;
+  if (summaryEl) summaryEl.innerHTML = '';
+
+  // Today summary card — only when viewing own events on today
+  if (isToday && summaryEl && effTarget === ownEmpNo) {
+    const key = attKey(u.id, today);
+    const rec = attendanceLog[key] || {};
+    summaryEl.innerHTML = `
+      <div class="ma-today-card" style="margin-bottom:16px">
+        <div class="ma-today-label">${L('Today', 'วันนี้')} &nbsp; ${fmtDateLong(new Date())}</div>
+        <div class="ma-checkinout-row">
+          <div class="ma-time-box ma-in">
+            <div class="ma-time-icon">🟢</div>
+            <div class="ma-time-label">${L('Check In', 'เข้างาน')}</div>
+            <div class="ma-time-value" id="ma-checkin-val">${escapeHtml(rec.checkIn) || '—'}</div>
+          </div>
+          <div class="ma-time-sep">→</div>
+          <div class="ma-time-box ma-out">
+            <div class="ma-time-icon">🔵</div>
+            <div class="ma-time-label">${L('Check Out', 'ออกงาน')}</div>
+            <div class="ma-time-value" id="ma-checkout-val">${escapeHtml(rec.checkOut) || '—'}</div>
+          </div>
+        </div>
+        <div class="ma-working-row" id="ma-working-row">
+          <span>⏱</span>
+          <span id="ma-working-time">—</span>
+        </div>
+      </div>`;
+    startMaTimer(rec);
+  } else {
+    clearInterval(myAttLiveTimer);
+  }
+
+  const dateObj  = new Date(dateStr + 'T12:00:00');
+  const dayLabel = fmtDate(dateObj);
+
+  // Fetch events
+  let allEvents = [];
+  try {
+    if (effTarget === 'all') {
+      // All employees for this date
+      const res = await apiFetch(`/api/events?date=${encodeURIComponent(dateStr)}&limit=5000`);
+      allEvents = await res.json();
+    } else if (effTarget) {
+      // Specific employee — fetch by employee_no (no date filter — client-side filter for full history)
+      // 2026-08-17 (review fix): was limit=5000 -- the busiest observed employee-month (192
+      // scans) projects to ~4750 over the new 25-month retention, only ~5% headroom. Match
+      // MAX_EVENT_LIMIT (server clamps regardless) rather than leave a second near-silent-
+      // truncation site alongside the one already fixed in loadAttendanceFromBackend().
+      const res = await apiFetch(`/api/events?employee_no=${encodeURIComponent(effTarget)}&limit=50000`);
+      const raw = await res.json();
+      allEvents = raw.filter(ev => (ev.event_time || '').startsWith(dateStr));
+    }
+  } catch(e) {}
+
+  if (allEvents.length === 0) {
+    eventsEl.innerHTML = `
+      <div class="card">
+        <div class="card-body" style="text-align:center;padding:40px;color:#94a3b8">
+          <div style="font-size:40px;margin-bottom:12px">🚪</div>
+          <div style="font-size:15px;font-weight:600;color:#475569">${L('No scan data', 'ไม่มีข้อมูลการสแกน')}</div>
+          <div style="font-size:13px;margin-top:4px">${dayLabel}</div>
+          ${!ownEmpNo && effTarget === ownEmpNo ? `<div style="font-size:12px;margin-top:8px;color:#f59e0b">${L('⚠️ This account is not linked to Hikvision', '⚠️ บัญชีนี้ยังไม่ผูกกับ Hikvision')}</div>` : ''}
+        </div>
+      </div>`;
+    return;
+  }
+
+  allEvents.sort((a, b) => (a.event_time || '').localeCompare(b.event_time || ''));
+
+  if (effTarget !== 'all') {
+    // Single employee view
+    const scanRows = allEvents.map((ev, i) => {
+      const time    = (ev.event_time || '').substring(11, 16);
+      const isFirst = i === 0;
+      const isLast  = i === allEvents.length - 1 && allEvents.length > 1;
+      const icon    = isFirst ? '🟢' : isLast ? '🔴' : '🚪';
+      const label   = isFirst ? L('Check In (first)', 'เข้างาน (ครั้งแรก)') : isLast ? L('Check Out (latest)', 'ออกงาน (ล่าสุด)') : L('Door Pass', 'ผ่านประตู');
+      const bg      = isFirst ? '#f0fdf4' : isLast ? '#fff1f2' : '#f8fafc';
+      const border  = isFirst ? '#22c55e'  : isLast ? '#ef4444'  : '#e2e8f0';
+      return `
+        <div style="display:flex;align-items:center;gap:14px;padding:14px 20px;border-bottom:1px solid #f1f5f9;background:${bg};border-left:4px solid ${border}">
+          <span style="font-size:22px;flex-shrink:0">${icon}</span>
+          <div style="flex:1">
+            <div style="font-size:20px;font-weight:800;color:#1e293b;letter-spacing:.5px">${time}</div>
+            <div style="font-size:12px;color:#64748b;margin-top:2px">${label}</div>
+          </div>
+          <div style="font-size:11px;color:#94a3b8">${L('No.', 'ครั้งที่')} ${i + 1}</div>
+        </div>`;
+    }).join('');
+
+    eventsEl.innerHTML = `
+      <div class="card">
+        <div class="card-header">
+          <h3>🚪 ${L('Scan Records', 'รายการสแกน')} — ${dayLabel}</h3>
+          <span style="font-size:13px;color:#718096;font-weight:600">${allEvents.length} ${L('times', 'ครั้ง')}</span>
+        </div>
+        <div style="overflow:hidden;border-radius:0 0 12px 12px">${scanRows}</div>
+      </div>`;
+    return;
+  }
+
+  // All-employees view (MD/Accounting only)
+  const grouped = {};
+  allEvents.forEach(ev => {
+    const empNo = String(ev.employeeNo || '');
+    if (!grouped[empNo]) grouped[empNo] = [];
+    grouped[empNo].push(ev);
+  });
+
+  // Sort groups alphabetically by employee name
+  const empNos = Object.keys(grouped).sort((a, b) => {
+    const na = (DATA_USERS.find(x => String(x.employeeNo) === a)?.name) || a;
+    const nb = (DATA_USERS.find(x => String(x.employeeNo) === b)?.name) || b;
+    return na.localeCompare(nb, 'th');
+  });
+
+  const cards = empNos.map(empNo => {
+    const evList = grouped[empNo];
+    const emp    = DATA_USERS.find(x => String(x.employeeNo) === empNo);
+    const name   = emp ? emp.name : `Employee ${empNo}`;
+    const avatar = emp?.facePhoto
+      ? `<img src="${escapeHtml(emp.facePhoto)}" style="width:36px;height:36px;border-radius:50%;object-fit:cover;border:2px solid #e2e8f0;flex-shrink:0">`
+      : `<div style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#2563eb,#06b6d4);display:flex;align-items:center;justify-content:center;color:white;font-weight:700;font-size:14px;flex-shrink:0">${escapeHtml(name.charAt(0))}</div>`;
+
+    const firstTime = evList[0].event_time.substring(11, 16);
+    const lastTime  = evList[evList.length - 1].event_time.substring(11, 16);
+
+    const scanRows = evList.map((ev, i) => {
+      const time    = ev.event_time.substring(11, 16);
+      const isFirst = i === 0;
+      const isLast  = i === evList.length - 1 && evList.length > 1;
+      const icon    = isFirst ? '🟢' : isLast ? '🔴' : '🚪';
+      const label   = isFirst ? L('In (first)', 'เข้า (ครั้งแรก)') : isLast ? L('Out (latest)', 'ออก (ล่าสุด)') : L('Door Pass', 'ผ่านประตู');
+      const bg      = isFirst ? '#f0fdf4' : isLast ? '#fff1f2' : '#f8fafc';
+      const border  = isFirst ? '#22c55e'  : isLast ? '#ef4444'  : '#e2e8f0';
+      return `
+        <div style="display:flex;align-items:center;gap:12px;padding:10px 16px;background:${bg};border-left:3px solid ${border};border-bottom:1px solid #f1f5f9">
+          <span style="font-size:18px">${icon}</span>
+          <span style="font-size:17px;font-weight:800;color:#1e293b;font-family:monospace">${time}</span>
+          <span style="font-size:11px;color:#64748b;flex:1">${label}</span>
+          <span style="font-size:10px;color:#94a3b8">${L('No.', 'ครั้งที่')} ${i + 1}</span>
+        </div>`;
+    }).join('');
+
+    return `
+      <div class="card" style="margin-bottom:12px">
+        <div style="display:flex;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid #f1f5f9">
+          ${avatar}
+          <div style="flex:1">
+            <div style="font-weight:700;color:#1e3a5f;font-size:14px">${escapeHtml(name)}</div>
+            <div style="font-size:11px;color:#94a3b8;margin-top:2px">
+              ${L('In', 'เข้า')} ${firstTime}${evList.length > 1 ? L(' → Out ', ' → ออก ') + lastTime : L(' (not out)', ' (ยังไม่ออก)')}
+            </div>
+          </div>
+          <span style="background:#eff6ff;color:#2563eb;font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px">${evList.length} ${L('times', 'ครั้ง')}</span>
+        </div>
+        <div>${scanRows}</div>
+      </div>`;
+  }).join('');
+
+  eventsEl.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;padding:0 2px">
+      <div style="font-size:14px;font-weight:700;color:#1e3a5f">🚪 ${dayLabel}</div>
+      <div style="font-size:12px;color:#64748b">${empNos.length} ${L('people', 'คน')} · ${allEvents.length} ${L('times', 'ครั้ง')}</div>
+    </div>
+    ${cards}`;
+}
+
+
+// ===== FINALIZE PAYROLL =====
+let finalizeSelectedPeriodIndex = 0;
+let finalizeData = {};
+
+async function loadFinalizeData() {
+  try {
+    const res = await apiFetch(`/api/finalize`);
+    finalizeData = res.ok ? await res.json() : {};
+  } catch(e) { finalizeData = {}; }
+}
+
+// F-12: send only the one key this call touched, not the whole finalizeData snapshot -- see
+// server.js PUT /api/finalize for why (lost-update race between concurrent savers).
+async function saveFinalizeData(key) {
+  try {
+    const res = await apiFetch(`/api/finalize`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, value: finalizeData[key] !== undefined ? finalizeData[key] : null })
+    });
+    // FIX 2026-08-13 (re-audit, finding F3-A): apiFetch() only rejects on a network failure, never
+    // on a 4xx/5xx HTTP response -- so PUT /api/finalize's new manualAllowances shape validation
+    // (added this session) 400s were silently swallowed here, every caller's try/catch never firing.
+    // A save could fail (nothing written) with the UI showing no error at all -- worse, clicking
+    // Confirm right after fires its own "confirmed" toast BEFORE this save, so the failure looked
+    // like a success until the next page load silently reverted the edit.
+    if (!res.ok) {
+      let msg = '';
+      try { msg = (await res.json()).message || ''; } catch(e) {}
+      throw new Error(msg || `HTTP ${res.status}`);
+    }
+  } catch(e) {
+    console.error('saveFinalizeData failed', e);
+    throw e; // re-throw so callers can show the user a save failed, instead of failing silently
+  }
+}
+
+function getFinalizeKey(periodStart, userId) {
+  const pad2 = n => String(n).padStart(2,'0');
+  return `${periodStart.getFullYear()}${pad2(periodStart.getMonth()+1)}${pad2(periodStart.getDate())}_${userId}`;
+}
+
+function getMdApprovalKey(periodStart, userId) {
+  const pad2 = n => String(n).padStart(2,'0');
+  return `md_${periodStart.getFullYear()}${pad2(periodStart.getMonth()+1)}${pad2(periodStart.getDate())}_${userId}`;
+}
+
+async function renderPayslipApprovalCard() {
+  const el = document.getElementById('payslip-md-approval');
+  if (!el || !currentUser) { if (el) el.innerHTML = ''; return; }
+  if (!isMdAccountingView()) { el.innerHTML = ''; return; }
+
+  const { start, end } = getPeriodBounds(payslipPeriodIndex);
+  await loadFinalizeData();
+  const pad2 = n => String(n).padStart(2,'0');
+  const periodLabel = `${pad2(start.getDate())}/${pad2(start.getMonth()+1)}/${start.getFullYear()} — ${pad2(end.getDate())}/${pad2(end.getMonth()+1)}/${end.getFullYear()}`;
+
+  if (isMdView()) {
+    // Approval is per-employee now, not per-period — each row tracks Accounting's confirm
+    // status (finalize key) and MD's own approval (md key) independently.
+    const employees = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active);
+    const rows = employees.map(u => ({
+      u,
+      confirmed: !!(finalizeData[getFinalizeKey(start, u.id)]?.confirmed),
+      approved: !!(finalizeData[getMdApprovalKey(start, u.id)]?.approved),
+    }));
+    const approvedCount = rows.filter(r => r.approved).length;
+    const totalCount = rows.length;
+
+    // All names in one flowing row, split into two groups (confirmed first, then pending) —
+    // click a name to jump to that person's payslip. The single Approve button on the far
+    // right always acts on whichever employee is currently selected/being viewed below, so
+    // MD's flow is: click a name → review the payslip → click Approve for that same person.
+    // The bold Approve-button green now belongs to the GROUP LABEL badges, not individual
+    // names — names are soft/light so the label (the category) reads as more prominent than
+    // any one person, and the two groups stay visually distinct at a glance.
+    // Currently selected/viewed employee on the Payslip page — the Approve button targets them,
+    // and (2026-08-02, user request) their name pill gets a visible ring so it's obvious which
+    // person's payslip is showing below, at a glance, without reading the dropdown.
+    const selectedId = parseInt(document.getElementById('payslip-employee')?.value);
+    const labelBadge = (text, bg, color) => `<span style="display:inline-block;padding:3px 10px;border-radius:10px;font-weight:700;font-size:11px;color:${color};background:${bg};margin-right:6px">${text}</span>`;
+    const pill = (u, confirmed) => {
+      const isSel = u.id === selectedId;
+      const selRing = isSel ? 'box-shadow:0 0 0 2px #2563eb;font-weight:700' : '';
+      return `<span class="payslip-name-pill" style="display:inline-block;padding:4px 12px;margin:2px;border-radius:14px;font-weight:${isSel ? 700 : 500};font-size:12px;cursor:pointer;transition:transform .1s;${confirmed ? 'background:#f0fdf4;color:#059669' : 'background:#f8fafc;color:#94a3b8'};${selRing}" onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform=''" onclick="jumpToPayslip(${u.id})" title="${L('View this payslip','ดู Payslip ของคนนี้')}">${isSel ? '👉 ' : ''}${escapeHtml(u.name)}</span>`;
+    };
+    const confirmedRows = rows.filter(r => r.confirmed);
+    const pendingRows = rows.filter(r => !r.confirmed);
+    // Single flowing row — confirmed group first, then pending, wrapping naturally.
+    const namesHtml = `
+      ${confirmedRows.length ? `${labelBadge(L('Accounting ✓','Accounting ✓'), 'linear-gradient(135deg,#34d399,#059669)', '#fff')}${confirmedRows.map(r => pill(r.u, true)).join(' ')}` : ''}
+      ${pendingRows.length ? `<span style="margin-left:${confirmedRows.length ? '10px' : '0'}">${labelBadge(L('Waiting for Accounting','รอ Accounting'), '#fef3c7', '#92400e')}</span>${pendingRows.map(r => pill(r.u, false)).join(' ')}` : ''}
+    `;
+
+    const selRow = rows.find(r => r.u.id === selectedId);
+    const selConfirmed = !!selRow?.confirmed;
+    const selApproved = !!selRow?.approved;
+    const selName = escapeHtml(selRow?.u.name || '');
+
+    el.innerHTML = `
+      <div class="card no-print" style="border-left:4px solid ${approvedCount === totalCount && totalCount > 0 ? '#10b981' : '#3b82f6'};margin-bottom:16px">
+        <div class="card-body" style="padding:14px 18px">
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+            <div style="flex:1;min-width:220px">
+              <div style="font-weight:700;font-size:14px;color:#1e3a5f">
+                🔍 ${L('Payroll Approval', 'การอนุมัติ Payroll')} &mdash; ${periodLabel}
+              </div>
+              <div style="font-size:12px;color:#64748b;margin-top:4px">
+                ${currentLang === 'ja' ? `Managing Director承認済み ${approvedCount}/${totalCount}名` : L(`Managing Director approved ${approvedCount}/${totalCount} employees`, `Managing Director อนุมัติแล้ว ${approvedCount}/${totalCount} คน`)}
+              </div>
+            </div>
+            <button class="btn ${selApproved ? 'btn-outline' : (selConfirmed ? 'btn-success' : 'btn-ghost')}" onclick="mdApprovePayrollForEmployee(${selectedId})"
+              title="${!selConfirmed ? L('Not confirmed by Accounting yet','Accounting ยังไม่ยืนยัน') : (selApproved ? L('Click to revoke','คลิกเพื่อยกเลิก') : '')}">
+              ${selApproved ? (currentLang === 'ja' ? `✅ 承認済み — ${selName}` : L(`✅ Approved — ${selName}`, `✅ อนุมัติแล้ว — ${selName}`)) : (currentLang === 'ja' ? `${selName}を承認` : L(`Approve ${selName}`, `อนุมัติ ${selName}`))}
+            </button>
+          </div>
+          <div style="margin-top:12px;padding-top:12px;border-top:1px solid #f1f5f9;line-height:2.4">${namesHtml}</div>
+        </div>
+      </div>`;
+  } else {
+    // Accounting: same per-employee overview MD sees, but read-only (no approve action) —
+    // reuses the same label-badge + soft-pill visual language for consistency.
+    const employees = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active);
+    const rows = employees.map(u => ({ u, approved: !!(finalizeData[getMdApprovalKey(start, u.id)]?.approved) }));
+    const approvedCount = rows.filter(r => r.approved).length;
+    const totalCount = rows.length;
+
+    const selectedId = parseInt(document.getElementById('payslip-employee')?.value);
+    const selUser = DATA_USERS.find(u => u.id === selectedId);
+    const selApproval = selUser ? finalizeData[getMdApprovalKey(start, selUser.id)] : null;
+    const selApproved = !!(selApproval?.approved);
+
+    const labelBadge = (text, bg, color) => `<span style="display:inline-block;padding:3px 10px;border-radius:10px;font-weight:700;font-size:11px;color:${color};background:${bg};margin-right:6px">${text}</span>`;
+    // 2026-08-02: selected employee's pill gets a visible ring, same treatment as MD's card above.
+    const pill = (u, approved) => {
+      const isSel = u.id === selectedId;
+      const selRing = isSel ? 'box-shadow:0 0 0 2px #2563eb;font-weight:700' : '';
+      return `<span class="payslip-name-pill" style="display:inline-block;padding:4px 12px;margin:2px;border-radius:14px;font-weight:${isSel ? 700 : 500};font-size:12px;cursor:pointer;transition:transform .1s;${approved ? 'background:#f0fdf4;color:#059669' : 'background:#f8fafc;color:#94a3b8'};${selRing}" onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform=''" onclick="jumpToPayslip(${u.id})" title="${L('View this payslip','ดู Payslip ของคนนี้')}">${isSel ? '👉 ' : ''}${escapeHtml(u.name)}</span>`;
+    };
+    const approvedRows = rows.filter(r => r.approved);
+    const notApprovedRows = rows.filter(r => !r.approved);
+    // Single flowing row, same layout as MD's card — approved group first, then waiting.
+    const namesHtml = `
+      ${approvedRows.length ? `${labelBadge(L('Managing Director ✓','Managing Director ✓'), 'linear-gradient(135deg,#34d399,#059669)', '#fff')}${approvedRows.map(r => pill(r.u, true)).join(' ')}` : ''}
+      ${notApprovedRows.length ? `<span style="margin-left:${approvedRows.length ? '10px' : '0'}">${labelBadge(L('Waiting for Managing Director','รอ Managing Director'), '#fef3c7', '#92400e')}</span>${notApprovedRows.map(r => pill(r.u, false)).join(' ')}` : ''}
+    `;
+
+    el.innerHTML = `
+      <div class="card no-print" style="border-left:4px solid ${selApproved ? '#10b981' : '#3b82f6'};margin-bottom:16px">
+        <div class="card-body" style="padding:14px 18px">
+          <div style="font-size:13px;font-weight:600;color:${selApproved ? '#065f46' : '#1d4ed8'}">
+            ${selApproved
+              // 2026-08-01: approvedAt is now an ISO timestamp written server-side (POST
+              // /api/md-approve), not the old client-formatted fmtDateTime() string -- format it
+              // for display here instead of interpolating the raw ISO string.
+              ? '✅ ' + (currentLang === 'ja' ? `${escapeHtml(selUser?.name || '')}の給与はManaging Director（${escapeHtml(selApproval.approvedBy)}）により${fmtDateTime(new Date(selApproval.approvedAt))}に承認されました` : L(`${escapeHtml(selUser?.name || '')}'s payroll approved by Managing Director (${escapeHtml(selApproval.approvedBy)}) on ${fmtDateTime(new Date(selApproval.approvedAt))}`, `Payroll ของ ${escapeHtml(selUser?.name || '')} อนุมัติแล้วโดย Managing Director (${escapeHtml(selApproval.approvedBy)}) เมื่อ ${fmtDateTime(new Date(selApproval.approvedAt))}`))
+              // 2026-08-02: reworded per user request -- names the actual active MD (who will
+              // review it) instead of the employee (already shown elsewhere on this same card),
+              // and says "Managing Director clicks Approve" as the explicit next step.
+              : '📝 ' + (() => {
+                  const mdName = escapeHtml(DATA_USERS.find(u => u.role === 'md' && u.active !== false)?.name || L('Managing Director', 'Managing Director'));
+                  return currentLang === 'ja'
+                    ? `Finalize PayrollでPITを入力し✓確認をクリックして${mdName}が確認できるようにしてください — その後Managing Directorが承認をクリックします`
+                    : L(`Enter PIT and click ✓ Confirm in Finalize Payroll so ${mdName} can review — then Managing Director clicks Approve`, `กรอก PIT และกด ✓ ยืนยัน ในหน้า Finalize Payroll เพื่อให้ ${mdName} ตรวจสอบ — จากนั้นให้ Managing Director กดอนุมัติ`);
+                })()}
+          </div>
+          <div style="font-size:12px;color:#64748b;margin-top:6px">${currentLang === 'ja' ? `Managing Director承認済み ${approvedCount}/${totalCount}名` : L(`Managing Director approved ${approvedCount}/${totalCount} employees`, `Managing Director อนุมัติแล้ว ${approvedCount}/${totalCount} คน`)}</div>
+          <div style="margin-top:10px;padding-top:10px;border-top:1px solid #f1f5f9;line-height:2.4">${namesHtml}</div>
+        </div>
+      </div>`;
+  }
+}
+
+// Jump straight to a specific employee's payslip from the per-employee confirmation status
+// list in the MD approval card, so MD doesn't have to hunt for them in the dropdown.
+function jumpToPayslip(userId) {
+  const sel = document.getElementById('payslip-employee');
+  if (!sel) return;
+  sel.value = userId;
+  renderPayslip();
+}
+
+// 2026-08-01: approval/revoke now goes through POST /api/md-approve instead of mutating
+// finalizeData + saveFinalizeData(key) directly -- the server builds and stores the frozen
+// snapshot atomically with the approval flag (see getPayrollView()'s comment). This function's
+// job is now just the confirm dialog + the API call + refreshing local state from the response.
+async function mdApprovePayrollForEmployee(userId) {
+  if (blockIfObserver()) return;
+  if (isPayrollLockDisabled()) { showToast(L('System account cannot MD-approve payroll', 'บัญชีระบบไม่สามารถ MD approve payroll ได้'), 'warning'); return; }
+  const { start, end } = getPeriodBounds(payslipPeriodIndex);
+  if (isPeriodLocked(start)) { showToast(currentLang === 'ja' ? '⚠️ この期間はロックされています' : L('⚠️ Period is locked', '⚠️ รอบนี้ถูกล็อคแล้ว'), 'warning'); return; }
+  await loadFinalizeData();
+  const key = getMdApprovalKey(start, userId);
+  const isApproved = !!(finalizeData[key]?.approved);
+  const uName = DATA_USERS.find(u => u.id === userId)?.name || '';
+
+  // Block approval (not revoke) until Accounting has confirmed THIS employee's payslip.
+  if (!isApproved) {
+    const confirmedByAccounting = !!(finalizeData[getFinalizeKey(start, userId)]?.confirmed);
+    if (!confirmedByAccounting) {
+      showToast(
+        currentLang === 'ja' ? `⚠️ まだ承認できません — ${uName}はAccountingの確認待ちです` : L(`⚠️ Cannot approve yet — ${uName} not confirmed by Accounting`, `⚠️ ยังอนุมัติไม่ได้ — Accounting ยังไม่ยืนยัน ${uName}`),
+        'warning'
+      );
+      return;
+    }
+  }
+
+  if (isApproved) {
+    // 2026-08-01: stronger wording once pay day has actually passed -- the money is very likely
+    // already transferred by then, so revoking now doesn't undo a payment, it only stops the
+    // numbers from being frozen going forward. The snapshot itself is kept either way (server-side).
+    const today = new Date(); today.setHours(0,0,0,0);
+    const payDay = getPayDay(end);
+    const pastPayDay = today >= payDay;
+    const msg = pastPayDay
+      ? (currentLang === 'ja'
+          ? `${uName}の給与はおそらく既に振り込まれています。承認を取り消しても、その支払いは取り消されません — 記録として承認時点のスナップショットは保持されます。それでもAccountingに再承認を求めますか？`
+          : L(`${uName}'s pay for this period has very likely already been transferred. Revoking approval does NOT undo that payment — a snapshot of what was approved is kept regardless. Still require Managing Director to approve again before Accounting can proceed?`, `เงินเดือนของ ${uName} รอบนี้น่าจะโอนไปแล้ว การยกเลิกอนุมัติจะไม่ย้อนเงินคืน — ระบบยังเก็บภาพนิ่งของยอดที่อนุมัติไปแล้วไว้อยู่ดี ยืนยันจะยกเลิกอนุมัติไหม (Accounting ต้องรอ Managing Director อนุมัติใหม่)?`))
+      : (currentLang === 'ja' ? `${uName}のManaging Director承認を取り消しますか？Accountingが続行するにはManaging Directorの再承認が必要になります。` : L(`Revoke Managing Director approval for ${uName}? Accounting will need Managing Director to approve again before proceeding.`, `ยกเลิกการอนุมัติของ ${uName}? Accounting จะต้องรอ Managing Director อนุมัติใหม่`));
+    if (!confirm(msg)) return;
+  }
+
+  try {
+    const res = await apiFetch('/api/md-approve', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId, periodIndex: payslipPeriodIndex, action: isApproved ? 'revoke' : 'approve' })
+    });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.message || 'Server error');
+    await loadFinalizeData();
+    showToast(
+      isApproved
+        ? (currentLang === 'ja' ? `⚠️ ${uName}の承認を取り消しました` : L(`⚠️ Approval revoked for ${uName}`, `⚠️ ยกเลิกการอนุมัติของ ${uName} แล้ว`))
+        : (currentLang === 'ja' ? `✅ ${uName}を承認しました` : L(`✅ Approved ${uName}`, `✅ อนุมัติ ${uName} แล้ว`)),
+      isApproved ? 'warning' : 'success'
+    );
+  } catch(e) {
+    showToast(L('❌ Could not save: ', '❌ ไม่สามารถบันทึกได้: ') + e.message, 'danger');
+    return;
+  }
+  // 2026-08-05 (Opus audit, M3): same fix as the FINALIZE_UPDATED websocket handler -- the MD who
+  // just clicked Approve/Revoke needs their OWN screen's payslip document (not just the overview
+  // banner) to reflect it immediately, same as anyone else who receives the broadcast.
+  renderPayslipApprovalCard();
+  if (currentPage === 'payslip') renderPayslip();
+}
+
+function syncFinalizePeriodDropdown() {
+  const sel = document.getElementById('finalize-period-select');
+  if (!sel) return;
+  if (sel.children.length === 0) {
+    getPeriodOptions(12).forEach(opt => {
+      const o = document.createElement('option');
+      o.value = opt.index;
+      o.textContent = opt.index === 0 ? `${opt.label}  ${L('← Current Period', '← รอบปัจจุบัน')}` : opt.label;
+      sel.appendChild(o);
+    });
+  }
+  sel.value = finalizeSelectedPeriodIndex;
+}
+
+function onFinalizePeriodChange(val) {
+  finalizeSelectedPeriodIndex = parseInt(val);
+  renderFinalize();
+}
+
+// 2026-08-01: two fixes at once.
+// (1) Bug: this always used the GLOBAL finalizeSelectedPeriodIndex regardless of the start/end
+// actually passed in, so render50Tawi() (loops periodIndex 0..60) and renderPayrollHistory()
+// (iterates arbitrary period dates) all silently computed with the CURRENTLY-SELECTED Finalize
+// page period's isCurrent flag baked in. Now takes an explicit periodIndex.
+// (2) Routes through getPayrollView() instead of computePayroll() directly, so a period MD has
+// approved reads its frozen snapshot -- immune to a later salary raise or Settings edit -- while
+// an unapproved period computes live exactly as before. Returns the full calc object spread at
+// the top level (previously only base/grossIncome/ssf/pvd/autoPit were picked out, which silently
+// zeroed transport/posAllowance/housingAllowance/diligenceAllowance/allowance1/earlyLateBonus/
+// allowance3/otAmount for any caller reading those -- exportPayrollSummaryCSV() was doing exactly
+// that), plus `fin`/`attendance`/`eligibility`/`frozen` for callers that need the finalize-record
+// values (pit/bonus/manualAllowances) to also respect the freeze once approved.
+function calcFinalizeEmployee(user, start, end, periodIndex) {
+  // 2026-08-02: periodIndex is now mandatory, no silent fallback to the global
+  // finalizeSelectedPeriodIndex. That fallback is exactly the bug class fixed in render50Tawi()/
+  // renderPayrollHistory() on 2026-08-01 (both had been silently computing with whichever
+  // period happened to be selected on the Finalize page, not the period actually being asked
+  // about) -- removing it here closes the class permanently instead of leaving the loaded gun
+  // in place for the next caller that forgets to pass it.
+  if (!Number.isInteger(periodIndex)) {
+    throw new Error('calcFinalizeEmployee() requires an explicit integer periodIndex');
+  }
+  const view = getPayrollView(user, start, end, periodIndex);
+  return { ...view.calc, fin: view.fin, attendance: view.attendance, eligibility: view.eligibility, frozen: view.frozen };
+}
+
+// ===== AUDIT LOG =====
+let _auditPage = 0;
+const AUDIT_PAGE_SIZE = 50;
+
+function renderAuditLog() {
+  const tbody   = document.getElementById('audit-log-tbody');
+  const summary = document.getElementById('audit-log-summary');
+  const pgEl    = document.getElementById('audit-log-pagination');
+  const userSel = document.getElementById('audit-filter-user');
+  if (!tbody) return;
+
+  // Populate user dropdown once
+  if (userSel && userSel.options.length <= 1) {
+    DATA_USERS.filter(isEmployeeRecord).slice().sort((a,b) => a.name.localeCompare(b.name,'th')).forEach(u => {
+      const o = document.createElement('option');
+      o.value = u.id;
+      o.textContent = `${u.name}`;
+      userSel.appendChild(o);
+    });
+  }
+
+  const filterUser   = userSel ? userSel.value : '';
+  const filterType   = document.getElementById('audit-filter-type')?.value  || '';
+  const filterStatus = document.getElementById('audit-filter-status')?.value || '';
+  const filterMonth  = document.getElementById('audit-filter-month')?.value  || '';
+
+  const typeLabel = {
+    'annual':L('🏖️ Annual Leave','🏖️ ลาพักร้อน'),
+    'sick':L('🤒 Sick Leave','🤒 ลาป่วย'),
+    'business':L('📋 Business Leave','📋 ลากิจ'),
+    'upcountry':L('🗺️ Upcountry','🗺️ Upcountry'),
+    'late-out':L('🌙 Late Night','🌙 กลับดึก'),
+    'ot':L('⏱️ OT','⏱️ OT'),
+    'comp':L('🔄 Compensatory','🔄 วันหยุดชดเชย'),
+    'time-correction':L('✏️ Time Correction','✏️ แก้ไขเวลา'),
+    'long-distance':L('🚗 Long Distance','🚗 Long Distance'),
+    // 2026-08-16 (Opus audit L-8): both types existed and could appear in the log, just had no
+    // entry -- fell through to the raw type slug instead of a proper label.
+    'personal-car':L('🚙 Personal Car','🚙 รถส่วนตัว'),
+    'clear-attachments':L('🗑️ Clear Old Attachments','🗑️ ล้างไฟล์แนบเก่า'),
+  };
+  // 2026-08-16 (Opus audit M-2): live routing sends most types to 'pending-md'/'pending-accounting',
+  // not bare 'pending' -- this map only had the bare key, so real pending records fell through to
+  // the raw-status-string fallback below (`escapeHtml(r.status)`) instead of a badge.
+  const statusBadge = {
+    approved: `<span class="badge badge-success">${L('✅ Approved','✅ อนุมัติ')}</span>`,
+    rejected: `<span class="badge badge-danger">${L('❌ Rejected','❌ ปฏิเสธ')}</span>`,
+  };
+  const pendingBadge = `<span class="badge badge-warning">${L('⏳ Pending','⏳ รออนุมัติ')}</span>`;
+
+  const userMap = {};
+  DATA_USERS.forEach(u => { userMap[u.id] = u; });
+
+  let rows = DATA_LEAVES.slice();
+  if (filterUser)   rows = rows.filter(r => r.userId == filterUser);
+  if (filterType)   rows = rows.filter(r => r.type === filterType);
+  // 2026-08-16 (Opus audit M-2 continued): the "Pending" filter option must match every
+  // pending-* status (pending-md/pending-accounting), not just the literal 'pending' -- see the
+  // statusBadge/pendingBadge fix above for the same underlying gap.
+  if (filterStatus === 'pending') rows = rows.filter(r => String(r.status).startsWith('pending'));
+  else if (filterStatus) rows = rows.filter(r => r.status === filterStatus);
+  // serverCreatedAt first, same reasoning as dtStr below — submittedAt isn't a consistent
+  // format across submission code paths (Thai display string vs ISO), so filtering/sorting
+  // by it directly silently misses records or sorts them in a meaningless order.
+  if (filterMonth)  rows = rows.filter(r => {
+    const d = (r.serverCreatedAt || r.submittedAt || r.dateFrom || '').substring(0,7);
+    return d === filterMonth;
+  });
+
+  // Sort newest first
+  rows.sort((a,b) => {
+    const da = a.serverCreatedAt || a.submittedAt || a.dateFrom || '';
+    const db = b.serverCreatedAt || b.submittedAt || b.dateFrom || '';
+    return new Date(db) - new Date(da);
+  });
+
+  if (summary) {
+    const tot = rows.length;
+    const pend = rows.filter(r => String(r.status).startsWith('pending')).length;
+    const appr = rows.filter(r => r.status === 'approved').length;
+    const rej  = rows.filter(r => r.status === 'rejected').length;
+    summary.textContent = L(
+      `${tot} records — ${appr} approved, ${pend} pending, ${rej} rejected`,
+      `${tot} รายการ — อนุมัติ ${appr}, รออนุมัติ ${pend}, ปฏิเสธ ${rej}`
+    );
+  }
+
+  const totalPages = Math.ceil(rows.length / AUDIT_PAGE_SIZE);
+  if (_auditPage >= totalPages) _auditPage = Math.max(0, totalPages - 1);
+  const pageRows = rows.slice(_auditPage * AUDIT_PAGE_SIZE, (_auditPage + 1) * AUDIT_PAGE_SIZE);
+
+  if (pageRows.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:32px;color:var(--text-muted)">${L('No records found','ไม่มีข้อมูล')}</td></tr>`;
+  } else {
+    tbody.innerHTML = pageRows.map(r => {
+      const u = userMap[r.userId];
+      const name = escapeHtml(u ? u.name : `#${r.userId}`);
+      const pos  = u ? `<div style="font-size:11px;color:var(--text-muted)">${escapeHtml(u.position||'')}</div>` : '';
+      // serverCreatedAt is always a real ISO timestamp set by the backend; submittedAt's
+      // format varies by submission path (legacy Thai display string vs ISO) so it's only
+      // a fallback. _fmtDtStr() parses+formats when possible, shows as-is otherwise; escaped here
+      // since this goes into innerHTML below.
+      const dtStr = escapeHtml(_fmtDtStr(r.serverCreatedAt || r.submittedAt || r.dateFrom));
+
+      let period = '';
+      if (r.type === 'time-correction') {
+        period = `${escapeHtml(r.dateFrom)} · ${r.correctionField==='checkIn'?L('Check In','เข้างาน'):L('Check Out','ออกงาน')} ${escapeHtml(r.originalTime||'')}→${escapeHtml(r.correctedTime||'')}`;
+      } else if (r.dateFrom === r.dateTo || !r.dateTo) {
+        period = escapeHtml(r.dateFrom || '');
+      } else {
+        period = `${escapeHtml(r.dateFrom)} – ${escapeHtml(r.dateTo)}${r.days ? ` (${Number(r.days)||0}d)` : ''}`;
+      }
+
+      const reasonRaw = r.reason || r.note || '';
+      const reasonText = escapeHtml(reasonRaw.substring(0, 60));
+      const reason = reasonText ? `<span title="${escapeHtml(reasonRaw)}" style="cursor:help">${reasonText}${reasonRaw.length>60?'…':''}</span>` : '<span style="color:var(--text-muted)">—</span>';
+
+      return `<tr>
+        <td style="white-space:nowrap;color:var(--text-muted);font-size:12px">${dtStr}</td>
+        <td><div style="font-weight:600">${name}</div>${pos}</td>
+        <td style="white-space:nowrap">${typeLabel[r.type] || escapeHtml(r.type)}</td>
+        <td class="col-hide-mobile" style="font-size:12px;color:var(--text-muted);white-space:nowrap">${period}</td>
+        <td class="col-hide-mobile" style="font-size:12px;max-width:220px">${reason}</td>
+        <td style="text-align:center">${String(r.status).startsWith('pending') ? pendingBadge : (statusBadge[r.status] || escapeHtml(r.status))}</td>
+        <td class="col-hide-mobile" style="font-size:12px;color:var(--text-muted)">${escapeHtml(r.approver || '—')}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // Pagination
+  if (pgEl) {
+    if (totalPages <= 1) { pgEl.innerHTML = ''; return; }
+    let btns = `<span style="font-size:12px;color:var(--text-muted)">${L('Page','หน้า')} ${_auditPage+1}/${totalPages}</span>`;
+    if (_auditPage > 0) btns = `<button class="btn btn-ghost btn-sm" onclick="_auditPage=${_auditPage-1};renderAuditLog()">← ${L('Prev','ก่อนหน้า')}</button>` + btns;
+    if (_auditPage < totalPages-1) btns += `<button class="btn btn-ghost btn-sm" onclick="_auditPage=${_auditPage+1};renderAuditLog()">${L('Next','ถัดไป')} →</button>`;
+    pgEl.innerHTML = btns;
+  }
+}
+
+// ===== FAQ =====
+// Answers are built fresh from live APP_SETTINGS on every render, not hardcoded numbers --
+// see feedback_attendance_i18n_always_3_langs / the 2026-07-18 hint-audit session for why:
+// hardcoded copies of these same numbers had already gone stale once (payslip SSF label,
+// Accounting Stand-in window, late-out modal). This page must never repeat that mistake.
+function _faq(en, th, ja) { return currentLang === 'ja' ? ja : currentLang === 'en' ? en : th; }
+// 2026-08-16 (Opus audit A-1/A-2/A-4/B-6): shared by both _faqRulesItems() and _faqHowToItems()
+// (moved to top-level scope after initially being defined only inside _faqRulesItems(), which
+// threw ReferenceError from _faqHowToItems() -- caught by Playwright verification before deploy).
+// Derives FAQ role-scoping from live isAllowanceEligible()/APP_SETTINGS.allowanceEligibility
+// instead of a hardcoded list, so this can't silently drift out of sync with Settings again.
+const _faqRoleLabel = {md:'MD',manager:{en:'Manager',th:'Manager',ja:'Manager'},accounting:{en:'Accounting',th:'Accounting',ja:'Accounting'},user:{en:'Staff',th:'พนักงาน',ja:'Staff'},driver:{en:'Drivers',th:'Driver',ja:'Driver'},marketing:{en:'Marketing',th:'Marketing',ja:'Marketing'}};
+// md/accounting always included (isFullAccess bypasses this array entirely at the filter site,
+// matching the existing convention every other item already follows) plus whichever operational
+// roles are actually eligible per live Settings.
+function _faqEligibleRoles(key) {
+  return ['md','accounting', ...ROLE_KEYS.filter(r => r !== 'md' && r !== 'accounting' && isAllowanceEligible(APP_SETTINGS.allowanceEligibility, r, key))];
+}
+function _faqNotEligibleText(key) {
+  const excluded = ROLE_KEYS.filter(r => !isAllowanceEligible(APP_SETTINGS.allowanceEligibility, r, key));
+  if (excluded.length === 0) return '';
+  const names = excluded.map(r => r === 'md' ? 'MD' : _faqRoleLabel[r][currentLang] || _faqRoleLabel[r].en);
+  // 2026-08-16 (Opus re-audit): the old unconditional ", and "/" และ " separator put an Oxford
+  // comma in front of a 2-item English list ("A, and B" instead of "A and B") -- not reachable by
+  // today's Settings (every key currently excludes either 0 or all-but-one roles), but will be the
+  // moment Settings change. Thai's " และ " and Japanese's "、" already read correctly at any list
+  // length (Japanese doesn't use a separate "and" word at all), so only English needs the 2-vs-3+
+  // branch.
+  let list;
+  if (names.length === 1) list = names[0];
+  else if (currentLang === 'ja') list = names.join('、');
+  else if (currentLang === 'th') list = names.slice(0, -1).join(', ') + ' และ ' + names[names.length - 1];
+  else list = names.length === 2 ? names.join(' and ') : names.slice(0, -1).join(', ') + ', and ' + names[names.length - 1];
+  return currentLang === 'ja' ? `${list}には適用されません。` : L(`Not applicable to ${list}.`, `ไม่มีสำหรับ ${list}`);
+}
+
+function _faqRulesItems() {
+  const S = APP_SETTINGS;
+  const p1 = S.lateDeductPolicy.tiers[0], p2 = S.lateDeductPolicy.tiers[1];
+  const thr1 = lateOutThresholdHour(1), thr2 = lateOutThresholdHour(2);
+  const amt1 = lateOutAllowanceForHour(thr1), amt2 = lateOutAllowanceForHour(thr2);
+  const earlyThr1 = minsToTime(S.allowances.earlyThreshold1Min), earlyThr2 = minsToTime(S.allowances.earlyThreshold2Min);
+  return [
+    { icon: '⏱️', roles: _faqEligibleRoles('ot'), q: _faq('How is OT calculated?', 'OT คำนวณยังไง?', 'OTはどう計算されますか？'),
+      a: _faq(
+        // 2026-08-16 (Opus audit B-7): "per tier" didn't say what the tiers actually are --
+        // drivers get ×1.5/×2.0/×3.0, not just the ×1.5/×3.0 that non-drivers see quoted above it.
+        `OT starts counting from 17:30. Weekday OT pays ×1.5 of your hourly rate; holiday/weekend OT pays ×3.0. Drivers enter OT hours directly instead of an end-time, at ×1.5 (weekday), ×2.0 (weekend/public holiday, company-declared holiday), or ×3.0 (public holiday) depending on the day.`,
+        `OT เริ่มนับตั้งแต่ 17:30 น. OT วันธรรมดาจ่าย ×1.5 ของค่าแรงต่อชั่วโมง ส่วนวันหยุด/เสาร์-อาทิตย์จ่าย ×3.0 — Driver จะกรอกจำนวนชั่วโมง OT ตรงแทนการใส่เวลาเลิกงาน โดยแบ่งเป็น ×1.5 (วันธรรมดา), ×2.0 (เสาร์-อาทิตย์/วันหยุดที่บริษัทประกาศ), หรือ ×3.0 (วันหยุดนักขัตฤกษ์) ตามประเภทวัน`,
+        `OTは17:30から計算が始まります。平日のOTは時給の×1.5、休日・週末のOTは×3.0が支給されます。Driverは終業時刻の代わりにOT時間を直接入力し、曜日に応じて×1.5（平日）、×2.0（週末・会社指定休日）、×3.0（祝日）のいずれかが適用されます。`
+      ) },
+    { icon: '🌅', roles: _faqEligibleRoles('earlyLate'), q: _faq('How does the Early Morning Allowance work?', 'Early Morning Allowance คำนวณยังไง?', '早出手当はどう計算されますか？'),
+      a: _faq(
+        `Check in at the face scanner before ${earlyThr1} → +฿${S.allowances.earlyMorning1}. Check in at the face scanner before ${earlyThr2} (even earlier) → +฿${S.allowances.earlyMorning2} instead. A web Check In button does not earn this allowance. ${_faqNotEligibleText('earlyLate')}`,
+        `สแกนเข้าที่เครื่องก่อน ${earlyThr1} → ได้ +฿${S.allowances.earlyMorning1} ถ้าสแกนเข้าที่เครื่องก่อน ${earlyThr2} (เช้ากว่านั้นอีก) → ได้ +฿${S.allowances.earlyMorning2} แทน การกด Check In บนเว็บจะไม่ได้อนุญาตนี้ ${_faqNotEligibleText('earlyLate')}`,
+        `顔認証端末で${earlyThr1}より前に出勤 → +฿${S.allowances.earlyMorning1}。端末で${earlyThr2}より前（さらに早い）に出勤 → 代わりに+฿${S.allowances.earlyMorning2}が支給されます。Webアプリの出勤ボタンではこの手当は支給されません。${_faqNotEligibleText('earlyLate')}`
+      ) },
+    { icon: '🌙', roles: _faqEligibleRoles('earlyLate'), q: _faq('How does the Late Night Allowance / "report late-out" work?', 'Late Night Allowance / แจ้งกลับดึก คำนวณยังไง?', '深夜手当・「深夜退勤報告」はどう機能しますか？'),
+      a: _faq(
+        `Scan out at the face terminal at or after ${String(thr1).padStart(2,'0')}:00 → +฿${amt1}. Scan out at or after ${String(thr2).padStart(2,'0')}:00 → +฿${amt2} instead. The 🌙 button appears only after a device check-out that meets the time. A web Check Out cannot be used to claim this. You must still submit a "Late Night Out" request. ${_faqNotEligibleText('earlyLate')}`,
+        `สแกนออกที่เครื่องตั้งแต่ ${String(thr1).padStart(2,'0')}:00 → ได้ +฿${amt1} ถ้าสแกนออกตั้งแต่ ${String(thr2).padStart(2,'0')}:00 → ได้ +฿${amt2} แทน ปุ่ม 🌙 จะขึ้นเมื่อสแกนออกที่เครื่องถึงเกณฑ์เวลาแล้วเท่านั้น กด Check Out บนเว็บแล้วยื่นไม่ได้ ต้องยื่นคำขอ "แจ้งกลับดึก" ด้วยถึงจะนับ ${_faqNotEligibleText('earlyLate')}`,
+        `顔認証端末で${String(thr1).padStart(2,'0')}:00以降に退勤 → +฿${amt1}。${String(thr2).padStart(2,'0')}:00以降に退勤 → 代わりに+฿${amt2}。🌙ボタンは端末退勤が時間条件を満たしたときだけ表示されます。Webアプリの退勤では申請できません。支給には「深夜退勤」申請も必要です。${_faqNotEligibleText('earlyLate')}`
+      ) },
+    { icon: '⏰', roles: ['md','accounting','manager','user','driver','marketing'], q: _faq('What happens if I\'m late?', 'มาสายแล้วเป็นยังไง?', '遅刻したらどうなりますか？'),
+      a: !S.lateDeductPolicy.enabled
+        ? _faq('The late-arrival deduction policy is currently OFF — being late doesn\'t deduct from your leave balance right now.', 'ตอนนี้นโยบายหักวันลาจากการมาสายยังปิดอยู่ — มาสายไม่มีผลต่อวันลาคงเหลือในตอนนี้', '現在、遅刻による休暇控除ポリシーはオフになっています — 現時点では遅刻による休暇残日数への影響はありません')
+        : _faq(
+            `Late-arrival minutes deduct from your Annual Leave balance: ${p1.fromMin}–${p1.toMin} min late → −${minToStr(p1.deductMin)}; ${p2.fromMin}–${p2.toMin} min late → −${minToStr(p2.deductMin)}. Later than that isn't deducted under the current tiers. Only applies to check-ins from ${S.lateDeductPolicy.effectiveFromPeriod || '—'} onward.`,
+            `มาสายจะหักออกจากวันลาพักร้อน: สาย ${p1.fromMin}–${p1.toMin} นาที → หัก ${minToStr(p1.deductMin)}, สาย ${p2.fromMin}–${p2.toMin} นาที → หัก ${minToStr(p2.deductMin)} เกินกว่านั้นตามเกณฑ์ปัจจุบันไม่หัก มีผลเฉพาะการเข้างานตั้งแต่รอบ ${S.lateDeductPolicy.effectiveFromPeriod || '—'} เป็นต้นไป`,
+            `遅刻した分数は年次有給休暇の残日数から控除されます：${p1.fromMin}〜${p1.toMin}分の遅刻 → −${minToStr(p1.deductMin)}、${p2.fromMin}〜${p2.toMin}分の遅刻 → −${minToStr(p2.deductMin)}。現行の区分ではそれ以上の遅刻は控除されません。${S.lateDeductPolicy.effectiveFromPeriod || '—'}以降の出勤にのみ適用されます。`
+          ) },
+    { icon: '🏥', roles: ['md','accounting','manager','user','driver','marketing'], q: _faq('How is Social Security (SSO) calculated?', 'ประกันสังคม (SSO) คำนวณยังไง?', '社会保険（SSO）はどう計算されますか？'),
+      a: _faq(
+        `${S.sso.rate}% of your base salary (your share only, not the employer's), capped at ฿${S.sso.maxAmount.toLocaleString()}/month. Salary below ฿${S.sso.minSalary.toLocaleString()} is exempt; salary above ฿${S.sso.maxSalary.toLocaleString()} doesn't increase the deduction further.`,
+        `หัก ${S.sso.rate}% ของเงินเดือนพื้นฐาน (เฉพาะส่วนของพนักงาน ไม่รวมนายจ้าง) สูงสุดไม่เกิน ฿${S.sso.maxAmount.toLocaleString()}/เดือน เงินเดือนต่ำกว่า ฿${S.sso.minSalary.toLocaleString()} ไม่ต้องหัก ส่วนเงินเดือนที่เกิน ฿${S.sso.maxSalary.toLocaleString()} จะไม่ทำให้หักเพิ่มขึ้นอีก`,
+        `基本給の${S.sso.rate}%（従業員負担分のみ、雇用主負担分は含みません）、上限は月額฿${S.sso.maxAmount.toLocaleString()}。給与が฿${S.sso.minSalary.toLocaleString()}未満の場合は対象外。฿${S.sso.maxSalary.toLocaleString()}を超える給与部分があっても控除額はそれ以上増えません。`
+      ) },
+    { icon: '🏖️', roles: ['md','accounting','manager','user','driver','marketing'], q: _faq('How does Annual Leave carry-forward work?', 'วันลาพักร้อนยกยอดปีถัดไปยังไง?', '年次有給休暇の繰越はどう機能しますか？'),
+      a: _faq(
+        `Unused Annual Leave carries over into next year — up to ${S.leave.carryForwardMax} days max — but only when Accounting/MD clicks "Process Carry-Forward" in Settings; it doesn't happen automatically at year-end. Carried-over days expire on ${S.leave.carryForwardExpiryDay}/${S.leave.carryForwardExpiryMonth} of the new year, with a reminder ${S.leave.carryForwardNotifyDays} days before that.`,
+        `วันลาพักร้อนที่เหลือยกไปปีถัดไปได้สูงสุด ${S.leave.carryForwardMax} วัน แต่ต้องให้ Accounting/MD กด "ประมวลผลยกยอด" ในหน้าตั้งค่าก่อน ไม่ได้ทำอัตโนมัติตอนสิ้นปี วันที่ยกยอดจะหมดอายุวันที่ ${S.leave.carryForwardExpiryDay}/${S.leave.carryForwardExpiryMonth} ของปีใหม่ และจะมีการแจ้งเตือนล่วงหน้า ${S.leave.carryForwardNotifyDays} วัน`,
+        `未消化の年次有給休暇は最大${S.leave.carryForwardMax}日まで翌年に繰り越せますが、Accounting/MDが設定画面で「繰越処理」をクリックした場合のみ有効で、年末に自動的には行われません。繰り越した日数は新年の${S.leave.carryForwardExpiryMonth}月${S.leave.carryForwardExpiryDay}日に失効し、その${S.leave.carryForwardNotifyDays}日前に通知されます。`
+      ) },
+    { icon: '🚌', roles: ['md','accounting','manager','user','driver','marketing'], q: _faq('What happens on a Company Trip day?', 'วัน Company Trip เป็นยังไง?', '社員旅行日はどうなりますか？'),
+      a: _faq(
+        `No extra pay of any kind — Early Morning, Late Night, OT, Upcountry, Long Distance, Personal Car, and Comp are all blocked for that date, even if you submit a request. You can still scan in/out as usual (e.g. to collect belongings).`,
+        `ไม่มีการคิดเงินเพิ่มใดๆ ทั้งสิ้น — Early Morning, Late Night, OT, Upcountry, Long Distance, รถส่วนตัว, วันหยุดชดเชย ถูกบล็อกหมดสำหรับวันนั้น แม้จะยื่นคำขอก็ตาม ยังสแกนเข้า-ออกได้ตามปกติ (เช่น เข้าไปเก็บของ)`,
+        `早出、深夜、OT、出張、長距離、自家用車、振替休日を含め、いかなる追加手当も支給されません — 申請してもその日はブロックされます。入退室スキャンは通常通り可能です（荷物の引き取りなど）。`
+      ) },
+    { icon: '🗺️', roles: _faqEligibleRoles('upcountry'), q: _faq('How much is the Upcountry allowance?', 'Upcountry ได้เบี้ยเลี้ยงเท่าไหร่?', '出張手当はいくらですか？'),
+      a: _faq(
+        // 2026-08-16 (Opus audit A-3 sibling): "per approved Upcountry request" clarified to "per
+        // day" -- the allowance is a flat daily rate regardless of how many stops one day's
+        // request covers, not a per-stop or per-request amount (see the Upcountry modal's own
+        // hint, added the same session).
+        `฿${S.allowances.upcountry.toLocaleString()} per day with an approved Upcountry request, regardless of how many stops that day covers. ${_faqNotEligibleText('upcountry')}`,
+        `฿${S.allowances.upcountry.toLocaleString()} ต่อวันที่มีคำขอ Upcountry ได้รับอนุมัติ ไม่ว่าวันนั้นจะแวะกี่แห่งก็ตาม ${_faqNotEligibleText('upcountry')}`,
+        `承認された出張申請がある日1日につき฿${S.allowances.upcountry.toLocaleString()}が支給されます（訪問先の数に関わらず）。${_faqNotEligibleText('upcountry')}`
+      ) },
+    { icon: '🚗', roles: _faqEligibleRoles('longDistance'), q: _faq('How does Long Distance allowance work?', 'Long Distance คำนวณยังไง?', '長距離手当はどう機能しますか？'),
+      a: _faq(
+        `Only available to roles eligible in Settings → Allowance Eligibility (Drivers by default). Company-wide rate: driving over ${S.allowances.longDistanceThresholdKm} km round-trip earns +฿${S.allowances.longDistance}/day (rate and threshold set in Settings → Allowance Rates). Enter start/end mileage in the request — the app calculates the distance for you.`,
+        `มีให้เฉพาะ role ที่มีสิทธิ์ตามที่ตั้งไว้ใน ตั้งค่า → สิทธิ์เบี้ยเลี้ยงตามระดับผู้ใช้ (ค่าเริ่มต้นคือ Driver) อัตรากลาง: ขับเกิน ${S.allowances.longDistanceThresholdKm} กม. ต่อวัน ได้ +฿${S.allowances.longDistance}/วัน (ตั้งอัตราและระยะทางขั้นต่ำได้ที่ ตั้งค่า → อัตราเบี้ยเลี้ยง) กรอกเลขไมล์เริ่มต้น/สิ้นสุดในคำขอ ระบบจะคำนวณระยะทางให้เอง`,
+        `設定 → 役割別手当資格 で対象と設定された役割のみ利用可能です（デフォルトはDriver）。全社共通レート：往復${S.allowances.longDistanceThresholdKm}kmを超える走行で1日あたり+฿${S.allowances.longDistance}が支給されます（レートと距離は 設定 → 手当レート で設定）。申請時に開始・終了の走行距離を入力すると、システムが距離を自動計算します。`
+      ) },
+    { icon: '🚙', roles: _faqEligibleRoles('personalCar'), requiresFlag: 'personalCarEligible', q: _faq('How does the Personal Car allowance work?', 'ค่าใช้รถส่วนตัวคำนวณยังไง?', '自家用車手当はどう機能しますか？'),
+      a: _faq(
+        // 2026-08-16 (Opus audit A-3): "Default ฿1,000" was a stale hardcoded number, unlike every
+        // other item in this list which interpolates from live Settings -- reads the real rate now.
+        `฿${(S.allowances.personalCar || 1000).toLocaleString()} per use (may vary per employee — check the rate shown in the request form). Goes through the same approval route as other requests (defaults to Managing Director) — paid on the payslip only after it is approved. ${_faqNotEligibleText('personalCar')}`,
+        `฿${(S.allowances.personalCar || 1000).toLocaleString()} ต่อครั้ง (อาจต่างกันแต่ละคน — เช็คอัตราที่ขึ้นในฟอร์มคำขอ) เข้าคิวอนุมัติเหมือนคำขอประเภทอื่น (ค่าเริ่มต้นคือ Managing Director) — จ่ายในสลิปเมื่อได้รับการอนุมัติแล้วเท่านั้น ${_faqNotEligibleText('personalCar')}`,
+        `1回あたり฿${(S.allowances.personalCar || 1000).toLocaleString()}（従業員によって異なる場合があります — 申請フォームに表示されるレートを確認してください）。他の申請と同じ承認ルートを通ります（デフォルトはManaging Director）。承認後にのみ給与明細へ反映されます。${_faqNotEligibleText('personalCar')}`
+      ) },
+    { icon: '📅', roles: ['md','accounting','manager','user','driver','marketing'], q: _faq('When does the payroll period start?', 'รอบเงินเดือนเริ่มวันไหน?', '給与計算期間はいつ始まりますか？'),
+      a: _faq(
+        `Each period runs from day ${S.payroll.periodStartDay} of one month through day ${S.payroll.periodStartDay - 1} of the next.`,
+        `แต่ละรอบเริ่มวันที่ ${S.payroll.periodStartDay} ของเดือน ถึงวันที่ ${S.payroll.periodStartDay - 1} ของเดือนถัดไป`,
+        `各期間は毎月${S.payroll.periodStartDay}日から翌月の${S.payroll.periodStartDay - 1}日までです。`
+      ) },
+    // 2026-08-16 (Opus audit A-1): roles was hardcoded to all 6 (matching the permissive default),
+    // not live Settings (which had narrowed phone to [manager,user]) -- a driver/marketing/
+    // accounting employee individually flagged phoneAllowanceEligible would have seen this promise
+    // ฿ they'd never actually receive (payroll requires both gates: role-level here AND the
+    // per-employee flag, same two-layer pattern as personalCar).
+    { icon: '📱', roles: _faqEligibleRoles('phone'), requiresFlag: 'phoneAllowanceEligible', q: _faq('How does the Phone Allowance work?', 'เบี้ยเลี้ยงโทรศัพท์คำนวณยังไง?', '携帯電話手当はどう機能しますか？'),
+      a: _faq(
+        // 2026-08-16 (Opus re-audit): the item's own `roles` now correctly follows live Settings
+        // (A-1 fix), which makes the old "not tied to role" claim in this text actively wrong for
+        // whoever can still see the item -- rewritten to describe the real two-layer gate instead
+        // (role eligibility in Settings, same as every other allowance, AND the per-employee flag).
+        `฿${(S.allowances.phone||0).toLocaleString()}/month, for employees individually flagged eligible on their profile — requires both: your role must be eligible in Settings, and the flag must be checked on your profile.`,
+        `฿${(S.allowances.phone||0).toLocaleString()}/เดือน สำหรับพนักงานที่ถูกติ๊กเปิดสิทธิ์เป็นรายคนในโปรไฟล์ — ต้องมีสิทธิ์ทั้ง 2 ชั้น: role ต้องมีสิทธิ์ใน Settings และต้องติ๊กเปิดสิทธิ์รายคนในโปรไฟล์`,
+        `月額฿${(S.allowances.phone||0).toLocaleString()}、プロフィールで個別に対象と設定された従業員向けです — 役職が設定で対象となっていること、かつプロフィールでフラグがオンになっていることの両方が必要です。`
+      ) },
+    { icon: '🔒', roles: ['md','accounting','manager','user','driver','marketing'], q: _faq('Why didn\'t my payslip change after Settings or my salary was updated?', 'ทำไมสลิปเงินเดือนไม่เปลี่ยนหลังแก้ Settings หรือขึ้นเงินเดือน?', '設定や給与を変更したのに、なぜ給与明細が変わらないのですか？'),
+      a: _faq(
+        `Once Managing Director approves a pay period, its numbers are permanently frozen — a later Settings change (allowance rates, eligibility, late-deduction policy, etc.) or a salary raise never retroactively rewrites an already-approved payslip. A 🔒 icon appears next to an approved period's status wherever it's shown. Only the CURRENT, not-yet-approved period keeps tracking live Settings/salary changes.`,
+        `เมื่อ Managing Director อนุมัติรอบเงินเดือนไหนแล้ว ตัวเลขของรอบนั้นจะถูกล็อกถาวร — การแก้ Settings ทีหลัง (อัตราเบี้ยเลี้ยง, สิทธิ์, นโยบายหักมาสาย ฯลฯ) หรือขึ้นเงินเดือน จะไม่ย้อนไปเปลี่ยนสลิปที่อนุมัติไปแล้ว จะมีไอคอน 🔒 ขึ้นข้างสถานะของรอบที่อนุมัติแล้วทุกที่ที่แสดง มีแค่รอบปัจจุบันที่ยังไม่อนุมัติเท่านั้นที่จะอัพเดทตาม Settings/เงินเดือนล่าสุด`,
+        `Managing Directorが給与期間を承認すると、その数字は永久に固定されます — その後の設定変更（手当レート、対象資格、遅刻控除ポリシーなど）や昇給があっても、承認済みの給与明細が遡って書き換わることはありません。承認済み期間のステータス横には🔒アイコンが表示されます。まだ承認されていない現在の期間のみ、設定・給与の変更がリアルタイムで反映され続けます。`
+      ) },
+  ];
+}
+
+function _faqHowToItems() {
+  const img = name => `<img src="images/faq/${name}" alt="" style="max-width:100%;border:1px solid var(--border);border-radius:8px;margin-top:8px;display:block">`;
+  // Same screenshot but captured once per UI language (currently only the install-app item uses
+  // this — most other screenshots are Thai-only since the UI chrome around them barely changes).
+  const imgLang = base => img(currentLang === 'en' ? base.replace('.png', '_en.png') : currentLang === 'ja' ? base.replace('.png', '_ja.png') : base);
+  const ul = (...lines) => `<ul style="margin:6px 0 0;padding-left:20px">${lines.map(l => `<li style="margin-bottom:4px">${l}</li>`).join('')}</ul>`;
+  return [
+    { icon: '📝', q: _faq('How do I request leave? Which type do I pick?', 'ขอลายังไง? เลือกประเภทไหนดี?', '休暇はどう申請しますか？どの種類を選べばいいですか？'),
+      a: _faq('Go to the Leave page (or "Request Leave" on the Dashboard):', 'ไปที่หน้า "การลา" (หรือกด "ยื่นคำขอวันลา" ที่ Dashboard):', '「休暇」ページに移動する（またはダッシュボードの「休暇申請」をクリック）：')
+      + ul(
+        _faq('<b>Type</b> — Annual: planned time off, deducted from your Annual Leave balance (late-arrival deductions eat into this same balance). Sick: no balance limit enforced when submitting, an optional medical certificate upload appears once selected. Business: personal errands, deducted from a separate Business Leave balance.',
+             '<b>ประเภท</b> — พักร้อน: ลาที่วางแผนไว้ล่วงหน้า หักจากวันลาพักร้อน (การหักจากมาสายก็หักยอดเดียวกันนี้) / ป่วย: ไม่มีการเช็คยอดคงเหลือตอนยื่น มีช่องแนบใบรับรองแพทย์ให้ (ไม่บังคับ) เมื่อเลือกประเภทนี้ / กิจ: ธุระส่วนตัว หักจากยอดวันลากิจแยกต่างหาก',
+             '<b>種類</b> — 年次休暇：計画的な休み、年次有給休暇残日数から控除されます（遅刻控除も同じ残日数から差し引かれます）。病気休暇：申請時の残日数チェックはなく、選択すると診断書の任意アップロード欄が表示されます。私用休暇：個人的な用事、別枠の私用休暇残日数から控除されます。'),
+        _faq('<b>Mode</b> — "By Day" for a full day (or multiple days); "By Hour" for a partial day off within a single date.',
+             '<b>รูปแบบการลา</b> — "ลาเป็นวัน" สำหรับลาเต็มวัน (หรือหลายวัน) / "ลาเป็นชั่วโมง" สำหรับลาบางส่วนของวันเดียว',
+             '<b>形式</b> — 「日単位」は終日（または複数日）、「時間単位」は1日の一部の休暇に使用します。'),
+        _faq('<b>By Day</b>: tick "Single day" for just one date (hides the End Date field), or untick it to pick a Start + End date range.',
+             '<b>ถ้าเลือกลาเป็นวัน</b>: ติ๊ก "ลาวันเดียว" ถ้าลาแค่วันเดียว (ช่องวันที่สิ้นสุดจะซ่อนไป) หรือติ๊กออกเพื่อเลือกช่วงวันที่เริ่ม-สิ้นสุด',
+             '<b>日単位を選んだ場合</b>：1日だけなら「単日」にチェック（終了日欄が非表示になります）、期間を指定する場合はチェックを外して開始日・終了日を選択します。'),
+        // 2026-08-16 (Opus audit B-5): the half-day 🌅/🌇 shortcut buttons weren't mentioned --
+        // typing times manually even a minute off the exact boundary reclassifies the day as
+        // 'partial' instead of a clean 'am'/'pm', which can cause a wrong late/blank-day result.
+        // The buttons exist specifically to avoid that.
+        _faq('<b>By Hour</b>: pick one date, then a start time and end time within that day — or use the 🌅 Morning Half-Day / 🌇 Afternoon Half-Day shortcut buttons, which fill in the exact correct boundary times for you and are the recommended way to request a half day off.',
+             '<b>ถ้าเลือกลาเป็นชั่วโมง</b>: เลือกวันที่หนึ่งวัน แล้วกรอกเวลาเริ่ม-สิ้นสุดในวันนั้น — หรือใช้ปุ่มลัด 🌅 ลาครึ่งวันเช้า / 🌇 ลาครึ่งวันบ่าย ที่จะกรอกเวลาที่ถูกต้องให้อัตโนมัติ แนะนำให้ใช้ปุ่มลัดนี้เมื่อลาครึ่งวัน',
+             '<b>時間単位を選んだ場合</b>：日付を1つ選び、その日の開始時刻と終了時刻を入力します — または🌅午前半休／🌇午後半休のショートカットボタンを使うと正確な境界時刻が自動入力されます。半休を申請する際はこちらの使用を推奨します。'),
+        _faq('<b>Reason</b> is required for every type. Backdated leave is allowed — a "Backdated" badge appears automatically, but it still needs approval like any other request.',
+             '<b>เหตุผล</b> ต้องกรอกทุกประเภท ระบุวันย้อนหลังได้ — จะขึ้นป้าย "ย้อนหลัง" อัตโนมัติ แต่ยังต้องรออนุมัติเหมือนคำขอปกติ',
+             '<b>理由</b>はすべての種類で必須です。過去日付の休暇申請も可能です — 自動的に「過去日付」バッジが表示されますが、他の申請と同様に承認が必要です。'),
+        _faq('Annual/Business leave is blocked at submission if the days requested exceed your remaining balance; Sick leave has no such check.',
+             'พักร้อน/ลากิจ จะยื่นไม่ได้ถ้าจำนวนวันเกินยอดคงเหลือ ส่วนลาป่วยไม่มีการเช็คนี้',
+             '年次休暇・私用休暇は残日数を超える申請はブロックされます。病気休暇にはこのチェックはありません。')
+      ) + imgLang('leave_modal.png') },
+    { icon: '⏱️', q: _faq('How do I request OT? What do I fill in?', 'ขอ OT ยังไง? ต้องกรอกอะไรบ้าง?', 'OTはどう申請しますか？何を入力しますか？'),
+      a: _faq('Click the ⏱️ icon on the day you worked OT (from the Attendance table or a quick-action button):', 'กดไอคอน ⏱️ ที่วันที่ทำ OT (จากตารางเช็คอิน-เช็คเอาท์ หรือปุ่มลัด):', 'OTを行った日の⏱️アイコンをクリックします（勤怠テーブルまたはクイックアクションボタンから）：')
+      + ul(
+        _faq('<b>Date</b> — defaults to the day you clicked from.',
+             '<b>วันที่</b> — ตั้งค่าเริ่มต้นเป็นวันที่ที่กดมา',
+             '<b>日付</b> — クリックした日がデフォルトで入ります。'),
+        _faq('<b>End time</b> — your actual finish time. Must be after 17:30 (that\'s where OT starts counting) or the app rejects it.',
+             '<b>เวลาเลิกงาน</b> — เวลาที่เลิกงานจริง ต้องหลัง 17:30 (จุดเริ่มนับ OT) ไม่งั้นระบบจะไม่ให้ยื่น',
+             '<b>終業時刻</b> — 実際の終業時刻。17:30以降である必要があります（OTの計算開始時刻）。そうでない場合は申請できません。'),
+        _faq('<b>Reason / work done</b> — required, describe what you worked on.',
+             '<b>เหตุผล / งานที่ทำ</b> — บังคับกรอก อธิบายงานที่ทำ',
+             '<b>理由・作業内容</b> — 必須、行った作業内容を記入してください。'),
+        _faq('<b>Attach file</b> — optional (image, PDF, Word, Excel, up to 10MB).',
+             '<b>แนบไฟล์</b> — ไม่บังคับ (รูปภาพ, PDF, Word, Excel ไม่เกิน 10MB)',
+             '<b>ファイル添付</b> — 任意（画像、PDF、Word、Excel、10MBまで）。'),
+        // 2026-08-16 (Opus audit B-2): implied all 3 tiers are always available together, but
+        // since 2026-08-13 they're mutually exclusive by day type — weekdays only show ×1.5,
+        // weekends/public holidays/Company Trip only show ×2/×3.
+        _faq('<b>Driver</b> gets a different form — enter OT hours directly instead of an end time. Only the tier(s) that apply to that date\'s type show up: ×1.5 on a weekday, or ×2/×3 on a weekend, public holiday, or company-declared holiday (Company Trip days have no OT at all, for anyone).',
+             '<b>Driver</b> จะเห็นฟอร์มต่างออกไป — กรอกจำนวนชั่วโมง OT ตรงแทนการกรอกเวลาเลิกงาน จะขึ้นเฉพาะอัตราที่ตรงกับประเภทวันนั้น — ×1.5 สำหรับวันธรรมดา หรือ ×2/×3 สำหรับเสาร์-อาทิตย์/วันหยุดนักขัตฤกษ์/วันหยุดที่บริษัทประกาศ (วัน Company Trip ไม่มี OT เลยสำหรับทุกคน)',
+             '<b>Driver</b>は異なるフォームになります — 終業時刻の代わりにOT時間を直接入力します。その日の種類に応じた区分のみ表示されます — 平日は×1.5、週末・祝日・会社指定休日は×2／×3（社員旅行日はOTなし、全員対象外）。')
+      ) + imgLang('ot_modal.png') },
+    { icon: '🌙', q: _faq('How do I report a late-night out?', 'แจ้งกลับดึกยังไง?', '深夜退勤の報告はどうしますか？'),
+      a: _faq('Click the 🌙 icon for that day:', 'กดไอคอน 🌙 ของวันนั้น:', 'その日の🌙アイコンをクリックします：')
+      + ul(
+        _faq('<b>Date</b> — defaults to today; backdating is allowed.',
+             '<b>วันที่</b> — ตั้งค่าเริ่มต้นเป็นวันนี้ ระบุย้อนหลังได้',
+             '<b>日付</b> — デフォルトは本日、過去日付も指定可能です。'),
+        _faq('<b>Return time</b> — pick whichever of the two tier buttons matches your actual return time; this determines the allowance amount. The buttons appear only after you have scanned out at the face terminal at or after the configured time (default 19:00). A web Check Out cannot be used to claim this, and advance requests are not allowed.',
+             '<b>เวลาที่กลับ</b> — เลือกปุ่ม tier ที่ตรงกับเวลาที่กลับจริง จะกำหนดจำนวนเบี้ยเลี้ยงที่ได้ ปุ่มจะขึ้นเมื่อสแกนออกที่เครื่องถึงเกณฑ์เวลาแล้วเท่านั้น (ค่าเริ่มต้น 19:00) กด Check Out บนเว็บแล้วยื่นไม่ได้ และยื่นล่วงหน้าไม่ได้',
+             '<b>帰宅時刻</b> — 実際の帰宅時刻に合う方の区分ボタンを選択します。これにより支給額が決まります。ボタンは顔認証端末で設定時刻（既定19:00）以降に退勤したときだけ表示されます。Webアプリの退勤では申請できず、事前申請もできません。'),
+        _faq('<b>Reason / work done</b> — optional but recommended.',
+             '<b>เหตุผล / งานที่ทำ</b> — ไม่บังคับ แต่แนะนำให้กรอก',
+             '<b>理由・作業内容</b> — 任意ですが記入を推奨します。')
+      ) + imgLang('lateout_modal.png') },
+    { icon: '⏰', q: _faq('How do I check in / check out?', 'ลงเวลาเข้า-ออกงานยังไง?', '出退勤の記録はどうしますか？'),
+      a: _faq('Go to the Check-in page (not shown to MD/Observer — they don\'t track attendance):', 'ไปที่หน้า "ลงเวลาทำงาน" (ไม่มีให้ MD/Observer เพราะไม่ต้องลงเวลา):', '「勤怠打刻」ページに移動します（MD/Observerには表示されません — 勤�status記録の対象外です）：')
+      + ul(
+        _faq('Tap the big green button to record the current time. The <b>first</b> tap of the day (after 5:00 AM) is your check-in; <b>every tap after that</b> updates your check-out to the latest time — so if you tap 3 times, the 3rd tap is your final check-out.',
+             'กดปุ่มวงกลมสีเขียวใหญ่เพื่อบันทึกเวลาปัจจุบัน กดครั้ง<b>แรก</b>ของวัน (หลัง 05:00 น.) จะเป็นเวลาเข้างาน กด<b>ครั้งต่อๆ ไป</b>จะอัปเดตเวลาออกงานเป็นเวลาล่าสุดเสมอ — ถ้ากด 3 ครั้ง ครั้งที่ 3 คือเวลาออกงานจริง',
+             '大きな緑色のボタンをタップして現在時刻を記録します。その日の<b>最初</b>のタップ（午前5:00以降）が出勤時刻になります。<b>それ以降のタップ</b>は毎回、退勤時刻を最新の時刻に更新します — 3回タップした場合、3回目が最終的な退勤時刻になります。'),
+        _faq('Tapping <b>before 5:00 AM</b> always counts as a check-out (for people finishing very late the night before), never a new check-in.',
+             'กด<b>ก่อน 05:00 น.</b> จะนับเป็นเวลาออกงานเสมอ (สำหรับคนที่เลิกงานดึกมากจากเมื่อคืน) ไม่ใช่การเข้างานใหม่',
+             '<b>午前5:00より前</b>のタップは常に退勤としてカウントされます（前夜遅くまで勤務していた人向け）。新たな出勤としては扱われません。'),
+        _faq('Check-in after 08:30 is marked <b>Late</b> — except for Drivers, who are exempt from the late flag entirely.',
+             'เช็กอินหลัง 08:30 น. จะถูกทำเครื่องหมายว่า <b>มาสาย</b> — ยกเว้น Driver ที่ไม่ถูกนับว่ามาสายเลย',
+             '08:30以降の出勤は<b>遅刻</b>としてマークされます — ただしDriverは遅刻扱いの対象外です。'),
+        _faq('If your browser has GPS permission granted, your location is recorded with each scan (shown at the bottom of the card) — this isn\'t required for the scan to work.',
+             'ถ้า browser อนุญาตให้เข้าถึง GPS ตำแหน่งจะถูกบันทึกไปพร้อมการสแกนแต่ละครั้ง (ขึ้นด้านล่างการ์ด) — ไม่จำเป็นต้องมี GPS ก็สแกนได้',
+             'ブラウザでGPSの権限が許可されている場合、スキャンごとに位置情報が記録されます（カード下部に表示）— スキャンの動作にGPSは必須ではありません。'),
+        _faq('You can also check in/out at the office via the Hikvision face-scan device — both methods write to the same attendance record.',
+             'สแกนหน้าที่เครื่อง Hikvision ที่ออฟฟิศได้เหมือนกัน — ทั้งสองวิธีบันทึกลงข้อมูลเดียวกัน',
+             'オフィスのHikvision顔認証デバイスでも出退勤の記録が可能です — どちらの方法も同じ勤怠記録に書き込まれます。')
+      ) + imgLang('checkin_page.png') },
+    { icon: '🖨️', q: _faq('How do I print my Attendance record?', 'พิมพ์ตารางเวลาทำงานยังไง?', '勤怠記録の印刷はどうしますか？'),
+      a: _faq('Go to the Attendance Table page, pick the period from the dropdown, then click "🖨 Print":', 'ไปที่หน้า "ตารางเวลาทำงาน" เลือกรอบจาก dropdown แล้วกด "🖨 พิมพ์":', '「勤怠テーブル」ページに移動し、ドロップダウンから期間を選択して「🖨印刷」をクリックします：')
+      + ul(
+        _faq('This opens a separate, clean landscape A4 document — not a print of the on-screen table — with your name, the pay period, and per-day rows (date, day of week, status, check-in/out with a 🌐 web-app or 📷 device-scanner icon).',
+             'ระบบจะเปิดเอกสารแยกต่างหาก แนวนอน A4 สะอาดตา — ไม่ใช่การพิมพ์ตารางบนหน้าจอตรงๆ — มีชื่อคุณ, รอบเงินเดือน, และแถวรายวัน (วันที่, วัน, สถานะ, เวลาเข้า-ออกพร้อมไอคอน 🌐 Web App หรือ 📷 เครื่องสแกน)',
+             '画面上の表をそのまま印刷するのではなく、氏名・給与期間・日別の行（日付、曜日、ステータス、🌐Web Appまたは📷スキャナーのアイコン付き出退勤時刻）を含む、専用のクリーンなA4横向き文書が開きます。'),
+        _faq('Each day also shows icons for any Early Morning / Late Night / OT / Upcountry / Personal Car that applied — only for allowance types you\'re actually eligible for — plus a summary of Work Days, Late count, Annual Leave, and Sick Leave for the period. A legend at the bottom explains every icon.',
+             'แต่ละวันจะมีไอคอนบอกด้วยถ้ามี Early Morning / Late Night / OT / Upcountry / รถส่วนตัว — แสดงเฉพาะประเภทเบี้ยเลี้ยงที่คุณมีสิทธิ์จริงเท่านั้น — พร้อมสรุปวันทำงาน, จำนวนครั้งมาสาย, ลาพักร้อน, ลาป่วยของรอบนั้น มีคำอธิบายไอคอนอยู่ท้ายเอกสาร',
+             '各日には該当する早出／深夜／OT／出張／自家用車のアイコンも表示されます — 実際に対象となる手当のみ表示されます — さらにその期間の出勤日数、遅刻回数、年次休暇、病気休暇の集計も表示されます。すべてのアイコンの説明は文書下部の凡例にあります。'),
+        _faq('Managing Director/Accounting viewing another employee\'s attendance (via the employee selector at the top) can print that employee\'s record the same way.',
+             'ถ้า Managing Director/Accounting กำลังดูข้อมูลของพนักงานคนอื่นอยู่ (ผ่านตัวเลือกพนักงานด้านบน) ก็พิมพ์ของพนักงานคนนั้นได้แบบเดียวกัน',
+             'Managing Director/Accountingが（上部の従業員選択で）他の従業員の勤怠を閲覧している場合も、同じ方法でその従業員の記録を印刷できます。')
+      ) },
+    // 2026-08-16 (Opus audit B-6): exclusion text was hardcoded "Accounting/Marketing" but live
+    // Settings also excludes Driver and MD from upcountry -- derived dynamically now, same fix
+    // pattern as the Rules-tab items above.
+    { icon: '🗺️', q: _faq('How do I request an Upcountry trip?', 'ขอ Upcountry ยังไง?', '出張はどう申請しますか？'),
+      a: _faq(`Click the 🗺️ icon on the Attendance table for that day. ${_faqNotEligibleText('upcountry')}`, `กดไอคอน 🗺️ ในตารางเช็คอิน-เช็คเอาท์ของวันนั้น ${_faqNotEligibleText('upcountry')}`, `勤怠テーブルのその日の🗺️アイコンをクリックします。${_faqNotEligibleText('upcountry')}`)
+      + ul(
+        _faq('<b>Date</b> — defaults to today.',
+             '<b>วันที่</b> — ตั้งค่าเริ่มต้นเป็นวันนี้',
+             '<b>日付</b> — デフォルトは本日です。'),
+        // 2026-08-16 (Opus audit B-3): described as one free-text field, but since 2026-08-06
+        // it's up to 6 separate time+location rows (minimum 1) instead.
+        _faq('<b>Customer / Location</b> — required, at least 1 entry (up to 6 rows if you visited multiple places that day), each with its own optional time. This doubles as your reason.',
+             '<b>ชื่อลูกค้า / สถานที่</b> — บังคับกรอกอย่างน้อย 1 แห่ง (กรอกได้สูงสุด 6 แถวถ้าไปหลายที่ในวันเดียว) แต่ละแถวมีเวลาแยกกัน (ไม่บังคับ) ใช้เป็นเหตุผลไปในตัว',
+             '<b>顧客名・場所</b> — 必須、最低1件（同日に複数箇所訪問した場合は最大6行まで入力可能）、それぞれに任意の時刻を入力できます。理由も兼ねます。')
+      ) + imgLang('upcountry_modal.png') },
+    { icon: '🚗', q: _faq('How do I report Long Distance driving? (Driver)', 'แจ้ง Long Distance ยังไง? (Driver)', '長距離運転の報告はどうしますか？（Driver）'),
+      a: _faq('Only Drivers see this option. Click the 🚗 icon for that day:', 'มีให้เฉพาะ Driver กดไอคอน 🚗 ของวันนั้น:', 'Driverのみこのオプションが表示されます。その日の🚗アイコンをクリックします：')
+      + ul(
+        _faq('<b>Date</b> — defaults to today.',
+             '<b>วันที่</b> — ตั้งค่าเริ่มต้นเป็นวันนี้',
+             '<b>日付</b> — デフォルトは本日です。'),
+        _faq('<b>Starting / Ending mileage (km)</b> — the app calculates the distance live and shows whether it qualifies for the extra allowance as you type.',
+             '<b>เลขไมล์เริ่มต้น / สิ้นสุด (กม.)</b> — ระบบคำนวณระยะทางให้ทันทีและขึ้นบอกว่าเข้าเกณฑ์ได้เบี้ยเลี้ยงเพิ่มหรือไม่ระหว่างที่พิมพ์',
+             '<b>開始・終了マイレージ（km）</b> — 入力中にシステムがリアルタイムで距離を計算し、追加手当の対象になるかどうかを表示します。'),
+        _faq('<b>Reason / note</b> — optional.',
+             '<b>เหตุผล / หมายเหตุ</b> — ไม่บังคับ',
+             '<b>理由・備考</b> — 任意です。')
+      ) + imgLang('longdistance_modal.png') },
+    { icon: '🚙', q: _faq('How do I record Personal Car use? (Staff/Manager)', 'แจ้งใช้รถส่วนตัวยังไง? (Staff/Manager)', '自家用車利用の記録はどうしますか？（Staff/Manager）'),
+      a: _faq('Only Staff and Managers see this option. Click the 🚙 icon for that day:', 'มีให้เฉพาะ Staff และ Manager กดไอคอน 🚙 ของวันนั้น:', 'StaffとManagerのみこのオプションが表示されます。その日の🚙アイコンをクリックします：')
+      + ul(
+        _faq('<b>Date</b> — defaults to today. The rate shown is fixed per your profile — you don\'t enter an amount.',
+             '<b>วันที่</b> — ตั้งค่าเริ่มต้นเป็นวันนี้ อัตราที่ขึ้นให้เป็นอัตราคงที่ตามโปรไฟล์ของคุณ ไม่ต้องกรอกจำนวนเงินเอง',
+             '<b>日付</b> — デフォルトは本日です。表示されるレートはプロフィールに基づく固定額です — 金額の入力は不要です。'),
+        _faq('<b>Note</b> — optional.',
+             '<b>หมายเหตุ</b> — ไม่บังคับ',
+             '<b>備考</b> — 任意です。'),
+        _faq('Its approval route is set in ⚙️ Approval Settings, same as every other request type (defaults to Managing Director). Approvers get the same push / email notifications as for leave, OT, and Long Distance. Paid on the payslip only after approval.',
+             'เส้นทางการอนุมัติตั้งได้ที่ ⚙️ ตั้งค่าการอนุมัติ เหมือนคำขอประเภทอื่นๆ (ค่าเริ่มต้นคือ Managing Director) ผู้อนุมัติได้รับการแจ้งเตือน push / อีเมลชุดเดียวกับลา, OT และ Long Distance จ่ายในสลิปเมื่อได้รับการอนุมัติแล้วเท่านั้น',
+             '承認ルートは他の申請タイプと同様、⚙️承認設定で設定できます（デフォルトはManaging Director）。承認者には休暇・残業・長距離と同じプッシュ／メール通知が届きます。承認後にのみ給与明細へ反映されます。')
+      ) + imgLang('personalcar_modal.png') },
+    { icon: '🔄', q: _faq('How do I request a Compensatory Day off?', 'ขอวันหยุดชดเชยยังไง?', '振替休日はどう申請しますか？'),
+      a: _faq('For working on a public holiday or weekend. Click "Request Compensatory Day":', 'สำหรับกรณีที่เข้ามาทำงานในวันหยุดนักขัตฤกษ์หรือเสาร์-อาทิตย์ กด "ขอวันหยุดชดเชย":', '祝日や週末に出勤した場合に使用します。「振替休日申請」をクリックします：')
+      + ul(
+        _faq('<b>Date worked</b> — required, the holiday/weekend date you actually came in.',
+             '<b>วันที่ไปทำงาน</b> — บังคับกรอก วันหยุด/เสาร์-อาทิตย์ที่เข้ามาทำงานจริง',
+             '<b>出勤日</b> — 必須、実際に出勤した祝日・週末の日付。'),
+        _faq('<b>Reason / work details</b> — required.',
+             '<b>เหตุผล / รายละเอียดงานที่ทำ</b> — บังคับกรอก',
+             '<b>理由・作業内容</b> — 必須です。'),
+        _faq('<b>Attach file</b> — optional.',
+             '<b>แนบไฟล์เอกสาร</b> — ไม่บังคับ',
+             '<b>ファイル添付</b> — 任意です。'),
+        _faq('Once approved, the system adds <b>1 day</b> to your Annual Leave balance — it doesn\'t give you a specific day off directly, you then request Annual Leave to use it.',
+             'เมื่อได้รับการอนุมัติ ระบบจะเพิ่ม <b>1 วัน</b> เข้าในสิทธิ์วันลาพักร้อนของคุณ — ไม่ได้ให้วันหยุดเจาะจงโดยตรง ต้องไปยื่นลาพักร้อนเพื่อใช้วันนี้อีกที',
+             '承認されると、システムはあなたの年次有給休暇残日数に<b>1日</b>を追加します — 特定の休日が直接付与されるわけではなく、その後年次休暇を申請して使用します。')
+      ) + imgLang('comp_modal.png') },
+    { icon: '🔧', q: _faq('How do I request a Time Correction?', 'ขอแก้ไขเวลาย้อนหลังยังไง?', '時刻修正はどう申請しますか？'),
+      a: _faq('For fixing a wrong or missing check-in/check-out time. Click the ✏️ icon for that day:', 'สำหรับแก้ไขเวลาเข้า-ออกงานที่ผิดหรือไม่มีข้อมูล กดไอคอน ✏️ ของวันนั้น:', '誤った、または記録されていない出退勤時刻を修正する場合に使用します。その日の✏️アイコンをクリックします：')
+      + ul(
+        _faq('<b>Date</b> — the date to correct.',
+             '<b>วันที่ที่ต้องการแก้ไข</b> — วันที่จะแก้ไข',
+             '<b>修正対象日</b> — 修正する日付です。'),
+        _faq('Choose <b>which field</b> to fix — Check-in time or Check-out time (shows the current recorded value for reference).',
+             'เลือก<b>ข้อมูลที่จะแก้ไข</b> — เวลาเข้างาน หรือเวลาออกงาน (ขึ้นค่าที่บันทึกไว้ปัจจุบันให้ดูประกอบ)',
+             '<b>修正する項目</b>を選択 — 出勤時刻または退勤時刻（参考として現在記録されている値が表示されます）。'),
+        _faq('<b>Correct time</b> and <b>Reason</b> are both required.',
+             '<b>เวลาที่ถูกต้อง</b> และ <b>เหตุผล</b> ต้องกรอกทั้งคู่',
+             '<b>正しい時刻</b>と<b>理由</b>はどちらも必須です。'),
+        _faq('Its approval route is set in ⚙️ Approval Settings, same as every other request type (defaults to Managing Director). (Managing Director/Accounting fixing someone else\'s ⚠️-flagged check-in via the warning badge is a separate instant "Quick Fix" path that skips this approval step entirely.)',
+             'เส้นทางการอนุมัติของคำขอนี้ตั้งได้ที่ ⚙️ ตั้งค่าการอนุมัติ เหมือนคำขอประเภทอื่นๆ (ค่าเริ่มต้นคือ Managing Director) (ถ้า Managing Director/Accounting แก้ไขให้คนอื่นผ่านป้าย ⚠️ โดยตรง จะเป็นคนละทาง "แก้ด่วน" ที่มีผลทันทีไม่ต้องรออนุมัติเลย)',
+             'この申請の承認ルートは他の申請タイプと同様、⚙️承認設定で設定できます（デフォルトはManaging Director）。（Managing Director/Accountingが⚠️警告バッジから他の人の記録を直接修正する場合は、承認不要で即座に反映される別の「クイック修正」経路になります。）')
+      ) + imgLang('timecorrection_modal.png') },
+    { icon: '↩️', q: _faq('Can I cancel or edit a request after submitting?', 'ยกเลิกหรือแก้ไขคำขอหลังยื่นได้ไหม?', '提出後に申請をキャンセル・編集できますか？'),
+      a: _faq('Both are only possible while the request is still pending (any approval step) and it\'s your own request:', 'ทำได้เฉพาะตอนคำขอยังอยู่ในสถานะรออนุมัติ (ขั้นไหนก็ได้) และเป็นคำขอของตัวเองเท่านั้น:', 'どちらも申請がまだ保留中（承認のどの段階でも可）で、自分自身の申請である場合にのみ可能です：')
+      + ul(
+        // 2026-08-21: Personal Car now follows the same pending approval path as other types.
+        // Cancel-after-approve remains for already-approved / legacy auto-approved PC records.
+        _faq('<b>Cancel</b> — open the request from My Requests or Leave History and click Cancel; you\'ll be asked to confirm. Once it\'s Approved or Rejected, it can no longer be cancelled — except a legacy Personal Car record that was auto-approved before this type went through review (no approver name on the record).',
+             '<b>ยกเลิก</b> — เปิดคำขอจากหน้า "ตรวจสอบสถานะคำขอ" หรือ "การลา" แล้วกดยกเลิก ระบบจะให้ยืนยันอีกครั้ง เมื่ออนุมัติหรือปฏิเสธแล้วจะยกเลิกไม่ได้อีก — ยกเว้นรถส่วนตัวรุ่นเก่าที่ระบบอนุมัติอัตโนมัติก่อนที่จะต้องรออนุมัติ (ไม่มีชื่อผู้อนุมัติบนรายการ)',
+             '<b>キャンセル</b> — マイリクエストまたは休暇履歴から申請を開き、キャンセルをクリックします。確認が求められます。承認または却下された後はキャンセルできません — 承認フロー導入前に自動承認された自家用車記録（承認者名がないもの）を除きます。'),
+        _faq('<b>Edit</b> — available for Annual/Sick/Business Leave, Upcountry, Long Distance, Late Night Out, Compensatory Day, OT, and Personal Car while still pending. Not available for Time Correction (submit a new one instead).',
+             '<b>แก้ไข</b> — มีให้สำหรับ ลาพักร้อน/ป่วย/กิจ, Upcountry, Long Distance, แจ้งกลับดึก, วันหยุดชดเชย, OT และรถส่วนตัว ขณะที่ยังรออนุมัติ ไม่มีให้สำหรับ แก้ไขเวลา (ให้ยื่นใหม่แทน)',
+             '<b>編集</b> — 年次/病気/私用休暇、出張、長距離、深夜退勤、振替休日、OT、自家用車は保留中のみ編集できます。時刻修正では利用できません（新規に申請し直してください）。')
+      ) },
+    { icon: '📋', q: _faq('Where can I track the status of my requests?', 'ตรวจสอบสถานะคำขอที่ไหน?', '自分の申請状況はどこで確認できますか？'),
+      a: _faq('Go to "My Requests" from the sidebar — shows every request you\'ve submitted, split into Pending and Done (Approved/Rejected), with a step-by-step approval progress indicator for multi-step routes. A red badge on the nav item shows how many are still pending.',
+              'ไปที่ "ตรวจสอบสถานะคำขอ" จากเมนูด้านซ้าย — แสดงคำขอทั้งหมดที่เคยยื่น แบ่งเป็นรออนุมัติ กับ เสร็จแล้ว (อนุมัติ/ปฏิเสธ) พร้อมแถบแสดงขั้นตอนการอนุมัติถ้าเส้นทางมีหลายขั้น มีป้ายแดงที่เมนูบอกจำนวนที่ยังค้างอยู่',
+              'サイドバーから「マイリクエスト」に移動します — これまでに提出したすべての申請が、保留中と完了済み（承認済み／却下）に分かれて表示されます。複数段階の承認ルートには進捗インジケーターが表示されます。ナビ項目の赤いバッジで保留中の件数がわかります。') },
+    { icon: '💰', q: _faq('Where do I see my payslip?', 'ดูสลิปเงินเดือนที่ไหน?', '給与明細はどこで確認できますか？'),
+      a: _faq('Go to the Payslip page from the sidebar. Pick the pay period from the dropdown. For Staff/Manager/Driver/Marketing, a payslip needs Managing Director\'s approval AND — for the current period only — actual pay day to have arrived; past periods just need MD approval, no pay-day wait. Managing Director and Accounting can view any payslip anytime, no gate.',
+              'ไปที่หน้า "ใบเงินเดือน" จากเมนูด้านซ้าย เลือกรอบเงินเดือนจาก dropdown สำหรับ Staff/Manager/Driver/Marketing ต้องรอ Managing Director อนุมัติก่อน และถ้าเป็นรอบปัจจุบันต้องรอถึงวันจ่ายเงินเดือนจริงด้วย ส่วนรอบที่ผ่านมาแล้วแค่รอ MD อนุมัติ ไม่ต้องรอวันจ่าย Managing Director กับ Accounting ดูสลิปของใครก็ได้ทุกเมื่อ ไม่มีเงื่อนไขปิดกั้น',
+              'サイドバーから「給与明細」ページに移動します。ドロップダウンから給与期間を選択してください。Staff/Manager/Driver/Marketingの場合、Managing Directorの承認が必要で、さらに当期分は実際の支給日が来るまで表示されません。過去の期間はMD承認のみで支給日を待つ必要はありません。Managing DirectorとAccountingはいつでも誰の給与明細も閲覧できます。') },
+    { icon: '📥', q: _faq('How do I download all employees\' payslips at once? (Accounting/MD)', 'ดาวน์โหลดสลิปเงินเดือนทุกคนพร้อมกันยังไง? (Accounting/MD)', '全従業員の給与明細を一括ダウンロードするには？（Accounting/MD）'),
+      a: _faq('On the Payslip page, Managing Director and Accounting see a "Download All" button next to "Download Excel":', 'ในหน้า "ใบเงินเดือน" Managing Director และ Accounting จะเห็นปุ่ม "Download All" อยู่ข้างๆ ปุ่ม "Download Excel":', '給与明細ページでは、Managing DirectorとAccountingに「Download Excel」ボタンの隣に「Download All」ボタンが表示されます：')
+      + ul(
+        _faq('Produces a single .xlsx file for the selected period, with every active employee\'s payslip as its own sheet inside it (inactive/former employees are excluded). The sheet is named after the employee — except Managing Director\'s sheet, which uses last name only.',
+             'ได้ไฟล์ .xlsx เดียวของรอบที่เลือก แบ่งเป็นชีทของแต่ละพนักงานที่ยังทำงานอยู่ (ไม่รวมพนักงานที่ลาออก/ระงับแล้ว) ชื่อชีทจะเป็นชื่อพนักงาน ยกเว้นของ Managing Director ที่ใช้แค่นามสกุล',
+             '選択した期間について、在籍中の全従業員の給与明細をそれぞれ別シートに含む1つの.xlsxファイルが作成されます（退職・休止中の従業員は除外）。シート名は従業員名ですが、Managing Directorのシートのみ姓のみが使用されます。'),
+        _faq('Useful for archiving or bulk-sending a whole period\'s payslips at once instead of downloading each employee one at a time.',
+             'เหมาะสำหรับเก็บไฟล์หรือส่งสลิปทั้งรอบทีเดียว แทนที่จะดาวน์โหลดทีละคน',
+             '従業員ごとに1件ずつダウンロードする代わりに、期間全体の給与明細をまとめて保存・送付するのに便利です。')
+      ) },
+    { icon: '✅', q: _faq('How do I approve requests? (Manager/Accounting/MD)', 'อนุมัติคำขอยังไง? (Manager/Accounting/MD)', '申請の承認方法は？（Manager/Accounting/MD）'),
+      a: _faq('Go to the Approval page — pending items needing your action show up under your tab. Click a card to review, then Approve or Reject. Quick Mode and Approve All are available for bulk handling. The approval route (who approves what) is configured in ⚙️ Approval Settings.',
+              'ไปที่หน้า "จัดการคำขอ" — รายการที่รอการอนุมัติจากคุณจะขึ้นในแท็บของคุณ กดการ์ดเพื่อดูรายละเอียด แล้วกด Approve หรือ Reject ใช้ Quick Mode หรือ Approve All ได้ถ้าจะอนุมัติทีละหลายรายการ เส้นทางอนุมัติ (ใครอนุมัติอะไร) ตั้งค่าได้ที่ ⚙️ ตั้งค่าการอนุมัติ',
+              '「承認」ページに移動します — あなたの対応が必要な保留中の項目は自分のタブに表示されます。カードをクリックして確認し、承認または却下します。一括処理にはクイックモードや「すべて承認」が使えます。承認ルート（誰が何を承認するか）は⚙️承認設定で設定できます。') },
+    { icon: '⚙️', q: _faq('How do I configure who approves what? (Managing Director)', 'ตั้งค่าเส้นทางการอนุมัติยังไง? (Managing Director)', '誰が何を承認するかはどう設定しますか？（Managing Director）'),
+      a: _faq('From the Approval page, click ⚙️ Approval Settings (Manager can view it read-only; only Managing Director can edit):', 'จากหน้าจัดการคำขอ กด ⚙️ ตั้งค่าการอนุมัติ (Manager ดูได้อย่างเดียว แก้ไขได้เฉพาะ Managing Director):', '承認ページから⚙️承認設定をクリックします（Managerは閲覧のみ可能、編集できるのはManaging Directorのみです）：')
+      + ul(
+        _faq('Each request type has its own <b>Approval Route</b> dropdown — e.g. "Managing Director only", "Manager only", "Accounting only" — pick who needs to sign off for that type.',
+             'คำขอแต่ละประเภทมี dropdown <b>เส้นทางการอนุมัติ</b> ของตัวเอง — เช่น "Managing Director เท่านั้น", "Manager เท่านั้น", "Accounting เท่านั้น" — เลือกว่าใครต้องอนุมัติประเภทนั้น',
+             '各申請タイプには独自の<b>承認ルート</b>ドロップダウンがあります — 例：「Managing Directorのみ」「Managerのみ」「Accountingのみ」— そのタイプを承認する担当者を選択します。'),
+        _faq('The <b>"Accounting stand-in"</b> toggle per type lets Accounting cover approvals when the assigned approver is unavailable — it auto-activates from a set day of the payroll period through pay day, and can be switched off per type (Managing Director can turn off any type; Manager only the types where Manager is in that type\'s own route).',
+             'สวิตช์ <b>"Accounting อนุมัติแทน"</b> ต่อประเภท ให้ Accounting ช่วยอนุมัติแทนได้เมื่อคนที่กำหนดไว้ไม่ว่าง จะเปิดอัตโนมัติตั้งแต่วันที่กำหนดไว้ของรอบเงินเดือนจนถึงวันจ่ายเงินเดือน และปิดได้ทีละประเภท (Managing Director ปิดได้ทุกประเภท ส่วน Manager ปิดได้เฉพาะประเภทที่ตัวเองอยู่ใน route)',
+             '各タイプの<b>「Accounting代理承認」</b>トグルにより、担当承認者が不在の場合にAccountingが承認を代行できます — 給与期間の指定日から支給日まで自動的に有効になり、タイプごとにオフにできます（Managing Directorは全タイプをオフにでき、Managerは自分がルートに含まれるタイプのみオフにできます）。'),
+        _faq('Driver OT is routed separately from regular OT (works differently — direct hours, not an end-time).',
+             'OT ของ Driver แยกเส้นทางออกจาก OT ทั่วไป (กรอกต่างกัน — ระบุชั่วโมงตรง ไม่ใช่เวลาเลิกงาน)',
+             'Driver OTは通常のOTとは別にルーティングされます（入力方法が異なります — 終業時刻ではなく時間を直接指定）。')
+      ) + imgLang('approvalsettings_modal.png') },
+    { icon: '🎫', q: _faq('How do I configure which roles get which allowance? (Managing Director/Accounting)', 'ตั้งค่าว่า role ไหนได้เบี้ยเลี้ยงอะไรบ้างยังไง? (Managing Director/Accounting)', 'どの役職がどの手当を受け取るかはどう設定しますか？（Managing Director/Accounting）'),
+      a: _faq('Go to Settings — two related sections handle this:', 'ไปที่หน้า "การตั้งค่าระบบ" — มี 2 ส่วนที่เกี่ยวข้อง:', '「設定」に移動します — 関連する2つのセクションがあります：')
+      + ul(
+        _faq('<b>🎫 Allowance Eligibility by Role</b> — a checkbox grid, rows = allowance type (Diligence, Long Distance, Personal Car, Upcountry, Early-Late, OT, Phone), columns = role. Tick/untick which roles are eligible for each. Unticking a role that would actually change someone\'s pay asks for confirmation first.',
+             '<b>🎫 สิทธิ์เบี้ยเลี้ยงตามระดับผู้ใช้</b> — ตารางติ๊ก แถวคือประเภทเบี้ยเลี้ยง (เบี้ยขยัน, Long Distance, รถส่วนตัว, Upcountry, Early-Late, OT, โทรศัพท์) คอลัมน์คือ role ติ๊ก/เอาติ๊กออกว่า role ไหนได้บ้าง ถ้าเอาติ๊กออกแล้วจะกระทบเงินของใครจริงๆ ระบบจะถามยืนยันก่อน',
+             '<b>🎫 役職別手当対象設定</b> — チェックボックスのグリッドで、行が手当の種類（精勤手当、長距離、自家用車、出張、早出・深夜、OT、携帯電話）、列が役職です。各手当の対象役職にチェックを入れる/外します。実際に誰かの給与に影響するチェックを外す場合は確認を求められます。'),
+        _faq('<b>Allowance Rates</b> (same page) — the ฿ amount/rate for each type, shared company-wide.',
+             '<b>อัตราเบี้ยเลี้ยง</b> (หน้าเดียวกัน) — จำนวนเงิน/อัตราของแต่ละประเภท ใช้ร่วมกันทั้งบริษัท',
+             '<b>手当レート</b>（同じページ）— 各種類の金額・レート、全社共通です。'),
+        _faq('Personal Car and Phone Allowance need an <b>extra per-employee checkbox</b> on top of the role setting — being in an eligible role alone isn\'t enough for these two; open the employee\'s edit form and tick "Eligible for Personal Car Allowance" / the phone allowance checkbox individually.',
+             'รถส่วนตัวและเบี้ยเลี้ยงโทรศัพท์ ต้องติ๊ก<b>ช่องเพิ่มเติมรายคน</b>ด้วย นอกเหนือจากตั้งที่ role — แค่อยู่ใน role ที่มีสิทธิ์ยังไม่พอสำหรับ 2 อย่างนี้ ต้องเปิดฟอร์มแก้ไขพนักงานคนนั้นแล้วติ๊ก "มีสิทธิ์รับเบี้ยเลี้ยงรถส่วนตัว" / ช่องเบี้ยเลี้ยงโทรศัพท์เป็นรายคนด้วย',
+             '自家用車手当と携帯電話手当は、役職設定に加えて<b>従業員ごとの追加チェック</b>が必要です — 対象役職に属しているだけでは不十分で、その従業員の編集フォームを開き「自家用車手当の対象」／携帯電話手当のチェックボックスを個別にオンにする必要があります。'),
+        _faq('Changes here only affect the CURRENT, not-yet-approved payroll period — any already MD-approved period keeps its frozen numbers regardless (see the Rules & Calculations FAQ above).',
+             'การแก้ตรงนี้มีผลแค่กับรอบเงินเดือนปัจจุบันที่ยังไม่อนุมัติเท่านั้น — รอบที่ Managing Director อนุมัติไปแล้วตัวเลขจะถูกล็อกไว้ไม่เปลี่ยนตาม (ดูหัวข้อกฎและการคำนวณด้านบน)',
+             'ここでの変更は、まだ承認されていない現在の給与期間にのみ影響します — Managing Directorが既に承認した期間は数字が固定されたままです（上記の「ルールと計算方法」FAQを参照）。')
+      ) },
+    { icon: '👥', q: _faq('How do I add or edit an employee? (Manager/Accounting/MD)', 'เพิ่มหรือแก้ไขข้อมูลพนักงานยังไง? (Manager/Accounting/MD)', '従業員の追加・編集はどうしますか？（Manager/Accounting/MD）'),
+      a: _faq('Go to the Employees page → "+ Add Employee" (or click an existing employee to edit):', 'ไปที่หน้า "ข้อมูลพนักงาน" → "+ เพิ่มพนักงานใหม่" (หรือกดที่พนักงานที่มีอยู่เพื่อแก้ไข):', '従業員ページに移動 → 「+従業員を追加」（既存の従業員をクリックすると編集できます）：')
+      + ul(
+        _faq('<b>Required</b>: first name, username, and — for a new employee — an initial password. New employees always start as role "Staff (user)"; only Managing Director can change a role (Accounting can only change role while editing an existing employee).',
+             '<b>บังคับ</b>: ชื่อจริง, username, และรหัสผ่านเริ่มต้น (สำหรับพนักงานใหม่) พนักงานใหม่จะเริ่มเป็น role "Staff (user)" เสมอ เปลี่ยน role ได้เฉพาะ Managing Director (Accounting เปลี่ยนได้เฉพาะตอนแก้ไขพนักงานที่มีอยู่แล้วเท่านั้น)',
+             '<b>必須</b>：名前、ユーザー名、そして新規従業員の場合は初期パスワード。新規従業員は常にrole「Staff（user）」で開始します。役職を変更できるのはManaging Directorのみです（Accountingは既存の従業員を編集する場合のみ役職を変更できます）。'),
+        _faq('Personal Info, Employment Info, and System Account are grouped into tabs/sections — includes ID card or Passport number, emergency contact, bank account for payroll transfer, and the allowance fields covered in the Rules & Calculations section above (Diligence Allowance, Personal Car Rate, Long Distance Rate, Annual/Sick/Business Leave days per year).',
+             'ข้อมูลแบ่งเป็นส่วน ข้อมูลส่วนตัว / ข้อมูลการทำงาน / บัญชีระบบ — รวมเลขบัตรประชาชนหรือพาสปอร์ต, ผู้ติดต่อฉุกเฉิน, บัญชีธนาคารสำหรับโอนเงินเดือน, และช่องเบี้ยเลี้ยงต่างๆ ที่อธิบายไว้ในหมวดกฎและการคำนวณด้านบน (เบี้ยขยัน, อัตรารถส่วนตัว, อัตรา Long Distance, วันลาพักร้อน/ป่วย/กิจต่อปี)',
+             '個人情報、雇用情報、システムアカウントはセクション/タブに分かれています — 身分証明書番号またはパスポート番号、緊急連絡先、給与振込用銀行口座、および上記「ルールと計算方法」セクションで説明した各種手当項目（精勤手当、自家用車レート、長距離レート、年間の年次/病気/私用休暇日数）が含まれます。'),
+        _faq('Employment Status has a third option besides Active/Inactive: <b>Observer</b> — view-only, no payroll, for someone who needs to see the system without being an actual paid employee.',
+             'สถานะการทำงานมีตัวเลือกที่ 3 นอกจาก Active/Inactive คือ <b>Observer</b> — ดูได้อย่างเดียว ไม่มีเงินเดือน สำหรับคนที่ต้องดูระบบได้โดยไม่ใช่พนักงานที่รับเงินเดือนจริง',
+             '雇用ステータスにはActive/Inactiveの他に3つ目の選択肢があります：<b>Observer</b> — 閲覧のみ、給与なし。実際の有給従業員ではないがシステムを閲覧する必要がある人向けです。')
+      ) },
+    { icon: '✔️', q: _faq('How does Accounting process Finalize Payroll?', 'Accounting ทำ Finalize Payroll ยังไง?', 'AccountingはどうFinalize Payrollを処理しますか？'),
+      a: _faq('Go to the Finalize Payroll page (Accounting only), pick the pay period:', 'ไปที่หน้า Finalize Payroll (เฉพาะ Accounting) เลือกรอบเงินเดือน:', 'Finalize Payrollページに移動します（Accountingのみ）、給与期間を選択します：')
+      + ul(
+        _faq('For each employee: enter the actual withholding tax (PIT) — pre-filled with an auto-estimate you can override — add any Bonus or Manual Adjustments (Amount/Advance), toggle Diligence paid/skipped for Drivers, then click <b>✓ Confirm</b>.',
+             'สำหรับแต่ละคน: กรอกภาษีหัก ณ ที่จ่าย (PIT) จริง (มีค่าประมาณอัตโนมัติให้ล่วงหน้า แก้ไขได้) เพิ่มโบนัสหรือปรับปรุงเงินเพิ่มเติม (จำนวนเงิน/เบิกล่วงหน้า) เปิด/ปิดเบี้ยขยันสำหรับ Driver แล้วกด <b>✓ Confirm</b>',
+             '各従業員について：実際の源泉徴収税（PIT）を入力します（自動見積り済みの値を上書き可能）、ボーナスや手動調整（金額／前払い）を追加し、Driverの精勤手当の支給/スキップを切り替えてから<b>✓確定</b>をクリックします。'),
+        _faq('Once <b>every</b> active employee for that period is Confirmed and Managing Director has approved each one individually (from the Payslip page\'s approval card), a "Lock Period" button appears — locking prevents further edits and unlocks the bank export buttons (Bangkok Bank CSV, PND.1, SSO).',
+             'เมื่อพนักงานทุกคนของรอบนั้น Confirm ครบและ Managing Director อนุมัติทีละคนแล้ว (จากการ์ดอนุมัติในหน้าใบเงินเดือน) จะมีปุ่ม "ล็อครอบนี้" ขึ้นมา — การล็อคจะห้ามแก้ไขต่อและปลดล็อคปุ่ม export ธนาคาร (Bangkok Bank CSV, PND.1, ประกันสังคม)',
+             'その期間のすべての在籍従業員がConfirm済みで、Managing Directorが個別に承認すると（給与明細ページの承認カードから）、「期間をロック」ボタンが表示されます — ロックするとそれ以上の編集ができなくなり、銀行エクスポートボタン（Bangkok Bank CSV、PND.1、社会保険）が有効になります。'),
+        _faq('This same Confirm step is what makes a period\'s data count toward the 50 Tawi annual tax summary — an unconfirmed period is silently excluded there (a warning banner shows if that happens).',
+             'ขั้นตอน Confirm นี้เองที่ทำให้ข้อมูลรอบนั้นถูกนับรวมในสรุปภาษี 50 ทวิ ประจำปี — รอบที่ยังไม่ Confirm จะไม่ถูกนับรวมโดยไม่มีการเตือน (จะมี banner เตือนขึ้นถ้าเกิดกรณีนี้)',
+             'この確定ステップこそが、その期間のデータが年間の50タウィ税務サマリーに反映される条件です — 未確定の期間はそこから除外されます（該当する場合は警告バナーが表示されます）。')
+      ) },
+    { icon: '🔔', q: _faq('How do I turn notifications on/off? How do they work?', 'เปิด/ปิดการแจ้งเตือนยังไง? ทำงานยังไง?', '通知のオン/オフはどうしますか？どう機能しますか？'),
+      a: _faq('Go to Settings — everyone (including Staff/Driver/Marketing) has two independent personal notification sections:', 'ไปที่หน้า "การตั้งค่าระบบ" — ทุก role (รวม Staff/Driver/Marketing) มีการแจ้งเตือนส่วนตัว 2 แบบ แยกอิสระจากกัน:', '「設定」に移動します — Staff/Driver/Marketingを含む全員が、それぞれ独立した2種類の個人通知設定を持っています：')
+      + ul(
+        _faq('<b>🔔 Browser Push Notifications</b> — click "Enable" to grant your browser permission (if blocked, you must change it in your browser\'s own site settings, the app can\'t re-prompt you). Once allowed, two checkboxes appear: notify me when my own request is approved/rejected, and — for Manager/Accounting/MD only — notify me when a new request needs my approval. A "Test Notification" button lets you confirm it works. The app checks for updates <b>every 3 minutes</b> while the tab is open — it won\'t notify you instantly, and won\'t notify you at all if the tab/browser is fully closed.',
+             '<b>🔔 การแจ้งเตือนในเบราว์เซอร์</b> — กด "เปิดการแจ้งเตือน" เพื่อขออนุญาตจากเบราว์เซอร์ (ถ้าเคยบล็อกไว้ ต้องไปแก้ที่ตั้งค่าเว็บไซต์ของเบราว์เซอร์เอง แอปขอใหม่ไม่ได้) เมื่ออนุญาตแล้วจะมี checkbox 2 อัน: แจ้งเตือนเมื่อคำขอของตัวเองได้รับอนุมัติ/ปฏิเสธ และ — เฉพาะ Manager/Accounting/MD — แจ้งเตือนเมื่อมีคำขอใหม่รออนุมัติจากตน มีปุ่ม "ทดสอบการแจ้งเตือน" ให้ลองได้ ระบบเช็คทุก <b>3 นาที</b> ขณะแท็บเปิดอยู่ — ไม่ใช่แบบทันที และจะไม่แจ้งเลยถ้าปิดแท็บ/เบราว์เซอร์ไปแล้ว',
+             '<b>🔔 ブラウザプッシュ通知</b> — 「有効にする」をクリックしてブラウザの許可を得ます（ブロックされている場合はブラウザ自体のサイト設定で変更する必要があり、アプリから再度プロンプトを出すことはできません）。許可されると2つのチェックボックスが表示されます：自分の申請が承認/却下されたら通知、そして — Manager/Accounting/MDのみ — 新しい申請が自分の承認待ちになったら通知。「テスト通知」ボタンで動作確認できます。タブが開いている間、アプリは<b>3分ごと</b>に更新をチェックします — 即時ではなく、タブ/ブラウザを完全に閉じている間は一切通知されません。'),
+        _faq('<b>📧 Email Notification Preferences</b> — pick your preferred language for notification emails (Thai/English/Japanese), and tick the box to also get an email when your own request is approved/rejected (requires an email address on your profile first, the checkbox stays disabled until you add one). This only controls the <i>extra email</i> — in-app notifications (bell icon, browser push) always work regardless of this setting.',
+             '<b>📧 การแจ้งเตือนทางอีเมลส่วนตัว</b> — เลือกภาษาที่ใช้ในอีเมลแจ้งเตือน (ไทย/อังกฤษ/ญี่ปุ่น) และติ๊กช่องถ้าอยากได้อีเมลแจ้งผลตอนคำขอของตัวเองอนุมัติ/ปฏิเสธด้วย (ต้องมีอีเมลในโปรไฟล์ก่อน ไม่งั้น checkbox จะกดไม่ได้) ตัวเลือกนี้ควบคุมแค่ <i>อีเมลเพิ่มเติม</i> เท่านั้น — การแจ้งเตือนในแอป (กระดิ่ง, push) ทำงานเสมอไม่ว่าจะตั้งค่านี้ยังไง',
+             '<b>📧 メール通知設定</b> — 通知メールの言語（タイ語/英語/日本語）を選択し、自分の申請が承認/却下された際にもメールを受け取りたい場合はチェックを入れます（先にプロフィールにメールアドレスが必要で、追加するまでチェックボックスは無効のままです）。これは<i>追加のメール</i>のみを制御します — アプリ内通知（ベルアイコン、プッシュ通知）はこの設定に関わらず常に機能します。')
+      ) },
+    { icon: '📨', q: _faq('(Managing Director/Accounting) How do I configure the pending-approval email digest?', '(Managing Director/Accounting) ตั้งค่าอีเมลแจ้งเตือนคำขอค้างอนุมัติยังไง?', '（Managing Director/Accounting）承認待ちダイジェストメールの設定はどうしますか？'),
+      a: _faq('This is a separate, admin-only feature from the personal notification preferences above — a scheduled digest email listing everything still awaiting approval, sent to whichever roles you choose, not just the requester themselves. Two sections in Settings:', 'นี่เป็นฟีเจอร์คนละตัวกับการแจ้งเตือนส่วนตัวด้านบน เป็น admin เท่านั้น — อีเมลสรุปคำขอที่ยังค้างอนุมัติทั้งหมดตามตารางเวลา ส่งให้ role ที่เลือกไว้ ไม่ใช่แค่คนยื่นคำขอเอง มี 2 ส่วนในหน้าตั้งค่า:', 'これは上記の個人通知設定とは別の、管理者専用の機能です — 承認待ちのすべての項目を一覧にした定期ダイジェストメールで、選択した役職に送信されます（申請者本人だけではありません）。設定には2つのセクションがあります：')
+      + ul(
+        _faq('<b>Email Configuration (SMTP)</b> — enter the sending Gmail address and an App Password (not your real Google password — generate one at Google Account → App Passwords with 2FA enabled first), then use "Test Email" to confirm it sends.',
+             '<b>ตั้งค่าอีเมล (SMTP)</b> — กรอกอีเมล Gmail ที่ใช้ส่งและ App Password (ไม่ใช่รหัสผ่าน Google จริง — สร้างได้ที่ Google Account → App Passwords หลังเปิด 2FA ก่อน) แล้วกด "ทดสอบส่งอีเมล" เพื่อเช็คว่าส่งได้',
+             '<b>メール設定（SMTP）</b> — 送信元のGmailアドレスとアプリパスワードを入力します（実際のGoogleパスワードではなく、先に2FAを有効にした上でGoogleアカウント→アプリパスワードで生成してください）。「テストメール送信」で送信できるか確認できます。'),
+        _faq('<b>Pending Approval Notifications</b> — toggle it on, tick which roles (Manager/MD/Accounting) receive the digest (each gets it in their own profile language), optionally add extra email addresses beyond those roles, pick which days of the week and what time it sends, and optionally only include items that have been pending for at least N days (to avoid noise for things just submitted).',
+             '<b>แจ้งเตือนคำขอค้างอนุมัติ</b> — เปิดสวิตช์ ติ๊กว่า role ไหนจะได้รับ (Manager/MD/Accounting — แต่ละคนได้รับตามภาษาที่ตั้งไว้ในโปรไฟล์ตัวเอง) เพิ่มอีเมลอื่นนอกเหนือจาก role พวกนี้ได้ เลือกวันและเวลาที่จะส่ง และเลือกได้ว่าจะส่งเฉพาะรายการที่ค้างมาแล้วอย่างน้อย N วัน (กันไม่ให้รก ถ้าเพิ่งยื่นมา)',
+             '<b>承認待ち通知</b> — トグルをオンにし、ダイジェストを受け取る役職（Manager/MD/Accounting — それぞれ自分のプロフィール言語で受信）にチェックを入れ、これらの役職以外に追加のメールアドレスを設定でき、送信する曜日と時刻を選択し、任意で少なくともN日間保留になっている項目のみを含めるよう設定できます（提出直後の項目でメールが埋まらないようにするため）。')
+      ) },
+    { icon: '🔑', q: _faq('How do I change my password?', 'เปลี่ยนรหัสผ่านยังไง?', 'パスワードはどう変更しますか？'),
+      a: _faq('Go to My Profile → click Edit → enter a new password in the password field → Save. (An admin can also reset it for you from the Employee list.)',
+              'ไปที่ "โปรไฟล์ของฉัน" → กด "แก้ไข" → กรอกรหัสผ่านใหม่ในช่องรหัสผ่าน → บันทึก (หรือให้ผู้ดูแลระบบตั้งรหัสใหม่ให้จากหน้าข้อมูลพนักงานก็ได้)',
+              '「マイプロフィール」に移動 → 「編集」をクリック → パスワード欄に新しいパスワードを入力 → 保存。（管理者が従業員一覧からリセットすることも可能です。）') },
+    { icon: '📲', q: _faq('How do I install this as an app on my phone/computer?', 'ติดตั้งเป็นแอปบนมือถือ/คอมพิวเตอร์ยังไง?', 'スマートフォンやパソコンにアプリとしてインストールするには？'),
+      a: _faq('Go to Settings — a "📲 Install App" section appears at the top if your device/browser supports it:', 'ไปที่หน้า "การตั้งค่าระบบ" — จะมี section "📲 ติดตั้งแอป" ขึ้นด้านบนสุด ถ้าเครื่อง/browser รองรับ:', '「設定」に移動してください — お使いの端末・ブラウザが対応していれば、上部に「📲 アプリをインストール」セクションが表示されます：')
+      + ul(
+        _faq('<b>Android / Windows / Mac (Chrome or Edge)</b>: click the "Install App" button and confirm in the dialog that appears. The app then opens in its own window, separate from the browser, and can receive push notifications.',
+             '<b>Android / Windows / Mac (Chrome หรือ Edge)</b>: กดปุ่ม "ติดตั้งแอป" แล้วกดยืนยันใน dialog ที่เด้งขึ้นมา แอปจะเปิดเป็นหน้าต่างแยกจาก browser และรับการแจ้งเตือน push ได้',
+             '<b>Android / Windows / Mac（ChromeまたはEdge）</b>：「アプリをインストール」ボタンをクリックし、表示されるダイアログで確認してください。アプリはブラウザとは別のウィンドウで開き、プッシュ通知を受け取れるようになります。')
+        + imgLang('install_android.png'),
+        _faq('The button only appears once the browser decides the app is installable — if you don\'t see it yet, use the site for a bit and check again. If nothing shows after that, use the browser\'s own menu (Chrome: ⋮ menu → "Install [app name]...", or the ⊕ icon in the address bar).',
+             'ปุ่มจะขึ้นก็ต่อเมื่อ browser ตัดสินว่าเว็บติดตั้งได้แล้วเท่านั้น — ถ้ายังไม่ขึ้น ให้ใช้งานเว็บสักพักแล้วเช็คใหม่ ถ้ายังไม่ขึ้นอีก ลองหาในเมนู browser เอง (Chrome: เมนู ⋮ → "ติดตั้ง [ชื่อแอป]..." หรือไอคอน ⊕ ที่แถบ URL)',
+             'ボタンはブラウザがインストール可能と判断した場合のみ表示されます — まだ表示されない場合は、しばらくサイトを使用してから再度確認してください。それでも表示されない場合は、ブラウザ自体のメニューをご確認ください（Chrome：⋮メニュー → 「[アプリ名]をインストール...」、またはアドレスバーの⊕アイコン）。'),
+        _faq('<b>iPhone / iPad (Safari)</b>: iOS does not allow any app to trigger installation automatically, so you install it manually — click the "Install App (iPhone/iPad)" button for step-by-step instructions:',
+             '<b>iPhone / iPad (Safari)</b>: iOS ไม่อนุญาตให้เว็บสั่งติดตั้งอัตโนมัติได้เลย ต้องทำเองตามขั้นตอน — กดปุ่ม "ติดตั้งแอป (iPhone/iPad)" จะมีวิธีทำทีละขั้นตอน:',
+             '<b>iPhone / iPad（Safari）</b>：iOSはアプリからの自動インストールを許可していないため、手動でのインストールが必要です — 「アプリをインストール（iPhone/iPad）」ボタンをクリックすると、手順が表示されます：')
+        + imgLang('install_ios.png'),
+        _faq('Must be opened in <b>Safari</b> specifically (not Chrome/other browsers on iOS — they can\'t install PWAs on iOS at all), and requires iOS 16.4+ to receive push notifications after installing.',
+             'ต้องเปิดด้วย <b>Safari</b> เท่านั้น (Chrome หรือ browser อื่นบน iOS ติดตั้งแบบนี้ไม่ได้เลย) และต้องใช้ iOS 16.4 ขึ้นไปถึงจะรับการแจ้งเตือน push ได้หลังติดตั้ง',
+             '<b>Safari</b>で開く必要があります（iOS上のChromeや他のブラウザではPWAをインストールできません）。インストール後にプッシュ通知を受け取るにはiOS 16.4以降が必要です。'),
+        _faq('<b>Firefox</b> (any platform) does not support app installation at all — no button will appear. Use Chrome, Edge, or Safari instead.',
+             '<b>Firefox</b> (ทุกแพลตฟอร์ม) ไม่รองรับการติดตั้งแอปเลย จะไม่มีปุ่มโผล่มาให้เลย ต้องใช้ Chrome, Edge หรือ Safari แทน',
+             '<b>Firefox</b>（すべてのプラットフォーム）はアプリのインストールに対応していないため、ボタンは表示されません。Chrome、Edge、またはSafariをご利用ください。')
+      ) },
+  ];
+}
+
+function _faqSectionHtml(title, items) {
+  const rows = items.map(it => `
+    <details class="faq-item" style="border-bottom:1px solid var(--border);padding:12px 0">
+      <summary style="cursor:pointer;font-weight:600;font-size:14px;list-style:none;display:flex;align-items:center;gap:10px">
+        <span style="font-size:18px">${it.icon}</span> ${it.q}
+      </summary>
+      <div style="margin:10px 0 0 30px;font-size:13px;color:var(--text-muted);line-height:1.6">${it.a}</div>
+    </details>`).join('');
+  return `
+    <div class="card mb-4">
+      <div class="card-header"><h3 style="margin:0">${title}</h3></div>
+      <div class="card-body" style="padding-top:4px">${rows}</div>
+    </div>`;
+}
+
+function renderFAQPage() {
+  const el = document.getElementById('faq-container');
+  if (!el) return;
+  // Rules & Calculations items reveal ฿ amounts -- only shown per-role for what's actually
+  // relevant/applicable to that role's own pay (MD/Accounting always see every item, since
+  // they administer payroll for everyone). How-To Guides has no such restriction (confirmed
+  // with user 2026-07-18) -- workflow instructions aren't sensitive the same way money figures are.
+  // 2026-08-02: some allowances (Phone, Personal Car) are eligible per-EMPLOYEE, not per-role --
+  // `it.roles` alone isn't a tight enough gate for those (most people in an "eligible" role still
+  // don't have the flag). `it.requiresFlag`, when set, additionally requires
+  // currentUser[it.requiresFlag] === true for non-full-access viewers.
+  const role = effectiveRole();
+  const isFullAccess = isMdAccountingView();
+  const rulesItems = isFullAccess ? _faqRulesItems() : _faqRulesItems().filter(it =>
+    it.roles.includes(role) && (!it.requiresFlag || currentUser?.[it.requiresFlag] === true)
+  );
+  el.innerHTML =
+    _faqSectionHtml(_faq('📐 Rules & Calculations', '📐 กฎและการคำนวณ', '📐 ルールと計算方法'), rulesItems) +
+    _faqSectionHtml(_faq('📖 How-To Guides', '📖 วิธีใช้งาน', '📖 使い方ガイド'), _faqHowToItems());
+}
+
+// ===== PAYROLL HISTORY =====
+async function renderPayrollHistory() {
+  await loadFinalizeData();
+  const tbody = document.getElementById('payroll-history-tbody');
+  if (!tbody) return;
+
+  // Collect unique period start dates from finalize keys. 2026-08-01: was a prefix blacklist
+  // (`!k.startsWith('md_')`) which would have let the new `snap_` keys add the literal string
+  // "snap" as a fake period the moment any period got a snapshot -- a positive shape test is
+  // immune to any future key prefix, not just the ones anticipated today.
+  const periodSet = new Set();
+  Object.keys(finalizeData).forEach(k => {
+    if (/^\d{8}_\d+$/.test(k)) periodSet.add(k.split('_')[0]);
+  });
+
+  if (periodSet.size === 0) {
+    tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:32px">${L('No payroll history yet','ยังไม่มีประวัติเงินเดือน')}</td></tr>`;
+    return;
+  }
+
+  // Sort newest first
+  const periods = [...periodSet].sort().reverse();
+  const fmtDate = str => `${str.slice(6)}/${str.slice(4,6)}/${str.slice(0,4)}`;
+
+  tbody.innerHTML = periods.map(dateStr => {
+    const y = parseInt(dateStr.slice(0,4)), mo = parseInt(dateStr.slice(4,6))-1, d = parseInt(dateStr.slice(6));
+    const start = new Date(y, mo, d);
+    // Period end = same logic as getPeriodBounds: find matching period by comparing start dates
+    let end = new Date(start); end.setDate(end.getDate() + 29); // fallback 30 days
+    // Try to find matching period bounds for nicer end date -- also resolves the real
+    // periodIndex (2026-08-01) so calcFinalizeEmployee() below reads/freezes the RIGHT period
+    // instead of always the currently-selected Finalize page period.
+    let periodIndex = null;
+    for (let i = 0; i < PAYSLIP_PERIOD_COUNT; i++) {
+      const { start: s, end: e } = getPeriodBounds(i);
+      const p2 = n => String(n).padStart(2,'0');
+      const sStr = `${s.getFullYear()}${p2(s.getMonth()+1)}${p2(s.getDate())}`;
+      if (sStr === dateStr) { end = e; periodIndex = i; break; }
+    }
+    const p2 = n => String(n).padStart(2,'0');
+    const periodLabel = `${fmtDate(dateStr)} — ${p2(end.getDate())}/${p2(end.getMonth()+1)}/${end.getFullYear()}`;
+
+    let totalGross = 0, totalDeduct = 0, totalNet = 0, headcount = 0, confirmedCount = 0;
+    // Same roster renderFinalize() shows: every currently-active employee, plus anyone no
+    // longer active who still has a saved record for this period (e.g. left mid-period but
+    // was paid). Previously this skipped any active employee with no finalizeData entry yet
+    // (`if (!saved) return`) — so headcount undercounted the moment even one employee hadn't
+    // been touched in Finalize Payroll, showing e.g. "0/4" while Finalize itself lists 9.
+    DATA_USERS.filter(u => isEmployeeRecord(u) && (u.active || finalizeData[getFinalizeKey(start, u.id)])).forEach(u => {
+      const fKey = getFinalizeKey(start, u.id);
+      const saved = finalizeData[fKey] || {};
+      headcount++;
+      if (saved.confirmed) confirmedCount++;
+      // 2026-08-01: explicit periodIndex (999 = "definitely not current" sentinel for the rare
+      // >36-month-old fallback case where the real index couldn't be resolved above) so an
+      // approved period reads its frozen snapshot. pit/bonus/manualAllowances from calc.fin.
+      const c = calcFinalizeEmployee(u, start, end, periodIndex != null ? periodIndex : 999);
+      const pit = c.fin.pit;
+      const bonus = c.fin.bonus;
+      const manualIncome  = c.fin.manualAllowances.reduce((s, ma) => s + (ma.amount || 0), 0);
+      const manualAdvance = c.fin.manualAllowances.reduce((s, ma) => s + (ma.advance || 0), 0);
+      totalGross  += c.grossIncome + bonus + manualIncome;
+      totalDeduct += c.ssf + c.pvd + pit + manualAdvance;
+      totalNet    += c.grossIncome + bonus + manualIncome - c.ssf - c.pvd - pit - manualAdvance;
+    });
+
+    const allConfirmed = headcount > 0 && confirmedCount === headcount;
+    const statusBadge = allConfirmed
+      ? `<span class="badge badge-success">✅ ${L('Finalized','ยืนยันแล้ว')}</span>`
+      : `<span class="badge badge-warning">${confirmedCount}/${headcount} ${L('confirmed','ยืนยัน')}</span>`;
+
+    return `<tr style="cursor:pointer" onclick="goToFinalizeForPeriod('${dateStr}')">
+      <td style="font-weight:600">${periodLabel}</td>
+      <td class="col-hide-mobile" style="text-align:right;color:#059669;font-weight:700">${totalGross.toLocaleString()}</td>
+      <td class="col-hide-mobile" style="text-align:right;color:#dc2626">${totalDeduct.toLocaleString()}</td>
+      <td style="text-align:right;color:var(--primary);font-weight:700">${totalNet.toLocaleString()}</td>
+      <td class="col-hide-mobile" style="text-align:center">${headcount} ${L('people','คน')}</td>
+      <td style="text-align:center">${statusBadge}</td>
+      <td style="text-align:center" class="no-print">
+        <button class="btn btn-sm btn-outline" onclick="event.stopPropagation();goToFinalizeForPeriod('${dateStr}')">
+          ${L('View','ดู')}
+        </button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+function goToFinalizeForPeriod(dateStr) {
+  // Find which period index matches this dateStr
+  for (let i = 0; i < 36; i++) {
+    const { start } = getPeriodBounds(i);
+    const p2 = n => String(n).padStart(2,'0');
+    const sStr = `${start.getFullYear()}${p2(start.getMonth()+1)}${p2(start.getDate())}`;
+    if (sStr === dateStr) {
+      finalizeSelectedPeriodIndex = i;
+      navigateTo('finalize');
+      return;
+    }
+  }
+  // Period is older than 36 months — just navigate to finalize
+  navigateTo('finalize');
+}
+
+async function renderFinalize() {
+  await loadFinalizeData();
+  syncFinalizePeriodDropdown();
+  // update i18n labels
+  const _fi = id => document.getElementById(id);
+  if (_fi('finalize-sub-lbl')) _fi('finalize-sub-lbl').textContent = t('fin_sub');
+  if (_fi('fin-th-emp'))    _fi('fin-th-emp').textContent    = t('emp_name');
+  if (_fi('fin-th-gross'))  _fi('fin-th-gross').textContent  = t('fin_gross');
+  if (_fi('fin-th-diligence')) _fi('fin-th-diligence').textContent = t('fin_diligence');
+  if (_fi('fin-th-tax'))    _fi('fin-th-tax').textContent    = t('fin_tax');
+  if (_fi('fin-th-net'))    _fi('fin-th-net').textContent    = t('fin_net');
+  if (_fi('fin-th-status')) _fi('fin-th-status').textContent = t('fin_status');
+  if (_fi('fin-th-md-approval')) _fi('fin-th-md-approval').textContent = L('Managing Director Approval Payroll', 'Managing Director อนุมัติ Payroll');
+  const { start, end } = getPeriodBounds(finalizeSelectedPeriodIndex);
+
+  // MD approval banner — approval is per-employee now, so this is a summary count, not a
+  // single period-level flag. Per-employee status shows in the table's MD Approval column below.
+  const employeesForCount = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active);
+  const approvedCount = employeesForCount.filter(u => !!(finalizeData[getMdApprovalKey(start, u.id)]?.approved)).length;
+  const totalForCount = employeesForCount.length;
+  const allApproved = totalForCount > 0 && approvedCount === totalForCount;
+  const bannerEl = document.getElementById('finalize-md-banner');
+  const isLocked = isPeriodLocked(start);
+  const isMdRole = isMdView();
+  if (bannerEl) {
+    if (allApproved) {
+      const lockBadge = isLocked
+        ? `<span class="badge badge-danger" style="font-size:12px;padding:5px 10px">🔒 ${L('Period Locked','ล็อคแล้ว')}</span>` : '';
+      const lockBtn = isMdRole
+        ? (isLocked
+            ? `<button class="btn btn-sm btn-outline" onclick="unlockPeriod()">🔓 ${L('Unlock Period','ยกเลิกล็อค')}</button>`
+            : `<button class="btn btn-sm btn-primary" onclick="lockPeriod()">🔒 ${L('Lock Period','ล็อครอบนี้')}</button>`)
+        : lockBadge;
+      bannerEl.innerHTML = `
+        <div class="alert alert-success" style="flex-direction:column;align-items:flex-start;gap:12px">
+          <div style="display:flex;align-items:center;gap:12px">
+            <span style="font-size:22px">✅</span>
+            <div>
+              <div style="font-weight:700;font-size:14px">${L('Payroll Approved — Ready to Send to Bank', 'Payroll อนุมัติแล้ว — พร้อมส่งข้อมูลธนาคารเพื่อจ่ายเงินเดือน')}</div>
+              <div style="margin-top:2px;opacity:0.85">${L('All employees approved by Managing Director', 'Managing Director อนุมัติครบทุกคนแล้ว')}</div>
+            </div>
+            ${isMdRole ? '' : lockBadge}
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            ${isMdRole ? lockBtn : ''}
+            <button class="btn btn-sm btn-primary" onclick="exportBankCSV()">🏦 ${L('Bangkok Bank CSV','Export ธนาคารกรุงเทพ')}</button>
+            <button class="btn btn-sm btn-outline" onclick="exportSSOCSV()">🛡️ Export ประกันสังคม</button>
+          </div>
+        </div>`;
+    } else {
+      bannerEl.innerHTML = `<div class="alert alert-info">
+         📝 ${currentLang === 'ja' ? `各従業員のPITを入力し✓確認をクリックしてください — Managing Director承認済み ${approvedCount}/${totalForCount}名` : L(`Enter PIT for each employee and click ✓ Confirm — Managing Director approved ${approvedCount}/${totalForCount} so far`, `กรอก PIT และกด ✓ ยืนยัน ทีละคน — ตอนนี้ Managing Director อนุมัติแล้ว ${approvedCount}/${totalForCount} คน`)}
+       </div>`;
+    }
+  }
+
+  // MD still draws a salary and needs PIT entered like everyone else — only attendance-related
+  // things (checkin, leave, PVD) are skipped for MD, not payroll itself.
+  const employees = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active);
+  const tbody = document.getElementById('finalize-tbody');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+  const _dark = document.documentElement.getAttribute('data-theme') === 'dark';
+  employees.forEach(u => {
+    // 2026-08-01: pit/bonus/diligencePaid/manualNet read from calc.fin (frozen once approved)
+    // instead of live `saved` -- defense in depth alongside the PUT /api/finalize lock.
+    const calc = calcFinalizeEmployee(u, start, end, finalizeSelectedPeriodIndex);
+    const key = getFinalizeKey(start, u.id);
+    const saved = finalizeData[key] || {};
+    const pit = calc.fin.pit;
+    const bonus = calc.fin.bonus;
+    const confirmed = saved.confirmed || false;
+    const mdApproved = !!(finalizeData[getMdApprovalKey(start, u.id)]?.approved);
+    const diligencePaid = calc.fin.diligencePaid;
+    // 2026-07-31: amount is now company-wide (Settings -> Allowance Rates), not per-employee.
+    const hasDiligence = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'diligence') && (APP_SETTINGS.allowances.diligence || 0) > 0;
+    const manualNet = calc.fin.manualAllowances.reduce((s, ma) => s + (ma.amount || 0) - (ma.advance || 0), 0);
+    const net = calc.grossIncome + bonus + manualNet - calc.ssf - calc.pvd - pit;
+    const tr = document.createElement('tr');
+    tr.id = `finalize-row-${u.id}`;
+    if (confirmed) tr.classList.add('finalize-row-confirmed');
+    tr.innerHTML = `
+      <td style="font-weight:600">
+        <div>${escapeHtml(u.name)}</div>
+        <div style="font-size:11px;color:var(--text-muted);font-weight:400">${escapeHtml(u.position || '')}</div>
+        <button class="btn btn-outline btn-sm" onclick="toggleManualAdj(${u.id},'${key}')" style="margin-top:6px;font-size:12px;color:#0891b2;border-color:#0891b2;padding:3px 10px;display:block">💰 ${L('Manual Adj.','ปรับค่าเบี้ยฯ')}${(saved.manualAllowances||[]).length > 0 ? ` (${(saved.manualAllowances||[]).length})` : ''}</button>
+      </td>
+      <td style="text-align:right;color:#059669;font-weight:700" id="finalize-gross-${u.id}">${calc.grossIncome.toLocaleString()}</td>
+      <td class="col-hide-mobile" style="text-align:right">
+        <input type="number" id="finalize-bonus-${u.id}" value="${bonus}" min="0"
+          ${confirmed ? 'disabled' : ''}
+          onchange="updateFinalizeBonus(${u.id},'${key}')"
+          oninput="updateFinalizeBonus(${u.id},'${key}')"
+          style="width:80px;text-align:right;padding:5px 8px;border:1.5px solid ${confirmed ? 'var(--border)' : (bonus > 0 ? '#10b981' : 'var(--border)')};border-radius:var(--radius-sm);font-size:12px;font-family:inherit;background:${confirmed ? (_dark?'#1e293b':'#f8fafc') : (bonus > 0 ? (_dark?'rgba(16,185,129,.12)':'#f0fdf4') : (_dark?'#0f172a':'white'))};color:#059669;transition:all var(--transition)">
+      </td>
+      <td class="col-hide-mobile" style="text-align:center">
+        ${hasDiligence
+          ? `<div class="toggle-switch ${diligencePaid ? 'on' : ''}" id="finalize-diligence-${u.id}" onclick="${confirmed ? '' : `toggleDiligencePaid(${u.id},'${key}')`}" style="margin:0 auto;${confirmed ? 'opacity:0.5;cursor:not-allowed' : ''}" title="${diligencePaid ? L('Paid this period', 'จ่ายรอบนี้') : L('Not paid this period', 'ไม่จ่ายรอบนี้')}"></div>`
+          : '<span style="color:#cbd5e1">—</span>'}
+      </td>
+      <td class="col-hide-mobile" style="text-align:right;color:#dc2626">${calc.ssf.toLocaleString()}</td>
+      <td class="col-hide-mobile" style="text-align:right;color:#dc2626">${calc.pvd.toLocaleString()}</td>
+      <td style="text-align:right">
+        <input type="number" id="finalize-pit-${u.id}" value="${pit}" min="0"
+          ${confirmed ? 'disabled' : ''}
+          onchange="updateFinalizeNet(${u.id},'${key}')"
+          oninput="updateFinalizeNet(${u.id},'${key}')"
+          style="width:90px;text-align:right;padding:6px 10px;border:1.5px solid ${confirmed ? 'var(--border)' : '#f59e0b'};border-radius:var(--radius-sm);font-size:13px;font-family:inherit;background:${confirmed ? (_dark?'#1e293b':'#f8fafc') : (_dark?'rgba(245,158,11,.12)':'#fffbeb')};color:#b45309;font-weight:700;transition:all var(--transition)">
+      </td>
+      <td style="text-align:right;font-weight:700;font-size:14px;color:var(--primary)" id="finalize-net-${u.id}">${net.toLocaleString()}</td>
+      <td style="text-align:center">
+        <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
+          <span id="finalize-status-${u.id}" class="badge ${confirmed ? 'badge-success' : 'badge-warning'}">
+            ${confirmed ? L('✅ Confirmed', '✅ ยืนยันแล้ว') : L('⏳ Pending', '⏳ รอยืนยัน')}
+          </span>
+          <button id="finalize-btn-${u.id}" onclick="${confirmed && mdApproved ? '' : `toggleFinalizeConfirm(${u.id},'${key}')`}"
+            class="btn btn-sm ${confirmed ? 'btn-outline' : 'btn-primary'}" style="min-width:72px${confirmed && mdApproved ? ';opacity:0.5;cursor:not-allowed' : ''}"
+            ${confirmed && mdApproved ? `title="${L('Managing Director has approved this payslip — ask Managing Director to revoke before editing', 'Managing Director อนุมัติแล้ว — ต้องให้ Managing Director ยกเลิกก่อนถึงจะแก้ไขได้')}"` : ''}>
+            ${confirmed ? L('✏️ Edit', '✏️ แก้ไข') : L('✓ Confirm', '✓ ยืนยัน')}
+          </button>
+        </div>
+      </td>
+      <td class="col-hide-mobile" style="text-align:center">
+        <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
+          <span class="badge ${mdApproved ? 'badge-success' : 'badge-gray'}" style="color:${mdApproved ? '' : '#94a3b8'}" title="${calc.frozen ? L('Numbers frozen at approval time — immune to later salary/Settings changes','ตัวเลขถูกล็อกไว้ ณ ตอนอนุมัติ — ไม่เปลี่ยนตามเงินเดือน/Settings ที่แก้ทีหลัง') : ''}">
+            ${mdApproved
+              ? L('✅ Approved', '✅ อนุมัติแล้ว')
+              // 2026-08-02: was always "รอ Managing Director" even before Accounting had entered
+              // PIT/confirmed -- misleading, since MD has nothing to act on yet at that point.
+              // Now reflects whichever step is actually next.
+              : (confirmed ? L('— Pending Managing Director', '— รอ Managing Director ยืนยัน') : L('— Pending Accounting', '— รอ Accounting กรอกภาษีและยืนยัน'))}${calc.frozen ? ' 🔒' : ''}
+          </span>
+          ${confirmed ? `<button class="btn btn-sm btn-ghost" onclick="printFinalizePayslip(${u.id})" title="${L('Print Payslip','พิมพ์ใบเงินเดือน')}">🖨️</button>
+          ${APP_SETTINGS.payslipEmailEnabled !== false ? `<button class="btn btn-sm btn-ghost" onclick="sendPayslipEmail(${u.id},${finalizeSelectedPeriodIndex})" title="${L('Email Payslip','ส่งสลิปทางอีเมล')}" style="color:#3b82f6">📧</button>` : ''}` : ''}
+        </div>
+      </td>`;
+    tbody.appendChild(tr);
+    // Manual Allowances sub-row (collapsed by default unless items exist)
+    const adjRow = document.createElement('tr');
+    adjRow.id = `finalize-adj-row-${u.id}`;
+    adjRow.style.display = (saved.manualAllowances||[]).length > 0 ? '' : 'none';
+    adjRow.innerHTML = `<td colspan="10" style="padding:0 8px 8px 8px">
+      <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:12px 14px">
+        <div style="font-size:12px;font-weight:700;color:#0c4a6e;margin-bottom:10px">💰 ${L('Manual Allowances','ค่าเบี้ยเลี้ยงพิเศษ')} — ${escapeHtml(u.name)}</div>
+        <div id="manual-adj-list-${u.id}"></div>
+        <div id="manual-adj-form-${u.id}" style="display:${confirmed ? 'none' : ''}">
+          <div style="font-size:11px;color:#0c4a6e;margin-top:8px">${L('📌 Amount adds to this pay period\'s gross income. Advance subtracts from net pay this period (e.g. repaying a cash advance) — they move the payslip in opposite directions.', '📌 จำนวนเงิน จะบวกเข้ารายได้รวมของรอบนี้ ส่วนเบิกล่วงหน้า จะหักออกจากยอดสุทธิรอบนี้ (เช่น หักคืนเงินที่เบิกไปก่อน) — สองช่องนี้มีผลตรงข้ามกันในสลิปเงินเดือน')}</div>
+          <div style="display:flex;gap:6px;align-items:center;margin-top:10px;flex-wrap:wrap">
+            <input id="manual-adj-type-${u.id}" type="text" maxlength="100" list="manual-adj-type-suggestions-${u.id}" placeholder="${L('Category','หมวดหมู่')}" style="padding:6px 10px;border:1px solid #bae6fd;border-radius:6px;font-size:12px;background:#fff;min-width:180px">
+            <datalist id="manual-adj-type-suggestions-${u.id}">
+              ${(APP_SETTINGS.allowanceTypes||[]).map(t => `<option value="${escapeHtml(t)}">`).join('')}
+            </datalist>
+            <input id="manual-adj-amount-${u.id}" type="number" min="0" max="10000000" placeholder="${L('Amount ฿','จำนวนเงิน ฿')}" style="width:110px;padding:6px 10px;border:1px solid #bae6fd;border-radius:6px;font-size:12px">
+            <input id="manual-adj-advance-${u.id}" type="number" min="0" max="10000000" placeholder="${L('Advance ฿','เบิกล่วงหน้า ฿')}" style="width:120px;padding:6px 10px;border:1px solid #bae6fd;border-radius:6px;font-size:12px">
+            <button type="button" class="btn btn-primary btn-sm" onclick="addManualAdj(${u.id},'${key}')">+ ${L('Add','เพิ่ม')}</button>
+          </div>
+        </div>
+      </div>
+    </td>`;
+    tbody.appendChild(adjRow);
+    renderManualAdjList(u.id, key);
+  });
+}
+
+function _getFinalizeManualNet(key) {
+  const mas = finalizeData[key]?.manualAllowances || [];
+  return mas.reduce((s, ma) => s + (ma.amount || 0) - (ma.advance || 0), 0);
+}
+
+function toggleManualAdj(userId, key) {
+  const row = document.getElementById(`finalize-adj-row-${userId}`);
+  if (!row) return;
+  row.style.display = row.style.display === 'none' ? '' : 'none';
+}
+
+function renderManualAdjList(userId, key) {
+  const list = document.getElementById(`manual-adj-list-${userId}`);
+  if (!list) return;
+  const mas = finalizeData[key]?.manualAllowances || [];
+  const confirmed = finalizeData[key]?.confirmed || false;
+  if (mas.length === 0) {
+    list.innerHTML = `<div style="color:#94a3b8;font-size:12px;padding:4px 0">${L('No manual allowances yet','ยังไม่มีรายการ')}</div>`;
+    return;
+  }
+  list.innerHTML = mas.map((ma, i) => `
+    <div id="manual-adj-item-${userId}-${i}" style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid #e0f2fe;font-size:12px">
+      <span style="flex:1;font-weight:600;color:#0c4a6e">${escapeHtml(ma.type)}</span>
+      ${(ma.amount||0) > 0 ? `<span style="color:#059669">+฿${(ma.amount||0).toLocaleString()}</span>` : ''}
+      ${(ma.advance||0) > 0 ? `<span style="color:#dc2626">เบิกล่วงหน้า -฿${(ma.advance||0).toLocaleString()}</span>` : ''}
+      <span style="color:#0891b2;font-weight:700">= ฿${((ma.amount||0)-(ma.advance||0)).toLocaleString()}</span>
+      ${confirmed ? '' : `
+        <button type="button" class="btn btn-ghost btn-sm" onclick="startManualAdjEdit(${userId},'${key}',${i})" style="color:#0891b2;padding:2px 6px" title="${L('Edit','แก้ไข')}">✏️</button>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="removeManualAdj(${userId},'${key}',${i})" style="color:#ef4444;padding:2px 6px">✕</button>`}
+    </div>`).join('');
+}
+
+function startManualAdjEdit(userId, key, idx) {
+  const row = document.getElementById(`manual-adj-item-${userId}-${idx}`);
+  if (!row) return;
+  const ma = (finalizeData[key]?.manualAllowances || [])[idx];
+  if (!ma) return;
+  row.innerHTML = `
+    <span style="flex:1;font-weight:600;color:#0c4a6e;font-size:12px">${escapeHtml(ma.type)}</span>
+    <input id="manual-edit-amt-${userId}-${idx}" type="number" min="0" value="${ma.amount||0}" style="width:100px;padding:4px 8px;border:1px solid #0891b2;border-radius:6px;font-size:12px">
+    <input id="manual-edit-adv-${userId}-${idx}" type="number" min="0" value="${ma.advance||0}" placeholder="${L('Advance','เบิกล่วงหน้า')}" style="width:110px;padding:4px 8px;border:1px solid #bae6fd;border-radius:6px;font-size:12px">
+    <button type="button" class="btn btn-primary btn-sm" onclick="saveManualAdjEdit(${userId},'${key}',${idx})" style="font-size:12px;padding:3px 10px">✓</button>
+    <button type="button" class="btn btn-ghost btn-sm" onclick="renderManualAdjList(${userId},'${key}')" style="color:#64748b;padding:3px 8px">✕</button>`;
+  row.querySelector(`#manual-edit-amt-${userId}-${idx}`)?.focus();
+}
+
+// 2026-08-01: the UI already disables these inputs once a row is confirmed+approved (see
+// renderFinalize()), but that's DOM state only -- defeatable by a stale render in another
+// tab/session (the FINALIZE_UPDATED broadcast doesn't force a re-render). This is the real
+// client-side lock, matching the server-side one in PUT /api/finalize (which would reject the
+// write anyway, but failing fast here avoids a round-trip + a confusing partial DOM update).
+// `key` is the plain finalize key (YYYYMMDD_userId); the matching md approval key is always
+// `md_` + that same string (see getMdApprovalKey()/getFinalizeKey()).
+function blockIfMdApproved(key) {
+  if (finalizeData[`md_${key}`]?.approved === true) {
+    showToast(L('⚠️ Managing Director has approved this payslip — ask Managing Director to revoke before editing', '⚠️ Managing Director อนุมัติแล้ว — ต้องให้ Managing Director ยกเลิกก่อนถึงจะแก้ไขได้'), 'warning');
+    return true;
+  }
+  return false;
+}
+
+async function saveManualAdjEdit(userId, key, idx) {
+  if (blockIfObserver()) return;
+  if (blockIfMdApproved(key)) return;
+  const amtEl = document.getElementById(`manual-edit-amt-${userId}-${idx}`);
+  const advEl = document.getElementById(`manual-edit-adv-${userId}-${idx}`);
+  const amount = parseInt(amtEl?.value) || 0;
+  const advance = parseInt(advEl?.value) || 0;
+  // FIX 2026-08-13 (re-audit, finding 2-1): the `<=0 && <=0` check let a NEGATIVE amount/advance
+  // through as long as the other field was positive (e.g. amount:-5000, advance:100) -- reachable
+  // through the normal form since `min="0"` on the <input> is browser-hint only, never enforced
+  // here. A negative line item then diverged the web payslip's total (includes it) from the Excel
+  // export's total (filters to `> 0`, silently dropping the negative line entirely) -- two official
+  // payroll documents disagreeing on official pay figures.
+  // FIX 2026-08-13 (re-audit, finding F3-A): mirror the server's 10,000,000 cap client-side too --
+  // PUT /api/finalize now rejects an out-of-range amount/advance, and saveFinalizeData() (below)
+  // was ALSO just fixed to stop swallowing that rejection silently, but catching it here means a
+  // typo (an extra zero) never reaches a failed save at all.
+  if (amount < 0 || advance < 0 || amount > 10000000 || advance > 10000000 || (amount <= 0 && advance <= 0)) { showToast(L('Amount and Advance must be between 0 and 10,000,000, and at least one must be greater than 0','จำนวนเงินและเบิกล่วงหน้าต้องอยู่ระหว่าง 0 ถึง 10,000,000 และต้องมากกว่า 0 อย่างน้อย 1 ช่อง'), 'warning'); return; }
+  const saved = finalizeData[key] || {};
+  const mas = [...(saved.manualAllowances || [])];
+  mas[idx] = { ...mas[idx], amount, advance };
+  finalizeData[key] = { ...saved, manualAllowances: mas };
+  refreshUnsavedAutoPit(userId, key);
+  refreshFinalizeNetDisplay(userId, key);
+  renderManualAdjList(userId, key);
+  try { await saveFinalizeData(key); } catch(e) { showToast(L('❌ Save failed: ','❌ บันทึกไม่สำเร็จ: ') + e.message, 'danger'); }
+}
+
+async function addManualAdj(userId, key) {
+  if (blockIfObserver()) return;
+  if (blockIfMdApproved(key)) return;
+  const typeEl = document.getElementById(`manual-adj-type-${userId}`);
+  const amtEl = document.getElementById(`manual-adj-amount-${userId}`);
+  const advEl = document.getElementById(`manual-adj-advance-${userId}`);
+  if (!typeEl || !amtEl) return;
+  const type = typeEl.value.trim();
+  const amount = parseInt(amtEl.value) || 0;
+  const advance = parseInt(advEl?.value) || 0;
+  // 2026-08-12: was `amount <= 0` unconditionally, which blocked a deduction-only line item (e.g.
+  // repaying a cash advance with no offsetting addition) -- valid as long as EITHER field has a
+  // real value.
+  // FIX 2026-08-13 (re-audit, finding 2-1): same negative-value hole as saveManualAdjEdit above.
+  // FIX 2026-08-13 (re-audit, finding F3-A): same 10,000,000 cap + type length cap as the server.
+  if (!type || type.length > 100 || amount < 0 || advance < 0 || amount > 10000000 || advance > 10000000 || (amount <= 0 && advance <= 0)) { showToast(L('Enter a category (100 characters or fewer), and an amount/advance between 0 and 10,000,000 (at least one greater than 0)','กรุณากรอกหมวดหมู่ (ไม่เกิน 100 ตัวอักษร) และจำนวนเงิน/เบิกล่วงหน้าระหว่าง 0 ถึง 10,000,000 (อย่างน้อย 1 ช่องต้องมากกว่า 0)'), 'warning'); return; }
+  const saved = finalizeData[key] || {};
+  const mas = [...(saved.manualAllowances || []), { type, amount, advance }];
+  finalizeData[key] = { ...saved, manualAllowances: mas };
+  amtEl.value = '';
+  if (advEl) advEl.value = '';
+  refreshUnsavedAutoPit(userId, key);
+  refreshFinalizeNetDisplay(userId, key);
+  renderManualAdjList(userId, key);
+  // Update badge count on button
+  const toggleBtn = document.querySelector(`#finalize-row-${userId} button[onclick*="toggleManualAdj"]`);
+  if (toggleBtn) toggleBtn.textContent = `💰 ${L('Manual Adj.','ปรับค่าเบี้ยฯ')} (${mas.length})`;
+  try { await saveFinalizeData(key); } catch(e) { showToast(L('❌ Save failed: ','❌ บันทึกไม่สำเร็จ: ') + e.message, 'danger'); }
+}
+
+async function removeManualAdj(userId, key, idx) {
+  if (blockIfObserver()) return;
+  if (blockIfMdApproved(key)) return;
+  const saved = finalizeData[key] || {};
+  const mas = (saved.manualAllowances || []).filter((_, i) => i !== idx);
+  finalizeData[key] = { ...saved, manualAllowances: mas };
+  refreshUnsavedAutoPit(userId, key);
+  refreshFinalizeNetDisplay(userId, key);
+  renderManualAdjList(userId, key);
+  const toggleBtn = document.querySelector(`#finalize-row-${userId} button[onclick*="toggleManualAdj"]`);
+  if (toggleBtn) toggleBtn.textContent = mas.length > 0 ? `💰 ${L('Manual Adj.','ปรับค่าเบี้ยฯ')} (${mas.length})` : `💰 ${L('Manual Adj.','ปรับค่าเบี้ยฯ')}`;
+  try { await saveFinalizeData(key); } catch(e) { showToast(L('❌ Save failed: ','❌ บันทึกไม่สำเร็จ: ') + e.message, 'danger'); }
+}
+
+// Keep the Finalize PIT input aligned with autoPit until Accounting types a value or Confirm.
+// Do not write `pit` into finalizeData here — that would lock the estimate and stop later
+// bonus / manual / diligence changes from refreshing it.
+function refreshUnsavedAutoPit(userId, key) {
+  const saved = finalizeData[key] || {};
+  if (saved.confirmed || saved.pit !== undefined) return;
+  const u = DATA_USERS.find(x => x.id === userId);
+  if (!u) return;
+  const { start, end } = getPeriodBounds(finalizeSelectedPeriodIndex);
+  const calc = calcFinalizeEmployee(u, start, end, finalizeSelectedPeriodIndex);
+  const pitInput = document.getElementById(`finalize-pit-${userId}`);
+  if (pitInput && !pitInput.disabled) pitInput.value = calc.autoPit;
+}
+
+function refreshFinalizeNetDisplay(userId, key) {
+  const pitInput = document.getElementById(`finalize-pit-${userId}`);
+  const netEl = document.getElementById(`finalize-net-${userId}`);
+  if (!netEl) return;
+  const u = DATA_USERS.find(x => x.id === userId);
+  if (!u) return;
+  const { start, end } = getPeriodBounds(finalizeSelectedPeriodIndex);
+  const calc = calcFinalizeEmployee(u, start, end, finalizeSelectedPeriodIndex);
+  const pit = pitInput ? (parseInt(pitInput.value) || 0) : (finalizeData[key]?.pit ?? calc.autoPit);
+  const bonusInput = document.getElementById(`finalize-bonus-${userId}`);
+  const bonus = bonusInput ? (parseInt(bonusInput.value) || 0) : (finalizeData[key]?.bonus || 0);
+  netEl.textContent = (calc.grossIncome + bonus + _getFinalizeManualNet(key) - calc.ssf - calc.pvd - pit).toLocaleString();
+}
+
+function updateFinalizeNet(userId, key) {
+  if (blockIfObserver()) return;
+  if (blockIfMdApproved(key)) return;
+  const pitInput = document.getElementById(`finalize-pit-${userId}`);
+  if (!pitInput) return;
+  const pit = parseInt(pitInput.value) || 0;
+  // User edited the PIT field — persist the override in memory until Confirm.
+  finalizeData[key] = { ...(finalizeData[key] || {}), pit };
+  refreshFinalizeNetDisplay(userId, key);
+}
+
+function updateFinalizeBonus(userId, key) {
+  if (blockIfObserver()) return;
+  if (blockIfMdApproved(key)) return;
+  const bonusInput = document.getElementById(`finalize-bonus-${userId}`);
+  const netEl = document.getElementById(`finalize-net-${userId}`);
+  if (!bonusInput || !netEl) return;
+  const bonus = parseInt(bonusInput.value) || 0;
+  finalizeData[key] = { ...(finalizeData[key] || {}), bonus };
+  bonusInput.style.border = `1.5px solid ${bonus > 0 ? '#10b981' : 'var(--border)'}`;
+  bonusInput.style.background = bonus > 0 ? (document.documentElement.getAttribute('data-theme')==='dark'?'rgba(16,185,129,.12)':'#f0fdf4') : (document.documentElement.getAttribute('data-theme')==='dark'?'#0f172a':'white');
+  refreshUnsavedAutoPit(userId, key);
+  refreshFinalizeNetDisplay(userId, key);
+}
+
+// Accounting toggles whether a Driver's diligence allowance is paid for THIS pay period only
+// (e.g. missed the criteria that month) — locked once the row is confirmed, same as PIT.
+// Updates the DOM directly (like updateFinalizeNet() does for PIT) instead of a full
+// renderFinalize() reload — a full reload re-fetches finalizeData from the backend, which is an
+// unnecessary round trip that can visually "undo" the toggle if that GET is slow or hiccups.
+async function toggleDiligencePaid(userId, key) {
+  if (blockIfObserver()) return;
+  if (isPayrollLockDisabled()) { showToast(L('System account: Finalize edits are view-only', 'บัญชีระบบ: แก้ Finalize ไม่ได้'), 'warning'); return; }
+  if (blockIfMdApproved(key)) return;
+  const saved = finalizeData[key] || {};
+  if (saved.confirmed) return;
+  const newPaid = !(saved.diligencePaid !== false);
+  finalizeData[key] = { ...saved, diligencePaid: newPaid };
+
+  const toggleEl = document.getElementById(`finalize-diligence-${userId}`);
+  if (toggleEl) {
+    toggleEl.classList.toggle('on', newPaid);
+    toggleEl.title = newPaid ? L('Paid this period', 'จ่ายรอบนี้') : L('Not paid this period', 'ไม่จ่ายรอบนี้');
+  }
+
+  const u = DATA_USERS.find(x => x.id === userId);
+  const { start, end } = getPeriodBounds(finalizeSelectedPeriodIndex);
+  if (u) {
+    const calc = calcFinalizeEmployee(u, start, end, finalizeSelectedPeriodIndex);
+    const grossEl = document.getElementById(`finalize-gross-${userId}`);
+    if (grossEl) grossEl.textContent = calc.grossIncome.toLocaleString();
+    refreshUnsavedAutoPit(userId, key);
+    refreshFinalizeNetDisplay(userId, key);
+  }
+
+  try {
+    await saveFinalizeData(key);
+  } catch(e) {
+    showToast(L('❌ Could not save: ', '❌ ไม่สามารถบันทึกได้: ') + e.message, 'danger');
+  }
+}
+
+async function toggleFinalizeConfirm(userId, key) {
+  if (isPayrollLockDisabled()) { showToast(L('System account: Finalize confirm is view-only', 'บัญชีระบบ: ยืนยัน Finalize ไม่ได้'), 'warning'); return; }
+  if (blockIfObserver()) return;
+  const { start: _fcStart } = getPeriodBounds(finalizeSelectedPeriodIndex);
+  if (isPeriodLocked(_fcStart)) { showToast(currentLang === 'ja' ? '⚠️ この期間はロックされています — ロック解除してから編集してください' : L('⚠️ Period is locked — unlock before editing', '⚠️ รอบนี้ถูกล็อคแล้ว — ปลดล็อคก่อนจึงจะแก้ไขได้'), 'warning'); return; }
+  const pitInput = document.getElementById(`finalize-pit-${userId}`);
+  const btn = document.getElementById(`finalize-btn-${userId}`);
+  const statusBadge = document.getElementById(`finalize-status-${userId}`);
+  const row = document.getElementById(`finalize-row-${userId}`);
+  const diligenceToggle = document.getElementById(`finalize-diligence-${userId}`);
+  if (!pitInput || !btn) return;
+  const saved = finalizeData[key] || {};
+  if (saved.confirmed) {
+    // MD approved this employee individually — Accounting can't edit until MD revokes it.
+    const { start } = getPeriodBounds(finalizeSelectedPeriodIndex);
+    if (finalizeData[getMdApprovalKey(start, userId)]?.approved) {
+      showToast(L('⚠️ Managing Director has approved this payslip — ask Managing Director to revoke before editing', '⚠️ Managing Director อนุมัติแล้ว — ต้องให้ Managing Director ยกเลิกก่อนถึงจะแก้ไขได้'), 'warning');
+      return;
+    }
+    // Bug fix (2026-07-04): this used to replace the whole record with { pit, confirmed:false },
+    // silently dropping diligencePaid (and any other field) that was set before confirming.
+    // Always spread ...saved so unrelated fields survive.
+    finalizeData[key] = { ...saved, confirmed: false };
+    pitInput.disabled = false;
+    pitInput.style.border = '1.5px solid #f59e0b';
+    pitInput.style.background = document.documentElement.getAttribute('data-theme')==='dark' ? 'rgba(245,158,11,.12)' : '#fffbeb';
+    const bonusInputU = document.getElementById(`finalize-bonus-${userId}`);
+    if (bonusInputU) { bonusInputU.disabled = false; bonusInputU.style.border = '1.5px solid var(--border)'; bonusInputU.style.background = document.documentElement.getAttribute('data-theme')==='dark' ? '#0f172a' : 'white'; }
+    btn.textContent = t('btn_confirm');
+    btn.className = 'btn btn-sm btn-primary';
+    if (statusBadge) { statusBadge.textContent = L('⏳ Pending', '⏳ รอยืนยัน'); statusBadge.className = 'badge badge-warning'; }
+    if (row) row.classList.remove('finalize-row-confirmed');
+    if (diligenceToggle) { diligenceToggle.onclick = () => toggleDiligencePaid(userId, key); diligenceToggle.style.opacity = ''; diligenceToggle.style.cursor = ''; }
+    const adjFormU = document.getElementById(`manual-adj-form-${userId}`);
+    if (adjFormU) adjFormU.style.display = '';
+    renderManualAdjList(userId, key);
+  } else {
+    const pit = parseInt(pitInput.value) || 0;
+    const bonusInput = document.getElementById(`finalize-bonus-${userId}`);
+    const bonus = bonusInput ? (parseInt(bonusInput.value) || 0) : (saved.bonus || 0);
+    if (bonusInput) { bonusInput.disabled = true; bonusInput.style.border = '1.5px solid var(--border)'; bonusInput.style.background = document.documentElement.getAttribute('data-theme')==='dark' ? '#1e293b' : '#f8fafc'; }
+    finalizeData[key] = { ...saved, pit, bonus, confirmed: true };
+    pitInput.disabled = true;
+    pitInput.style.border = '1.5px solid var(--border)';
+    pitInput.style.background = document.documentElement.getAttribute('data-theme')==='dark' ? '#1e293b' : '#f8fafc';
+    btn.textContent = t('btn_edit');
+    btn.className = 'btn btn-sm btn-outline';
+    if (statusBadge) { statusBadge.textContent = L('✅ Confirmed', '✅ ยืนยันแล้ว'); statusBadge.className = 'badge badge-success'; }
+    if (row) row.classList.add('finalize-row-confirmed');
+    if (diligenceToggle) { diligenceToggle.onclick = null; diligenceToggle.style.opacity = '0.5'; diligenceToggle.style.cursor = 'not-allowed'; }
+    const adjFormC = document.getElementById(`manual-adj-form-${userId}`);
+    if (adjFormC) adjFormC.style.display = 'none';
+    renderManualAdjList(userId, key);
+    const uName = DATA_USERS.find(u=>u.id===userId)?.name || '';
+    showToast(`✅ ${currentLang==='en'?'Confirmed':'ยืนยัน'} ${uName}`, 'success');
+  }
+  try {
+    await saveFinalizeData(key);
+  } catch(e) {
+    showToast(L('❌ Could not save: ', '❌ ไม่สามารถบันทึกได้: ') + e.message, 'danger');
+  }
+}

@@ -1,0 +1,35 @@
+# Dependencies
+**/node_modules/
+
+# Live server data (PII, secrets, runtime state)
+attendance-server/backend/data/
+!attendance-server/backend/data/.gitkeep
+
+# Backup snapshots
+**/*.bak*
+**/_backup_*/
+**/__pycache__/
+attendance/.git.bak-attendance-nested/
+
+# Local tooling / tunnel binaries
+attendance-server/cloudflared/
+attendance-server/ngrok/
+attendance-server/.npm/
+attendance-server/.rnd
+
+# Logs and debug
+*.log
+debug-*.log
+.cursor/debug-*.log
+attendance-server/watchdog.log
+
+# Frontend local dev artifacts
+attendance/.claude/
+attendance/.playwright-mcp/
+attendance/_backup_*/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo

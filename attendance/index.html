@@ -1,0 +1,2388 @@
+﻿<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Time Attendance — Tozai Boeki Kaisha (Thailand) Ltd.</title>
+  <link rel="icon" type="image/jpeg" href="images/logo-short.jpg">
+  <link rel="apple-touch-icon" href="images/logo-short.jpg">
+  <link rel="manifest" href="manifest.json">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Attendance">
+  <meta name="theme-color" content="#2563eb">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css?v=20260823c">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css">
+</head>
+<body>
+
+<!-- ===== LOGIN PAGE ===== -->
+<div id="login-page" class="login-page">
+  <div class="login-bg-pattern"></div>
+  <div class="login-card">
+    <div class="login-logo">
+      <img src="images/logo-long.jpg" alt="Tozai Boeki Kaisha" class="login-logo-img">
+      <p data-en="Time Attendance System">ระบบบันทึกเวลาทำงาน — Time Attendance System</p>
+    </div>
+
+    <div class="login-form">
+      <h2 data-en="Sign In">เข้าสู่ระบบ</h2>
+      <p class="subtitle" data-en="Please enter your username and password">กรุณาใส่ชื่อผู้ใช้และรหัสผ่านของคุณ</p>
+
+      <div id="login-error" class="alert alert-warning" style="display:none">
+        ⚠️ <span></span>
+      </div>
+
+      <form id="login-form" onsubmit="login(); return false;" action="#">
+      <div class="form-group">
+        <label data-en="Username">ชื่อผู้ใช้ (Username)</label>
+        <div class="input-wrap">
+          <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></span>
+          <input type="text" id="username" placeholder="กรอกชื่อผู้ใช้" data-en-ph="Enter username" autocomplete="username">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label data-en="Password">รหัสผ่าน (Password)</label>
+        <div class="input-wrap">
+          <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span>
+          <input type="password" id="password" placeholder="กรอกรหัสผ่าน" data-en-ph="Enter password" autocomplete="current-password">
+        </div>
+      </div>
+
+      <div class="form-group" style="display:flex;align-items:center;gap:8px;margin-top:-6px">
+        <input type="checkbox" id="remember-me" style="width:16px;height:16px;cursor:pointer;flex-shrink:0">
+        <label for="remember-me" style="font-size:13px;font-weight:400;cursor:pointer;margin:0" data-en="Remember me for 30 days">จำฉันไว้ 30 วัน</label>
+      </div>
+
+      <button type="submit" class="btn-login" data-en="Sign In">
+        เข้าสู่ระบบ
+      </button>
+      </form>
+    </div>
+
+    <div class="login-footer">
+      <p data-en="Test accounts: admin.md / manager / accounting / user01 (password: 1234)">สำหรับทดสอบ: admin.md / manager / accounting / user01 (รหัสผ่าน: 1234)</p>
+      <p style="margin-top:6px">Powered by Hikvision DS-K1T342MFX + Synology DS923+</p>
+    </div>
+  </div>
+</div>
+
+<!-- ===== MAIN APP ===== -->
+<div id="app" class="app-layout">
+
+  <!-- SIDEBAR OVERLAY (mobile) -->
+  <div id="sidebar-overlay" class="sidebar-overlay" onclick="closeSidebar()"></div>
+
+  <!-- SIDEBAR -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <div class="sidebar-brand">
+        <img src="images/logo-long.png" alt="Tozai Boeki" class="sidebar-logo-img">
+      </div>
+    </div>
+
+    <div class="sidebar-user">
+      <div class="user-avatar" id="user-avatar">T</div>
+      <div class="user-info">
+        <h3 id="sidebar-name">Loading...</h3>
+        <p id="sidebar-position">—</p>
+        <span id="sidebar-role-badge" class="role-badge role-user">Staff</span>
+      </div>
+    </div>
+
+    <nav class="sidebar-nav">
+      <div class="nav-section">หน้าหลัก</div>
+      <div class="nav-item nav-no-md active" data-page="checkin" onclick="navigateTo('checkin')">
+        <span class="icon">⏰</span> ลงเวลาทำงาน
+      </div>
+      <div class="nav-item" data-page="dashboard" onclick="navigateTo('dashboard')">
+        <span class="icon">📊</span> แดชบอร์ด
+      </div>
+
+      <div class="nav-section">ข้อมูลส่วนตัว</div>
+      <div class="nav-item" data-page="profile" onclick="navigateTo('profile')">
+        <span class="icon">🙍</span> โปรไฟล์ของฉัน
+      </div>
+      <div class="nav-item" data-page="attendance" onclick="navigateTo('attendance')">
+        <span class="icon">📅</span> ตารางเวลาทำงาน
+      </div>
+      <div class="nav-item" data-page="leave" onclick="navigateTo('leave')">
+        <span class="icon">🏖️</span> วันลาของฉัน
+      </div>
+      <div class="nav-item nav-staff-only" data-page="my-requests" onclick="navigateTo('my-requests')">
+        <span class="icon">📋</span> ตรวจสอบสถานะคำขอ
+        <span id="my-requests-badge" style="display:none;background:#ef4444;color:#fff;font-size:10px;font-weight:800;min-width:18px;height:18px;padding:0 5px;border-radius:9px;margin-left:auto;align-items:center;justify-content:center;line-height:1"></span>
+      </div>
+
+      <div class="nav-section nav-manager">จัดการพนักงาน</div>
+      <div class="nav-item nav-manager" data-page="employees" onclick="navigateTo('employees')">
+        <span class="icon">👥</span> ข้อมูลพนักงาน
+      </div>
+      <div class="nav-item nav-approval" data-page="approval" onclick="navigateTo('approval')">
+        <span class="icon">📋</span> รายการคำขอ
+        <span id="approval-badge" class="nav-badge" style="display:none"></span>
+      </div>
+
+      <div class="nav-section nav-admin">รายงาน & การเงิน</div>
+      <div class="nav-item nav-admin nav-payslip" data-page="payslip" onclick="navigateTo('payslip')">
+        <span class="icon">💵</span> ใบเงินเดือน
+      </div>
+      <div class="nav-item nav-accounting-only" data-page="finalize" onclick="navigateTo('finalize')">
+        <span class="icon">✅</span> Finalize Payroll
+      </div>
+      <div class="nav-item nav-admin" data-page="reports" onclick="navigateTo('reports')">
+        <span class="icon">📈</span> รายงานสรุปวันทำงาน
+      </div>
+
+      <div class="nav-item nav-accounting-only" data-page="tawi50" onclick="navigateTo('tawi50')">
+        <span class="icon">📄</span> <span data-en="Withholding Tax">50 ทวิ</span>
+      </div>
+      <div class="nav-item nav-accounting-only" data-page="archive" onclick="navigateTo('archive')">
+        <span class="icon">🗂️</span> <span data-en="Former Employees">อดีตพนักงาน</span>
+      </div>
+
+      <div class="nav-section" data-en="System">ระบบ</div>
+      <div class="nav-item" data-page="settings" onclick="navigateTo('settings')">
+        <span class="icon">⚙️</span> การตั้งค่าระบบ
+      </div>
+    </nav>
+
+    <div class="sidebar-footer">
+      <button id="dark-mode-toggle" onclick="toggleDarkMode()" style="display:flex;align-items:center;gap:10px;width:100%;padding:10px 14px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.12);border-radius:var(--radius-sm);color:rgba(255,255,255,0.75);cursor:pointer;font-size:13px;font-family:inherit;margin-bottom:8px;transition:all 180ms">
+        <span id="dark-mode-icon">🌙</span> <span id="dark-mode-label">Dark Mode</span>
+      </button>
+      <button class="btn-logout" onclick="logout()">
+        🚪 ออกจากระบบ
+      </button>
+    </div>
+  </aside>
+
+  <!-- MAIN CONTENT -->
+  <div class="main-content">
+
+    <!-- TOPBAR -->
+    <header class="topbar">
+      <div class="topbar-left">
+        <button class="hamburger-btn" onclick="toggleSidebar()"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
+        <img src="images/logo-short.jpg" alt="TB" class="topbar-logo-short">
+        <div class="page-title">
+          <h1 id="page-title">แดชบอร์ด</h1>
+          <p id="page-subtitle">ภาพรวมระบบลงเวลา</p>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <div class="topbar-date">
+          <div class="time" id="topbar-time">00:00:00</div>
+          <div class="date" id="topbar-date">—</div>
+        </div>
+
+        <span id="ws-status-dot" class="ws-dot offline" title="สแกนเนอร์: ไม่ได้เชื่อมต่อ" data-en-title="Scanner: Disconnected"></span>
+        <div id="role-preview-wrap" style="display:none;align-items:center;gap:6px">
+          <label for="role-preview-select" style="font-size:11px;font-weight:600;color:#64748b;white-space:nowrap" data-en="View as">ดูเป็น</label>
+          <select id="role-preview-select" onchange="onRolePreviewChange(this.value)" style="font-size:12px;padding:4px 8px;border:1.5px solid #e2e8f0;border-radius:8px;background:#fff;color:#1e3a5f">
+            <option value="">Full access</option>
+            <option value="md">MD</option>
+            <option value="accounting">Accounting</option>
+            <option value="manager">Manager</option>
+            <option value="user">Staff</option>
+            <option value="driver">Driver</option>
+            <option value="marketing">Marketing</option>
+          </select>
+        </div>
+        <button id="lang-toggle-btn" onclick="toggleLang()" style="padding:4px 10px;border:1.5px solid #e2e8f0;border-radius:8px;background:#f8fafc;font-size:12px;font-weight:700;color:#1e3a5f;cursor:pointer;letter-spacing:0.03em">EN</button>
+        <div class="btn-icon" onclick="navigateTo('approval')" title="แจ้งเตือนคำขอค้างอนุมัติ" data-en-title="Pending approvals">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+          <span id="topbar-approval-dot" class="dot"></span>
+        </div>
+        <div class="topbar-user-btn" style="display:flex;align-items:center;gap:8px;padding:6px 14px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:9px;cursor:pointer;" onclick="navigateTo('checkin')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#1e3a5f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+          <span style="font-size:13px;font-weight:600;color:#1e3a5f" id="topbar-name">—</span>
+        </div>
+      </div>
+    </header>
+
+    <div id="system-account-banner" style="display:none;align-items:center;gap:10px;padding:10px 16px;background:#fff7ed;border-bottom:1px solid #fed7aa;color:#9a3412;font-size:13px;font-weight:600">
+      <span>🛠️</span>
+      <span data-en="Developer system account — not an employee. Payroll lock actions (Finalize confirm, MD approve, email payslip, save 50-Tawi) are disabled. Approvals require typing CONFIRM.">บัญชีระบบสำหรับนักพัฒนา — ไม่ใช่พนักงาน การล็อก payroll (ยืนยัน Finalize, MD approve, ส่งสลิป, บันทึก 50 ทวิ) ถูกปิดไว้ การอนุมัติต้องพิมพ์ CONFIRM</span>
+    </div>
+
+    <!-- PAGE CONTENT -->
+    <div class="page-content">
+
+      <!-- ===== PAGE: DASHBOARD ===== -->
+      <div id="page-dashboard" class="page">
+
+        <div class="alert alert-info mb-6">
+          <span data-en="📡 Connected to Hikvision DS-K1T342MFX and Synology DS923+">📡 เชื่อมต่อกับ Hikvision DS-K1T342MFX และ Synology DS923+ สำเร็จ</span>
+        </div>
+
+        <!-- Stats Row -->
+        <div class="grid grid-3 mb-6" id="dash-stats-row">
+          <div class="stat-card">
+            <div class="stat-icon blue">👥</div>
+            <div class="stat-info">
+              <div class="value" id="dash-total-emp">—</div>
+              <div class="label" data-en="Total Employees">พนักงานทั้งหมด</div>
+              <div class="sub" id="dash-total-emp-sub">—</div>
+            </div>
+          </div>
+          <div class="stat-card dash-stat-click" id="stat-pending-approvals" onclick="openDashPendingFromBadge()" style="cursor:pointer;display:none" title="คลิกเพื่อดูรายละเอียด" data-en-title="Click to view details">
+            <div class="stat-icon amber">⏳</div>
+            <div class="stat-info">
+              <div class="value" id="dash-pending-count">—</div>
+              <div class="label" data-en="Pending Requests">คำขอรออนุมัติ</div>
+              <div class="sub" id="dash-pending-sub">—</div>
+            </div>
+          </div>
+          <div class="stat-card" id="stat-leave-today" onclick="openTodayLeaveModal()" style="cursor:pointer" title="คลิกเพื่อดูรายละเอียด" data-en-title="Click to view details">
+            <div class="stat-icon red">🏖️</div>
+            <div class="stat-info">
+              <div class="value" id="dash-today-leave-count">—</div>
+              <div class="label" data-en="On Leave Today">ลาวันนี้</div>
+              <div class="sub" id="dash-today-leave-sub">—</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid grid-2 gap-4">
+          <!-- Dashboard Left Panel — rendered by JS -->
+          <div id="dash-left-panel"></div>
+
+          <!-- My Requests Panel — rendered by JS -->
+          <div id="dash-right-panel"></div>
+        </div>
+
+        <!-- Live Check-in Status Widget — always-visible, updates via WS SCAN_EVENT (rendered by JS) -->
+        <div class="card mt-4" id="dash-checkin-widget"></div>
+
+        <!-- Monthly Summary -->
+        <div class="card mt-4">
+          <div class="card-header">
+            <h3>📊 <span id="dash-period-label">สรุปรอบปัจจุบัน</span></h3>
+            <div class="filter-bar">
+              <select id="att-period-select" onchange="loadPeriod()"></select>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="grid grid-4">
+              <div class="stat-card dash-stat-click" style="flex-direction:column;text-align:center;gap:6px;cursor:pointer" onclick="showDashPeriodDetail('work')" title="คลิกเพื่อดูวันที่" data-en-title="Click to view days">
+                <div style="font-size:32px;font-weight:800;color:#1e3a5f" id="dash-work-days">—</div>
+                <div style="font-size:12px;color:#718096" data-en="Work Days (This Period)">วันทำงาน (รอบนี้)</div>
+                <div style="font-size:11px;color:#059669" id="dash-today-date">—</div>
+              </div>
+              <div class="stat-card dash-stat-click" style="flex-direction:column;text-align:center;gap:6px;cursor:pointer" onclick="showDashPeriodDetail('late')" title="คลิกเพื่อดูวันที่" data-en-title="Click to view days">
+                <div style="font-size:32px;font-weight:800;color:#d97706" id="dash-late-days">—</div>
+                <div style="font-size:12px;color:#718096" data-en="Late">มาสาย</div>
+              </div>
+              <div class="stat-card dash-stat-click" style="flex-direction:column;text-align:center;gap:6px;cursor:pointer" onclick="showDashPeriodDetail('leave')" title="คลิกเพื่อดูวันที่" data-en-title="Click to view days">
+                <div style="font-size:32px;font-weight:800;color:#2563eb" id="dash-leave-days">—</div>
+                <div style="font-size:12px;color:#718096" data-en="Days on Leave">วันลาใช้ไป</div>
+                <div style="font-size:11px;color:#718096" data-en="Current Period">รอบปัจจุบัน</div>
+              </div>
+              <div class="stat-card dash-stat-click" style="flex-direction:column;text-align:center;gap:6px;cursor:pointer" onclick="showDashPeriodDetail('early')" title="คลิกเพื่อดูวันที่" data-en-title="Click to view days">
+                <div style="font-size:32px;font-weight:800;color:#7c3aed" id="dash-early-late-bonus">—</div>
+                <div style="font-size:12px;color:#718096">Early Morning/Late Night</div>
+                <div style="font-size:11px;color:#059669" id="dash-early-late-count">—</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== PAGE: CHECK-IN ===== -->
+      <div id="page-checkin" class="page active">
+        <div class="grid grid-2 gap-4">
+          <!-- Check-in Panel -->
+          <div>
+            <div class="checkin-panel mb-6">
+              <div class="clock-display">00:00:00</div>
+              <div class="date-display">วันที่ —</div>
+              <div class="checkin-status">
+                <span class="status-dot none" id="checkin-status-dot"></span>
+                <span id="checkin-status-text">ยังไม่ได้ลงเวลา</span>
+              </div>
+              <div class="scan-btn-wrap">
+                <button class="scan-btn scan-ready" id="scan-btn" onclick="doScan('web')">
+                  <span class="scan-btn-icon"  id="scan-btn-icon">⏱</span>
+                  <span class="scan-btn-label" id="scan-btn-label">ตอกบัตร</span>
+                  <span class="scan-btn-sub"   id="scan-btn-sub">กดเพื่อบันทึกเข้างาน</span>
+                </button>
+                <div class="scan-times" id="scan-times"></div>
+              </div>
+              <div class="gps-info">
+                <span class="gps-badge">🛰 GPS: <span class="gps-status">กำลังระบุตำแหน่ง...</span></span>
+              </div>
+            </div>
+
+            <div class="card" style="position:relative;isolation:isolate">
+              <div class="card-header">
+                <h3 data-en="📍 GPS Location">📍 ตำแหน่ง GPS</h3>
+                <button class="btn btn-ghost btn-sm" onclick="requestGPS()" data-en="🔄 Refresh">🔄 รีเฟรช</button>
+              </div>
+              <div class="card-body" style="padding:0">
+
+                <!-- GPS Status Bar -->
+                <div id="gps-status-bar" style="padding:12px 16px;display:flex;align-items:center;gap:10px;background:#f8fafc;border-bottom:1px solid #e2e8f0">
+                  <div id="gps-dot" style="width:10px;height:10px;border-radius:50%;background:#f59e0b;flex-shrink:0;animation:pulse 2s infinite"></div>
+                  <div style="flex:1;min-width:0">
+                    <div id="gps-coords-text" style="font-size:12px;font-weight:600;color:#1e3a5f">กำลังระบุตำแหน่ง...</div>
+                    <div id="gps-accuracy-text" style="font-size:11px;color:#94a3b8;margin-top:1px"></div>
+                  </div>
+                  <div id="gps-lock-badge" style="display:none;align-items:center;gap:4px;background:#d1fae5;color:#065f46;font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px">
+                    <span data-en="🔒 Location Locked">🔒 ล็อกตำแหน่งแล้ว</span>
+                  </div>
+                </div>
+
+                <!-- Leaflet Map -->
+                <div id="gps-map" style="height:240px;width:100%"></div>
+
+                <!-- Coordinates Info -->
+                <div style="padding:12px 16px;background:#f0f9ff;border-top:1px solid #bae6fd">
+                  <div style="font-size:11px;color:#0369a1;display:flex;align-items:center;gap:6px">
+                    🛡️ <strong data-en="Location is auto-locked from your device — cannot be edited">ตำแหน่งถูกล็อกอัตโนมัติจากอุปกรณ์ของคุณ — ไม่สามารถแก้ไขได้</strong>
+                  </div>
+                  <div id="gps-coords-detail" style="font-size:11px;color:#64748b;margin-top:4px;font-family:monospace"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Today Log + Leave Request -->
+          <div>
+            <div class="card mb-4">
+              <div class="card-header">
+                <h3 data-en="📋 Today's Log">📋 บันทึกเวลาวันนี้</h3>
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span id="today-log-date" style="font-size:12px;color:#718096"></span>
+                  <button id="today-log-more-btn" onclick="showFullLog()"
+                    style="display:none;font-size:11px;padding:3px 10px;border-radius:8px;border:1px solid #e2e8f0;background:#f8fafc;color:#2563eb;cursor:pointer;font-weight:600">
+                    <span data-en="View all ›">ดูทั้งหมด ›</span>
+                  </button>
+                </div>
+              </div>
+              <div class="card-body">
+                <div class="today-log" id="today-log">
+                  <div class="log-empty" style="text-align:center;padding:30px;color:#94a3b8">
+                    <div style="font-size:40px;margin-bottom:12px">⏰</div>
+                    <p data-en="No time records today">ยังไม่มีการบันทึกเวลาวันนี้</p>
+                    <p style="font-size:12px;margin-top:4px" data-en="Tap the button on the left to clock in">กดปุ่มด้านซ้ายเพื่อลงเวลา</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="card mb-4">
+              <div class="card-header">
+                <h3 data-en="📝 Submit Request">📝 ยื่นคำขอ</h3>
+              </div>
+              <div class="card-body">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+                  <button class="btn btn-outline req-card-btn" onclick="openLeaveModal('annual')" style="padding:16px;flex-direction:column;gap:6px;border-radius:12px;border:1.5px dashed #93c5fd;background:#eff6ff;">
+                    <span style="font-size:24px">🏖️</span>
+                    <span class="req-card-label" style="font-size:13px;color:#1e3a5f;font-weight:600" data-en="Annual Leave">ขอลาพักร้อน</span>
+                  </button>
+                  <button class="btn btn-outline req-card-btn" onclick="openLeaveModal('sick')" style="padding:16px;flex-direction:column;gap:6px;border-radius:12px;border:1.5px dashed #fca5a5;background:#fff1f2;">
+                    <span style="font-size:24px">🤒</span>
+                    <span class="req-card-label" style="font-size:13px;color:#1e3a5f;font-weight:600" data-en="Sick Leave">ขอลาป่วย</span>
+                  </button>
+                  <button class="btn btn-outline req-card-btn" onclick="openLeaveModal('business')" style="padding:16px;flex-direction:column;gap:6px;border-radius:12px;border:1.5px dashed #a78bfa;background:#f5f3ff;">
+                    <span style="font-size:24px">📋</span>
+                    <span class="req-card-label" style="font-size:13px;color:#1e3a5f;font-weight:600" data-en="Business Leave">ขอลากิจ</span>
+                  </button>
+                  <button class="btn btn-outline req-card-btn driver-hide acct-mkt-hide" onclick="openUpcountryModal()" style="padding:16px;flex-direction:column;gap:6px;border-radius:12px;border:1.5px dashed #86efac;background:#f0fdf4;">
+                    <span style="font-size:24px">🗺️</span>
+                    <span class="req-card-label" style="font-size:13px;color:#1e3a5f;font-weight:600" data-en="Upcountry">Upcountry</span>
+                  </button>
+
+                  <button id="checkin-lateout-btn" class="btn btn-outline req-card-btn driver-hide acct-mkt-hide" onclick="openLateOutModal()" style="padding:16px;flex-direction:column;gap:6px;border-radius:12px;border:1.5px dashed #6ee7b7;background:#f0fdf4;">
+                    <span style="font-size:24px">🌙</span>
+                    <span class="req-card-label" style="font-size:13px;color:#1e3a5f;font-weight:600" data-en="Late Night Out">กลับดึก</span>
+                  </button>
+                  <button class="btn btn-outline req-card-btn driver-only" style="display:none;padding:16px;flex-direction:column;gap:6px;border-radius:12px;border:1.5px dashed #7dd3fc;background:#f0f9ff;" onclick="openLongDistanceModal()">
+                    <span style="font-size:24px">🚗</span>
+                    <span class="req-card-label" style="font-size:13px;color:#0369a1;font-weight:600" data-en="Long Distance">Long Distance</span>
+                  </button>
+                  <button class="btn btn-outline req-card-btn acct-mkt-hide" onclick="openOTModal()" style="padding:16px;flex-direction:column;gap:6px;border-radius:12px;border:1.5px dashed #fed7aa;background:#fff7ed;">
+                    <span style="font-size:24px">⏱️</span>
+                    <span class="req-card-label" style="font-size:13px;color:#9a3412;font-weight:600" data-en="Request OT">ขอ OT</span>
+                  </button>
+                  <button class="btn btn-outline req-card-btn driver-hide" id="checkin-comp-btn" onclick="openCompModal()" style="padding:16px;flex-direction:column;gap:6px;border-radius:12px;border:1.5px dashed #5eead4;background:#f0fdfa;grid-column:1/-1">
+                    <span style="font-size:24px">🔄</span>
+                    <span class="req-card-label" style="font-size:13px;color:#0f766e;font-weight:600" data-en="Compensatory Day">ขอวันหยุดชดเชย</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== PAGE: ATTENDANCE ===== -->
+      <div id="page-attendance" class="page">
+        <div id="att-employee-selector-container"></div>
+        <div id="att-today-card-container"></div>
+        <div class="card mb-4">
+          <div class="card-header">
+            <h3 data-en="📊 Selected Period Summary">📊 สรุปรอบที่เลือก</h3>
+          </div>
+          <div class="card-body">
+            <div class="grid grid-4">
+              <div style="text-align:center;padding:12px;background:#f0fdf4;border-radius:10px;">
+                <div style="font-size:28px;font-weight:800;color:#059669" id="att-work">—</div>
+                <div style="font-size:12px;color:#718096" data-en="Work Days">วันทำงาน</div>
+              </div>
+              <div style="text-align:center;padding:12px;background:#fef3c7;border-radius:10px;">
+                <div style="font-size:28px;font-weight:800;color:#d97706" id="att-late">—</div>
+                <div style="font-size:12px;color:#718096" data-en="Late">มาสาย</div>
+              </div>
+              <div style="text-align:center;padding:12px;background:#dbeafe;border-radius:10px;">
+                <div style="font-size:28px;font-weight:800;color:#2563eb" id="att-annual">—</div>
+                <div style="font-size:12px;color:#718096" data-en="Annual Leave">ลาพักร้อน</div>
+              </div>
+              <div style="text-align:center;padding:12px;background:#fee2e2;border-radius:10px;">
+                <div style="font-size:28px;font-weight:800;color:#dc2626" id="att-sick">—</div>
+                <div style="font-size:12px;color:#718096" data-en="Sick Leave">ลาป่วย</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" id="att-table-card">
+          <div class="card-header">
+            <h3 data-en="📅 Attendance Table">📅 ตารางเวลาทำงาน</h3>
+            <div class="filter-bar">
+              <select id="period-select" onchange="onPeriodChange(this.value)" style="min-width:220px">
+              </select>
+              <button class="btn btn-ghost btn-sm" onclick="window.print()" data-en="🖨 Print">🖨 พิมพ์</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th data-en="Date">วันที่</th>
+                  <th data-en="Status">สถานะ</th>
+                  <th data-en="Check In (first)">เข้างาน (แรก)</th>
+                  <th data-en="Check Out (last)">ออกงาน (สุดท้าย)</th>
+                  <th class="col-hide-mobile" id="att-th-allowances" style="text-transform:none" data-en="Allowances / OT">รายการพิเศษ / OT</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="attendance-tbody">
+              </tbody>
+            </table>
+          </div>
+          <div style="padding:14px 22px;background:#f8fafc;border-top:1px solid #e2e8f0;font-size:12px;color:#718096;display:flex;gap:20px;flex-wrap:wrap">
+            <span data-en="🌐 = via Web App">🌐 = ลงผ่าน Web App</span>
+            <span data-en="📷 = via Hikvision scanner">📷 = ลงผ่านเครื่องสแกน Hikvision</span>
+            <span data-en="⏳ = pending approval">⏳ = รออนุมัติ</span>
+            <span id="att-legend-early">🌅 Early Morning</span>
+            <span id="att-legend-late">🌙 Late Night</span>
+            <span id="att-legend-personalcar">🚙 Personal car used</span>
+          </div>
+        </div>
+      <div style="padding:10px 4px;font-size:11px;color:#94a3b8">
+        <span data-en="📌 The 🌙 / ⏱️ / 🚗 buttons only appear on days that already have a check-out time — if you forgot to clock out, submit a ✏️ time correction first and they will appear.">📌 ปุ่ม 🌙 / ⏱️ / 🚗 จะขึ้นเฉพาะวันที่มีเวลาออกงานบันทึกไว้แล้ว — ถ้าลืมตอกบัตรออก ให้กด ✏️ ขอแก้ไขเวลาก่อน แล้วปุ่มจะปรากฏ</span>
+      </div>
+      <div id="att-cards-mobile"></div>
+      <div id="att-print-view" class="print-only"></div>
+
+      </div>
+
+      <!-- ===== PAGE: MY ATTENDANCE ===== -->
+      <div id="page-myattendance" class="page">
+        <!-- Content is rendered by renderMyAttendance() in app.js -->
+      </div>
+
+      <!-- ===== PAGE: LEAVE ===== -->
+      <div id="page-leave" class="page">
+
+        <!-- Leave Balance -->
+        <div class="card mb-6">
+          <div class="card-header">
+            <h3><span data-en="🗓️ Leave Balance (Year ">🗓️ วันลาคงเหลือ (ปี </span><span id="leave-balance-year"></span>)</h3>
+            <span id="leave-balance-date" style="font-size:12px;color:#718096"></span>
+          </div>
+          <div class="card-body">
+            <div class="leave-balance-grid" id="leave-balance-cards">
+              <!-- populated by renderLeaveBalanceSummary() -->
+            </div>
+            <div style="margin-top:10px;font-size:11px;color:#94a3b8">
+              <span data-en="ℹ️ This balance counts approved leave only — pending requests are also reserved when you submit a new one.">ℹ️ ยอดนี้นับเฉพาะวันลาที่อนุมัติแล้ว — คำขอที่ยังรออนุมัติจะถูกกันไว้ด้วยตอนยื่นคำขอใหม่</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Leave History -->
+        <div class="card">
+          <div class="card-header">
+            <h3 data-en="📋 Leave History">📋 ประวัติวันลา</h3>
+            <button class="btn btn-primary btn-sm" onclick="openLeaveModal()" data-en="+ New Leave Request">
+              + ยื่นขอลาใหม่
+            </button>
+          </div>
+          <div style="padding:10px 22px 0;font-size:11px;color:#94a3b8">
+            <span data-en="ℹ️ You can only edit or cancel a request while it is still &quot;Pending&quot; — once approved, ask your approver to revoke it. Cancelling permanently removes the request from your history.">ℹ️ แก้ไข/ยกเลิกได้เฉพาะคำขอที่ยัง "รออนุมัติ" เท่านั้น — เมื่ออนุมัติแล้วต้องแจ้งผู้อนุมัติให้ยกเลิกให้ และการกดยกเลิกจะลบคำขอออกจากประวัติถาวร</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th data-en="Leave Type">ประเภทลา</th>
+                  <th data-en="Leave Date">วันที่ลา</th>
+                  <th data-en="Amount">จำนวน</th>
+                  <th class="col-hide-mobile" data-en="Reason">เหตุผล</th>
+                  <th data-en="Status">สถานะ</th>
+                  <th class="col-hide-mobile" data-en="Approver">ผู้อนุมัติ</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="leave-history-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== PAGE: MY REQUESTS ===== -->
+      <div id="page-my-requests" class="page">
+        <div id="my-requests-container" style="display:flex;flex-direction:column;gap:12px"></div>
+      </div>
+
+      <!-- ===== PAGE: APPROVAL ===== -->
+      <div id="page-approval" class="page">
+        <div id="approval-summary-bar" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px"></div>
+        <div id="approval-categories"></div>
+        <div id="approval-history-section" style="margin-top:8px"></div>
+        <!-- legacy list kept for compatibility -->
+        <div id="approval-list" style="display:none"></div>
+      </div>
+
+      <!-- ===== PAGE: EMPLOYEES ===== -->
+      <div id="page-employees" class="page">
+        <div id="unknown-scan-banner" style="display:none;background:#fffbeb;border:1px solid #fcd34d;border-radius:10px;padding:12px 18px;margin-bottom:14px;font-size:13px;color:#92400e;font-weight:500"></div>
+        <div class="card">
+          <div class="card-header">
+            <h3 data-en="👥 All Employees">👥 รายชื่อพนักงานทั้งหมด</h3>
+            <div class="filter-bar">
+              <input type="text" id="emp-search" placeholder="ค้นหาชื่อ / ตำแหน่ง..." data-en-ph="Search name / position..." oninput="filterEmployees()">
+
+              <button class="btn btn-outline btn-sm" id="btn-sync-hikvision" onclick="syncHikvisionEmployees()" style="border-color:#2563eb;color:#2563eb" data-en="🔄 Sync from Hikvision">
+                🔄 Sync จาก Hikvision
+              </button>
+              <button class="btn btn-outline btn-sm btn-door-audit" onclick="openDoorAccessAudit()" style="border-color:#7c3aed;color:#7c3aed" data-en="🚪 Door Access Audit">
+                🚪 ตรวจสอบสิทธิ์เปิดประตู
+              </button>
+              <button class="btn btn-primary btn-sm btn-add-employee" onclick="openAddEmployeeModal()" data-en="➕ Add New Employee">
+                ➕ เพิ่มพนักงานใหม่
+              </button>
+            </div>
+          </div>
+          <details style="margin:0 22px 16px;border:1px solid #bfdbfe;background:#eff6ff;border-radius:10px;padding:12px 16px;font-size:13px;color:#1e3a5f">
+            <summary style="cursor:pointer;font-weight:700;color:#1d4ed8" data-en="ℹ️ How to add a new employee (click to expand)">ℹ️ วิธีเพิ่มพนักงานใหม่ (คลิกเพื่อดู)</summary>
+            <div style="margin-top:12px;line-height:1.7">
+              <div style="font-weight:700;margin-bottom:4px" data-en="Steps (for employees who need to use the face scanner):">ขั้นตอน (สำหรับพนักงานที่ต้องใช้เครื่องสแกนหน้าเข้า-ออกงาน):</div>
+              <ol style="margin:0 0 12px 20px;padding:0">
+                <li data-en="Have IT enroll the new employee's face on the Hikvision device first (this assigns their Employee No. on the device).">ให้ IT ลงทะเบียนใบหน้าพนักงานใหม่ในเครื่องสแกน Hikvision ก่อน (เครื่องจะกำหนด Employee No. ให้)</li>
+                <li data-en="Come back here and click '🔄 Sync from Hikvision' — this pulls in the name, photo, and Employee No. automatically and creates the account with a temporary username/password.">กลับมาที่หน้านี้ แล้วกด "🔄 Sync จาก Hikvision" — ระบบจะดึงชื่อ รูปหน้า และ Employee No. เข้ามาสร้างบัญชีให้อัตโนมัติ พร้อม username/password ชั่วคราว</li>
+                <li data-en="Click 'Edit' on the newly added row and fill in what's still missing: salary, position, personal details, bank account, etc.">กด "แก้ไข" ที่แถวพนักงานใหม่ที่เพิ่งขึ้นมา แล้วกรอกข้อมูลที่ยังขาด: เงินเดือน ตำแหน่ง ข้อมูลส่วนตัว บัญชีธนาคาร ฯลฯ</li>
+              </ol>
+              <div style="font-weight:700;margin-bottom:4px;color:#b45309" data-en="⚠️ Things to watch out for:">⚠️ ข้อควรระวัง:</div>
+              <ul style="margin:0 0 12px 20px;padding:0">
+                <li data-en="Employee No. can only be set by syncing from Hikvision — there's no field to type it in manually on the edit form.">Employee No. กำหนดได้จากการ Sync เท่านั้น ไม่มีช่องให้กรอกเองในฟอร์มแก้ไข</li>
+                <li data-en="If the name wasn't set on the Hikvision device before syncing, the employee's name will show as their Employee No. instead — remember to go fix the real name afterward.">ถ้าลืมตั้งชื่อในเครื่อง Hikvision ก่อน sync ชื่อพนักงานจะกลายเป็นตัวเลข Employee No. แทน ต้องกลับมาแก้ชื่อจริงทีหลัง</li>
+              </ul>
+              <div style="font-weight:700;margin-bottom:4px" data-en='When to use the "➕ Add New Employee" button:'>ปุ่ม "➕ เพิ่มพนักงานใหม่" ใช้ในกรณีไหน:</div>
+              <div data-en='Only for the special case where the employee will never use the face scanner at all (e.g. a system-account-only user). Do NOT use it for anyone who needs face-scan attendance — it never gets an Employee No., so scans can never match them, and syncing from Hikvision later would create a duplicate account for the same person.'>ใช้เฉพาะกรณีพิเศษที่พนักงานคนนั้นไม่ต้องใช้เครื่องสแกนหน้าเลย (เช่น สร้างบัญชีไว้ใช้งานระบบอย่างเดียว) ห้ามใช้กับคนที่ต้องสแกนหน้าเข้า-ออกงาน เพราะจะไม่มี Employee No. เชื่อมกับเครื่องสแกนเลย และถ้าไป Sync จาก Hikvision ซ้ำทีหลัง จะกลายเป็นสร้างบัญชีซ้ำ 2 บัญชีสำหรับคนเดียวกัน</div>
+            </div>
+          </details>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th data-en="Full Name">ชื่อ-นามสกุล</th>
+                  <th class="col-hide-mobile">Employee No.</th>
+                  <th data-en="Position">ตำแหน่ง</th>
+
+                  <th data-en="Rights">สิทธิ์</th>
+                  <th class="col-hide-mobile" data-en="Start Date">วันเริ่มงาน</th>
+                  <th class="col-hide-mobile" id="th-salary" data-en="Salary">เงินเดือน</th>
+                  <th data-en="Status">สถานะ</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="employees-tbody">
+              </tbody>
+            </table>
+          </div>
+          <div style="padding:12px 22px;background:#f8fafc;border-top:1px solid #e2e8f0;font-size:12px;color:#718096">
+            <span data-en="💡 Only Managing Director and Accounting can add / edit employee data">💡 เฉพาะ Managing Director และ Accounting สามารถเพิ่ม / แก้ไขข้อมูลพนักงานได้</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== PAGE: PAYSLIP ===== -->
+      <div id="page-payslip" class="page">
+        <div class="card mb-4 no-print">
+          <div class="card-body" style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
+            <div id="payslip-emp-selector" class="form-field" style="margin-bottom:0;flex:1;min-width:180px">
+              <label data-en="Employee">พนักงาน</label>
+              <select id="payslip-employee" onchange="renderPayslip()">
+              </select>
+            </div>
+            <div class="form-field" style="margin-bottom:0;flex:1;min-width:180px">
+              <label data-en="Pay Period">รอบเดือน</label>
+              <select id="payslip-period-select" onchange="onPayslipPeriodChange(this.value)"></select>
+            </div>
+            <div style="display:flex;gap:10px;margin-top:20px">
+              <button id="payslip-btn-print" class="btn btn-ghost" onclick="printPayslip()" data-en="🖨 Print Payslip">🖨 พิมพ์ใบเงินเดือน</button>
+              <button id="payslip-btn-xlsx" class="btn btn-ghost" onclick="downloadPayslipXlsx()" data-en="📥 Download Excel">📥 ดาวน์โหลด Excel</button>
+              <!-- Accounting/MD only -- one .xlsx, every active employee, one sheet each (2026-08-02) -->
+              <button id="payslip-btn-xlsx-all" class="btn btn-ghost" style="display:none" onclick="downloadAllPayslipsXlsx()" data-en="📦 Download All">📦 ดาวน์โหลดทั้งหมด</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- MD Approval card (rendered by renderPayslipApprovalCard) -->
+        <div id="payslip-md-approval"></div>
+
+        <!-- Employee lock screen — shown when payslip not yet available -->
+        <div id="payslip-emp-lock" class="card" style="display:none"></div>
+
+        <!-- PAYSLIP DOCUMENT -->
+        <div class="payslip">
+          <div class="payslip-topheader">
+            <div class="payslip-logo"><img src="images/logo-long.png" alt="Tozai Boeki"></div>
+            <div class="payslip-companyinfo">
+              <div class="company" id="payslip-company-name">Tozai Boeki Kaisha (Thailand) Ltd.</div>
+              <div class="subtitle" id="payslip-company-address">88 Paso Tower 14 floor, Silom Rd., Suriyawong, Bangrak, Bangkok 10500</div>
+              <div class="subtitle" id="payslip-company-taxid">Tax ID: 0105552006771</div>
+            </div>
+          </div>
+          <div class="payslip-accentbar"></div>
+          <div class="payslip-title-bar" data-en="PAYSLIP">ใบแสดงรายการเงินเดือน / PAYSLIP</div>
+
+          <div class="payslip-employee">
+            <div class="emp-field">
+              <label data-en="Employee Name:">ชื่อพนักงาน:</label>
+              <p id="payslip-name">Apinya Meesakul</p>
+            </div>
+            <div class="emp-field">
+              <label data-en="Position:">ตำแหน่ง:</label>
+              <p id="payslip-position">Sales Executive</p>
+            </div>
+            <div class="emp-field">
+              <label data-en="Pay Period:">รอบเดือน:</label>
+              <p id="payslip-period-label">—</p>
+            </div>
+            <div class="emp-field">
+              <label data-en="Payment Date:">วันจ่ายเงิน:</label>
+              <p id="payslip-pay-date">—</p>
+            </div>
+            <div class="emp-field">
+              <label data-en="Start Working:">วันเริ่มงาน:</label>
+              <p id="payslip-start-date">—</p>
+            </div>
+            <div class="emp-field">
+              <label id="payslip-idcard-label">เลขบัตรประชาชน:</label>
+              <p id="payslip-idcard">—</p>
+            </div>
+          </div>
+
+          <!-- Attendance Summary — up to 10 tiles, eligibility-gated (2026-08-02). JS reorders
+               and splits these into row1/row2 explicitly (renderPayslip()'s TILE_ORDER +
+               ceil(n/2) split) instead of relying on flex-wrap's natural line-breaking, so the
+               split is always predictable (e.g. 4-top/3-bottom for a driver, not a lopsided
+               5-top/1-bottom) regardless of how many tiles end up visible. -->
+          <div class="payslip-summary-grid" id="payslip-summary-grid">
+            <div class="payslip-summary-row" id="payslip-summary-row1"></div>
+            <div class="payslip-summary-row" id="payslip-summary-row2"></div>
+          </div>
+          <!-- Tile pool (moved into row1/row2 above by JS on every render) -->
+          <div id="payslip-summary-tilepool" style="display:none">
+            <div class="sum-box" id="payslip-sumbox-workdays">
+              <div class="lbl" data-en="Days Worked">Days Worked</div>
+              <div class="num" style="color:#0891b2" id="payslip-sum-workdays">—</div>
+            </div>
+            <div class="sum-box" id="payslip-sumbox-late">
+              <div class="lbl" data-en="Late (times)">Late (times)</div>
+              <div class="num" style="color:#dc2626" id="payslip-sum-late">—</div>
+              <div id="payslip-sum-late-deduct" class="no-print" style="display:none;font-size:10px;color:#dc2626;margin-top:2px"></div>
+            </div>
+            <div class="sum-box" id="payslip-sumbox-absent">
+              <div class="lbl" data-en="Absent Days">Absent Days</div>
+              <div class="num" style="color:#991b1b" id="payslip-sum-absent">—</div>
+            </div>
+            <div class="sum-box" id="payslip-sumbox-ot">
+              <div class="lbl" data-en="Over Time">Over Time</div>
+              <div class="num" style="color:#059669" id="payslip-sum-ot">—</div>
+            </div>
+            <div class="sum-box" id="payslip-sumbox-a1">
+              <div class="lbl" data-en="Upcountry">Upcountry</div>
+              <div class="num" style="color:#7c3aed" id="payslip-sum-a1">—</div>
+            </div>
+            <div class="sum-box" id="payslip-sumbox-early">
+              <div class="lbl" data-en="Early Morning">Early Morning</div>
+              <div class="num" style="color:#d97706" id="payslip-sum-early">—</div>
+            </div>
+            <div class="sum-box" id="payslip-sumbox-latenight">
+              <div class="lbl" data-en="Late Night">Late Night</div>
+              <div class="num" style="color:#d97706" id="payslip-sum-latenight">—</div>
+            </div>
+            <div class="sum-box" id="payslip-sumbox-holiday">
+              <div class="lbl" data-en="Paid Holiday">Paid Holiday</div>
+              <div class="num" style="color:#0d9488" id="payslip-sum-annual">—</div>
+            </div>
+            <div class="sum-box" id="payslip-sumbox-sick">
+              <div class="lbl" data-en="Sick Leave">Sick Leave</div>
+              <div class="num" style="color:#ef4444" id="payslip-sum-sick">—</div>
+            </div>
+            <div class="sum-box" id="payslip-sumbox-business">
+              <div class="lbl" data-en="Business Leave">Business Leave</div>
+              <div class="num" style="color:#8b5cf6" id="payslip-sum-business">—</div>
+            </div>
+          </div>
+
+          <div class="payslip-body">
+            <div class="payslip-table">
+              <!-- Earnings -->
+              <div class="pay-section">
+                <div class="table-header" id="payslip-lbl-income">EARNINGS</div>
+                <div class="pay-row">
+                  <span class="item" id="payslip-lbl-base">Basic Salary</span>
+                  <span class="amount plus" id="payslip-base">—</span>
+                </div>
+                <div class="pay-row">
+                  <span class="item" id="payslip-lbl-transport">Transportation Allowance</span>
+                  <span class="amount plus" id="payslip-transport">—</span>
+                </div>
+                <div class="pay-row">
+                  <span class="item" id="payslip-lbl-pos">Position Allowance</span>
+                  <span class="amount plus" id="payslip-pos-allowance">—</span>
+                </div>
+                <div class="pay-row">
+                  <span class="item" id="payslip-lbl-housing">Housing Allowance</span>
+                  <span class="amount plus" id="payslip-housing">—</span>
+                </div>
+                <div class="pay-row" id="payslip-diligence-row">
+                  <span class="item" id="payslip-lbl-diligence">Perfect Attendance</span>
+                  <span class="amount plus" id="payslip-diligence">—</span>
+                </div>
+                <div class="pay-row" id="payslip-ot15-row">
+                  <span class="item" id="payslip-lbl-ot15">OT ×1.5 (วันธรรมดา)<span class="detail" id="payslip-ot15-detail">—</span></span>
+                  <span class="amount plus" id="payslip-ot15">—</span>
+                </div>
+                <div class="pay-row" id="payslip-ot20-row">
+                  <span class="item">OT ×2.0<span class="detail" id="payslip-ot20-detail">—</span></span>
+                  <span class="amount plus" id="payslip-ot20">—</span>
+                </div>
+                <div class="pay-row" id="payslip-ot30-row">
+                  <span class="item" id="payslip-lbl-ot30">OT ×3.0 (วันหยุด)<span class="detail" id="payslip-ot30-detail">—</span></span>
+                  <span class="amount plus" id="payslip-ot30">—</span>
+                </div>
+                <div class="pay-row" id="payslip-a1-row">
+                  <span class="item" id="payslip-lbl-a1">Allowance 1 — Upcountry<span class="detail" id="payslip-a1-detail">฿240/ครั้ง</span></span>
+                  <span class="amount plus" id="payslip-a1">—</span>
+                </div>
+                <div class="pay-row" id="payslip-a2-row">
+                  <span class="item">Allowance 2 — Early/Late<span class="detail" id="payslip-a2-detail">—</span></span>
+                  <span class="amount plus" id="payslip-a2">—</span>
+                </div>
+                <div class="pay-row" id="payslip-a3-row">
+                  <span class="item" id="payslip-lbl-a3">Allowance 3 — Phone</span>
+                  <span class="amount plus" id="payslip-a3">—</span>
+                </div>
+                <div class="pay-row" id="payslip-longdistance-row" style="display:none">
+                  <span class="item">🚗 Long Distance<span class="detail" id="payslip-longdistance-detail">—</span></span>
+                  <span class="amount plus" id="payslip-longdistance">—</span>
+                </div>
+                <div class="pay-row" id="payslip-personalcar-row" style="display:none">
+                  <span class="item">🚙 Personal Car Allowance<span class="detail" id="payslip-personalcar-detail">—</span></span>
+                  <span class="amount plus" id="payslip-personalcar">—</span>
+                </div>
+                <div id="payslip-manual-allowances"></div>
+                <div class="pay-row" id="payslip-bonus-row" style="display:none">
+                  <span class="item" id="payslip-lbl-bonus">🎁 Bonus</span>
+                  <span class="amount plus" id="payslip-bonus">—</span>
+                </div>
+                <div class="table-total-row">
+                  <span data-en="TOTAL EARNINGS">TOTAL EARNINGS</span>
+                  <span id="payslip-total-earn">—</span>
+                </div>
+              </div>
+
+              <div class="table-divider"></div>
+
+              <!-- Deductions -->
+              <div class="pay-section">
+                <div class="table-header" id="payslip-lbl-deduct">DEDUCTIONS</div>
+                <div id="payslip-manual-advance-deductions"></div>
+                <div class="pay-row">
+                  <span class="item" id="payslip-lbl-ssf">Social Security Fund (SSF)<span class="detail" id="payslip-lbl-ssf-detail" data-en="5% max ฿875 (min salary ฿1,650)">5% สูงสุด ฿875 (ขั้นต่ำเงินเดือน ฿1,650)</span></span>
+                  <span class="amount minus" id="payslip-ssf">—</span>
+                </div>
+                <div class="pay-row">
+                  <span class="item" id="payslip-lbl-pvd">Provident Fund (PVD)<span class="detail" id="payslip-pvd-rate">5%</span></span>
+                  <span class="amount minus" id="payslip-pvd">—</span>
+                </div>
+                <div class="pay-row">
+                  <span class="item" id="payslip-lbl-pit">Personal Income Tax (PIT)<span class="detail" id="payslip-lbl-pit-detail">หัก ณ ที่จ่าย</span></span>
+                  <span class="amount minus" id="payslip-pit">—</span>
+                </div>
+                <div class="table-total-row">
+                  <span id="payslip-lbl-total-deduct" data-en="TOTAL DEDUCTIONS">TOTAL DEDUCTIONS</span>
+                  <span id="payslip-total-deduct">—</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Net Pay -->
+            <div class="pay-total">
+              <div class="label" id="payslip-lbl-net">NET PAY</div>
+              <div class="amount" id="payslip-net">฿0.00</div>
+            </div>
+            <div id="payslip-lbl-net-sub" style="display:none"></div>
+
+            <!-- Calculation Details -- web-only (2026-08-02, opposite of the Excel export, which
+                 dropped this same section per user request the same session). -->
+            <div id="payslip-calc-details" style="display:none;padding:10px 24px 0">
+              <div style="font-size:10.5px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:0.5px" data-en="Calculation Details">Calculation Details</div>
+              <div id="payslip-calc-details-lines" style="font-size:11px;color:#94a3b8;margin-top:4px;line-height:1.7"></div>
+            </div>
+          </div>
+
+          <div class="payslip-blankspace"></div>
+
+          <!-- Signatures -->
+          <div class="payslip-signatures">
+            <div class="sig-box">
+              <div class="sig-label" data-en="Paid by">ผู้จ่ายเงิน / Paid by</div>
+              <div class="sig-line"></div>
+              <div class="sig-title" id="payslip-sig-md-name">—</div>
+              <div class="sig-date" data-en="Date: ___/___/______">วันที่: ___/___/______</div>
+            </div>
+            <div class="sig-box">
+              <div class="sig-label" data-en="Received by">ผู้รับเงิน / Received by</div>
+              <div class="sig-line"></div>
+              <div class="sig-title" id="payslip-sig-name">Apinya Meesakul</div>
+              <div style="font-size:11px;color:#94a3b8" id="payslip-sig-position">Sales Executive</div>
+              <div class="sig-date" data-en="Date: ___/___/______">วันที่: ___/___/______</div>
+            </div>
+          </div>
+
+          <div class="payslip-footer">
+            <span data-en="This document was issued by the Time Attendance system — Tozai Boeki Kaisha (Thailand) Ltd. | Created: ">เอกสารนี้ออกโดยระบบ Time Attendance — Tozai Boeki Kaisha (Thailand) Ltd. | สร้างเมื่อ: </span><span id="payslip-created-date"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== PAGE: FINALIZE PAYROLL ===== -->
+      <div id="page-finalize" class="page">
+        <div id="finalize-md-banner"></div>
+        <div class="card mb-4">
+          <div class="card-header" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+            <h3 style="margin:0">✅ Finalize Payroll</h3>
+            <select id="finalize-period-select" onchange="onFinalizePeriodChange(this.value)"
+              style="border:1.5px solid var(--border);border-radius:var(--radius-md);padding:7px 12px;font-size:13px;color:var(--primary);font-family:inherit;cursor:pointer;transition:all var(--transition)">
+            </select>
+            <button class="btn btn-sm btn-outline" onclick="exportPayrollSummaryCSV()" style="margin-left:auto" title="Export payroll summary to CSV (Excel)">📊 Export Summary</button>
+          </div>
+          <p id="finalize-sub-lbl" style="margin:4px 0 4px;font-size:13px;color:var(--text-muted)">กรอกยอดภาษีหัก ณ ที่จ่ายจริง แล้วกด ✓ ยืนยัน ทีละคน</p>
+          <p style="margin:0 0 16px;font-size:12px;color:var(--text-muted)" data-en="ℹ️ PIT is an automatic estimate from base pay only — it does NOT include the bonus. Adjust the tax field yourself if the bonus should be taxed.">ℹ️ ภาษี (PIT) เป็นค่าประมาณอัตโนมัติจากรายได้ปกติเท่านั้น — ไม่รวมโบนัส ถ้าอยากให้โบนัสถูกหักภาษีด้วย ต้องปรับตัวเลขในช่องภาษีเอง</p>
+          <div class="table-wrap">
+            <table style="width:100%;font-size:13px">
+              <thead>
+                <tr>
+                  <th id="fin-th-emp" style="text-align:left">พนักงาน</th>
+                  <th id="fin-th-gross" style="text-align:right;color:#059669">รวมรับ (฿)</th>
+                  <th id="fin-th-bonus" class="col-hide-mobile" style="text-align:right;color:#059669" title="บวกเข้ายอดสุทธิโดยตรง — ไม่รวมในภาษี (PIT) ที่ประมาณให้อัตโนมัติ ถ้าอยากให้โบนัสถูกหักภาษีด้วยต้องปรับช่องภาษีเอง" data-en-title="Added to net pay directly — not included in the automatic PIT tax estimate. Adjust the PIT field yourself if the bonus should be taxed.">โบนัส (฿)</th>
+                  <th id="fin-th-diligence" class="col-hide-mobile" style="text-align:center" title="แก้ไขได้เฉพาะ role Driver — ปิดได้ถ้าการมาทำงานรอบนั้นไม่เข้าเงื่อนไข role อื่นจะจ่ายอัตโนมัติเสมอ" data-en-title="Only editable for Drivers — toggle off if attendance that period doesn't qualify. Other roles always get it paid automatically.">เบี้ยขยันรอบนี้</th>
+                  <th class="col-hide-mobile" style="text-align:right;color:#dc2626">SSF (฿)</th>
+                  <th class="col-hide-mobile" style="text-align:right;color:#dc2626">PVD (฿)</th>
+                  <th id="fin-th-tax" style="text-align:right;color:#b45309" title="ประมาณอัตโนมัติจากเงินเดือนพื้นฐานเท่านั้น (ไม่รวมโบนัส) แก้ไขได้ — Accounting ปรับเป็นยอดหักจริงได้" data-en-title="Auto-estimated from base pay only (excludes bonus). Editable — Accounting can override with the actual withholding amount.">ภาษี ณ ที่จ่าย (฿)</th>
+                  <th id="fin-th-net" style="text-align:right;color:var(--primary)">สุทธิ (฿)</th>
+                  <th id="fin-th-status" style="text-align:center">สถานะ</th>
+                  <th id="fin-th-md-approval" class="col-hide-mobile" style="text-align:center">Managing Director อนุมัติ Payroll</th>
+                </tr>
+              </thead>
+              <tbody id="finalize-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== PAGE: ARCHIVE (Former Employees) ===== -->
+      <div id="page-archive" class="page">
+        <div class="card">
+          <div class="card-header">
+            <h3 data-en="🗂️ Former Employees (Archive)">🗂️ อดีตพนักงาน (Archive)</h3>
+          </div>
+          <div class="table-wrap">
+            <table style="width:100%;font-size:13px">
+              <thead>
+                <tr>
+                  <th style="text-align:left" data-en="Name">ชื่อ-นามสกุล</th>
+                  <th class="col-hide-mobile" style="text-align:left" data-en="Position">ตำแหน่ง</th>
+                  <th class="col-hide-mobile" style="text-align:left" data-en="Department">แผนก</th>
+                  <th class="col-hide-mobile" style="text-align:left" data-en="Employee ID">รหัสพนักงาน</th>
+                  <th style="text-align:center" data-en="Status">สถานะ</th>
+                  <th style="text-align:center" data-en="Actions">การดำเนินการ</th>
+                </tr>
+              </thead>
+              <tbody id="archive-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== PAGE: 50 ทวิ ===== -->
+      <div id="page-tawi50" class="page">
+        <div class="card">
+          <div class="card-header" style="flex-wrap:wrap;gap:12px">
+            <h3 data-en="📄 Withholding Tax Certificate">📄 ใบรับรองการหักภาษี ณ ที่จ่าย (50 ทวิ)</h3>
+            <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+              <select id="tawi50-year" onchange="render50Tawi(parseInt(this.value))"
+                style="border:1.5px solid var(--border);border-radius:var(--radius-md);padding:7px 12px;font-size:13px;cursor:pointer"></select>
+              <button class="btn btn-ghost btn-sm" onclick="export50TawiCSV(parseInt(document.getElementById('tawi50-year').value))">📥 Export CSV</button>
+              <button id="tawi50-btn-xlsx" class="btn btn-primary btn-sm" onclick="download50TawiXlsx(parseInt(document.getElementById('tawi50-year').value))" data-en="📄 Export 50 Tawi (Excel)">📄 ส่งออก 50 ทวิ (Excel)</button>
+              <button class="btn btn-ghost btn-sm" onclick="window.print()" data-en="🖨️ Print">🖨️ พิมพ์</button>
+            </div>
+          </div>
+          <p id="tawi50-desc" style="margin:4px 0 8px;font-size:13px;color:var(--text-muted)"
+            data-en="Edit green/red/brown fields directly — changes are saved automatically">
+            แก้ไขยอดในช่องสีเขียว/แดง/น้ำตาลได้โดยตรง — ระบบจะบันทึกอัตโนมัติ
+          </p>
+          <p style="margin:0 0 8px;font-size:12px;color:var(--text-muted)">
+            ℹ️ ตัวเลขในตารางนี้รวมเฉพาะรอบเงินเดือนที่ Accounting กด "✓ Confirm" ในหน้า Finalize Payroll แล้วเท่านั้น — รอบที่ยังไม่ Confirm จะไม่ถูกนับรวม ดูจำนวนรอบที่นับได้ต่อคนใต้ยอดเงินได้รวมแต่ละแถว
+          </p>
+          <div id="tawi50-warning-banner" style="display:none;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:12px;color:#991b1b"></div>
+          <div class="table-wrap">
+            <table style="width:100%;font-size:13px">
+              <thead>
+                <tr>
+                  <th style="text-align:left" data-en="Name">ชื่อ-นามสกุล</th>
+                  <th class="col-hide-mobile" style="text-align:left" data-en="National ID">เลขบัตรประชาชน</th>
+                  <th style="text-align:right;color:#059669" data-en="Total Income (฿)">เงินได้รวม (฿)</th>
+                  <th class="col-hide-mobile" style="text-align:right;color:#dc2626">SSF (฿)</th>
+                  <th class="col-hide-mobile" style="text-align:right;color:#dc2626">PVD (฿)</th>
+                  <th style="text-align:right;color:#b45309" data-en="Tax Withheld (฿)">ภาษีที่หัก (฿)</th>
+                  <th style="text-align:right;color:var(--primary)" data-en="Net (฿)">สุทธิ (฿)</th>
+                </tr>
+              </thead>
+              <tbody id="tawi50-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== PAGE: REPORTS ===== -->
+      <div id="page-reports" class="page">
+        <div class="card mb-4">
+          <div class="card-header">
+            <h3 data-en="📊 Employee Work Days Summary Report">📊 รายงานสรุปวันทำงานของพนักงาน</h3>
+            <div class="filter-bar">
+              <div id="rpt-view-toggle-group" style="display:flex;background:#f1f5f9;border-radius:10px;padding:3px;gap:3px">
+                <button id="rpt-view-monthly-btn" onclick="switchReportsView('monthly')"
+                  style="padding:7px 14px;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer" data-en="Monthly">รายเดือน</button>
+                <button id="rpt-view-yearly-btn" onclick="switchReportsView('yearly')"
+                  style="padding:7px 14px;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer" data-en="Yearly">รายปี</button>
+              </div>
+              <select id="report-period" onchange="selectedPeriodIndex=parseInt(this.value);renderReports()" style="min-width:220px">
+              </select>
+              <select id="report-year" onchange="selectedReportYear=parseInt(this.value);renderReports()" style="min-width:120px;display:none">
+              </select>
+              <button class="btn btn-ghost btn-sm" onclick="window.print()" data-en="🖨 Print">🖨 พิมพ์</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th data-en="Employee Name">ชื่อพนักงาน</th>
+                  <th style="text-align:center" data-en="Work Days">วันทำงาน</th>
+                  <th class="rpt-hide-mobile" style="text-align:center" data-en="Late">มาสาย</th>
+                  <th class="rpt-hide-mobile" style="text-align:center" data-en="Annual">ลาพักร้อน</th>
+                  <th class="rpt-hide-mobile" style="text-align:center" data-en="Sick">ลาป่วย</th>
+                  <th class="col-hide-mobile" style="text-align:center" data-en="Upcountry">Upcountry</th>
+                  <th class="col-hide-mobile" style="text-align:center" data-en="Early Morning" data-th="Early Morning" title="เป็นคะแนนถ่วงน้ำหนัก ไม่ใช่จำนวนวันจริง — วันที่เข้าเช้าอัตรา ×2 นับเป็น 2 คะแนน อัตรา ×1 นับเป็น 1 คะแนน — Driver ไม่มีแนวคิดนี้" data-en-title="Weighted score, not a literal day count — a ×2-rate early check-in counts as 2, a ×1-rate one counts as 1 — Driver is exempt">Early Morning</th>
+                  <th class="col-hide-mobile" style="text-align:center" data-en="Late Night" data-th="Late Night" title="เป็นคะแนนถ่วงน้ำหนัก ไม่ใช่จำนวนวันจริง — วันที่ออกดึกอัตรา ×2 นับเป็น 2 คะแนน อัตรา ×1 นับเป็น 1 คะแนน" data-en-title="Weighted score, not a literal day count — a ×2-rate late check-out counts as 2, a ×1-rate one counts as 1">Late Night</th>
+                  <th class="col-hide-mobile" style="text-align:center">OT</th>
+                  <th class="col-hide-mobile" style="text-align:center" data-en="Personal Car" data-th="รถส่วนตัว">Personal Car</th>
+                  <th id="th-report-salary" data-en="Net Salary (est.)">เงินเดือนสุทธิ (ประมาณ)</th>
+                  <th class="rpt-hide-mobile no-print" id="th-report-payslip-btn"></th>
+                  <th class="rpt-show-mobile no-print"></th>
+                </tr>
+              </thead>
+              <tbody id="reports-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== PAGE: PAYROLL HISTORY ===== -->
+      <div id="page-payroll-history" class="page">
+        <div class="card mb-4">
+          <div class="card-header">
+            <h3 data-en="📋 Payroll History">📋 ประวัติเงินเดือน</h3>
+          </div>
+          <div class="table-wrap">
+            <table style="width:100%;font-size:13px">
+              <thead>
+                <tr>
+                  <th style="text-align:left" data-en="Pay Period">รอบเงินเดือน</th>
+                  <th class="col-hide-mobile" style="text-align:right;color:#059669" data-en="Total Gross (฿)">รวมรับรวม (฿)</th>
+                  <th class="col-hide-mobile" style="text-align:right;color:#dc2626" data-en="Total Deduct (฿)">หักรวม (฿)</th>
+                  <th style="text-align:right;color:var(--primary)" data-en="Total Net (฿)">สุทธิรวม (฿)</th>
+                  <th class="col-hide-mobile" style="text-align:center" data-en="Count">จำนวน</th>
+                  <th style="text-align:center" data-en="Status">สถานะ</th>
+                  <th style="text-align:center" class="no-print" data-en="Detail">รายละเอียด</th>
+                </tr>
+              </thead>
+              <tbody id="payroll-history-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== PAGE: AUDIT LOG ===== -->
+      <div id="page-audit-log" class="page">
+        <div class="card mb-4">
+          <div class="card-header">
+            <h3 data-en="🔍 Activity Log">🔍 บันทึกกิจกรรม</h3>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-left:auto">
+              <select id="audit-filter-user" onchange="renderAuditLog()" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--bg-card);color:var(--text)">
+                <option value="">👤 <span data-en="All Users">ทุกคน</span></option>
+              </select>
+              <select id="audit-filter-type" onchange="renderAuditLog()" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--bg-card);color:var(--text)">
+                <option value="" data-en="All Types">ทุกประเภท</option>
+                <option value="annual" data-en="Annual Leave">ลาพักร้อน</option>
+                <option value="sick" data-en="Sick Leave">ลาป่วย</option>
+                <option value="business" data-en="Business Leave">ลากิจ</option>
+                <option value="upcountry" data-en="Upcountry">Upcountry</option>
+                <option value="late-out" data-en="Late Night">กลับดึก</option>
+                <option value="ot" data-en="OT">OT</option>
+                <option value="comp" data-en="Compensatory">วันหยุดชดเชย</option>
+                <option value="time-correction" data-en="Time Correction">แก้ไขเวลา</option>
+                <option value="long-distance" data-en="Long Distance">Long Distance</option>
+              </select>
+              <select id="audit-filter-status" onchange="renderAuditLog()" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--bg-card);color:var(--text)">
+                <option value="" data-en="All Status">ทุกสถานะ</option>
+                <option value="pending" data-en="Pending">รออนุมัติ</option>
+                <option value="approved" data-en="Approved">อนุมัติแล้ว</option>
+                <option value="rejected" data-en="Rejected">ปฏิเสธ</option>
+              </select>
+              <input type="month" id="audit-filter-month" onchange="renderAuditLog()" title="กรองตามวันที่ยื่นคำขอ ไม่ใช่วันที่ของการลา/คำขอเอง" data-en-title="Filters by the date the request was submitted, not the leave/request's own date range" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--bg-card);color:var(--text)">
+              <button class="btn btn-ghost btn-sm" onclick="document.getElementById('audit-filter-user').value='';document.getElementById('audit-filter-type').value='';document.getElementById('audit-filter-status').value='';document.getElementById('audit-filter-month').value='';renderAuditLog()" data-en="✕ Clear">✕ ล้างตัวกรอง</button>
+            </div>
+          </div>
+          <div id="audit-log-summary" style="padding:10px 20px;font-size:12px;color:var(--text-muted);border-bottom:1px solid var(--border)"></div>
+          <div class="table-wrap">
+            <table style="width:100%;font-size:13px">
+              <thead>
+                <tr>
+                  <th id="audit-th-date" style="text-align:left;min-width:130px" data-en="Date Submitted">วันที่ยื่น</th>
+                  <th style="text-align:left" data-en="Employee">พนักงาน</th>
+                  <th style="text-align:left" data-en="Request Type">ประเภทคำขอ</th>
+                  <th class="col-hide-mobile" style="text-align:left" data-en="Period">ช่วงเวลา</th>
+                  <th class="col-hide-mobile" style="text-align:left" data-en="Reason">เหตุผล</th>
+                  <th style="text-align:center" data-en="Status">สถานะ</th>
+                  <th class="col-hide-mobile" style="text-align:left" data-en="Approved By">ผู้อนุมัติ</th>
+                </tr>
+              </thead>
+              <tbody id="audit-log-tbody"></tbody>
+            </table>
+          </div>
+          <div id="audit-log-pagination" style="padding:12px 20px;display:flex;gap:8px;align-items:center;justify-content:center"></div>
+        </div>
+      </div>
+
+      <!-- ===== PAGE: PROFILE ===== -->
+      <div id="page-profile" class="page">
+        <div id="profile-content"></div>
+      </div>
+
+      <!-- ===== PAGE: CALENDAR ===== -->
+      <div id="page-calendar" class="page">
+        <div style="text-align:center;padding:40px;color:#94a3b8" data-en="Loading...">กำลังโหลด...</div>
+      </div>
+
+      <!-- ===== PAGE: HOLIDAYS ===== -->
+      <div id="page-holidays" class="page">
+        <div style="text-align:center;padding:40px;color:#94a3b8" data-en="Loading...">กำลังโหลด...</div>
+      </div>
+
+      <!-- ===== PAGE: FAQ ===== -->
+      <div id="page-faq" class="page">
+        <div id="faq-container" style="max-width:820px;margin:0 auto;padding-bottom:40px">
+          <div style="text-align:center;padding:40px;color:#94a3b8">กำลังโหลด...</div>
+        </div>
+      </div>
+
+      <!-- ===== PAGE: SETTINGS ===== -->
+      <div id="page-settings" class="page">
+        <div id="settings-container" style="max-width:860px;margin:0 auto;padding-bottom:40px">
+          <div style="text-align:center;padding:40px;color:#94a3b8">กำลังโหลด...</div>
+        </div>
+      </div>
+
+    </div><!-- end page-content -->
+  </div><!-- end main-content -->
+
+  <!-- Mobile Bottom Nav -->
+  <nav id="bottom-nav" class="bottom-nav">
+    <div class="bottom-nav-item" data-page="dashboard" onclick="navigateTo('dashboard')">
+      <span class="bn-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>
+      <span class="bn-label" data-en="Home">หน้าหลัก</span>
+    </div>
+    <div class="bottom-nav-item nav-no-md active" data-page="checkin" onclick="navigateTo('checkin')">
+      <span class="bn-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
+      <span class="bn-label" data-en="Clock In">ตอกบัตร</span>
+    </div>
+    <div class="bottom-nav-item" data-page="attendance" onclick="navigateTo('attendance')">
+      <span class="bn-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></span>
+      <span class="bn-label" data-en="Schedule">ตารางเวลา</span>
+    </div>
+    <div class="bottom-nav-item" data-page="profile" onclick="navigateTo('profile')">
+      <span class="bn-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></span>
+      <span class="bn-label" data-en="Profile">โปรไฟล์</span>
+    </div>
+    <div class="bottom-nav-item bn-logout" onclick="logout()">
+      <span class="bn-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg></span>
+      <span class="bn-label" data-en="Log Out">ออกระบบ</span>
+    </div>
+  </nav>
+
+</div><!-- end app -->
+
+<!-- ===== MODALS ===== -->
+
+<!-- Late Detail Modal -->
+<div class="modal-overlay" id="late-detail-modal" onclick="if(event.target===this)closeLateDetail()">
+  <div class="modal" style="max-width:620px;width:95vw">
+    <div class="modal-header">
+      <h3 id="late-detail-title">🕐 รายละเอียดมาสาย</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeLateDetail()">✕</button>
+    </div>
+    <div class="modal-body" style="padding:0;overflow:auto;max-height:70vh" id="late-detail-body"></div>
+  </div>
+</div>
+
+<!-- Door Access Audit Modal (2026-08-05) -->
+<div class="modal-overlay" id="door-audit-modal" onclick="if(event.target===this)closeDoorAccessAudit()">
+  <div class="modal" style="max-width:900px;width:95vw">
+    <div class="modal-header">
+      <h3 data-en="🚪 Door Access Audit">🚪 ตรวจสอบสิทธิ์เปิดประตู</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeDoorAccessAudit()">✕</button>
+    </div>
+    <div class="modal-body" style="overflow:auto;max-height:70vh">
+      <div style="font-size:12px;color:#64748b;margin-bottom:10px" data-en="Compares what the app says vs. what the physical door controller actually has. Read-only — nothing is pushed automatically. Use Push for each row you want to reconcile.">เทียบสถานะในแอปกับสถานะจริงที่เครื่องสแกนหน้า — เป็นการตรวจสอบเฉยๆ ไม่มีการส่งคำสั่งอัตโนมัติ กดปุ่ม Push เป็นรายคนที่ต้องการแก้ไข</div>
+      <div id="door-audit-body">
+        <div style="text-align:center;padding:24px;color:#94a3b8" data-en="Loading...">กำลังโหลด...</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- OT Detail Modal -->
+<div class="modal-overlay" id="ot-detail-modal" onclick="if(event.target===this)closeOTDetail()">
+  <div class="modal" style="max-width:560px;width:95vw">
+    <div class="modal-header">
+      <h3 id="ot-detail-title">⏱️ รายละเอียด OT</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeOTDetail()">✕</button>
+    </div>
+    <div class="modal-body" style="padding:0;overflow:auto;max-height:70vh" id="ot-detail-body"></div>
+  </div>
+</div>
+
+<!-- Leave Request Modal -->
+<div class="modal-overlay" id="leave-modal" onclick="if(event.target===this)closeLeaveModal()">
+  <div class="modal" style="max-width:520px">
+    <div class="modal-header">
+      <h3 id="leave-modal-title">📋 ยื่นคำขอวันลา</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeLeaveModal()">✕</button>
+    </div>
+    <div class="modal-body" style="display:flex;flex-direction:column;gap:16px">
+
+      <!-- Leave type pills -->
+      <div id="leave-type-pills">
+        <label style="font-size:12px;font-weight:600;color:#64748b;margin-bottom:8px;display:block" data-en="Leave Type">ประเภทการลา</label>
+        <div style="display:flex;gap:8px">
+          <button id="ltab-annual" onclick="setLeaveType('annual')"
+            style="flex:1;padding:10px 6px;border-radius:10px;border:2px solid #bfdbfe;background:#eff6ff;color:#1d4ed8;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s" data-en="🏖️ Annual">
+            🏖️ พักร้อน
+          </button>
+          <button id="ltab-sick" onclick="setLeaveType('sick')"
+            style="flex:1;padding:10px 6px;border-radius:10px;border:2px solid #e2e8f0;background:#f8fafc;color:#64748b;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s" data-en="🤒 Sick">
+            🤒 ลาป่วย
+          </button>
+          <button id="ltab-business" onclick="setLeaveType('business')"
+            style="flex:1;padding:10px 6px;border-radius:10px;border:2px solid #e2e8f0;background:#f8fafc;color:#64748b;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s" data-en="📋 Business">
+            📋 ลากิจ
+          </button>
+        </div>
+      </div>
+      <input type="hidden" id="leave-form-type" value="annual">
+
+      <!-- Mode toggle -->
+      <div>
+        <label style="font-size:12px;font-weight:600;color:#64748b;margin-bottom:8px;display:block" data-en="Leave Mode">รูปแบบการลา</label>
+        <div style="display:flex;background:#f1f5f9;border-radius:10px;padding:3px;gap:3px">
+          <button id="lmode-days-btn" onclick="setLeaveMode('days')"
+            style="flex:1;padding:8px;border:none;border-radius:8px;background:white;color:#1e3a5f;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.1)" data-en="🗓️ By Day">
+            🗓️ ลาเป็นวัน
+          </button>
+          <button id="lmode-hours-btn" onclick="setLeaveMode('hours')"
+            style="flex:1;padding:8px;border:none;border-radius:8px;background:transparent;color:#94a3b8;font-size:13px;font-weight:600;cursor:pointer" data-en="⏰ By Hour">
+            ⏰ ลาเป็นชั่วโมง
+          </button>
+        </div>
+      </div>
+
+      <!-- Mode: วัน -->
+      <div id="leave-mode-days">
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#475569;margin-bottom:4px;cursor:pointer">
+          <input type="checkbox" id="leave-single-day-check" checked onchange="toggleLeaveSingleDay()">
+          <span data-en="Single day leave">ลาวันเดียว</span>
+        </label>
+        <div style="font-size:11px;color:#94a3b8;margin-bottom:10px" data-en="✔️ Checked = leave for one day only (no need to fill in an end date). Uncheck to select a date range.">✔️ ติ๊กไว้ = ลาแค่วันเดียว (ไม่ต้องกรอกวันที่สิ้นสุด) ถ้าลาหลายวันให้ติ๊กออกเพื่อเลือกช่วงวันที่</div>
+        <div class="form-row">
+          <div class="form-field" style="margin-bottom:0">
+            <label data-en="Start Date">วันที่เริ่มลา</label>
+            <input type="date" id="leave-form-from" onchange="calcLeaveDays()">
+          </div>
+          <div class="form-field" id="leave-to-field" style="margin-bottom:0;display:none">
+            <label data-en="End Date">วันที่สิ้นสุด</label>
+            <input type="date" id="leave-form-to" onchange="calcLeaveDays()">
+          </div>
+        </div>
+        <div style="font-size:11px;color:#94a3b8;margin-top:6px" data-en="📌 Backdated dates are allowed — the request still requires approval">📌 สามารถระบุวันที่ย้อนหลังได้ — คำขอยังคงต้องรอการอนุมัติ</div>
+        <div id="leave-days-summary" style="display:none;margin-top:10px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:8px 14px;font-size:13px;color:#166534;font-weight:600"></div>
+      </div>
+
+      <!-- Mode: ชั่วโมง -->
+      <div id="leave-mode-hours" style="display:none">
+        <div class="form-field" style="margin-bottom:12px">
+          <label data-en="Leave Date">วันที่ลา</label>
+          <input type="date" id="leave-form-date" onchange="calcLeaveHours()">
+          <div style="font-size:11px;color:#94a3b8;margin-top:4px" data-en="📌 Backdated dates are allowed — the request still requires approval">📌 สามารถระบุวันที่ย้อนหลังได้ — คำขอยังคงต้องรอการอนุมัติ</div>
+        </div>
+        <div class="form-row">
+          <div class="form-field" style="margin-bottom:0">
+            <label data-en="Start Time">เวลาเริ่ม</label>
+            <input type="time" id="leave-form-start" onchange="calcLeaveHours()">
+          </div>
+          <div class="form-field" style="margin-bottom:0">
+            <label data-en="End Time">เวลาสิ้นสุด</label>
+            <input type="time" id="leave-form-end" onchange="calcLeaveHours()">
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button type="button" onclick="setHalfDayLeave('am')" class="btn btn-ghost btn-sm" style="flex:1" data-en="🌅 Half day (morning)">🌅 ลาครึ่งวันเช้า</button>
+          <button type="button" onclick="setHalfDayLeave('pm')" class="btn btn-ghost btn-sm" style="flex:1" data-en="🌇 Half day (afternoon)">🌇 ลาครึ่งวันบ่าย</button>
+        </div>
+        <div id="leave-hours-summary" style="display:none;margin-top:10px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:8px 14px;font-size:13px;color:#166534;font-weight:600"></div>
+      </div>
+
+      <!-- Reason -->
+      <div class="form-field" style="margin-bottom:0">
+        <label><span data-en="Reason for Leave">เหตุผลการลา</span> <span style="color:#ef4444">*</span></label>
+        <textarea id="leave-form-reason" rows="3" maxlength="2000" placeholder="กรุณาระบุเหตุผลการลา..." data-en-ph="Please specify the reason for leave..."></textarea>
+      </div>
+
+      <!-- Medical certificate (sick only) -->
+      <div id="leave-medical-row" style="display:none">
+        <label style="font-size:12px;font-weight:600;color:#64748b;margin-bottom:8px;display:block" data-en="📎 Medical Certificate (if any)">📎 ใบรับรองแพทย์ (ถ้ามี)</label>
+        <div style="display:flex;align-items:center;gap:10px">
+          <input type="file" id="leave-medical-file" accept=".pdf,.jpg,.jpeg,.png" style="display:none" onchange="showMedicalFilename()">
+          <button onclick="document.getElementById('leave-medical-file').click()"
+            style="padding:7px 14px;border:1.5px dashed #94a3b8;border-radius:8px;background:#f8fafc;color:#475569;font-size:13px;cursor:pointer;white-space:nowrap" data-en="📎 Attach File">
+            📎 แนบไฟล์
+          </button>
+          <span id="leave-medical-filename" style="font-size:12px;color:#94a3b8">ยังไม่ได้แนบไฟล์</span>
+        </div>
+      </div>
+
+      <div class="alert alert-info" style="margin:0">
+        <span id="leave-approval-note">📋 คำขอจะถูกส่งไปยัง Manager และ Managing Director เพื่อขออนุมัติ</span>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeLeaveModal()" data-en="Cancel">ยกเลิก</button>
+      <button class="btn btn-primary" onclick="submitLeave()" data-en="📤 Submit Request">📤 ยื่นคำขอ</button>
+    </div>
+  </div>
+</div>
+
+<!-- Time Correction Modal -->
+<div class="modal-overlay" id="time-correction-modal" onclick="if(event.target===this)closeTimeCorrectionModal()">
+  <div class="modal" style="max-width:460px">
+    <div class="modal-header">
+      <h3 id="tc-modal-title" data-en="✏️ Request Time Correction">✏️ ขอแก้ไขเวลาย้อนหลัง</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeTimeCorrectionModal()">✕</button>
+    </div>
+    <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
+      <div class="alert alert-warning" id="tc-warning-banner" style="margin:0;font-size:13px;display:block">
+        <span data-en="⚠️ Time corrections must be approved by ">⚠️ การแก้ไขเวลาต้องได้รับการอนุมัติจาก </span><strong>Managing Director</strong><span data-en=" only"> เท่านั้น</span>
+      </div>
+      <div id="tc-employee-line" style="font-size:13px;color:#1e3a5f;font-weight:700;display:none"></div>
+      <div class="form-field" style="margin-bottom:0">
+        <label data-en="Date to Correct">วันที่ที่ต้องการแก้ไข</label>
+        <input type="date" id="tc-date" style="background:#f1f5f9;color:#475569;pointer-events:none">
+      </div>
+      <div>
+        <label style="font-size:12px;font-weight:600;color:#64748b;margin-bottom:8px;display:block" data-en="Which field to edit">แก้ไขข้อมูลใด</label>
+        <div style="display:flex;gap:10px">
+          <button id="tc-btn-in" onclick="selectCorrectionField('checkIn')"
+            style="flex:1;padding:14px 8px;border-radius:12px;border:2px solid #e2e8f0;background:#f8fafc;cursor:pointer;text-align:center;transition:all .15s">
+            <div style="font-size:20px">⬆️</div>
+            <div style="font-size:13px;font-weight:700;color:#1e293b;margin-top:4px" data-en="Check-In Time">เวลาเข้างาน</div>
+            <div id="tc-current-in" style="font-size:12px;color:#64748b;margin-top:2px">—</div>
+          </button>
+          <button id="tc-btn-out" onclick="selectCorrectionField('checkOut')"
+            style="flex:1;padding:14px 8px;border-radius:12px;border:2px solid #e2e8f0;background:#f8fafc;cursor:pointer;text-align:center;transition:all .15s">
+            <div style="font-size:20px">⬇️</div>
+            <div style="font-size:13px;font-weight:700;color:#1e293b;margin-top:4px" data-en="Check-Out Time">เวลาออกงาน</div>
+            <div id="tc-current-out" style="font-size:12px;color:#64748b;margin-top:2px">—</div>
+          </button>
+        </div>
+        <input type="hidden" id="tc-field">
+      </div>
+      <div class="form-field" style="margin-bottom:0">
+        <label data-en="Correct Time">เวลาที่ถูกต้อง</label>
+        <input type="time" id="tc-corrected-time">
+      </div>
+      <div class="form-field" style="margin-bottom:0">
+        <label><span data-en="Reason">เหตุผล</span> <span style="color:#ef4444">*</span></label>
+        <textarea id="tc-reason" rows="3" placeholder="เช่น ลืมกดตอกบัตร / ไม่ได้ขึ้น office / เครื่องขัดข้อง..." data-en-ph="e.g. forgot to clock in / off-site / device error..."></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeTimeCorrectionModal()" data-en="Cancel">ยกเลิก</button>
+      <button class="btn btn-primary" id="tc-submit-btn" onclick="submitTimeCorrection()" data-en="📤 Submit Request">📤 ยื่นคำร้อง</button>
+    </div>
+  </div>
+</div>
+
+<!-- Late Out Modal -->
+<div class="modal-overlay" id="lateout-modal" onclick="if(event.target===this)closeLateOutModal()">
+  <div class="modal" style="max-width:440px">
+    <div class="modal-header">
+      <h3 data-en="🌙 Report Late Night Out">🌙 แจ้งกลับดึก</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeLateOutModal()">✕</button>
+    </div>
+    <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
+      <div class="form-field" style="margin-bottom:0">
+        <label data-en="Date">วันที่</label>
+        <input type="date" id="lateout-date" onchange="refreshLateOutGate()">
+        <div style="font-size:11px;color:#94a3b8;margin-top:4px" data-en="📌 Backdated dates are allowed">📌 สามารถระบุวันที่ย้อนหลังได้</div>
+      </div>
+      <div style="margin-bottom:0">
+        <label style="font-size:12px;font-weight:600;color:#64748b;margin-bottom:8px;display:block" data-en="Return Time">เวลาที่กลับ</label>
+        <div style="display:flex;gap:10px">
+          <button id="lateout-btn-19" onclick="selectLateOutTime(lateOutThresholdHour(1))"
+            style="flex:1;padding:14px 8px;border-radius:12px;border:2px solid #e2e8f0;background:#f8fafc;cursor:pointer;transition:all .15s;text-align:center">
+            <div style="font-size:22px;margin-bottom:4px">🌆</div>
+            <div id="lateout-btn-19-time" style="font-size:15px;font-weight:700;color:#1e293b">--:--</div>
+            <div id="lateout-btn-19-amt" style="font-size:11px;color:#64748b;margin-top:2px"></div>
+          </button>
+          <button id="lateout-btn-20" onclick="selectLateOutTime(lateOutThresholdHour(2))"
+            style="flex:1;padding:14px 8px;border-radius:12px;border:2px solid #e2e8f0;background:#f8fafc;cursor:pointer;transition:all .15s;text-align:center">
+            <div style="font-size:22px;margin-bottom:4px">🌙</div>
+            <div id="lateout-btn-20-time" style="font-size:15px;font-weight:700;color:#1e293b">--:--</div>
+            <div id="lateout-btn-20-amt" style="font-size:11px;color:#64748b;margin-top:2px"></div>
+          </button>
+        </div>
+        <div id="lateout-time-note" style="margin-top:8px;font-size:12px;color:#94a3b8;text-align:center"></div>
+        <div style="margin-top:6px;font-size:11px;color:#94a3b8;text-align:center">
+          <span data-en="📌 Pick the tier at or below your actual return time (e.g. left at 19:30 → choose the earlier tier) — the allowance follows the tier you pick.">📌 เลือกช่วงเวลาที่ "ไม่เกิน" เวลาที่คุณกลับจริง (เช่น กลับ 19:30 ให้เลือกช่วงเวลาแรก) — ระบบจะจ่ายตามช่วงที่เลือก</span>
+        </div>
+      </div>
+      <div class="form-field" style="margin-bottom:0">
+        <label><span data-en="Reason / Work done">เหตุผล / งานที่ทำ</span> <span style="font-size:11px;color:#94a3b8;font-weight:400" data-en="(if any)">(ถ้ามี)</span></label>
+        <textarea id="lateout-reason" rows="3" placeholder="อธิบายงานที่ต้องทำจนดึก..." data-en-ph="Describe the work you did late..."></textarea>
+      </div>
+      <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:10px 14px;font-size:13px;color:#1e40af">
+        <div id="lateout-approval-note">📋 คำขอจะถูกส่งไปยัง Manager และ Managing Director เพื่อขออนุมัติ</div>
+      </div>
+      <div style="background:#fef3c7;border:1px solid #fde68a;border-radius:10px;padding:10px 14px;font-size:13px;color:#92400e">
+        <div data-en="📌 Must be reported every time — otherwise no allowance will be paid.">📌 ต้องแจ้งทุกครั้ง ไม่งั้นจะไม่ได้เบี้ยเลี้ยง</div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeLateOutModal()" data-en="Cancel">ยกเลิก</button>
+      <button class="btn btn-primary" onclick="submitLateOut()" data-en="📤 Submit Request">📤 ยื่นคำขอ</button>
+    </div>
+  </div>
+</div>
+
+<!-- OT Request Modal -->
+<div class="modal-overlay" id="ot-modal" onclick="if(event.target===this)closeOTModal()">
+  <div class="modal" style="max-width:420px">
+    <div class="modal-header">
+      <h3 data-en="⏱️ Request OT">⏱️ ขอ OT</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeOTModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label" data-en="Date">วันที่</label>
+        <input type="date" id="ot-date" class="form-control" onchange="calcOTHours(); updateDriverOTFieldsVisibility()">
+      </div>
+      <div id="ot-standard-fields">
+        <div class="form-group">
+          <label class="form-label" data-en="End Time">เวลาเลิกงาน</label>
+          <input type="time" id="ot-end-time" class="form-control" oninput="calcOTHours()">
+          <div style="font-size:11px;color:#94a3b8;margin-top:4px" data-en="OT is calculated from 17:30">OT คำนวณตั้งแต่ 17:30 น.</div>
+        </div>
+        <div id="ot-hours-display" style="background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:10px 14px;margin-bottom:12px;display:none">
+          <span style="font-size:13px;color:#c2410c;font-weight:600"><span data-en="⏱️ Total OT ">⏱️ OT รวม </span><span id="ot-hours-text">0</span><span data-en=" (17:30 → specified time)"> (17:30 → เวลาที่ระบุ)</span></span>
+        </div>
+      </div>
+      <div id="ot-driver-fields" style="display:none">
+        <div id="ot-driver-weekday-fields">
+          <div class="form-group">
+            <label class="form-label" data-en="OT x1.5 hours">ชั่วโมง OT x1.5</label>
+            <div style="display:flex;gap:8px;align-items:center">
+              <input type="number" id="ot-hours-15" class="form-control" min="0" step="1" placeholder="0" style="flex:1;min-width:0">
+              <span style="font-size:12px;color:#64748b;white-space:nowrap" data-en="hr">ชม.</span>
+              <input type="number" id="ot-mins-15" class="form-control" min="0" max="59" step="1" placeholder="0" style="flex:1;min-width:0">
+              <span style="font-size:12px;color:#64748b;white-space:nowrap" data-en="min">น.</span>
+            </div>
+          </div>
+        </div>
+        <div id="ot-driver-holiday-fields">
+          <div class="form-group">
+            <label class="form-label" data-en="OT x2.0 hours (holiday)">ชั่วโมง OT x2.0 (วันหยุด)</label>
+            <div style="display:flex;gap:8px;align-items:center">
+              <input type="number" id="ot-hours-20" class="form-control" min="0" step="1" placeholder="0" style="flex:1;min-width:0">
+              <span style="font-size:12px;color:#64748b;white-space:nowrap" data-en="hr">ชม.</span>
+              <input type="number" id="ot-mins-20" class="form-control" min="0" max="59" step="1" placeholder="0" style="flex:1;min-width:0">
+              <span style="font-size:12px;color:#64748b;white-space:nowrap" data-en="min">น.</span>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label" data-en="OT x3.0 hours (holiday)">ชั่วโมง OT x3.0 (วันหยุด)</label>
+            <div style="display:flex;gap:8px;align-items:center">
+              <input type="number" id="ot-hours-30" class="form-control" min="0" step="1" placeholder="0" style="flex:1;min-width:0">
+              <span style="font-size:12px;color:#64748b;white-space:nowrap" data-en="hr">ชม.</span>
+              <input type="number" id="ot-mins-30" class="form-control" min="0" max="59" step="1" placeholder="0" style="flex:1;min-width:0">
+              <span style="font-size:12px;color:#64748b;white-space:nowrap" data-en="min">น.</span>
+            </div>
+          </div>
+        </div>
+        <div style="font-size:11px;color:#94a3b8;margin-top:-8px;margin-bottom:12px" data-en="Fill in the hours that apply — leave others at 0">กรอกเฉพาะช่องที่มีชั่วโมง OT จริง ช่องที่ไม่มีให้เว้นเป็น 0</div>
+      </div>
+      <div class="form-group">
+        <label class="form-label"><span data-en="Reason / OT work">เหตุผล / งานที่ทำ OT</span> <span id="ot-reason-required-mark" style="color:#ef4444">*</span></label>
+        <textarea id="ot-reason" class="form-control" rows="2" placeholder="ระบุงานที่ทำ OT..." data-en-ph="Specify the OT work..."></textarea>
+      </div>
+      <div class="form-group" style="margin-bottom:0">
+        <label class="form-label" data-en="Attach File (if any)">แนบไฟล์ (ถ้ามี)</label>
+        <div style="display:flex;align-items:center;gap:8px">
+          <input type="file" id="ot-file" accept="image/*,.pdf,.doc,.docx,.xls,.xlsx" style="display:none" onchange="onOTFileChange()">
+          <button type="button" class="btn btn-outline btn-sm" onclick="document.getElementById('ot-file').click()" style="white-space:nowrap" data-en="📎 Choose File">📎 เลือกไฟล์</button>
+          <span id="ot-file-name" style="font-size:12px;color:#64748b;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+          <button type="button" id="ot-file-clear" onclick="clearOTFile()" style="display:none;background:none;border:none;color:#94a3b8;cursor:pointer;font-size:16px;padding:0 4px;line-height:1">✕</button>
+        </div>
+        <div style="font-size:11px;color:#94a3b8;margin-top:4px" data-en="Supports: images, PDF, Word, Excel (max 10MB)">รองรับ: รูปภาพ, PDF, Word, Excel (ไม่เกิน 10MB)</div>
+      </div>
+    </div>
+      <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:10px 14px;font-size:13px;color:#1e40af">
+        <div id="ot-approval-note">📋 คำขอจะถูกส่งไปยัง Manager และ Managing Director เพื่อขออนุมัติ</div>
+      </div>
+      <div style="background:#fef3c7;border:1px solid #fde68a;border-radius:10px;padding:10px 14px;font-size:13px;color:#92400e">
+        <div data-en="📌 Must be reported every time — otherwise no allowance will be paid.">📌 ต้องแจ้งทุกครั้ง ไม่งั้นจะไม่ได้เบี้ยเลี้ยง</div>
+      </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeOTModal()" data-en="Cancel">ยกเลิก</button>
+      <button class="btn btn-primary" onclick="submitOT()" style="background:#ea580c;border-color:#ea580c" data-en="⏱️ Submit OT">⏱️ ยื่นขอ OT</button>
+    </div>
+  </div>
+</div>
+
+<!-- COMP MODAL -->
+<div class="modal-overlay" id="comp-modal" onclick="if(event.target===this)closeCompModal()">
+  <div class="modal" style="max-width:440px">
+    <div class="modal-header">
+      <h3 data-en="🔄 Request Compensatory Day">🔄 ขอวันหยุดชดเชย</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeCompModal()">✕</button>
+    </div>
+    <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
+      <div class="form-group">
+        <label class="form-label"><span data-en="Worked Date">วันที่ไปทำงาน</span> <span style="color:#ef4444">*</span></label>
+        <input type="date" id="comp-worked-date" class="form-control" />
+        <div style="font-size:12px;color:#94a3b8;margin-top:4px" data-en="Specify the holiday / weekend day you worked">ระบุวันหยุด/วันเสาร์-อาทิตย์ที่เข้ามาทำงาน</div>
+      </div>
+      <div class="form-group">
+        <label class="form-label"><span data-en="Reason / Work details">เหตุผล / รายละเอียดงานที่ทำ</span> <span style="color:#ef4444">*</span></label>
+        <textarea id="comp-reason" class="form-control" rows="3" placeholder="ระบุงานที่ทำในวันหยุด..." data-en-ph="Specify the work you did on the holiday..."></textarea>
+      </div>
+      <div class="form-group">
+        <label class="form-label" data-en="Attach Document (if any)">แนบไฟล์เอกสาร (ถ้ามี)</label>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0">
+            <span data-en="📎 Choose File">📎 เลือกไฟล์</span>
+            <input type="file" id="comp-file" style="display:none" onchange="onCompFileChange(this)" accept="image/*,.pdf,.doc,.docx,.xls,.xlsx">
+          </label>
+          <span id="comp-file-name" style="font-size:13px;color:#64748b">ยังไม่ได้เลือกไฟล์</span>
+          <button id="comp-file-clear" class="btn btn-ghost btn-sm" style="display:none;color:#ef4444;padding:2px 6px" onclick="clearCompFile()">✕</button>
+        </div>
+        <div style="font-size:11px;color:#94a3b8;margin-top:4px" data-en="Supports: images, PDF, Word, Excel (max 10MB)">รองรับ: รูปภาพ, PDF, Word, Excel (ไม่เกิน 10MB)</div>
+      </div>
+      <div class="alert alert-info" style="margin:0">
+        <span id="comp-approval-note">📋 คำขอจะถูกส่งไปยัง Manager และ Managing Director เพื่อขออนุมัติ</span>
+      </div>
+      <div style="background:#f0fdfa;border:1px solid #5eead4;border-radius:8px;padding:10px 12px;font-size:13px;color:#0f766e">
+        <span data-en="ℹ️ Once approved, the system will add ">ℹ️ เมื่อได้รับการอนุมัติ ระบบจะเพิ่ม </span><strong data-en="1 day">1 วัน</strong><span data-en=" to your annual leave balance"> เข้าในสิทธิ์ลาพักร้อนของคุณ</span>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeCompModal()" data-en="Cancel">ยกเลิก</button>
+      <button class="btn btn-primary" onclick="submitComp()" style="background:#0d9488;border-color:#0d9488" data-en="🔄 Submit Compensatory Day">🔄 ยื่นขอวันหยุดชดเชย</button>
+    </div>
+  </div>
+</div>
+
+<!-- Approval Detail Modal -->
+<div class="modal-overlay" id="approval-detail-modal" onclick="if(event.target===this)closeApprovalDetail()">
+  <div class="modal" style="max-width:480px">
+    <div class="modal-header">
+      <h3 id="adetail-title">รายละเอียดคำขอ</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeApprovalDetail()">✕</button>
+    </div>
+    <div class="modal-body" id="adetail-body" style="padding:20px;display:flex;flex-direction:column;gap:12px"></div>
+  </div>
+</div>
+
+<!-- Upcountry Request Modal -->
+<div class="modal-overlay" id="upcountry-modal" onclick="if(event.target===this)closeUpcountryModal()">
+  <div class="modal" style="max-width:420px">
+    <div class="modal-header">
+      <h3 data-en="🗺️ Request Upcountry">🗺️ Upcountry</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeUpcountryModal()">✕</button>
+    </div>
+    <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
+      <div class="form-field" style="margin-bottom:0">
+        <label data-en="Date">วันที่</label>
+        <input type="date" id="upcountry-date">
+      </div>
+      <div class="form-field" style="margin-bottom:0">
+        <label><span data-en="Customer / Location (up to 6 stops, at least 1 required)">ชื่อลูกค้า / สถานที่ (สูงสุด 6 แห่ง อย่างน้อย 1 แห่ง)</span> <span style="color:#ef4444">*</span></label>
+        <div style="display:flex;gap:8px;font-size:11px;color:#94a3b8;margin-bottom:4px">
+          <div style="width:88px;flex-shrink:0" data-en="Time">เวลา</div>
+          <div data-en="Customer / Location">ชื่อลูกค้า / สถานที่</div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <div style="display:flex;gap:8px">
+            <input type="time" id="upcountry-loc-time-1" style="width:88px;flex-shrink:0">
+            <input type="text" id="upcountry-loc-name-1" maxlength="200" placeholder="เช่น บริษัท ABC, โคราช, นิคมอมตะ..." data-en-ph="e.g. ABC Co., Korat, Amata Industrial Estate..." style="flex:1">
+          </div>
+          <div style="display:flex;gap:8px">
+            <input type="time" id="upcountry-loc-time-2" style="width:88px;flex-shrink:0">
+            <input type="text" id="upcountry-loc-name-2" maxlength="200" placeholder="(ถ้ามี)" data-en-ph="(optional)" style="flex:1">
+          </div>
+          <div style="display:flex;gap:8px">
+            <input type="time" id="upcountry-loc-time-3" style="width:88px;flex-shrink:0">
+            <input type="text" id="upcountry-loc-name-3" maxlength="200" placeholder="(ถ้ามี)" data-en-ph="(optional)" style="flex:1">
+          </div>
+          <div style="display:flex;gap:8px">
+            <input type="time" id="upcountry-loc-time-4" style="width:88px;flex-shrink:0">
+            <input type="text" id="upcountry-loc-name-4" maxlength="200" placeholder="(ถ้ามี)" data-en-ph="(optional)" style="flex:1">
+          </div>
+          <div style="display:flex;gap:8px">
+            <input type="time" id="upcountry-loc-time-5" style="width:88px;flex-shrink:0">
+            <input type="text" id="upcountry-loc-name-5" maxlength="200" placeholder="(ถ้ามี)" data-en-ph="(optional)" style="flex:1">
+          </div>
+          <div style="display:flex;gap:8px">
+            <input type="time" id="upcountry-loc-time-6" style="width:88px;flex-shrink:0">
+            <input type="text" id="upcountry-loc-name-6" maxlength="200" placeholder="(ถ้ามี)" data-en-ph="(optional)" style="flex:1">
+          </div>
+        </div>
+      </div>
+      <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:10px 14px;font-size:13px;color:#1e40af">
+        <div id="upcountry-approval-note">📋 คำขอจะถูกส่งไปยัง Manager และ Managing Director เพื่อขออนุมัติ</div>
+        <div style="margin-top:4px;color:#92400e" data-en="📌 Must be reported every time — otherwise no allowance will be paid.">📌 ต้องแจ้งทุกครั้ง ไม่งั้นจะไม่ได้เบี้ยเลี้ยง</div>
+        <div style="margin-top:4px;color:#92400e" data-en="📌 The Upcountry allowance is paid once per day no matter how many stops — the extra rows are for recording the trip details only.">📌 เบี้ยเลี้ยง Upcountry จ่ายวันละ 1 ครั้ง ไม่ว่าจะแวะกี่แห่งก็ตาม — ช่องหลายแถวมีไว้บันทึกรายละเอียดการเดินทางเท่านั้น</div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeUpcountryModal()" data-en="Cancel">ยกเลิก</button>
+      <button class="btn btn-primary" onclick="submitUpcountry()" data-en="📤 Submit Request">📤 ยื่นคำขอ</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== LONG DISTANCE MODAL (Driver) ===== -->
+<div class="modal-overlay" id="install-app-modal" onclick="if(event.target===this)closeInstallAppModal()">
+  <div class="modal" style="max-width:400px">
+    <div class="modal-header">
+      <h3 data-en="📲 Install on iPhone/iPad">📲 ติดตั้งบน iPhone/iPad</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeInstallAppModal()">✕</button>
+    </div>
+    <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
+      <div style="font-size:12px;color:#64748b;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 14px" data-en="⚠️ This must be done manually in Safari — iOS doesn't allow websites to trigger it automatically.">⚠️ ต้องทำเองใน Safari — iOS ไม่อนุญาตให้เว็บสั่งติดตั้งอัตโนมัติได้</div>
+      <div style="display:flex;gap:12px;align-items:flex-start">
+        <div style="font-size:20px;font-weight:800;color:#2563eb;min-width:24px">1</div>
+        <div style="font-size:13px">
+          <span data-en="Open this page in Safari (not Chrome), then tap the ">เปิดหน้านี้ด้วย Safari (ไม่ใช่ Chrome) แล้วแตะปุ่ม </span>
+          <b>⬆️ <span data-en="Share">แชร์</span></b>
+          <span data-en=" icon at the bottom of the screen."> ที่ด้านล่างจอ</span>
+        </div>
+      </div>
+      <div style="display:flex;gap:12px;align-items:flex-start">
+        <div style="font-size:20px;font-weight:800;color:#2563eb;min-width:24px">2</div>
+        <div style="font-size:13px">
+          <span data-en="Scroll down the menu and tap ">เลื่อนลงในเมนู แล้วแตะ </span>
+          <b data-en="Add to Home Screen">"เพิ่มไปยังหน้าจอโฮม"</b>
+        </div>
+      </div>
+      <div style="display:flex;gap:12px;align-items:flex-start">
+        <div style="font-size:20px;font-weight:800;color:#2563eb;min-width:24px">3</div>
+        <div style="font-size:13px">
+          <span data-en="Tap ">แตะ </span><b data-en="Add">"เพิ่ม"</b><span data-en=" in the top-right corner."> ที่มุมขวาบน</span>
+        </div>
+      </div>
+      <div style="font-size:12px;color:#64748b;background:#f8fafc;border-radius:8px;padding:8px 12px" data-en="ℹ️ Requires iOS 16.4 or later. After installing, open the app from the new icon on your Home Screen (not from Safari) to receive push notifications.">ℹ️ ต้องใช้ iOS 16.4 ขึ้นไป หลังติดตั้งแล้ว ให้เปิดแอปจาก icon ใหม่บนหน้าจอโฮม (ไม่ใช่จาก Safari) จึงจะรับการแจ้งเตือน push ได้</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-primary" onclick="closeInstallAppModal()" data-en="Got it">เข้าใจแล้ว</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="personalcar-modal" onclick="if(event.target===this)closePersonalCarModal()">
+  <div class="modal" style="max-width:400px">
+    <div class="modal-header">
+      <h3 data-en="🚙 Report Personal Car Use">🚙 แจ้งใช้รถส่วนตัว</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closePersonalCarModal()">✕</button>
+    </div>
+    <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
+      <div class="form-field" style="margin-bottom:0">
+        <label data-en="Date">วันที่</label>
+        <input type="date" id="personalcar-date">
+      </div>
+      <div id="personalcar-rate-display" style="background:#f0fdf4;border:1px solid #86efac;border-radius:10px;padding:10px 14px;font-size:13px;color:#15803d;font-weight:600"></div>
+      <div class="form-field" style="margin-bottom:0">
+        <label data-en="Note (optional)">หมายเหตุ (ถ้ามี)</label>
+        <textarea id="personalcar-reason" rows="2" placeholder="ระบุปลายทาง หรือรายละเอียดอื่นๆ (ถ้ามี)" data-en-ph="Destination or other details (optional)"></textarea>
+      </div>
+      <div id="personalcar-approval-note" style="font-size:12px;color:#1e40af;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:8px 12px">📋 คำขอจะถูกส่งไปยัง Managing Director เพื่อขออนุมัติ</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closePersonalCarModal()" data-en="Cancel">ยกเลิก</button>
+      <button class="btn btn-primary" onclick="submitPersonalCar()" data-en="📤 Submit Request">📤 ยื่นคำขอ</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="longdistance-modal" onclick="if(event.target===this)closeLongDistanceModal()">
+  <div class="modal" style="max-width:420px">
+    <div class="modal-header">
+      <h3 data-en="🚗 Report Long Distance">🚗 แจ้ง Long Distance</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeLongDistanceModal()">✕</button>
+    </div>
+    <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
+      <div class="form-field" style="margin-bottom:0">
+        <label data-en="Date">วันที่</label>
+        <input type="date" id="longdistance-date">
+      </div>
+      <div class="form-row">
+        <div class="form-field" style="margin-bottom:0">
+          <label data-en="Starting Mileage (km)">เลขไมล์เริ่มต้น (กม.)</label>
+          <input type="number" id="longdistance-mileage-start" min="0" placeholder="0" oninput="calcLongDistance()">
+        </div>
+        <div class="form-field" style="margin-bottom:0">
+          <label data-en="Ending Mileage (km)">เลขไมล์สุดท้าย (กม.)</label>
+          <input type="number" id="longdistance-mileage-end" min="0" placeholder="0" oninput="calcLongDistance()">
+        </div>
+      </div>
+      <div id="longdistance-result-display" style="display:none;background:#f0f9ff;border:1px solid #7dd3fc;border-radius:10px;padding:10px 14px;font-size:13px;color:#0369a1;font-weight:600">
+        <span id="longdistance-result-text"></span>
+      </div>
+      <div class="form-field" style="margin-bottom:0">
+        <label data-en="Reason / Notes (if any)">เหตุผล / หมายเหตุ (ถ้ามี)</label>
+        <textarea id="longdistance-reason" rows="2" placeholder="ระบุปลายทาง หรือรายละเอียดอื่นๆ (ถ้ามี)" data-en-ph="Specify destination or other details (optional)"></textarea>
+      </div>
+      <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:10px 14px;font-size:13px;color:#1e40af">
+        <div id="longdistance-approval-note">📋 คำขอจะถูกส่งไปยัง Accounting เพื่อขออนุมัติ</div>
+        <div id="longdistance-threshold-note" style="margin-top:4px;color:#92400e">📌 ถ้าระยะทางเกิน 250 กม. จะได้รับเบี้ยเลี้ยงเพิ่ม 150 บาท/วัน</div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeLongDistanceModal()" data-en="Cancel">ยกเลิก</button>
+      <button class="btn btn-primary" onclick="submitLongDistance()" data-en="📤 Submit Request">📤 ยื่นคำขอ</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast Container -->
+<div id="toast-container" style="position:fixed;bottom:24px;right:24px;z-index:9999;display:flex;flex-direction:column;gap:10px;"></div>
+
+<!-- ===== EMPLOYEE PROFILE MODAL (view) ===== -->
+<div class="modal-overlay" id="profile-modal" onclick="if(event.target===this)closeProfileModal()">
+  <div class="modal modal-wide" style="max-height:90vh;max-height:90dvh;overflow-y:auto;padding:0">
+    <div id="profile-modal-content"></div>
+  </div>
+</div>
+
+<!-- ===== ADD / EDIT EMPLOYEE MODAL ===== -->
+<div class="modal-overlay" id="emp-modal" onclick="if(event.target===this)closeEmpModal()">
+  <div class="modal modal-wide" style="max-height:92vh;max-height:92dvh;overflow-y:auto">
+    <div class="modal-header" style="position:sticky;top:0;background:var(--bg-card);z-index:10">
+      <h3 id="emp-modal-title">➕ เพิ่มพนักงานใหม่</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeEmpModal()">✕</button>
+    </div>
+    <div class="modal-body" style="padding:20px">
+      <form id="emp-form" onsubmit="return false">
+
+        <!-- ข้อมูลส่วนตัว -->
+        <div class="emp-form-section">
+          <h4 data-en="👤 Personal Information">👤 ข้อมูลส่วนตัว (Personal Information)</h4>
+          <div class="form-row form-row-3">
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="Name Prefix (English)">คำนำหน้า (อังกฤษ)</label>
+              <!-- 2026-08-17: this select's option text is deliberately hardcoded English (no
+                   data-en swap) -- it's paired with the English name fields specifically, so it
+                   always reads Mr./Mrs./Miss regardless of the page's current UI language, the
+                   same way the English name inputs' placeholders are always English examples. -->
+              <select id="emp-name-prefix" onchange="syncNamePrefix(this)">
+                <option value="">— Select —</option>
+                <option value="mr">Mr.</option>
+                <option value="mrs">Mrs.</option>
+                <option value="ms">Miss</option>
+              </select>
+            </div>
+            <div class="form-field" style="margin-bottom:0">
+              <label><span data-en="First Name">ชื่อ</span> <span style="color:#ef4444">*</span></label>
+              <input type="text" id="emp-firstname" placeholder="เช่น Somchai" data-en-ph="e.g. Somchai" required>
+            </div>
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="Last Name">นามสกุล</label>
+              <input type="text" id="emp-lastname" placeholder="เช่น Jaidee" data-en-ph="e.g. Jaidee">
+            </div>
+          </div>
+          <div class="form-row form-row-3" style="margin-top:12px">
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="Name Prefix (Thai)">คำนำหน้า (ไทย)</label>
+              <!-- Same underlying value as #emp-name-prefix above (synced both ways via
+                   syncNamePrefix()) -- option text always Thai, paired with the Thai name
+                   fields, mirroring the English select's always-English convention. -->
+              <select id="emp-name-prefix-th" onchange="syncNamePrefix(this)">
+                <option value="">— เลือก —</option>
+                <option value="mr">นาย</option>
+                <option value="mrs">นาง</option>
+                <option value="ms">นางสาว</option>
+              </select>
+            </div>
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="First Name (Thai)">ชื่อ (ภาษาไทย)</label>
+              <input type="text" id="emp-firstname-th" placeholder="เช่น สมชาย" data-en-ph="e.g. สมชาย (in Thai script)">
+            </div>
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="Last Name (Thai)">นามสกุล (ภาษาไทย)</label>
+              <input type="text" id="emp-lastname-th" placeholder="เช่น ใจดี" data-en-ph="e.g. ใจดี (in Thai script)">
+            </div>
+          </div>
+          <div class="form-row" style="margin-top:12px">
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="Date of Birth">วันเกิด</label>
+              <input type="date" id="emp-dob">
+            </div>
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="Gender">เพศ</label>
+              <select id="emp-gender">
+                <option value="" data-en="— Select —">— เลือก —</option>
+                <option value="male" data-en="Male">ชาย</option>
+                <option value="female" data-en="Female">หญิง</option>
+                <option value="other" data-en="Other">อื่นๆ</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row" style="margin-top:12px">
+            <div class="form-field" style="margin-bottom:0;flex:0 0 170px">
+              <label data-en="Document Type">ประเภทเอกสาร</label>
+              <select id="emp-idtype" onchange="onEmpIdTypeChange()">
+                <option value="idcard" data-en="National ID">บัตรประชาชน</option>
+                <option value="passport">Passport</option>
+                <option value="tax_id" data-en="Tax ID Number">เลขประจำตัวผู้เสียภาษีอากร</option>
+              </select>
+            </div>
+            <div class="form-field" style="margin-bottom:0">
+              <label id="emp-idcard-label">เลขบัตรประชาชน 13 หลัก</label>
+              <input type="text" id="emp-idcard" placeholder="1 2345 67890 12 3" maxlength="13">
+            </div>
+          </div>
+          <div class="form-row" style="margin-top:12px">
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="Phone Number">เบอร์โทรศัพท์</label>
+              <input type="text" id="emp-phone" placeholder="081-234-5678">
+            </div>
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="Email">อีเมล</label>
+              <input type="email" id="emp-email" placeholder="name@tozai.co.th">
+            </div>
+          </div>
+          <div class="form-field" style="margin-top:12px">
+            <label data-en="Current Address">ที่อยู่ปัจจุบัน</label>
+            <textarea id="emp-address" rows="2" placeholder="บ้านเลขที่ ถนน แขวง เขต จังหวัด รหัสไปรษณีย์" data-en-ph="House no., street, sub-district, district, province, postal code"></textarea>
+          </div>
+          <div class="form-field" style="margin-top:12px">
+            <label data-en="Address on ID Card">ที่อยู่ตามบัตรประชาชน</label>
+            <textarea id="emp-idcard-address" rows="2" placeholder="บ้านเลขที่ ถนน แขวง เขต จังหวัด รหัสไปรษณีย์" data-en-ph="House no., street, sub-district, district, province, postal code"></textarea>
+            <div style="font-size:11px;color:#94a3b8;margin-top:4px">
+              <span data-en="ℹ️ As printed on the ID card — may differ from the current address above">ℹ️ ตามที่ปรากฏบนบัตรประชาชน — อาจต่างจากที่อยู่ปัจจุบันด้านบน</span>
+            </div>
+          </div>
+          <div class="form-row form-row-3">
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="Emergency Contact">ผู้ติดต่อฉุกเฉิน</label>
+              <input type="text" id="emp-emergency-contact" placeholder="ชื่อผู้ติดต่อ" data-en-ph="Contact name">
+            </div>
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="Relationship">ความสัมพันธ์</label>
+              <select id="emp-emergency-relation">
+                <option value="" data-en="— Select —">— เลือก —</option>
+                <option value="บิดา" data-en="Father">บิดา</option>
+                <option value="มารดา" data-en="Mother">มารดา</option>
+                <option value="คู่สมรส" data-en="Spouse">คู่สมรส</option>
+                <option value="บุตร" data-en="Child">บุตร</option>
+                <option value="พี่น้อง" data-en="Sibling">พี่น้อง</option>
+                <option value="ญาติ" data-en="Relative">ญาติ</option>
+                <option value="เพื่อน" data-en="Friend">เพื่อน</option>
+                <option value="อื่นๆ" data-en="Other">อื่นๆ</option>
+              </select>
+            </div>
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="Emergency Phone">เบอร์โทรฉุกเฉิน</label>
+              <input type="text" id="emp-emergency-phone" placeholder="081-000-0000">
+            </div>
+          </div>
+        </div>
+
+        <!-- ข้อมูลการทำงาน -->
+        <div class="emp-form-section">
+          <h4 data-en="💼 Employment">💼 ข้อมูลการทำงาน (Employment)</h4>
+          <div class="form-field" style="margin-bottom:0">
+            <label><span data-en="Position">ตำแหน่ง</span> <span style="color:#ef4444">*</span></label>
+            <input type="text" id="emp-position" placeholder="เช่น Sales Executive" data-en-ph="e.g. Sales Executive">
+          </div>
+          <div class="form-field" style="margin-bottom:0;margin-top:12px">
+            <label data-en="Department">แผนก</label>
+            <select id="emp-dept">
+              <option value="" data-en="— None —">— ไม่ระบุ —</option>
+              <option value="Sales" data-en="Sales">Sales</option>
+              <option value="Engineering" data-en="Engineering">Engineering</option>
+              <option value="Management" data-en="Management">Management</option>
+              <option value="Operations" data-en="Operations">Operations</option>
+              <option value="Finance" data-en="Finance">Finance</option>
+              <option value="Marketing" data-en="Marketing">Marketing</option>
+            </select>
+          </div>
+          <div class="form-row form-row-3" style="margin-top:12px">
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="Start Date">วันเริ่มเข้าทำงาน</label>
+              <input type="date" id="emp-start-date">
+            </div>
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="End Date">วันที่สิ้นสุดการทำงาน</label>
+              <input type="date" id="emp-end-date">
+            </div>
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="Employment Status">สถานะการทำงาน</label>
+              <select id="emp-active">
+                <option value="true" data-en="● Active">● ปกติ (Active)</option>
+                <option value="false" data-en="● Inactive">● ระงับ (Inactive)</option>
+                <option value="observer" data-en="👁️ Observer (view only, no payroll)">👁️ ผู้สังเกตการณ์ (Observer — ดูได้อย่างเดียว ไม่มีเงินเดือน)</option>
+              </select>
+            </div>
+          </div>
+          <div style="font-size:11px;color:#94a3b8;margin-top:6px" data-en="🚪 Active or Observer status can open the physical door (face-scan). Inactive cannot. Saving this field pushes the change to the door controller automatically.">🚪 สถานะ ปกติ (Active) หรือ ผู้สังเกตการณ์ (Observer) จะเปิดประตูสแกนหน้าได้ ส่วน ระงับ (Inactive) จะเปิดไม่ได้ — เมื่อบันทึกระบบจะส่งค่านี้ไปที่เครื่องสแกนหน้าอัตโนมัติ</div>
+          <div id="emp-door-sync-row" style="display:none;margin-top:8px;font-size:12px" >
+            <span id="emp-door-sync-status"></span>
+            <button type="button" id="emp-door-sync-retry-btn" class="btn btn-sm btn-secondary" style="margin-left:8px;display:none" onclick="retryDoorSync()" data-en="🔄 Retry">🔄 ลองใหม่</button>
+          </div>
+          <div class="form-row" style="margin-top:12px">
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="Annual Leave (days/year)">วันลาพักร้อน (วัน/ปี)</label>
+              <input type="number" id="emp-annual-leave" value="6" min="0">
+            </div>
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="Sick Leave (days/year)">วันลาป่วย (วัน/ปี)</label>
+              <input type="number" id="emp-sick-leave" value="30" min="0">
+            </div>
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="Business Leave (days/year)">วันลากิจ (วัน/ปี)</label>
+              <input type="number" id="emp-business-leave" value="3" min="0">
+            </div>
+          </div>
+          <div style="font-size:11px;color:#94a3b8;margin-top:6px" data-en="📌 These reset by calendar year (Jan 1 – Dec 31), not by hire-date anniversary. Unused Annual Leave can carry over into next year via Settings → Leave Policy → Year-End Carry-Forward.">📌 นับตามปีปฏิทิน (1 ม.ค. – 31 ธ.ค.) ไม่ใช่ตามวันครบรอบเข้างาน วันลาพักร้อนที่เหลือยกไปปีถัดไปได้ผ่าน ตั้งค่า → นโยบายวันลา → Year-End Carry-Forward</div>
+        </div>
+
+        <!-- บัญชีระบบ -->
+        <div class="emp-form-section">
+          <div id="emp-employee-no-display" style="display:inline-block;margin-bottom:14px;padding:6px 14px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;font-size:12px;color:#1e40af;font-weight:600"></div>
+          <h4 data-en="🔐 System Account">🔐 บัญชีเข้าใช้งานระบบ (System Account)</h4>
+          <div style="font-size:11px;color:#94a3b8;margin-bottom:10px" id="emp-id-field">
+            <span data-en="💡 Editing — password change can be done separately">💡 กำลังแก้ไขข้อมูล — การเปลี่ยนรหัสผ่านสามารถทำได้แยกต่างหาก</span>
+          </div>
+          <div class="form-row">
+            <div class="form-field" style="margin-bottom:0">
+              <label><span data-en="Username">ชื่อผู้ใช้ (Username)</span> <span style="color:#ef4444">*</span></label>
+              <input type="text" id="emp-username" placeholder="เช่น user03" data-en-ph="e.g. user03" autocomplete="off">
+            </div>
+            <div class="form-field" style="margin-bottom:0" id="emp-role-row">
+              <label><span data-en="User Level">ระดับผู้ใช้งาน (Level)</span> <span style="color:#ef4444">*</span> <span style="font-size:10px;color:#94a3b8" data-en="— set by Managing Director only">— กำหนดโดย Managing Director เท่านั้น</span></label>
+              <select id="emp-role" onchange="toggleEmpPvdRow()">
+                                <option value="md" data-en="Level 1 — Managing Director" data-th="ระดับ 1 — กรรมการผู้จัดการ">Level 1 — Managing Director</option>
+                <option value="manager" data-en="Level 2 — Manager" data-th="ระดับ 2 — ผู้จัดการ">Level 2 — Manager</option>
+                <option value="accounting" data-en="Level 3 — Accounting" data-th="ระดับ 3 — บัญชี">Level 3 — Accounting</option>
+                <option value="user" data-en="Level 4 — Staff" data-th="ระดับ 4 — พนักงาน">Level 4 — Staff</option>
+                <option value="marketing" data-en="Level 4 — Marketing" data-th="ระดับ 4 — การตลาด">Level 4 — Marketing</option>
+                <option value="driver" data-en="Level 5 — Driver (no clock-in)" data-th="ระดับ 5 — คนขับ (ไม่มีเวลาเข้างาน)">Level 5 — Driver (no clock-in)</option>
+              </select>
+            </div>
+          </div>
+          <div id="emp-password-row" style="margin-top:12px">
+            <div class="form-row">
+              <div class="form-field" style="margin-bottom:0">
+                <label><span id="emp-password-label" data-en="Initial Password">รหัสผ่านเริ่มต้น</span> <span id="emp-password-required-mark" style="color:#ef4444">*</span></label>
+                <input type="password" id="emp-password" placeholder="ตั้งรหัสผ่านเริ่มต้น" data-en-ph="Set an initial password" autocomplete="new-password">
+              </div>
+              <div class="form-field" style="margin-bottom:0">
+                <label data-en="Confirm Password">ยืนยันรหัสผ่าน</label>
+                <input type="password" id="emp-password-confirm" placeholder="ยืนยันรหัสผ่านอีกครั้ง" data-en-ph="Confirm password again">
+              </div>
+            </div>
+            <div class="alert alert-info" id="emp-password-hint" style="margin-top:10px;margin-bottom:0">
+              <span data-en="🔒 Employees can change their own password after first login">🔒 พนักงานสามารถเปลี่ยนรหัสผ่านได้เองหลังจากเข้าสู่ระบบครั้งแรก</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- ข้อมูลการเงิน -->
+        <div class="emp-form-section">
+          <h4 data-en="💵 Financial Information">💵 ข้อมูลการเงิน (Financial Information)</h4>
+          <div class="form-row">
+            <div class="form-field" style="margin-bottom:0">
+              <label><span data-en="Base Salary (THB)">เงินเดือนพื้นฐาน (บาท)</span> <span style="color:#ef4444">*</span></label>
+              <input type="number" id="emp-salary" placeholder="25000" min="0">
+            </div>
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="Transport (THB/month)">ค่าเดินทาง (บาท/เดือน)</label>
+              <input type="number" id="emp-transport" value="0" min="0">
+            </div>
+          </div>
+          <div class="form-row" style="margin-top:12px">
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="Position Allowance (THB/month)">ค่าตำแหน่ง (บาท/เดือน)</label>
+              <input type="number" id="emp-position-allowance" value="0" min="0" placeholder="0 = ไม่มี" data-en-ph="0 = none">
+            </div>
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="Housing (THB/month)">ค่าที่พัก/Housing (บาท/เดือน)</label>
+              <input type="number" id="emp-housing" value="0" min="0" placeholder="0 = ไม่มี" data-en-ph="0 = none">
+            </div>
+          </div>
+          <div class="form-row" style="margin-top:12px">
+            <div class="form-field" style="margin-bottom:0" id="emp-pvd-row">
+              <label><span data-en="Provident Fund PVD (%)">กองทุนสำรองเลี้ยงชีพ PVD (%)</span> <span style="font-size:10px;color:#94a3b8" data-en="deducted from salary">หักจากเงินเดือน</span></label>
+              <input type="number" id="emp-pvd-rate" value="5" min="0" max="15" step="0.5" placeholder="5">
+            </div>
+          </div>
+          <!-- 2026-07-31: Diligence/Long Distance rates + threshold centralized to Settings ->
+               Allowance Rates (was per-employee). Personal Car keeps a per-employee eligibility
+               checkbox since the old rate field was also acting as an on/off flag. Guaranteed OT
+               stays a real per-employee input (individual contract term, not a rate).
+               2026-07-31 (later): removed the read-only Diligence/Long Distance rate-reference
+               rows entirely per user request -- redundant now that Settings owns the rate. -->
+          <!-- Staff-only fields -->
+          <div id="emp-personalcar-row" style="display:none">
+            <div class="form-row" style="margin-top:12px">
+              <div class="form-field" style="margin-bottom:0">
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                  <input type="checkbox" id="emp-personalcar-eligible" style="width:16px;height:16px;cursor:pointer">
+                  <span data-en="Eligible for Personal Car Allowance">มีสิทธิ์รับค่าใช้รถส่วนตัว</span>
+                </label>
+                <div id="emp-personalcar-rate-display" style="font-size:11px;color:#94a3b8;margin-top:4px">–</div>
+              </div>
+            </div>
+          </div>
+          <!-- 2026-07-31: phone allowance, same pattern as Personal Car -- role eligibility gates
+               who CAN have it, but the real data shows zero role correlation (only 1 of 4 'user'
+               employees ever had it), so a per-employee checkbox is the actual gate. -->
+          <div id="emp-phone-row" style="display:none">
+            <div class="form-row" style="margin-top:12px">
+              <div class="form-field" style="margin-bottom:0">
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                  <input type="checkbox" id="emp-phone-eligible" style="width:16px;height:16px;cursor:pointer">
+                  <span data-en="Eligible for Phone Allowance">มีสิทธิ์รับค่าเบี้ยเลี้ยงโทรศัพท์</span>
+                </label>
+                <div id="emp-phone-rate-display" style="font-size:11px;color:#94a3b8;margin-top:4px">–</div>
+              </div>
+            </div>
+          </div>
+          <!-- 2026-07-31: split into two independently-gated rows -- Guaranteed OT is gated on
+               OT eligibility (computePayroll tops up ot15Hours for any canOT role, not just
+               drivers), while the Long Distance rate display is gated on Long Distance
+               eligibility specifically. These used to share one div gated on longDistance only,
+               which meant a non-driver OT-eligible role could never have Guaranteed OT set
+               through this UI even though the calc would have honored it. -->
+          <div id="emp-ot-contract-row" style="display:none">
+            <div class="form-row" style="margin-top:12px">
+              <div class="form-field" style="margin-bottom:0">
+                <label><span data-en="Guaranteed Overtime (hours/month)">การันตี Overtime (ชั่วโมง/เดือน)</span> <span style="font-size:10px;color:#94a3b8" data-en="minimum floor for OT x1.5 only">ขั้นต่ำเฉพาะ OT x1.5</span></label>
+                <input type="number" id="emp-guaranteed-ot" value="0" min="0" step="0.5" placeholder="0 = ไม่มี" data-en-ph="0 = none">
+              </div>
+            </div>
+          </div>
+          <div class="form-row" style="margin-top:12px">
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="Bank">ธนาคาร</label>
+              <select id="emp-bank-name">
+                <option value="ธนาคารกสิกรไทย" data-en="Kasikorn Bank (KBank)">ธนาคารกสิกรไทย</option>
+                <option value="ธนาคารไทยพาณิชย์" data-en="SCB (Siam Commercial Bank)">ธนาคารไทยพาณิชย์</option>
+                <option value="ธนาคารกรุงเทพ" data-en="Bangkok Bank (BBL)">ธนาคารกรุงเทพ</option>
+                <option value="ธนาคารกรุงไทย" data-en="Krungthai Bank (KTB)">ธนาคารกรุงไทย</option>
+                <option value="ธนาคารออมสิน" data-en="Government Savings Bank (GSB)">ธนาคารออมสิน</option>
+                <option value="ธนาคารกรุงศรีอยุธยา" data-en="Bank of Ayudhya (Krungsri)">ธนาคารกรุงศรีอยุธยา</option>
+                <option value="ธนาคารทหารไทยธนชาต" data-en="TTB Bank">ธนาคารทหารไทยธนชาต</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row" style="margin-top:12px">
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="Bank Account No.">เลขบัญชีธนาคาร</label>
+              <input type="text" id="emp-bank-account" placeholder="000-0-00000-0">
+            </div>
+          </div>
+        </div>
+
+      </form>
+    </div>
+    <div class="modal-footer" style="position:sticky;bottom:0;background:var(--bg-card);border-top:1px solid var(--border)">
+      <button class="btn btn-ghost" onclick="closeEmpModal()" data-en="Cancel">ยกเลิก</button>
+      <button class="btn btn-primary" onclick="saveEmployee()" data-en="💾 Save">💾 บันทึกข้อมูล</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== MY PROFILE EDIT MODAL (User) ===== -->
+<div class="modal-overlay" id="my-profile-modal" onclick="if(event.target===this)closeMyProfileModal()">
+  <div class="modal" style="max-width:460px">
+    <div class="modal-header">
+      <h3 data-en="✏️ Edit Personal Info">✏️ แก้ไขข้อมูลส่วนตัว</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeMyProfileModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-field">
+        <label data-en="📞 Phone">📞 โทรศัพท์</label>
+        <input type="tel" id="my-profile-phone" placeholder="08X-XXX-XXXX">
+      </div>
+      <div class="form-field">
+        <label data-en="📧 Email">📧 อีเมล</label>
+        <input type="email" id="my-profile-email" placeholder="example@email.com">
+      </div>
+      <div class="form-field">
+        <label data-en="🏠 Current Address">🏠 ที่อยู่ปัจจุบัน</label>
+        <textarea id="my-profile-address" rows="2" placeholder="บ้านเลขที่ ถนน แขวง เขต จังหวัด รหัสไปรษณีย์" data-en-ph="House no., street, sub-district, district, province, postal code"></textarea>
+      </div>
+      <div class="form-row form-row-id-doc">
+        <div class="form-field" style="margin-bottom:0">
+          <label data-en="🪪 Document Type">🪪 ประเภทเอกสาร</label>
+          <select id="my-profile-idtype" onchange="onMyProfileIdTypeChange()">
+            <option value="idcard" data-en="National ID">บัตรประชาชน</option>
+            <option value="passport">Passport</option>
+            <option value="tax_id" data-en="Tax ID Number">เลขประจำตัวผู้เสียภาษีอากร</option>
+          </select>
+        </div>
+        <div class="form-field" style="margin-bottom:0">
+          <label id="my-profile-idcard-label">เลขบัตรประชาชน 13 หลัก</label>
+          <input type="text" id="my-profile-idcard" placeholder="1 2345 67890 12 3" maxlength="13">
+        </div>
+      </div>
+      <div class="form-row form-row-3">
+        <div class="form-field" style="margin-bottom:0">
+          <label data-en="🆘 Emergency Contact">🆘 ผู้ติดต่อฉุกเฉิน</label>
+          <input type="text" id="my-profile-emname" placeholder="ชื่อผู้ติดต่อ" data-en-ph="Contact name">
+        </div>
+        <div class="form-field" style="margin-bottom:0">
+          <label data-en="💑 Relationship">💑 ความสัมพันธ์</label>
+          <select id="my-profile-emrelation">
+            <option value="" data-en="— Select —">— เลือก —</option>
+            <option value="บิดา" data-en="Father">บิดา</option>
+            <option value="มารดา" data-en="Mother">มารดา</option>
+            <option value="คู่สมรส" data-en="Spouse">คู่สมรส</option>
+            <option value="บุตร" data-en="Child">บุตร</option>
+            <option value="พี่น้อง" data-en="Sibling">พี่น้อง</option>
+            <option value="ญาติ" data-en="Relative">ญาติ</option>
+            <option value="เพื่อน" data-en="Friend">เพื่อน</option>
+            <option value="อื่นๆ" data-en="Other">อื่นๆ</option>
+          </select>
+        </div>
+        <div class="form-field" style="margin-bottom:0">
+          <label data-en="📞 Emergency Phone">📞 เบอร์ฉุกเฉิน</label>
+          <input type="tel" id="my-profile-emphone" placeholder="08X-XXX-XXXX">
+        </div>
+      </div>
+      <div class="alert alert-info mt-4" style="margin-bottom:0">
+        <span data-en="🔒 Other info (salary, position) can only be edited by HR">🔒 ข้อมูลอื่น ๆ (เงินเดือน, ตำแหน่ง) แก้ไขได้โดย HR เท่านั้น</span>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeMyProfileModal()" data-en="Cancel">ยกเลิก</button>
+      <button class="btn btn-primary" onclick="saveMyProfile()" data-en="💾 Save">💾 บันทึก</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== FORCE PASSWORD CHANGE MODAL (F-09) =====
+     No close/X button and no backdrop-dismiss onclick on purpose -- this gate is only shown when
+     currentUser.mustChangePassword is true and must not be dismissible without actually changing
+     the password. Content is rendered entirely from JS (renderForcePasswordModal() in app.js)
+     rather than static markup here, since it runs only post-login and can safely read
+     currentUser/L()/currentLang -- see feedback_attendance_fixstatictext.md for why static
+     pre-login markup in this file must never do that. -->
+<div class="modal-overlay" id="force-pw-modal" style="z-index:2000">
+  <div class="modal" style="max-width:440px" id="force-pw-modal-content"></div>
+</div>
+
+<!-- ===== APPROVAL SETTINGS MODAL ===== -->
+<div class="modal-overlay" id="approval-settings-modal" onclick="if(event.target===this)closeApprovalSettings()">
+  <div class="modal" style="max-width:640px">
+    <div class="modal-header">
+      <h3 data-en="⚙️ Approval Settings">⚙️ ตั้งค่าการอนุมัติ</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeApprovalSettings()">✕</button>
+    </div>
+    <div class="modal-body" id="approval-settings-body"></div>
+    <div class="modal-footer">
+      <button class="btn btn-primary" onclick="closeApprovalSettings()" data-en="Save and Close">บันทึกและปิด</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== CLEAR OLD ATTACHMENTS MODAL ===== -->
+<div class="modal-overlay" id="clear-attachments-modal" onclick="if(event.target===this)closeClearAttachmentsModal()">
+  <div class="modal modal-wide" style="max-width:760px;max-height:88vh;max-height:88dvh;overflow-y:auto">
+    <div class="modal-header" style="position:sticky;top:0;background:var(--bg-card);z-index:10">
+      <h3 data-en="🗑️ Clear Old Attachments">🗑️ ล้างไฟล์แนบเก่า</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeClearAttachmentsModal()">✕</button>
+    </div>
+    <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
+      <div style="font-size:12px;color:#64748b"><span data-en="Deletes only the attached file — the request record itself (and who approved it) is kept for history.">ลบเฉพาะไฟล์ที่แนบเท่านั้น — ประวัติคำขอ (และผู้อนุมัติ) ยังคงอยู่เหมือนเดิม</span></div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
+        <div class="form-field" style="margin-bottom:0">
+          <label data-en="Delete attachments requested before this date">ลบไฟล์แนบของคำขอที่ยื่นก่อนวันที่</label>
+          <input type="date" id="ca-cutoff-date">
+        </div>
+        <button class="btn btn-primary" onclick="searchOldAttachments()">🔍 <span data-en="Search">ค้นหา</span></button>
+      </div>
+      <div id="ca-result-area"></div>
+    </div>
+    <div class="modal-footer" id="ca-modal-footer" style="display:none">
+      <button class="btn btn-ghost" onclick="closeClearAttachmentsModal()" data-en="Cancel">ยกเลิก</button>
+      <button class="btn btn-primary" id="ca-submit-btn" onclick="submitClearAttachments()"></button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== APPROVAL FLOW CHART MODAL ===== -->
+<div class="modal-overlay" id="approval-flowchart-modal" onclick="if(event.target===this)closeApprovalFlowChart()">
+  <div class="modal" style="max-width:560px">
+    <div class="modal-header">
+      <h3 data-en="📊 Approval Flow Chart">📊 ผังการอนุมัติ</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeApprovalFlowChart()">✕</button>
+    </div>
+    <div class="modal-body" id="approval-flowchart-body"></div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeApprovalFlowChart()" data-en="Close">ปิด</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== LEAVE DETAIL MODAL ===== -->
+<div class="modal-overlay" id="leave-detail-modal" onclick="if(event.target===this)closeLeaveDetail()">
+  <div class="modal" style="max-width:460px">
+    <div class="modal-header">
+      <h3 id="leave-detail-title">📋 รายละเอียดคำขอลา</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeLeaveDetail()">✕</button>
+    </div>
+    <div class="modal-body" style="padding:0">
+      <div id="leave-detail-banner" style="padding:16px 24px;border-bottom:1px solid #e2e8f0;display:flex;align-items:center;gap:14px">
+        <div id="leave-detail-icon" style="font-size:36px"></div>
+        <div>
+          <div id="leave-detail-type" style="font-size:15px;font-weight:700;color:#1e3a5f"></div>
+          <div id="leave-detail-status-badge" style="margin-top:4px"></div>
+        </div>
+      </div>
+      <div style="padding:20px 24px;display:grid;gap:14px">
+        <div style="display:grid;grid-template-columns:120px 1fr;gap:8px;align-items:start">
+          <span style="font-size:12px;color:#94a3b8;font-weight:600" data-en="📅 Leave Date">📅 วันที่ลา</span>
+          <span id="leave-detail-dates" style="font-size:13px;font-weight:600;color:#1e3a5f"></span>
+        </div>
+        <div style="display:grid;grid-template-columns:120px 1fr;gap:8px;align-items:start">
+          <span style="font-size:12px;color:#94a3b8;font-weight:600" data-en="🔢 Amount">🔢 จำนวน</span>
+          <span id="leave-detail-days" style="font-size:13px;color:#374151"></span>
+        </div>
+        <div style="display:grid;grid-template-columns:120px 1fr;gap:8px;align-items:start">
+          <span style="font-size:12px;color:#94a3b8;font-weight:600" data-en="📝 Reason">📝 เหตุผล</span>
+          <span id="leave-detail-reason" style="font-size:13px;color:#374151"></span>
+        </div>
+        <div id="leave-detail-note-row" style="display:grid;grid-template-columns:120px 1fr;gap:8px;align-items:start">
+          <span style="font-size:12px;color:#94a3b8;font-weight:600" data-en="🗒️ Note">🗒️ หมายเหตุ</span>
+          <span id="leave-detail-note" style="font-size:13px;color:#374151"></span>
+        </div>
+        <div id="leave-detail-attachment-row" style="display:none;grid-template-columns:120px 1fr;gap:8px;align-items:start">
+          <span style="font-size:12px;color:#94a3b8;font-weight:600" data-en="📎 Attachment">📎 ไฟล์แนบ</span>
+          <span id="leave-detail-attachment" style="font-size:13px;color:#374151"></span>
+        </div>
+        <div style="display:grid;grid-template-columns:120px 1fr;gap:8px;align-items:start">
+          <span style="font-size:12px;color:#94a3b8;font-weight:600" data-en="👤 Approver">👤 ผู้อนุมัติ</span>
+          <span id="leave-detail-approver" style="font-size:13px;color:#374151"></span>
+        </div>
+        <div style="display:grid;grid-template-columns:120px 1fr;gap:8px;align-items:start">
+          <span style="font-size:12px;color:#94a3b8;font-weight:600" data-en="🕐 Submitted">🕐 ยื่นเมื่อ</span>
+          <span id="leave-detail-submitted" style="font-size:13px;color:#374151"></span>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end">
+      <button id="leave-detail-cancel-btn" class="btn btn-danger" style="display:none" onclick="cancelLeaveFromDetail()" data-en="Cancel Leave Request">ยกเลิกคำขอลา</button>
+      <button class="btn btn-primary" onclick="closeLeaveDetail()" data-en="Close">ปิด</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== ATTENDANCE DETAIL MODAL ===== -->
+<div class="modal-overlay" id="att-detail-modal" onclick="if(event.target===this)closeAttDetail()">
+  <div class="modal" style="max-width:480px">
+    <div class="modal-header">
+      <h3 id="att-detail-title">📅 รายละเอียดการเข้างาน</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeAttDetail()">✕</button>
+    </div>
+    <div class="modal-body" style="padding:0">
+
+      <!-- Status Banner -->
+      <div id="att-detail-banner" style="padding:16px 24px;border-bottom:1px solid #e2e8f0;display:flex;align-items:center;gap:12px">
+        <div id="att-detail-status-icon" style="font-size:32px"></div>
+        <div>
+          <div id="att-detail-status-label" style="font-size:15px;font-weight:700;color:#1e3a5f"></div>
+          <div id="att-detail-late-min" style="font-size:12px;font-weight:600;color:#d97706;margin-top:2px"></div>
+          <div id="att-detail-date-full" style="font-size:12px;color:#64748b;margin-top:2px"></div>
+        </div>
+      </div>
+
+      <!-- Time Row -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;border-bottom:1px solid #e2e8f0">
+        <div style="padding:16px 20px;border-right:1px solid #e2e8f0">
+          <div style="font-size:11px;color:#94a3b8;font-weight:600;text-transform:uppercase;margin-bottom:6px" data-en="Check-In Time">เวลาเข้างาน</div>
+          <div id="att-detail-in" style="font-size:22px;font-weight:700;color:#059669"></div>
+          <div id="att-detail-in-src" style="font-size:11px;color:#94a3b8;margin-top:3px"></div>
+          <div id="att-detail-in-warn" style="font-size:11px;font-weight:600;color:#dc2626;margin-top:4px"></div>
+          <button id="att-detail-in-fix-btn" class="btn btn-ghost btn-sm" style="margin-top:6px;padding:3px 10px;font-size:11px;display:none">🔧 <span data-en="Fix this time">แก้ไขเวลานี้</span></button>
+        </div>
+        <div style="padding:16px 20px">
+          <div style="font-size:11px;color:#94a3b8;font-weight:600;text-transform:uppercase;margin-bottom:6px" data-en="Check-Out Time">เวลาออกงาน</div>
+          <div id="att-detail-out" style="font-size:22px;font-weight:700;color:#dc2626"></div>
+          <div id="att-detail-out-src" style="font-size:11px;color:#94a3b8;margin-top:3px"></div>
+        </div>
+      </div>
+
+      <!-- Work Hours -->
+      <div id="att-detail-hours-row" style="padding:12px 20px;background:#f8fafc;border-bottom:1px solid #e2e8f0;display:flex;align-items:center;gap:8px">
+        <span style="font-size:16px">⏱</span>
+        <span id="att-detail-hours" style="font-size:13px;color:#374151;font-weight:600"></span>
+      </div>
+
+      <!-- GPS Section -->
+      <div id="att-detail-gps-section" style="padding:16px 20px;border-bottom:1px solid #e2e8f0">
+        <div style="font-size:11px;color:#94a3b8;font-weight:600;margin-bottom:8px" data-en="📍 GPS Location">📍 ตำแหน่ง GPS</div>
+        <div id="att-detail-gps-in" style="font-size:12px;color:#374151;margin-bottom:4px"></div>
+        <div id="att-detail-gps-out" style="font-size:12px;color:#374151"></div>
+      </div>
+
+      <!-- Bonus / Tags -->
+      <div id="att-detail-tags" style="padding:14px 20px;display:flex;flex-wrap:wrap;gap:8px"></div>
+
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-primary" onclick="closeAttDetail()" data-en="Close">ปิด</button>
+    </div>
+  </div>
+</div>
+
+<!-- My Requests Modal -->
+<div class="modal-overlay" id="my-requests-modal" onclick="if(event.target===this)closeMyRequestsModal()">
+  <div class="modal" style="max-width:860px;width:95vw">
+    <div class="modal-header">
+      <h3 data-en="📋 All My Requests">📋 คำขอของฉันทั้งหมด</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeMyRequestsModal()">✕</button>
+    </div>
+    <div class="modal-body" style="padding:0">
+      <div style="padding:12px 16px 0;font-size:11px;color:#94a3b8">
+        <span data-en="ℹ️ You can only edit or cancel a request while it is still &quot;Pending&quot; — once approved, ask your approver to revoke it. Cancelling permanently removes the request from your history.">ℹ️ แก้ไข/ยกเลิกได้เฉพาะคำขอที่ยัง "รออนุมัติ" เท่านั้น — เมื่ออนุมัติแล้วต้องแจ้งผู้อนุมัติให้ยกเลิกให้ และการกดยกเลิกจะลบคำขอออกจากประวัติถาวร</span>
+      </div>
+      <div class="my-req-grid">
+        <!-- Left: Pending -->
+        <div style="border-right:1px solid #e2e8f0;padding:16px">
+          <div style="font-size:12px;font-weight:700;color:#92400e;background:#fef3c7;padding:6px 12px;border-radius:20px;display:inline-block;margin-bottom:12px" data-en="⏳ Pending">⏳ รออนุมัติ</div>
+          <div id="my-req-pending" style="display:flex;flex-direction:column;gap:10px"></div>
+        </div>
+        <!-- Right: Done -->
+        <div style="padding:16px">
+          <div style="font-size:12px;font-weight:700;color:#065f46;background:#d1fae5;padding:6px 12px;border-radius:20px;display:inline-block;margin-bottom:12px" data-en="✅ Completed">✅ เสร็จสิ้น</div>
+          <div id="my-req-done" style="display:flex;flex-direction:column;gap:10px"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Today Leave Detail Modal -->
+<div class="modal-overlay" id="today-leave-modal" onclick="if(event.target===this)closeTodayLeaveModal()">
+  <div class="modal" style="max-width:480px">
+    <div class="modal-header">
+      <h3 data-en="🏖️ On Leave Today">🏖️ รายชื่อผู้ลาวันนี้</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeTodayLeaveModal()">✕</button>
+    </div>
+    <div class="modal-body" id="today-leave-modal-body" style="padding:16px;display:flex;flex-direction:column;gap:10px">
+    </div>
+  </div>
+</div>
+
+<!-- Full Scan Log Modal -->
+<div class="modal-overlay" id="full-log-modal" onclick="if(event.target===this)closeFullLog()">
+  <div class="modal" style="max-width:440px">
+    <div class="modal-header">
+      <h3 data-en="📋 Full Time Log">📋 บันทึกเวลาทั้งหมด</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeFullLog()">✕</button>
+    </div>
+    <div class="modal-body" style="padding:0">
+      <div id="full-log-date-label"
+        style="padding:10px 20px;background:#f8fafc;border-bottom:1px solid #e2e8f0;font-size:12px;color:#64748b;font-weight:600"></div>
+      <div id="full-log-list" style="max-height:420px;overflow-y:auto;padding:8px 0"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Check-in Status Modal -->
+<div class="modal-overlay" id="checkin-status-modal" onclick="if(event.target===this)closeCheckinStatusModal()">
+  <div class="modal" style="max-width:500px;max-height:90vh;max-height:90dvh;display:flex;flex-direction:column">
+    <div class="modal-header">
+      <h3 id="checkin-status-title">สถานะ Check-in วันนี้</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeCheckinStatusModal()">✕</button>
+    </div>
+    <div id="checkin-status-body" style="overflow-y:auto;flex:1;padding:0"></div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>window._LeafletAPI = window.L;</script>
+<script src="lang/ja.js?v=20260821d"></script>  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ja.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/th.js"></script>
+
+<script src="js/app.js?v=20260823m"></script>
+</body>
+</html>

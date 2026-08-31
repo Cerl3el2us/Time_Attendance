@@ -1,0 +1,15 @@
+# Local Claude Code state (not project code)
+.claude/
+
+# Playwright test artifacts
+.playwright-mcp/
+
+# Old dated backup snapshots (git history replaces the need for these)
+_backup_*/
+
+# Stray empty leftover folder
+volume1/
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db
