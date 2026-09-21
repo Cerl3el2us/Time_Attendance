@@ -566,11 +566,13 @@ function commitTypedTime(inp) {
   const norm = normalizeTypedTime(raw);
   if (!norm) { markTimeFieldInvalid(inp, true); return; }
   markTimeFieldInvalid(inp, false);
+  // Already formatted and unchanged — tabbing through a field should not re-fire anything.
+  if (raw === norm) return;
   if (inp._flatpickr) {
     // `true` so onChange fires and the dependent maths (calcOTHours, calcLeaveHours, the
     // Holiday Work OT split) recalculates exactly as it does after picking from the popup.
     inp._flatpickr.setDate(norm, true);
-  } else if (inp.value !== norm) {
+  } else {
     inp.value = norm;
     inp.dispatchEvent(new Event('change', { bubbles: true }));
   }
@@ -620,14 +622,18 @@ function normalizeTypedDate(raw) {
   const now = bangkokTodayDate();
   const curY = now.getFullYear(), curM = now.getMonth() + 1;
   let dd, mm, yy;
+  // A two-digit year needs a century. 00-49 reads as 20xx, 50-99 as 19xx — without the pivot a
+  // birth date typed as "010190" became 2090 instead of 1990, which these fields genuinely see
+  // (emp-dob, emp-start-date), while leave and OT dates stay in the 20xx half either way.
+  const century = (two) => (two <= 49 ? 2000 : 1900) + two;
   if (currentLang === 'ja') {
     if (d.length === 8)      { yy = +d.slice(0, 4); mm = +d.slice(4, 6); dd = +d.slice(6, 8); }
-    else if (d.length === 6) { yy = 2000 + +d.slice(0, 2); mm = +d.slice(2, 4); dd = +d.slice(4, 6); }
+    else if (d.length === 6) { yy = century(+d.slice(0, 2)); mm = +d.slice(2, 4); dd = +d.slice(4, 6); }
     else if (d.length === 4) { yy = curY; mm = +d.slice(0, 2); dd = +d.slice(2, 4); }
     else return null;
   } else {
     if (d.length === 8)      { dd = +d.slice(0, 2); mm = +d.slice(2, 4); yy = +d.slice(4, 8); }
-    else if (d.length === 6) { dd = +d.slice(0, 2); mm = +d.slice(2, 4); yy = 2000 + +d.slice(4, 6); }
+    else if (d.length === 6) { dd = +d.slice(0, 2); mm = +d.slice(2, 4); yy = century(+d.slice(4, 6)); }
     else if (d.length === 4) { dd = +d.slice(0, 2); mm = +d.slice(2, 4); yy = curY; }
     else if (d.length <= 2)  { dd = +d; mm = curM; yy = curY; }
     else return null;
@@ -651,6 +657,10 @@ function commitTypedDate(fp) {
       : L('⚠️ Invalid date', '⚠️ วันที่ไม่ถูกต้อง'), 'warning');
     return;
   }
+  // Nothing was actually edited — the text still reads back as the date already held. Return
+  // before the checks below so merely tabbing through a field neither re-fires onChange nor,
+  // worse, clears a date that some other code set deliberately.
+  if (fp.input && iso === fp.input.value) { markTimeFieldInvalid(el, false); return; }
   // The greyed-out days in the calendar come from each picker's own `disable` rule; isEnabled()
   // reads that very rule, so a typed date is held to exactly the same standard as a clicked one.
   // Without this, typing would be a way around restrictions like "only days you checked in".
