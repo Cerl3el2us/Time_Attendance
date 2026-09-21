@@ -503,6 +503,112 @@ function formatIdCardValue(idType, idCard) {
 // silently stop updating. Match both the not-yet-initialized and already-initialized shape so
 // every subsequent call (language toggle, page nav, modal open) still finds and re-locales them.
 // Safe to call repeatedly/liberally — destroys any existing instance on a given input first.
+// ===== TYPED TIME ENTRY (2026-09-21) =====
+// Picking a time through the clock popup takes several taps, and the plain field expected the
+// colon to be typed by hand. These let every time field in the app accept bare digits instead:
+//   "0830" -> 08:30 (formatted the moment the 4th digit lands)
+//   "830"  -> 08:30 (resolved when the field is left, or on Enter)
+//   "8"    -> 08:00
+// Fewer than three digits is read as an hour; three or four split as H:MM / HH:MM. The popup is
+// untouched, so anyone who prefers clicking still gets it.
+const TIME_DIGITS_MAX = 4;
+function timeDigitsOf(value) {
+  return String(value == null ? '' : value).replace(/\D/g, '').slice(0, TIME_DIGITS_MAX);
+}
+// Returns 'HH:MM', or null when the digits cannot be a real clock time (hour > 23, minute > 59).
+// Never guesses at an out-of-range value — a silent correction of a time is worse than a visible
+// rejection, since these feed OT hours and payroll.
+function normalizeTypedTime(raw) {
+  const d = timeDigitsOf(raw);
+  if (!d) return '';
+  let h, m;
+  if (d.length <= 2) { h = Number(d); m = 0; }
+  else if (d.length === 3) { h = Number(d.slice(0, 1)); m = Number(d.slice(1)); }
+  else { h = Number(d.slice(0, 2)); m = Number(d.slice(2)); }
+  if (!Number.isFinite(h) || !Number.isFinite(m) || h > 23 || m > 59) return null;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+function markTimeFieldInvalid(inp, invalid) {
+  inp.style.borderColor = invalid ? '#dc2626' : '';
+  inp.setAttribute('aria-invalid', invalid ? 'true' : 'false');
+}
+// Re-fires `input` after we rewrite the value, so the inline oninput handlers on these fields
+// (calcOTHours, calcLeaveHours, …) see the formatted time rather than the raw digits they were
+// handed first. `_typedTimeEcho` stops our own listener from looping on the synthetic event.
+function echoTypedTimeInput(inp) {
+  inp._typedTimeEcho = true;
+  inp.dispatchEvent(new Event('input', { bubbles: true }));
+  inp._typedTimeEcho = false;
+}
+function onTypedTimeInput(e) {
+  const inp = e.target;
+  if (inp._typedTimeEcho) return;
+  const d = timeDigitsOf(inp.value);
+  // Only insert the separator once the split is unambiguous, so the text never flickers between
+  // two different readings while the user is still typing.
+  if (d.length === TIME_DIGITS_MAX) {
+    const norm = normalizeTypedTime(d);
+    if (norm) {
+      inp.value = norm;
+      markTimeFieldInvalid(inp, false);
+      echoTypedTimeInput(inp);
+      return;
+    }
+    markTimeFieldInvalid(inp, true);
+    return;
+  }
+  if (inp.value !== d) inp.value = d;
+  markTimeFieldInvalid(inp, false);
+}
+function commitTypedTime(inp) {
+  const raw = inp.value;
+  if (!timeDigitsOf(raw)) { markTimeFieldInvalid(inp, false); return; }
+  const norm = normalizeTypedTime(raw);
+  if (!norm) { markTimeFieldInvalid(inp, true); return; }
+  markTimeFieldInvalid(inp, false);
+  if (inp._flatpickr) {
+    // `true` so onChange fires and the dependent maths (calcOTHours, calcLeaveHours, the
+    // Holiday Work OT split) recalculates exactly as it does after picking from the popup.
+    inp._flatpickr.setDate(norm, true);
+  } else if (inp.value !== norm) {
+    inp.value = norm;
+    inp.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  // Fields whose recalculation hangs off `oninput` rather than flatpickr's onChange still need a
+  // nudge — the 1-to-3-digit path never produced a formatted input event of its own.
+  if (inp.value === norm) echoTypedTimeInput(inp);
+}
+function onTypedTimeBlur(e) {
+  const inp = e.target;
+  if (timeDigitsOf(inp.value) && normalizeTypedTime(inp.value) === null) {
+    // Refuse an impossible time outright instead of leaving it for flatpickr. Its own allowInput
+    // blur parser coerces "2500" into a perfectly plausible-looking 01:00 — a silently wrong time
+    // in a field that feeds OT hours and payroll. Clearing and saying why is the safe failure.
+    inp.value = '';
+    if (inp._flatpickr) inp._flatpickr.clear();
+    markTimeFieldInvalid(inp, true);
+    showToast(currentLang === 'ja'
+      ? '⚠️ 時刻が正しくありません（00:00〜23:59）'
+      : L('⚠️ Invalid time — use 00:00 to 23:59', '⚠️ เวลาไม่ถูกต้อง — ต้องอยู่ระหว่าง 00:00 ถึง 23:59'), 'warning');
+    return;
+  }
+  commitTypedTime(inp);
+}
+function onTypedTimeKeydown(e) {
+  if (e.key !== 'Enter') return;
+  commitTypedTime(e.target);
+  if (e.target._flatpickr) e.target._flatpickr.close();
+}
+function attachTypedTimeEntry(inp) {
+  if (inp._typedTimeBound) return;
+  inp._typedTimeBound = true;
+  inp.setAttribute('inputmode', 'numeric');
+  inp.setAttribute('autocomplete', 'off');
+  inp.addEventListener('input', onTypedTimeInput);
+  inp.addEventListener('blur', onTypedTimeBlur);
+  inp.addEventListener('keydown', onTypedTimeKeydown);
+}
+
 function initDatePickers() {
   if (typeof flatpickr === 'undefined') return;
   // Leftover altInput clones (no id) from a previous init that wrapped them as new pickers —
@@ -549,6 +655,9 @@ function initDatePickers() {
     if (inp._flatpickr) inp._flatpickr.destroy();
     inp.classList.add('flatpickr-time-input');
     inp.setAttribute('placeholder', 'HH:MM');
+    // One call here covers every time field in the app — this loop is the single place they are
+    // all initialised, and the MutationObserver further down re-runs it for fields added later.
+    attachTypedTimeEntry(inp);
     // 24h clock for every language, including English — user explicitly asked English to stay
     // 24h too rather than switching to 12h AM/PM (an earlier version of this fix did that).
     flatpickr(inp, {
