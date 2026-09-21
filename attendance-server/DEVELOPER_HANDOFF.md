@@ -216,6 +216,17 @@ appear in employee lists, payslips, reports, or the login page hint text.
 | Can do | View every page (incl. Finalize + 50 ทวิ), export payslip/50-Tawi xlsx, approve requests (with CONFIRM prompt), edit employees/settings, role preview dropdown |
 | Cannot do | Finalize confirm, MD payroll approve, email payslip, save 50-Tawi overrides, check-in, submit own leave |
 
+**Secret:** staff must not know this login exists. Never show it in employee
+lists, the login page, role dropdowns, or API errors (use generic
+`Not allowed` / `Username is already taken`).
+
+**AI / developer policy:** no AI (Claude, Cursor, GPT, Gemini, or other) may
+edit the superadmin path or change `isSuperAdmin*` branches while fixing an
+unrelated bug. Ask the human first. Superadmin is **not an employee** — never
+add it to รายชื่อพนักงาน or other staff lists (keep `isEmployeeRecord` /
+`employeeRecords` filters). See `.cursor/rules/superadmin-do-not-touch.mdc`
+and the header in `backend/systemAccount.js`.
+
 **Do not delete `systemAccount.js` or remove its hooks in `server.js`.** If an AI
 or another developer removes the account from `users.json`, restart the backend
 (with `SUPERADMIN_PASSWORD` still set) to restore it.

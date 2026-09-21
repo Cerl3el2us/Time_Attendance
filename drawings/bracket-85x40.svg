@@ -1,0 +1,221 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 500" width="1440" height="1000" role="img" aria-label="Bracket plate 85 x 40 x 1.5 mm with M3.5 holes">
+  <defs>
+    <style>
+      .part { fill: #e8eef5; stroke: #1a2332; stroke-width: 2; stroke-linejoin: round; }
+      .part-edge { fill: #c5d4e6; stroke: #1a2332; stroke-width: 1.6; }
+      .hole { fill: #ffffff; stroke: #1a2332; stroke-width: 1.5; }
+      .dim { fill: none; stroke: #3d5a80; stroke-width: 1; }
+      .ext { fill: none; stroke: #3d5a80; stroke-width: 0.7; }
+      .guide { fill: none; stroke: #94a3b8; stroke-width: 0.6; stroke-dasharray: 3 2.5; }
+      .label {
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 12px;
+        font-weight: 700;
+        fill: #1a2332;
+        text-anchor: middle;
+        dominant-baseline: central;
+      }
+      .label-start { text-anchor: start; }
+      .title {
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 16px;
+        font-weight: 700;
+        fill: #1a2332;
+        text-anchor: start;
+      }
+      .subtitle {
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 12px;
+        fill: #64748b;
+        text-anchor: start;
+      }
+      .note {
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 13px;
+        font-weight: 700;
+        fill: #1a2332;
+        text-anchor: middle;
+        dominant-baseline: central;
+      }
+      .view-tag {
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 11px;
+        font-weight: 700;
+        fill: #64748b;
+        letter-spacing: 0.08em;
+        text-anchor: middle;
+      }
+    </style>
+    <g id="tick">
+      <line x1="-3.2" y1="3.2" x2="3.2" y2="-3.2" stroke="#3d5a80" stroke-width="1.2"/>
+    </g>
+  </defs>
+
+  <!-- Page -->
+  <rect width="720" height="500" fill="#f7f8fa"/>
+  <rect x="16" y="16" width="688" height="468" rx="10" fill="#ffffff" stroke="#e2e8f0" stroke-width="1"/>
+
+  <!-- Header (own band — no overlap with dims) -->
+  <text class="title" x="36" y="44">Bracket Plate</text>
+  <text class="subtitle" x="36" y="64">85 x 40 x 1.5 mm  |  Cutout 50  |  2x M3.5 dia</text>
+  <rect x="560" y="32" width="124" height="34" rx="6" fill="#eff6ff" stroke="#3d5a80" stroke-width="1"/>
+  <text class="note" x="622" y="49">THK = 1.5 mm</text>
+
+  <line x1="36" y1="80" x2="684" y2="80" stroke="#e2e8f0" stroke-width="1"/>
+
+  <!-- ========== FRONT VIEW ========== -->
+  <!-- Part local origin at (130, 170). Top dim rows sit above part, below header. -->
+  <text class="view-tag" x="279" y="100">FRONT</text>
+
+  <g transform="translate(130, 170)">
+    <!-- Geometry: scale 3.5 px/mm -->
+    <path class="part" d="
+      M 0,0
+      L 61.25,0
+      L 61.25,77
+      L 236.25,77
+      L 236.25,0
+      L 297.5,0
+      L 297.5,140
+      L 0,140
+      Z
+    "/>
+
+    <circle class="hole" cx="35" cy="21" r="6.125"/>
+    <circle class="hole" cx="262.5" cy="21" r="6.125"/>
+
+    <g stroke="#64748b" stroke-width="0.6">
+      <line x1="28" y1="21" x2="42" y2="21"/>
+      <line x1="35" y1="14" x2="35" y2="28"/>
+      <line x1="255.5" y1="21" x2="269.5" y2="21"/>
+      <line x1="262.5" y1="14" x2="262.5" y2="28"/>
+    </g>
+
+    <!-- Guides to top dim ticks -->
+    <line class="guide" x1="0" y1="-8" x2="0" y2="-18"/>
+    <line class="guide" x1="35" y1="-8" x2="35" y2="-18"/>
+    <line class="guide" x1="262.5" y1="-8" x2="262.5" y2="-18"/>
+    <line class="guide" x1="297.5" y1="-8" x2="297.5" y2="-18"/>
+    <line class="guide" x1="61.25" y1="-8" x2="61.25" y2="-46"/>
+    <line class="guide" x1="236.25" y1="-8" x2="236.25" y2="-46"/>
+
+    <!-- TOP row A: cutout width 50 (highest) -->
+    <g transform="translate(0, -54)">
+      <line class="dim" x1="61.25" y1="0" x2="236.25" y2="0"/>
+      <use href="#tick" x="61.25" y="0"/>
+      <use href="#tick" x="236.25" y="0"/>
+      <text class="label" x="148.75" y="-10">50</text>
+    </g>
+
+    <!-- TOP row B: 10 | 65 | 10 -->
+    <g transform="translate(0, -26)">
+      <line class="dim" x1="0" y1="0" x2="297.5" y2="0"/>
+      <use href="#tick" x="0" y="0"/>
+      <use href="#tick" x="35" y="0"/>
+      <use href="#tick" x="262.5" y="0"/>
+      <use href="#tick" x="297.5" y="0"/>
+      <text class="label" x="17.5" y="-10">10</text>
+      <text class="label" x="148.75" y="-10">65</text>
+      <text class="label" x="280" y="-10">10</text>
+    </g>
+
+    <!-- BOTTOM row A: 17.5 | 50 | 17.5 -->
+    <line class="guide" x1="0" y1="140" x2="0" y2="156"/>
+    <line class="guide" x1="61.25" y1="140" x2="61.25" y2="156"/>
+    <line class="guide" x1="236.25" y1="140" x2="236.25" y2="156"/>
+    <line class="guide" x1="297.5" y1="140" x2="297.5" y2="156"/>
+
+    <g transform="translate(0, 164)">
+      <line class="dim" x1="0" y1="0" x2="297.5" y2="0"/>
+      <use href="#tick" x="0" y="0"/>
+      <use href="#tick" x="61.25" y="0"/>
+      <use href="#tick" x="236.25" y="0"/>
+      <use href="#tick" x="297.5" y="0"/>
+      <text class="label" x="30.625" y="14">17.5</text>
+      <text class="label" x="148.75" y="14">50</text>
+      <text class="label" x="266.875" y="14">17.5</text>
+    </g>
+
+    <!-- BOTTOM row B: overall 85 -->
+    <g transform="translate(0, 198)">
+      <line class="dim" x1="0" y1="0" x2="297.5" y2="0"/>
+      <use href="#tick" x="0" y="0"/>
+      <use href="#tick" x="297.5" y="0"/>
+      <text class="label" x="148.75" y="14">85</text>
+    </g>
+
+    <!-- LEFT: overall height 40 (outer) — horizontal text, no rotate -->
+    <g transform="translate(-36, 0)">
+      <line class="ext" x1="36" y1="0" x2="0" y2="0"/>
+      <line class="ext" x1="36" y1="140" x2="0" y2="140"/>
+      <line class="dim" x1="0" y1="0" x2="0" y2="140"/>
+      <use href="#tick" x="0" y="0"/>
+      <use href="#tick" x="0" y="140"/>
+      <text class="label" x="-14" y="70">40</text>
+    </g>
+
+    <!-- LEFT: base height 18 (inner, lower) -->
+    <g transform="translate(-68, 0)">
+      <line class="ext" x1="68" y1="77" x2="0" y2="77"/>
+      <line class="ext" x1="68" y1="140" x2="0" y2="140"/>
+      <line class="dim" x1="0" y1="77" x2="0" y2="140"/>
+      <use href="#tick" x="0" y="77"/>
+      <use href="#tick" x="0" y="140"/>
+      <text class="label" x="-14" y="108.5">18</text>
+    </g>
+
+    <!-- RIGHT: 6 (top to hole) -->
+    <g transform="translate(324, 0)">
+      <line class="ext" x1="-26.5" y1="0" x2="0" y2="0"/>
+      <line class="ext" x1="-26.5" y1="21" x2="0" y2="21"/>
+      <line class="dim" x1="0" y1="0" x2="0" y2="21"/>
+      <use href="#tick" x="0" y="0"/>
+      <use href="#tick" x="0" y="21"/>
+      <text class="label" x="14" y="10.5">6</text>
+    </g>
+
+    <!-- RIGHT: 34 (hole to bottom) -->
+    <g transform="translate(324, 0)">
+      <line class="ext" x1="-26.5" y1="140" x2="0" y2="140"/>
+      <line class="dim" x1="0" y1="21" x2="0" y2="140"/>
+      <use href="#tick" x="0" y="21"/>
+      <use href="#tick" x="0" y="140"/>
+      <text class="label" x="18" y="80.5">34</text>
+    </g>
+
+    <!-- M3.5 callout — placed in cutout area, clear of other labels -->
+    <g>
+      <line class="dim" x1="41" y1="27" x2="110" y2="55"/>
+      <circle cx="41" cy="27" r="1.6" fill="#3d5a80"/>
+      <rect x="100" y="44" width="72" height="22" rx="4" fill="#ffffff" stroke="#3d5a80" stroke-width="1"/>
+      <text class="label" x="136" y="55">M3.5 dia</text>
+    </g>
+  </g>
+
+  <!-- ========== SIDE VIEW ========== -->
+  <text class="view-tag" x="580" y="100">SIDE</text>
+  <g transform="translate(560, 170)">
+    <!-- Thickness shown exaggerated (1.5 mm -> 14 px) for readability -->
+    <rect class="part-edge" x="0" y="0" width="14" height="140"/>
+    <line class="guide" x1="0" y1="21" x2="14" y2="21"/>
+    <line class="guide" x1="0" y1="77" x2="14" y2="77"/>
+
+    <!-- Thickness 1.5 -->
+    <g transform="translate(0, 164)">
+      <line class="dim" x1="0" y1="0" x2="14" y2="0"/>
+      <use href="#tick" x="0" y="0"/>
+      <use href="#tick" x="14" y="0"/>
+      <text class="label" x="7" y="14">1.5</text>
+    </g>
+
+    <!-- Height 40 -->
+    <g transform="translate(34, 0)">
+      <line class="ext" x1="-20" y1="0" x2="0" y2="0"/>
+      <line class="ext" x1="-20" y1="140" x2="0" y2="140"/>
+      <line class="dim" x1="0" y1="0" x2="0" y2="140"/>
+      <use href="#tick" x="0" y="0"/>
+      <use href="#tick" x="0" y="140"/>
+      <text class="label" x="14" y="70">40</text>
+    </g>
+  </g>
+</svg>

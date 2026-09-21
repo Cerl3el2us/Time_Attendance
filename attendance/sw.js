@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE = 'ta-v1';
+const CACHE = 'ta-v2';
 
 self.addEventListener('install', () => self.skipWaiting());
 
@@ -12,15 +12,22 @@ self.addEventListener('activate', e =>
 self.addEventListener('push', e => {
   let d = { title: 'Time Attendance', body: '' };
   try { d = Object.assign(d, e.data.json()); } catch {}
-  e.waitUntil(
-    self.registration.showNotification(d.title, {
+  e.waitUntil((async () => {
+    if (typeof d.badge === 'number' && navigator.setAppBadge) {
+      try {
+        if (d.badge > 0) await navigator.setAppBadge(d.badge);
+        else await navigator.clearAppBadge();
+      } catch (_) {}
+    }
+    return self.registration.showNotification(d.title, {
       body:  d.body,
       icon:  '/images/logo-short.jpg',
       badge: '/images/logo-short.jpg',
       tag:   d.tag || 'ta',
+      renotify: true,
       data:  d,
-    })
-  );
+    });
+  })());
 });
 
 // Open app when user clicks notification

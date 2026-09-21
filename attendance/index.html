@@ -1,8 +1,8 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="th">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Time Attendance — Tozai Boeki Kaisha (Thailand) Ltd.</title>
   <link rel="icon" type="image/jpeg" href="images/logo-short.jpg">
   <link rel="apple-touch-icon" href="images/logo-short.jpg">
@@ -14,8 +14,8 @@
   <meta name="theme-color" content="#2563eb">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/style.css?v=20260823c">
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <link rel="stylesheet" href="css/style.css?v=20260915m">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css"/>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css">
 </head>
 <body>
@@ -66,8 +66,7 @@
     </div>
 
     <div class="login-footer">
-      <p data-en="Test accounts: admin.md / manager / accounting / user01 (password: 1234)">สำหรับทดสอบ: admin.md / manager / accounting / user01 (รหัสผ่าน: 1234)</p>
-      <p style="margin-top:6px">Powered by Hikvision DS-K1T342MFX + Synology DS923+</p>
+      <p data-en="Tozai Boeki Kaisha (Thailand) Ltd.">Tozai Boeki Kaisha (Thailand) Ltd.</p>
     </div>
   </div>
 </div>
@@ -113,6 +112,7 @@
       </div>
       <div class="nav-item" data-page="leave" onclick="navigateTo('leave')">
         <span class="icon">🏖️</span> วันลาของฉัน
+        <span id="leave-requests-badge" style="display:none;background:#ef4444;color:#fff;font-size:10px;font-weight:800;min-width:18px;height:18px;padding:0 5px;border-radius:9px;margin-left:auto;align-items:center;justify-content:center;line-height:1"></span>
       </div>
       <div class="nav-item nav-staff-only" data-page="my-requests" onclick="navigateTo('my-requests')">
         <span class="icon">📋</span> ตรวจสอบสถานะคำขอ
@@ -137,6 +137,9 @@
       </div>
       <div class="nav-item nav-admin" data-page="reports" onclick="navigateTo('reports')">
         <span class="icon">📈</span> รายงานสรุปวันทำงาน
+      </div>
+      <div class="nav-item nav-admin" data-page="leave-summary" onclick="navigateTo('leave-summary')">
+        <span class="icon">🗓️</span> <span data-en="Employee Leave Summary">สรุปวันลาพนักงาน</span>
       </div>
 
       <div class="nav-item nav-accounting-only" data-page="tawi50" onclick="navigateTo('tawi50')">
@@ -184,7 +187,7 @@
         <span id="ws-status-dot" class="ws-dot offline" title="สแกนเนอร์: ไม่ได้เชื่อมต่อ" data-en-title="Scanner: Disconnected"></span>
         <div id="role-preview-wrap" style="display:none;align-items:center;gap:6px">
           <label for="role-preview-select" style="font-size:11px;font-weight:600;color:#64748b;white-space:nowrap" data-en="View as">ดูเป็น</label>
-          <select id="role-preview-select" onchange="onRolePreviewChange(this.value)" style="font-size:12px;padding:4px 8px;border:1.5px solid #e2e8f0;border-radius:8px;background:#fff;color:#1e3a5f">
+          <select id="role-preview-select" onchange="onRolePreviewChange(this.value)" style="font-size:12px;padding:4px 8px;border:1.5px solid #e2e8f0;border-radius:8px;background:var(--bg-card);color:var(--text)">
             <option value="">Full access</option>
             <option value="md">MD</option>
             <option value="accounting">Accounting</option>
@@ -195,7 +198,7 @@
           </select>
         </div>
         <button id="lang-toggle-btn" onclick="toggleLang()" style="padding:4px 10px;border:1.5px solid #e2e8f0;border-radius:8px;background:#f8fafc;font-size:12px;font-weight:700;color:#1e3a5f;cursor:pointer;letter-spacing:0.03em">EN</button>
-        <div class="btn-icon" onclick="navigateTo('approval')" title="แจ้งเตือนคำขอค้างอนุมัติ" data-en-title="Pending approvals">
+        <div id="topbar-bell-btn" class="btn-icon" onclick="onTopbarBellClick()" title="คำขอของคุณที่ยังรออนุมัติ" data-en-title="Your pending requests">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
           <span id="topbar-approval-dot" class="dot"></span>
         </div>
@@ -216,6 +219,8 @@
 
       <!-- ===== PAGE: DASHBOARD ===== -->
       <div id="page-dashboard" class="page">
+
+        <div id="dash-announcements" class="announcements-board mb-6"></div>
 
         <div class="alert alert-info mb-6">
           <span data-en="📡 Connected to Hikvision DS-K1T342MFX and Synology DS923+">📡 เชื่อมต่อกับ Hikvision DS-K1T342MFX และ Synology DS923+ สำเร็จ</span>
@@ -301,6 +306,7 @@
           <div>
             <div class="checkin-panel mb-6">
               <div class="clock-display">00:00:00</div>
+              <div class="clock-tz" id="checkin-clock-tz" style="display:none"></div>
               <div class="date-display">วันที่ —</div>
               <div class="checkin-status">
                 <span class="status-dot none" id="checkin-status-dot"></span>
@@ -338,8 +344,14 @@
                   </div>
                 </div>
 
-                <!-- Leaflet Map -->
-                <div id="gps-map" style="height:240px;width:100%"></div>
+                <!-- GPS Map (MapLibre + CARTO vector) -->
+                <div id="gps-map-wrap">
+                  <div id="gps-map"></div>
+                  <div class="gps-map-style-toggle" role="group" aria-label="Map style">
+                    <button type="button" id="gps-map-street-btn" class="gps-map-style-btn is-active" onclick="setGpsMapStyle('street')" data-en="Map">แผนที่</button>
+                    <button type="button" id="gps-map-satellite-btn" class="gps-map-style-btn" onclick="setGpsMapStyle('satellite')" data-en="Satellite">ดาวเทียม</button>
+                  </div>
+                </div>
 
                 <!-- Coordinates Info -->
                 <div style="padding:12px 16px;background:#f0f9ff;border-top:1px solid #bae6fd">
@@ -382,7 +394,7 @@
               </div>
               <div class="card-body">
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-                  <button class="btn btn-outline req-card-btn" onclick="openLeaveModal('annual')" style="padding:16px;flex-direction:column;gap:6px;border-radius:12px;border:1.5px dashed #93c5fd;background:#eff6ff;">
+                  <button id="req-annual-leave-btn" class="btn btn-outline req-card-btn" onclick="openLeaveModal('annual')" style="padding:16px;flex-direction:column;gap:6px;border-radius:12px;border:1.5px dashed #93c5fd;background:#eff6ff;">
                     <span style="font-size:24px">🏖️</span>
                     <span class="req-card-label" style="font-size:13px;color:#1e3a5f;font-weight:600" data-en="Annual Leave">ขอลาพักร้อน</span>
                   </button>
@@ -399,9 +411,17 @@
                     <span class="req-card-label" style="font-size:13px;color:#1e3a5f;font-weight:600" data-en="Upcountry">Upcountry</span>
                   </button>
 
+                  <button id="checkin-earlymorning-btn" class="btn btn-outline req-card-btn driver-hide acct-mkt-hide" onclick="openEarlyMorningModal()" style="padding:16px;flex-direction:column;gap:6px;border-radius:12px;border:1.5px dashed #fde68a;background:#fffbeb;">
+                    <span style="font-size:24px">🌅</span>
+                    <span class="req-card-label" style="font-size:13px;color:#92400e;font-weight:600" data-en="Early Morning">แจ้งมาเช้า</span>
+                  </button>
                   <button id="checkin-lateout-btn" class="btn btn-outline req-card-btn driver-hide acct-mkt-hide" onclick="openLateOutModal()" style="padding:16px;flex-direction:column;gap:6px;border-radius:12px;border:1.5px dashed #6ee7b7;background:#f0fdf4;">
                     <span style="font-size:24px">🌙</span>
-                    <span class="req-card-label" style="font-size:13px;color:#1e3a5f;font-weight:600" data-en="Late Night Out">กลับดึก</span>
+                    <span class="req-card-label" style="font-size:13px;color:#1e3a5f;font-weight:600" data-en="Late Night Out">แจ้งกลับดึก</span>
+                  </button>
+                  <button id="checkin-abroad-btn" class="btn btn-outline req-card-btn driver-hide acct-mkt-hide" onclick="openAbroadModal()" style="display:none;padding:16px;flex-direction:column;gap:6px;border-radius:12px;border:1.5px dashed #c4b5fd;background:#f5f3ff;">
+                    <span style="font-size:24px">✈️</span>
+                    <span class="req-card-label" style="font-size:13px;color:#4c1d95;font-weight:600" data-en="Work Abroad">ทำงานต่างประเทศ</span>
                   </button>
                   <button class="btn btn-outline req-card-btn driver-only" style="display:none;padding:16px;flex-direction:column;gap:6px;border-radius:12px;border:1.5px dashed #7dd3fc;background:#f0f9ff;" onclick="openLongDistanceModal()">
                     <span style="font-size:24px">🚗</span>
@@ -411,9 +431,9 @@
                     <span style="font-size:24px">⏱️</span>
                     <span class="req-card-label" style="font-size:13px;color:#9a3412;font-weight:600" data-en="Request OT">ขอ OT</span>
                   </button>
-                  <button class="btn btn-outline req-card-btn driver-hide" id="checkin-comp-btn" onclick="openCompModal()" style="padding:16px;flex-direction:column;gap:6px;border-radius:12px;border:1.5px dashed #5eead4;background:#f0fdfa;grid-column:1/-1">
+                  <button class="btn btn-outline req-card-btn driver-hide" id="checkin-holiday-work-btn" onclick="openHolidayWorkModal()" style="padding:16px;flex-direction:column;gap:6px;border-radius:12px;border:1.5px dashed #5eead4;background:#f0fdfa;">
                     <span style="font-size:24px">🔄</span>
-                    <span class="req-card-label" style="font-size:13px;color:#0f766e;font-weight:600" data-en="Compensatory Day">ขอวันหยุดชดเชย</span>
+                    <span class="req-card-label" style="font-size:13px;color:#0f766e;font-weight:600" data-en="Holiday Work">ขอทำงานวันหยุด</span>
                   </button>
                 </div>
               </div>
@@ -527,7 +547,7 @@
             </button>
           </div>
           <div style="padding:10px 22px 0;font-size:11px;color:#94a3b8">
-            <span data-en="ℹ️ You can only edit or cancel a request while it is still &quot;Pending&quot; — once approved, ask your approver to revoke it. Cancelling permanently removes the request from your history.">ℹ️ แก้ไข/ยกเลิกได้เฉพาะคำขอที่ยัง "รออนุมัติ" เท่านั้น — เมื่ออนุมัติแล้วต้องแจ้งผู้อนุมัติให้ยกเลิกให้ และการกดยกเลิกจะลบคำขอออกจากประวัติถาวร</span>
+            <span data-en="ℹ️ Pending requests can be edited or cancelled. Approved Annual/Sick/Business leave can still be cancelled if today is before the leave start date — the days return to your balance. On or after that date it cannot be cancelled. Cancelling permanently removes the request from your history.">ℹ️ คำขอที่ยังรออนุมัติ แก้ไข/ยกเลิกได้ ลาพักร้อน/ป่วย/กิจ ที่อนุมัติแล้ว ยังยกเลิกได้ถ้าวันนี้ยังไม่ถึงวันเริ่มลา — วันลาจะคืนเข้ายอดคงเหลือ ถึงวันนั้นแล้วหรือเลยแล้ว ยกเลิกไม่ได้ การกดยกเลิกจะลบคำขอออกจากประวัติถาวร</span>
           </div>
           <div class="table-wrap">
             <table>
@@ -535,7 +555,7 @@
                 <tr>
                   <th data-en="Leave Type">ประเภทลา</th>
                   <th data-en="Leave Date">วันที่ลา</th>
-                  <th data-en="Amount">จำนวน</th>
+                  <th class="col-hide-mobile" data-en="Amount">จำนวน</th>
                   <th class="col-hide-mobile" data-en="Reason">เหตุผล</th>
                   <th data-en="Status">สถานะ</th>
                   <th class="col-hide-mobile" data-en="Approver">ผู้อนุมัติ</th>
@@ -606,7 +626,7 @@
                 <tr>
                   <th data-en="Full Name">ชื่อ-นามสกุล</th>
                   <th class="col-hide-mobile">Employee No.</th>
-                  <th data-en="Position">ตำแหน่ง</th>
+                  <th class="col-hide-mobile" data-en="Position">ตำแหน่ง</th>
 
                   <th data-en="Rights">สิทธิ์</th>
                   <th class="col-hide-mobile" data-en="Start Date">วันเริ่มงาน</th>
@@ -638,7 +658,7 @@
               <label data-en="Pay Period">รอบเดือน</label>
               <select id="payslip-period-select" onchange="onPayslipPeriodChange(this.value)"></select>
             </div>
-            <div style="display:flex;gap:10px;margin-top:20px">
+            <div class="payslip-export-btns" style="display:flex;gap:10px;margin-top:20px;flex-wrap:wrap">
               <button id="payslip-btn-print" class="btn btn-ghost" onclick="printPayslip()" data-en="🖨 Print Payslip">🖨 พิมพ์ใบเงินเดือน</button>
               <button id="payslip-btn-xlsx" class="btn btn-ghost" onclick="downloadPayslipXlsx()" data-en="📥 Download Excel">📥 ดาวน์โหลด Excel</button>
               <!-- Accounting/MD only -- one .xlsx, every active employee, one sheet each (2026-08-02) -->
@@ -804,6 +824,14 @@
                   <span class="item">🚙 Personal Car Allowance<span class="detail" id="payslip-personalcar-detail">—</span></span>
                   <span class="amount plus" id="payslip-personalcar">—</span>
                 </div>
+                <div class="pay-row" id="payslip-holidaytransport-row" style="display:none">
+                  <span class="item">🔄 Holiday Transport<span class="detail" id="payslip-holidaytransport-detail">—</span></span>
+                  <span class="amount plus" id="payslip-holidaytransport">—</span>
+                </div>
+                <div class="pay-row" id="payslip-abroad-row" style="display:none">
+                  <span class="item" id="payslip-lbl-abroad">✈️ Abroad<span class="detail" id="payslip-abroad-detail">—</span></span>
+                  <span class="amount plus" id="payslip-abroad">—</span>
+                </div>
                 <div id="payslip-manual-allowances"></div>
                 <div class="pay-row" id="payslip-bonus-row" style="display:none">
                   <span class="item" id="payslip-lbl-bonus">🎁 Bonus</span>
@@ -863,14 +891,14 @@
               <div class="sig-label" data-en="Paid by">ผู้จ่ายเงิน / Paid by</div>
               <div class="sig-line"></div>
               <div class="sig-title" id="payslip-sig-md-name">—</div>
-              <div class="sig-date" data-en="Date: ___/___/______">วันที่: ___/___/______</div>
+              <div class="sig-date" id="payslip-sig-date-paid" data-en="Date: ___/___/______">วันที่: ___/___/______</div>
             </div>
             <div class="sig-box">
               <div class="sig-label" data-en="Received by">ผู้รับเงิน / Received by</div>
               <div class="sig-line"></div>
               <div class="sig-title" id="payslip-sig-name">Apinya Meesakul</div>
               <div style="font-size:11px;color:#94a3b8" id="payslip-sig-position">Sales Executive</div>
-              <div class="sig-date" data-en="Date: ___/___/______">วันที่: ___/___/______</div>
+              <div class="sig-date" id="payslip-sig-date-received" data-en="Date: ___/___/______">วันที่: ___/___/______</div>
             </div>
           </div>
 
@@ -898,7 +926,7 @@
               <thead>
                 <tr>
                   <th id="fin-th-emp" style="text-align:left">พนักงาน</th>
-                  <th id="fin-th-gross" style="text-align:right;color:#059669">รวมรับ (฿)</th>
+                  <th id="fin-th-gross" class="col-hide-mobile" style="text-align:right;color:#059669">รวมรับ (฿)</th>
                   <th id="fin-th-bonus" class="col-hide-mobile" style="text-align:right;color:#059669" title="บวกเข้ายอดสุทธิโดยตรง — ไม่รวมในภาษี (PIT) ที่ประมาณให้อัตโนมัติ ถ้าอยากให้โบนัสถูกหักภาษีด้วยต้องปรับช่องภาษีเอง" data-en-title="Added to net pay directly — not included in the automatic PIT tax estimate. Adjust the PIT field yourself if the bonus should be taxed.">โบนัส (฿)</th>
                   <th id="fin-th-diligence" class="col-hide-mobile" style="text-align:center" title="แก้ไขได้เฉพาะ role Driver — ปิดได้ถ้าการมาทำงานรอบนั้นไม่เข้าเงื่อนไข role อื่นจะจ่ายอัตโนมัติเสมอ" data-en-title="Only editable for Drivers — toggle off if attendance that period doesn't qualify. Other roles always get it paid automatically.">เบี้ยขยันรอบนี้</th>
                   <th class="col-hide-mobile" style="text-align:right;color:#dc2626">SSF (฿)</th>
@@ -944,7 +972,7 @@
         <div class="card">
           <div class="card-header" style="flex-wrap:wrap;gap:12px">
             <h3 data-en="📄 Withholding Tax Certificate">📄 ใบรับรองการหักภาษี ณ ที่จ่าย (50 ทวิ)</h3>
-            <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <div class="filter-bar" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
               <select id="tawi50-year" onchange="render50Tawi(parseInt(this.value))"
                 style="border:1.5px solid var(--border);border-radius:var(--radius-md);padding:7px 12px;font-size:13px;cursor:pointer"></select>
               <button class="btn btn-ghost btn-sm" onclick="export50TawiCSV(parseInt(document.getElementById('tawi50-year').value))">📥 Export CSV</button>
@@ -970,7 +998,7 @@
                   <th class="col-hide-mobile" style="text-align:right;color:#dc2626">SSF (฿)</th>
                   <th class="col-hide-mobile" style="text-align:right;color:#dc2626">PVD (฿)</th>
                   <th style="text-align:right;color:#b45309" data-en="Tax Withheld (฿)">ภาษีที่หัก (฿)</th>
-                  <th style="text-align:right;color:var(--primary)" data-en="Net (฿)">สุทธิ (฿)</th>
+                  <th class="col-hide-mobile" style="text-align:right;color:var(--primary)" data-en="Net (฿)">สุทธิ (฿)</th>
                 </tr>
               </thead>
               <tbody id="tawi50-body"></tbody>
@@ -1023,6 +1051,35 @@
         </div>
       </div>
 
+      <!-- ===== PAGE: EMPLOYEE LEAVE SUMMARY ===== -->
+      <div id="page-leave-summary" class="page">
+        <div class="card mb-4">
+          <div class="card-header">
+            <h3 data-en="🗓️ Employee Leave Summary">🗓️ สรุปวันลาพนักงาน</h3>
+            <div class="filter-bar">
+              <select id="leave-summary-year" onchange="selectedLeaveSummaryYear=parseInt(this.value,10);renderLeaveSummary()" style="min-width:120px"></select>
+              <input type="search" id="leave-summary-search" oninput="renderLeaveSummary()" placeholder="ค้นหาชื่อ..." data-en-ph="Search name..." style="min-width:180px;padding:7px 12px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px">
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th data-en="Employee">พนักงาน</th>
+                  <th class="ls-hide-mobile" style="text-align:center" data-en="Annual used / remaining">พักร้อน ใช้ / เหลือ</th>
+                  <th class="ls-hide-mobile" style="text-align:center" data-en="Sick used / remaining">ป่วย ใช้ / เหลือ</th>
+                  <th class="ls-hide-mobile" style="text-align:center" data-en="Business used / remaining">กิจ ใช้ / เหลือ</th>
+                  <th class="ls-show-mobile" style="text-align:left" data-en="Used / remaining">ใช้ / เหลือ</th>
+                  <th class="no-print" style="width:28px"></th>
+                </tr>
+              </thead>
+              <tbody id="leave-summary-tbody"></tbody>
+            </table>
+          </div>
+          <div style="padding:8px 20px 16px;font-size:11px;color:#94a3b8" data-en="Calendar year Jan–Dec. 8 hours = 1 day. Click a row for approved leave details.">ปีปฏิทิน ม.ค.–ธ.ค. · 8 ชั่วโมง = 1 วัน · คลิกแถวเพื่อดูรายละเอียดใบลาที่อนุมัติแล้ว</div>
+        </div>
+      </div>
+
       <!-- ===== PAGE: PAYROLL HISTORY ===== -->
       <div id="page-payroll-history" class="page">
         <div class="card mb-4">
@@ -1038,7 +1095,7 @@
                   <th class="col-hide-mobile" style="text-align:right;color:#dc2626" data-en="Total Deduct (฿)">หักรวม (฿)</th>
                   <th style="text-align:right;color:var(--primary)" data-en="Total Net (฿)">สุทธิรวม (฿)</th>
                   <th class="col-hide-mobile" style="text-align:center" data-en="Count">จำนวน</th>
-                  <th style="text-align:center" data-en="Status">สถานะ</th>
+                  <th class="col-hide-mobile" style="text-align:center" data-en="Status">สถานะ</th>
                   <th style="text-align:center" class="no-print" data-en="Detail">รายละเอียด</th>
                 </tr>
               </thead>
@@ -1053,7 +1110,7 @@
         <div class="card mb-4">
           <div class="card-header">
             <h3 data-en="🔍 Activity Log">🔍 บันทึกกิจกรรม</h3>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-left:auto">
+            <div class="filter-bar" style="margin-left:auto">
               <select id="audit-filter-user" onchange="renderAuditLog()" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--bg-card);color:var(--text)">
                 <option value="">👤 <span data-en="All Users">ทุกคน</span></option>
               </select>
@@ -1063,9 +1120,10 @@
                 <option value="sick" data-en="Sick Leave">ลาป่วย</option>
                 <option value="business" data-en="Business Leave">ลากิจ</option>
                 <option value="upcountry" data-en="Upcountry">Upcountry</option>
-                <option value="late-out" data-en="Late Night">กลับดึก</option>
+                <option value="late-out" data-en="Late Night">แจ้งกลับดึก</option>
                 <option value="ot" data-en="OT">OT</option>
-                <option value="comp" data-en="Compensatory">วันหยุดชดเชย</option>
+                <option value="holiday-work" data-en="Holiday Work">ทำงานวันหยุด</option>
+                <option value="early-morning" data-en="Early Morning">แจ้งมาเช้า</option>
                 <option value="time-correction" data-en="Time Correction">แก้ไขเวลา</option>
                 <option value="long-distance" data-en="Long Distance">Long Distance</option>
               </select>
@@ -1084,7 +1142,7 @@
             <table style="width:100%;font-size:13px">
               <thead>
                 <tr>
-                  <th id="audit-th-date" style="text-align:left;min-width:130px" data-en="Date Submitted">วันที่ยื่น</th>
+                  <th id="audit-th-date" class="col-hide-mobile" style="text-align:left;min-width:130px" data-en="Date Submitted">วันที่ยื่น</th>
                   <th style="text-align:left" data-en="Employee">พนักงาน</th>
                   <th style="text-align:left" data-en="Request Type">ประเภทคำขอ</th>
                   <th class="col-hide-mobile" style="text-align:left" data-en="Period">ช่วงเวลา</th>
@@ -1208,19 +1266,19 @@
     <div class="modal-body" style="display:flex;flex-direction:column;gap:16px">
 
       <!-- Leave type pills -->
-      <div id="leave-type-pills">
+        <div id="leave-type-pills" class="leave-type-pills">
         <label style="font-size:12px;font-weight:600;color:#64748b;margin-bottom:8px;display:block" data-en="Leave Type">ประเภทการลา</label>
-        <div style="display:flex;gap:8px">
+        <div class="leave-type-pill-row" style="display:flex;gap:8px;flex-wrap:wrap">
           <button id="ltab-annual" onclick="setLeaveType('annual')"
-            style="flex:1;padding:10px 6px;border-radius:10px;border:2px solid #bfdbfe;background:#eff6ff;color:#1d4ed8;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s" data-en="🏖️ Annual">
+            style="flex:1;min-width:90px;padding:10px 6px;border-radius:10px;border:2px solid #bfdbfe;background:#eff6ff;color:#1d4ed8;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s" data-en="🏖️ Annual">
             🏖️ พักร้อน
           </button>
           <button id="ltab-sick" onclick="setLeaveType('sick')"
-            style="flex:1;padding:10px 6px;border-radius:10px;border:2px solid #e2e8f0;background:#f8fafc;color:#64748b;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s" data-en="🤒 Sick">
+            style="flex:1;min-width:90px;padding:10px 6px;border-radius:10px;border:2px solid #e2e8f0;background:#f8fafc;color:#64748b;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s" data-en="🤒 Sick">
             🤒 ลาป่วย
           </button>
           <button id="ltab-business" onclick="setLeaveType('business')"
-            style="flex:1;padding:10px 6px;border-radius:10px;border:2px solid #e2e8f0;background:#f8fafc;color:#64748b;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s" data-en="📋 Business">
+            style="flex:1;min-width:90px;padding:10px 6px;border-radius:10px;border:2px solid #e2e8f0;background:#f8fafc;color:#64748b;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s" data-en="📋 Business">
             📋 ลากิจ
           </button>
         </div>
@@ -1231,12 +1289,10 @@
       <div>
         <label style="font-size:12px;font-weight:600;color:#64748b;margin-bottom:8px;display:block" data-en="Leave Mode">รูปแบบการลา</label>
         <div style="display:flex;background:#f1f5f9;border-radius:10px;padding:3px;gap:3px">
-          <button id="lmode-days-btn" onclick="setLeaveMode('days')"
-            style="flex:1;padding:8px;border:none;border-radius:8px;background:white;color:#1e3a5f;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.1)" data-en="🗓️ By Day">
+          <button id="lmode-days-btn" class="leave-mode-btn is-active" onclick="setLeaveMode('days')" data-en="🗓️ By Day">
             🗓️ ลาเป็นวัน
           </button>
-          <button id="lmode-hours-btn" onclick="setLeaveMode('hours')"
-            style="flex:1;padding:8px;border:none;border-radius:8px;background:transparent;color:#94a3b8;font-size:13px;font-weight:600;cursor:pointer" data-en="⏰ By Hour">
+          <button id="lmode-hours-btn" class="leave-mode-btn" onclick="setLeaveMode('hours')" data-en="⏰ By Hour">
             ⏰ ลาเป็นชั่วโมง
           </button>
         </div>
@@ -1312,7 +1368,7 @@
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="closeLeaveModal()" data-en="Cancel">ยกเลิก</button>
-      <button class="btn btn-primary" onclick="submitLeave()" data-en="📤 Submit Request">📤 ยื่นคำขอ</button>
+      <button class="btn btn-primary" id="leave-submit-btn" onclick="submitLeave()" data-en="📤 Submit Request">📤 ยื่นคำขอ</button>
     </div>
   </div>
 </div>
@@ -1377,8 +1433,8 @@
     <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
       <div class="form-field" style="margin-bottom:0">
         <label data-en="Date">วันที่</label>
-        <input type="date" id="lateout-date" onchange="refreshLateOutGate()">
-        <div style="font-size:11px;color:#94a3b8;margin-top:4px" data-en="📌 Backdated dates are allowed">📌 สามารถระบุวันที่ย้อนหลังได้</div>
+        <input type="date" id="lateout-date">
+        <div style="font-size:11px;color:#94a3b8;margin-top:4px" data-en="Must scan at the device only">ต้องสแกนที่เครื่องเท่านั้น</div>
       </div>
       <div style="margin-bottom:0">
         <label style="font-size:12px;font-weight:600;color:#64748b;margin-bottom:8px;display:block" data-en="Return Time">เวลาที่กลับ</label>
@@ -1429,22 +1485,23 @@
     <div class="modal-body">
       <div class="form-group">
         <label class="form-label" data-en="Date">วันที่</label>
-        <input type="date" id="ot-date" class="form-control" onchange="calcOTHours(); updateDriverOTFieldsVisibility()">
+        <input type="date" id="ot-date" class="form-control">
+        <div id="ot-date-hint" style="font-size:12px;color:#94a3b8;margin-top:4px" data-en="Weekdays with a check-in only. Weekends and public holidays use Holiday Work.">เลือกได้เฉพาะวันทำงานที่มีเข้างาน เสาร์-อาทิตย์และวันหยุดบริษัทให้ยื่นขอทำงานวันหยุด</div>
       </div>
       <div id="ot-standard-fields">
         <div class="form-group">
           <label class="form-label" data-en="End Time">เวลาเลิกงาน</label>
           <input type="time" id="ot-end-time" class="form-control" oninput="calcOTHours()">
-          <div style="font-size:11px;color:#94a3b8;margin-top:4px" data-en="OT is calculated from 17:30">OT คำนวณตั้งแต่ 17:30 น.</div>
+          <div id="ot-end-hint" style="font-size:11px;color:#94a3b8;margin-top:4px" data-en="Weekday OT is calculated from 17:30 (×1.5). Must submit OT — not auto from scan-out.">วันธรรมดา: OT คำนวณตั้งแต่ 17:30 (×1.5) ต้องยื่นขอ OT ก่อน ระบบไม่คำนวณจากสแกนออกอัตโนมัติ</div>
         </div>
         <div id="ot-hours-display" style="background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:10px 14px;margin-bottom:12px;display:none">
-          <span style="font-size:13px;color:#c2410c;font-weight:600"><span data-en="⏱️ Total OT ">⏱️ OT รวม </span><span id="ot-hours-text">0</span><span data-en=" (17:30 → specified time)"> (17:30 → เวลาที่ระบุ)</span></span>
+          <span style="font-size:13px;color:#c2410c;font-weight:600"><span data-en="⏱️ Total OT ">⏱️ OT รวม </span><span id="ot-hours-text">0</span><span id="ot-hours-range-hint" data-en=" (17:30 → specified time)"> (17:30 → เวลาที่ระบุ)</span></span>
         </div>
       </div>
       <div id="ot-driver-fields" style="display:none">
         <div id="ot-driver-weekday-fields">
           <div class="form-group">
-            <label class="form-label" data-en="OT x1.5 hours">ชั่วโมง OT x1.5</label>
+            <label class="form-label" data-en="OT x1.5 hours (weekday after 17:30)">ชั่วโมง OT ×1.5 (วันธรรมดาหลัง 17:30)</label>
             <div style="display:flex;gap:8px;align-items:center">
               <input type="number" id="ot-hours-15" class="form-control" min="0" step="1" placeholder="0" style="flex:1;min-width:0">
               <span style="font-size:12px;color:#64748b;white-space:nowrap" data-en="hr">ชม.</span>
@@ -1455,7 +1512,7 @@
         </div>
         <div id="ot-driver-holiday-fields">
           <div class="form-group">
-            <label class="form-label" data-en="OT x2.0 hours (holiday)">ชั่วโมง OT x2.0 (วันหยุด)</label>
+            <label class="form-label" id="ot-driver-label-20" data-en="OT x2.0 hours (holiday 08:30–17:30)">ชั่วโมง OT ×2.0 (วันหยุด 08:30–17:30)</label>
             <div style="display:flex;gap:8px;align-items:center">
               <input type="number" id="ot-hours-20" class="form-control" min="0" step="1" placeholder="0" style="flex:1;min-width:0">
               <span style="font-size:12px;color:#64748b;white-space:nowrap" data-en="hr">ชม.</span>
@@ -1464,7 +1521,7 @@
             </div>
           </div>
           <div class="form-group">
-            <label class="form-label" data-en="OT x3.0 hours (holiday)">ชั่วโมง OT x3.0 (วันหยุด)</label>
+            <label class="form-label" data-en="OT x3.0 hours (holiday after 17:30)">ชั่วโมง OT ×3.0 (วันหยุดหลัง 17:30)</label>
             <div style="display:flex;gap:8px;align-items:center">
               <input type="number" id="ot-hours-30" class="form-control" min="0" step="1" placeholder="0" style="flex:1;min-width:0">
               <span style="font-size:12px;color:#64748b;white-space:nowrap" data-en="hr">ชม.</span>
@@ -1503,45 +1560,181 @@
   </div>
 </div>
 
-<!-- COMP MODAL -->
-<div class="modal-overlay" id="comp-modal" onclick="if(event.target===this)closeCompModal()">
-  <div class="modal" style="max-width:440px">
+<!-- Holiday Work Modal -->
+<div class="modal-overlay" id="abroad-modal" onclick="if(event.target===this)closeAbroadModal()">
+  <div class="modal" style="max-width:480px">
     <div class="modal-header">
-      <h3 data-en="🔄 Request Compensatory Day">🔄 ขอวันหยุดชดเชย</h3>
-      <button class="btn btn-ghost btn-sm" onclick="closeCompModal()">✕</button>
+      <h3 data-en="✈️ Report Work Abroad">✈️ แจ้งทำงานต่างประเทศ</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeAbroadModal()">✕</button>
     </div>
     <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
-      <div class="form-group">
-        <label class="form-label"><span data-en="Worked Date">วันที่ไปทำงาน</span> <span style="color:#ef4444">*</span></label>
-        <input type="date" id="comp-worked-date" class="form-control" />
-        <div style="font-size:12px;color:#94a3b8;margin-top:4px" data-en="Specify the holiday / weekend day you worked">ระบุวันหยุด/วันเสาร์-อาทิตย์ที่เข้ามาทำงาน</div>
-      </div>
-      <div class="form-group">
-        <label class="form-label"><span data-en="Reason / Work details">เหตุผล / รายละเอียดงานที่ทำ</span> <span style="color:#ef4444">*</span></label>
-        <textarea id="comp-reason" class="form-control" rows="3" placeholder="ระบุงานที่ทำในวันหยุด..." data-en-ph="Specify the work you did on the holiday..."></textarea>
-      </div>
-      <div class="form-group">
-        <label class="form-label" data-en="Attach Document (if any)">แนบไฟล์เอกสาร (ถ้ามี)</label>
-        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-          <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0">
-            <span data-en="📎 Choose File">📎 เลือกไฟล์</span>
-            <input type="file" id="comp-file" style="display:none" onchange="onCompFileChange(this)" accept="image/*,.pdf,.doc,.docx,.xls,.xlsx">
-          </label>
-          <span id="comp-file-name" style="font-size:13px;color:#64748b">ยังไม่ได้เลือกไฟล์</span>
-          <button id="comp-file-clear" class="btn btn-ghost btn-sm" style="display:none;color:#ef4444;padding:2px 6px" onclick="clearCompFile()">✕</button>
+      <div style="display:flex;gap:10px">
+        <div class="form-group" style="flex:1">
+          <label class="form-label"><span data-en="Start date">วันที่เริ่ม</span> <span style="color:#ef4444">*</span></label>
+          <input type="date" id="abroad-date-from" class="form-control" onchange="refreshAbroadSpanHint()" />
         </div>
-        <div style="font-size:11px;color:#94a3b8;margin-top:4px" data-en="Supports: images, PDF, Word, Excel (max 10MB)">รองรับ: รูปภาพ, PDF, Word, Excel (ไม่เกิน 10MB)</div>
+        <div class="form-group" style="flex:1">
+          <label class="form-label"><span data-en="End date">วันที่สิ้นสุด</span> <span style="color:#ef4444">*</span></label>
+          <input type="date" id="abroad-date-to" class="form-control" onchange="refreshAbroadSpanHint()" />
+        </div>
       </div>
-      <div class="alert alert-info" style="margin:0">
-        <span id="comp-approval-note">📋 คำขอจะถูกส่งไปยัง Manager และ Managing Director เพื่อขออนุมัติ</span>
+      <div id="abroad-span-hint" style="font-size:12px;color:#64748b;margin-top:-6px;line-height:1.5"></div>
+      <div class="form-group">
+        <label class="form-label"><span data-en="Country / Customer">ประเทศ / ลูกค้า</span> <span style="color:#ef4444">*</span></label>
+        <input type="text" id="abroad-location" class="form-control" maxlength="200" placeholder="เช่น ญี่ปุ่น หรือ ชื่อลูกค้า" data-en-ph="e.g. Japan, or a customer name" />
       </div>
-      <div style="background:#f0fdfa;border:1px solid #5eead4;border-radius:8px;padding:10px 12px;font-size:13px;color:#0f766e">
-        <span data-en="ℹ️ Once approved, the system will add ">ℹ️ เมื่อได้รับการอนุมัติ ระบบจะเพิ่ม </span><strong data-en="1 day">1 วัน</strong><span data-en=" to your annual leave balance"> เข้าในสิทธิ์ลาพักร้อนของคุณ</span>
+      <div class="form-group">
+        <label class="form-label"><span data-en="Reason / Work details">เหตุผล / รายละเอียดงาน</span> <span style="color:#ef4444">*</span></label>
+        <textarea id="abroad-reason" class="form-control" rows="3" placeholder="ระบุงานที่ไปทำ..." data-en-ph="Describe the work on this trip..."></textarea>
+      </div>
+      <div style="font-size:12px;color:#0369a1;background:#f0f9ff;border-radius:8px;padding:10px;line-height:1.55">
+        <div data-en="📌 Days in this range are not counted as absent, and each day earns the Abroad allowance — weekends and public holidays included.">📌 วันในช่วงนี้จะไม่ถูกนับว่าขาดงาน และได้รับเบี้ยเลี้ยงทำงานต่างประเทศทุกวัน รวมเสาร์-อาทิตย์และวันหยุดนักขัตฤกษ์</div>
+        <div style="margin-top:6px" data-en="📌 On these days only OT can still be claimed.">📌 วันเหล่านี้เคลมได้เฉพาะ OT เท่านั้น</div>
       </div>
     </div>
     <div class="modal-footer">
-      <button class="btn btn-secondary" onclick="closeCompModal()" data-en="Cancel">ยกเลิก</button>
-      <button class="btn btn-primary" onclick="submitComp()" style="background:#0d9488;border-color:#0d9488" data-en="🔄 Submit Compensatory Day">🔄 ยื่นขอวันหยุดชดเชย</button>
+      <button class="btn btn-ghost" onclick="closeAbroadModal()" data-en="Cancel">ยกเลิก</button>
+      <button class="btn btn-primary" onclick="submitAbroad()" data-en="✈️ Submit Request">✈️ ยื่นคำขอ</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="holiday-work-modal" onclick="if(event.target===this)closeHolidayWorkModal()">
+  <div class="modal" style="max-width:480px">
+    <div class="modal-header">
+      <h3 data-en="🔄 Request Holiday Work">🔄 ขอทำงานวันหยุด</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeHolidayWorkModal()">✕</button>
+    </div>
+    <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
+      <div class="form-group">
+        <label class="form-label"><span data-en="Worked Date">วันที่ทำงาน</span> <span style="color:#ef4444">*</span></label>
+        <input type="date" id="holiday-work-date" class="form-control" onchange="refreshHolidayWorkGate()" />
+        <div id="holiday-work-gate-note" style="font-size:12px;color:#b45309;margin-top:6px;display:none"></div>
+        <div style="font-size:12px;color:#94a3b8;margin-top:4px;line-height:1.5">
+          <div data-en="Only dates you actually worked are selectable">เลือกได้เฉพาะวันที่ทำงานจริงเท่านั้น</div>
+          <div data-en="Weekends or public holidays only (not Company Trip)">เฉพาะวันเสาร์-อาทิตย์หรือวันหยุดนักขัตฤกษ์ (ไม่รวม Company Trip)</div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label"><span data-en="Location (Upcountry)">สถานที่ (Upcountry)</span> <span style="color:#ef4444">*</span></label>
+        <input type="text" id="holiday-work-location" class="form-control" placeholder="ระบุสถานที่ทำงาน..." data-en-ph="Specify work location..." />
+      </div>
+      <div style="display:flex;gap:10px">
+        <div class="form-group" style="flex:1">
+          <label class="form-label"><span data-en="Work start (off-site)">เวลาเริ่มงาน (นอกสถานที่)</span> <span style="color:#ef4444">*</span></label>
+          <input type="time" id="holiday-work-start-time" class="form-control" />
+        </div>
+        <div class="form-group" style="flex:1">
+          <label class="form-label"><span data-en="Work end (off-site)">เวลาเลิกงาน (นอกสถานที่)</span> <span style="color:#ef4444">*</span></label>
+          <input type="time" id="holiday-work-end-time" class="form-control" />
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label"><span data-en="Compensation Mode">รูปแบบการชดเชย</span> <span style="color:#ef4444">*</span></label>
+        <select id="holiday-work-comp-mode" class="form-control" onchange="refreshHolidayWorkCompHint()">
+          <option value="annual-leave" data-en="Annual leave +1 day">ลาพักร้อน +1 วัน</option>
+          <option value="paid" data-en="Paid (OT + transport)">ชดเชยเป็นเงิน (OT + ค่าเดินทาง)</option>
+        </select>
+        <div id="holiday-work-comp-hint" style="font-size:11px;color:#64748b;margin-top:6px;line-height:1.45"></div>
+      </div>
+      <div class="form-group">
+        <label class="form-label"><span data-en="Reason / Work details">เหตุผล / รายละเอียดงานที่ทำ</span> <span style="color:#ef4444">*</span></label>
+        <textarea id="holiday-work-reason" class="form-control" rows="3" placeholder="ระบุงานที่ทำในวันหยุด..." data-en-ph="Specify the work you did on the holiday..."></textarea>
+      </div>
+      <div class="form-group">
+        <label class="form-label"><span data-en="Attach Working Report">แนบ Working Report</span> <span style="color:#ef4444">*</span></label>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0">
+            <span data-en="📎 Choose File">📎 เลือกไฟล์</span>
+            <input type="file" id="holiday-work-file" style="display:none" onchange="onHolidayWorkFileChange(this)" accept="image/*,.pdf,.doc,.docx,.xls,.xlsx">
+          </label>
+          <span id="holiday-work-file-name" style="font-size:13px;color:#64748b">ยังไม่ได้เลือกไฟล์</span>
+          <button id="holiday-work-file-clear" class="btn btn-ghost btn-sm" style="display:none;color:#ef4444;padding:2px 6px" onclick="clearHolidayWorkFile()">✕</button>
+        </div>
+        <div style="font-size:11px;color:#94a3b8;margin-top:4px" data-en="Working Report is mandatory">ต้องแนบ Working Report</div>
+      </div>
+      <div id="holiday-work-latenight-wrap" style="display:none;background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:12px 14px">
+        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;margin:0">
+          <input type="checkbox" id="holiday-work-include-latenight" style="margin-top:3px" onchange="onHolidayWorkLateNightToggle()">
+          <span>
+            <span data-en="Also submit Late Night (🌙) for this date">ยื่นแจ้งกลับดึก (🌙) พร้อมกันด้วย</span>
+            <div style="font-size:11px;color:#64748b;margin-top:4px;line-height:1.45" data-en="Shown because you already scanned out at or after the late-night threshold. Creates a separate Late Night request after Holiday Work.">แสดงเพราะคุณสแกนออกถึงเกณฑ์กลับดึกแล้ว จะสร้างคำขอแจ้งกลับดึกแยก หลังยื่นขอทำงานวันหยุด</div>
+          </span>
+        </label>
+        <div id="holiday-work-latenight-tiers" style="display:none;margin-top:10px">
+          <div style="display:flex;gap:10px">
+            <button type="button" id="hw-lateout-btn-19" onclick="selectHwLateOutTime(lateOutThresholdHour(1))"
+              style="flex:1;padding:14px 8px;border-radius:12px;border:2px solid #e2e8f0;background:#f8fafc;cursor:pointer;transition:all .15s;text-align:center">
+              <div style="font-size:22px;margin-bottom:4px">🌆</div>
+              <div id="hw-lateout-btn-19-time" style="font-size:15px;font-weight:700;color:#1e293b">--:--</div>
+              <div id="hw-lateout-btn-19-amt" style="font-size:11px;color:#64748b;margin-top:2px"></div>
+            </button>
+            <button type="button" id="hw-lateout-btn-20" onclick="selectHwLateOutTime(lateOutThresholdHour(2))"
+              style="flex:1;padding:14px 8px;border-radius:12px;border:2px solid #e2e8f0;background:#f8fafc;cursor:pointer;transition:all .15s;text-align:center">
+              <div style="font-size:22px;margin-bottom:4px">🌙</div>
+              <div id="hw-lateout-btn-20-time" style="font-size:15px;font-weight:700;color:#1e293b">--:--</div>
+              <div id="hw-lateout-btn-20-amt" style="font-size:11px;color:#64748b;margin-top:2px"></div>
+            </button>
+          </div>
+          <div id="hw-lateout-time-note" style="margin-top:8px;font-size:12px;color:#94a3b8;text-align:center"></div>
+        </div>
+      </div>
+      <div class="alert alert-info" style="margin:0">
+        <span id="holiday-work-approval-note">📋 คำขอจะถูกส่งไปยัง Manager และ Managing Director เพื่อขออนุมัติ</span>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeHolidayWorkModal()" data-en="Cancel">ยกเลิก</button>
+      <button class="btn btn-primary" onclick="submitHolidayWork()" style="background:#0d9488;border-color:#0d9488" data-en="🔄 Submit Holiday Work">🔄 ยื่นขอทำงานวันหยุด</button>
+    </div>
+  </div>
+</div>
+
+<!-- Early Morning Modal -->
+<div class="modal-overlay" id="earlymorning-modal" onclick="if(event.target===this)closeEarlyMorningModal()">
+  <div class="modal" style="max-width:440px">
+    <div class="modal-header">
+      <h3 data-en="🌅 Request Early Morning Allowance">🌅 ขอแจ้งมาเช้า</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeEarlyMorningModal()">✕</button>
+    </div>
+    <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
+      <div class="form-field" style="margin-bottom:0">
+        <label data-en="Date">วันที่</label>
+        <input type="date" id="earlymorning-date" onchange="refreshEarlyMorningGate()">
+        <div style="font-size:11px;color:#94a3b8;margin-top:4px" data-en="For non-device (web) early check-in only">สำหรับเช็กอินบนเว็บที่มาเช้าเท่านั้น</div>
+      </div>
+      <div style="margin-bottom:0">
+        <label style="font-size:12px;font-weight:600;color:#64748b;margin-bottom:8px;display:block" data-en="Check-in Time">เวลาเช็กอิน</label>
+        <div style="display:flex;gap:10px">
+          <button id="earlymorning-btn-1" onclick="selectEarlyMorningTier(1)"
+            style="flex:1;padding:14px 8px;border-radius:12px;border:2px solid #e2e8f0;background:#f8fafc;cursor:pointer;transition:all .15s;text-align:center">
+            <div style="font-size:22px;margin-bottom:4px">🌄</div>
+            <div id="earlymorning-btn-1-time" style="font-size:15px;font-weight:700;color:#1e293b">--:--</div>
+            <div id="earlymorning-btn-1-amt" style="font-size:11px;color:#64748b;margin-top:2px"></div>
+          </button>
+          <button id="earlymorning-btn-2" onclick="selectEarlyMorningTier(2)"
+            style="flex:1;padding:14px 8px;border-radius:12px;border:2px solid #e2e8f0;background:#f8fafc;cursor:pointer;transition:all .15s;text-align:center">
+            <div style="font-size:22px;margin-bottom:4px">🌅</div>
+            <div id="earlymorning-btn-2-time" style="font-size:15px;font-weight:700;color:#1e293b">--:--</div>
+            <div id="earlymorning-btn-2-amt" style="font-size:11px;color:#64748b;margin-top:2px"></div>
+          </button>
+        </div>
+        <div id="earlymorning-tier-note" style="margin-top:8px;font-size:12px;color:#94a3b8;text-align:center"></div>
+        <div style="margin-top:6px;font-size:11px;color:#94a3b8;text-align:center">
+          <span data-en="📌 Pick the tier matching your actual check-in (e.g. checked in at 07:00 → choose the later tier) — the allowance follows the tier you pick.">📌 เลือกช่วงที่ตรงกับเวลาเช็กอินจริง (เช่น เช็กอิน 07:00 ให้เลือกช่วงหลัง) — ระบบจะจ่ายตามช่วงที่เลือก</span>
+        </div>
+      </div>
+      <div class="form-field" style="margin-bottom:0">
+        <label><span data-en="Reason / Work done">เหตุผล / งานที่ทำ</span> <span style="font-size:11px;color:#94a3b8;font-weight:400" data-en="(if any)">(ถ้ามี)</span></label>
+        <textarea id="earlymorning-reason" rows="3" placeholder="อธิบายงานที่ต้องมาเช้า..." data-en-ph="Describe why you came early..."></textarea>
+      </div>
+      <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:10px 14px;font-size:13px;color:#1e40af">
+        <div id="earlymorning-approval-note">📋 คำขอจะถูกส่งไปยัง Manager และ Managing Director เพื่อขออนุมัติ</div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeEarlyMorningModal()" data-en="Cancel">ยกเลิก</button>
+      <button class="btn btn-primary" onclick="submitEarlyMorning()" data-en="📤 Submit Request">📤 ยื่นคำขอ</button>
     </div>
   </div>
 </div>
@@ -1568,6 +1761,10 @@
       <div class="form-field" style="margin-bottom:0">
         <label data-en="Date">วันที่</label>
         <input type="date" id="upcountry-date">
+        <div style="font-size:12px;color:#94a3b8;margin-top:4px;line-height:1.5">
+          <div data-en="Only weekdays you actually checked in are selectable">เลือกได้เฉพาะวันธรรมดาที่ลงเวลาเข้างาน</div>
+          <div data-en="Weekends/public holidays: submit Holiday Work instead (location counts as Upcountry)">วันหยุดให้ยื่นขอทำงานวันหยุดแทน (สถานที่นับเป็น Upcountry)</div>
+        </div>
       </div>
       <div class="form-field" style="margin-bottom:0">
         <label><span data-en="Customer / Location (up to 6 stops, at least 1 required)">ชื่อลูกค้า / สถานที่ (สูงสุด 6 แห่ง อย่างน้อย 1 แห่ง)</span> <span style="color:#ef4444">*</span></label>
@@ -1688,6 +1885,7 @@
       <div class="form-field" style="margin-bottom:0">
         <label data-en="Date">วันที่</label>
         <input type="date" id="longdistance-date">
+        <div style="font-size:12px;color:#94a3b8;margin-top:4px" data-en="Only dates you actually checked in are selectable">เลือกได้เฉพาะวันที่ลงเวลาเข้างาน</div>
       </div>
       <div class="form-row">
         <div class="form-field" style="margin-bottom:0">
@@ -1884,7 +2082,7 @@
           <div class="form-row form-row-3" style="margin-top:12px">
             <div class="form-field" style="margin-bottom:0">
               <label data-en="Start Date">วันเริ่มเข้าทำงาน</label>
-              <input type="date" id="emp-start-date">
+              <input type="date" id="emp-start-date" onchange="updateEmpAnnualLeaveDisplay()">
             </div>
             <div class="form-field" style="margin-bottom:0">
               <label data-en="End Date">วันที่สิ้นสุดการทำงาน</label>
@@ -1907,18 +2105,21 @@
           <div class="form-row" style="margin-top:12px">
             <div class="form-field" style="margin-bottom:0">
               <label data-en="Annual Leave (days/year)">วันลาพักร้อน (วัน/ปี)</label>
-              <input type="number" id="emp-annual-leave" value="6" min="0">
+              <div id="emp-annual-leave-display" style="padding:8px 10px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;font-weight:700;color:#2563eb">—</div>
+              <input type="hidden" id="emp-annual-leave" value="0">
             </div>
             <div class="form-field" style="margin-bottom:0">
               <label data-en="Sick Leave (days/year)">วันลาป่วย (วัน/ปี)</label>
-              <input type="number" id="emp-sick-leave" value="30" min="0">
+              <div id="emp-sick-leave-display" style="padding:8px 10px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;font-weight:700;color:#ef4444">—</div>
+              <input type="hidden" id="emp-sick-leave" value="30">
             </div>
             <div class="form-field" style="margin-bottom:0">
               <label data-en="Business Leave (days/year)">วันลากิจ (วัน/ปี)</label>
-              <input type="number" id="emp-business-leave" value="3" min="0">
+              <div id="emp-business-leave-display" style="padding:8px 10px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;font-weight:700;color:#8b5cf6">—</div>
+              <input type="hidden" id="emp-business-leave" value="3">
             </div>
           </div>
-          <div style="font-size:11px;color:#94a3b8;margin-top:6px" data-en="📌 These reset by calendar year (Jan 1 – Dec 31), not by hire-date anniversary. Unused Annual Leave can carry over into next year via Settings → Leave Policy → Year-End Carry-Forward.">📌 นับตามปีปฏิทิน (1 ม.ค. – 31 ธ.ค.) ไม่ใช่ตามวันครบรอบเข้างาน วันลาพักร้อนที่เหลือยกไปปีถัดไปได้ผ่าน ตั้งค่า → นโยบายวันลา → Year-End Carry-Forward</div>
+          <div style="font-size:11px;color:#94a3b8;margin-top:6px" data-en="📌 Annual, Sick, and Business leave days all come from Settings → Leave Policy (not set per person). Annual leave follows years of service. Sick and Business are the same quota for everyone. These reset by calendar year (Jan 1 – Dec 31). Unused Annual Leave can carry over via Settings → Leave Policy → Year-End Carry-Forward.">📌 วันลาพักร้อน ลาป่วย และลากิจ มาจาก ตั้งค่า → นโยบายวันลา (ไม่ได้ตั้งรายคน) ลาพักร้อนคิดตามอายุงาน ลาป่วยกับลากิจโควตาเดียวกันทุกคน นับตามปีปฏิทิน (1 ม.ค. – 31 ธ.ค.) วันลาพักร้อนที่เหลือยกไปปีถัดไปได้ผ่าน ตั้งค่า → นโยบายวันลา → Year-End Carry-Forward</div>
         </div>
 
         <!-- บัญชีระบบ -->
@@ -2023,12 +2224,10 @@
               </div>
             </div>
           </div>
-          <!-- 2026-07-31: split into two independently-gated rows -- Guaranteed OT is gated on
-               OT eligibility (computePayroll tops up ot15Hours for any canOT role, not just
-               drivers), while the Long Distance rate display is gated on Long Distance
-               eligibility specifically. These used to share one div gated on longDistance only,
-               which meant a non-driver OT-eligible role could never have Guaranteed OT set
-               through this UI even though the calc would have honored it. -->
+          <!-- Guaranteed OT is a driver contract floor (OT ×1.5 hours/month). 2026-09-01:
+               visibility is driver-only. The 2026-07-31 pass gated this on whoever is ticked
+               for OT in Settings (live config: Staff + Driver), so the field also appeared
+               when editing Staff. -->
           <div id="emp-ot-contract-row" style="display:none">
             <div class="form-row" style="margin-top:12px">
               <div class="form-field" style="margin-bottom:0">
@@ -2198,6 +2397,17 @@
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="closeApprovalFlowChart()" data-en="Close">ปิด</button>
     </div>
+  </div>
+</div>
+
+<!-- ===== EMPLOYEE LEAVE SUMMARY DETAIL MODAL ===== -->
+<div class="modal-overlay" id="leave-summary-detail-modal" onclick="if(event.target===this)closeLeaveSummaryDetail()">
+  <div class="modal" style="max-width:640px">
+    <div class="modal-header">
+      <h3 id="leave-summary-detail-title">🗓️ รายละเอียดวันลา</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeLeaveSummaryDetail()">✕</button>
+    </div>
+    <div class="modal-body" id="leave-summary-detail-body" style="padding:16px 20px 22px;max-height:70vh;overflow-y:auto"></div>
   </div>
 </div>
 
@@ -2377,12 +2587,11 @@
   </div>
 </div>
 
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script>window._LeafletAPI = window.L;</script>
-<script src="lang/ja.js?v=20260821d"></script>  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="lang/ja.js?v=20260921a"></script>  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ja.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/th.js"></script>
 
-<script src="js/app.js?v=20260823m"></script>
+<script src="js/app.js?v=20260921p"></script>
 </body>
 </html>

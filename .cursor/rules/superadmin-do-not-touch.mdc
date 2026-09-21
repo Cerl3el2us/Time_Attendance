@@ -1,0 +1,37 @@
+---
+description: Superadmin is a secret developer login. Never expose it to staff. Never edit it during unrelated bugfixes.
+alwaysApply: true
+---
+
+# Superadmin is secret and off-limits (all AIs, all models)
+
+This login is **developer-only and secret**. Staff, MD, Accounting, and every other user must **not know it exists**. Claude, Cursor, GPT, Gemini, and any other AI must not change this path while fixing unrelated bugs.
+
+## Secret — never reveal to users
+
+- Do not show it in รายชื่อพนักงาน, pickers, payslips, reports, finalize, archive, 50 ทวิ, headcount, login page, or role dropdowns.
+- Keep `.filter(isEmployeeRecord)` / `employeeRecords()`.
+- Do not add `superadmin` as a selectable employee role.
+- Do not mention superadmin / system account / developer login in UI copy, toasts, or **API errors that non-developers can see**. Use generic text (`Not allowed`, `Username is already taken`).
+- `GET /api/users` may return the record **to itself only** (session). Everyone else’s user lists must omit it.
+- Do not put this username or "System Administrator" into employee-visible audit text, `leave.approver`, or `approvedBy`.
+
+## Do not touch
+
+- `attendance-server/backend/systemAccount.js`
+- `isSuperAdmin` / `isSuperAdminUser` / `isSystemAccountUser` / `effectiveRole` / `previewRole` / `requireSuperAdminConfirm` / `qaAttendance*` / `updateSystemAccountUI` / `isEmployeeRecord`
+- `ensureSystemAccounts`, `assertNotCreatingSystemAccount`, `assertCanMutateSystemAccount`, `stripSystemAccountFields`, `employeeRecords`, `filterEmployeeRecords`
+- `readUsers` / `saveUsers` / `bootstrapSystemAccount` in `server.js`
+- username `superadmin`, id `900001`, `isSystemAccount`
+- role-preview UI (`#system-account-banner`, `#role-preview-wrap`) — visible only while *this* account is logged in
+
+## When fixing an unrelated bug
+
+- Leave every `isSuperAdmin()` / `isSuperAdminUser()` branch as-is.
+- Do not drop `superadmin` from role checks or remove restore-on-boot.
+- If the bug is next to this code, stop and ask the human.
+
+## Allowed
+
+- Human explicitly says to change superadmin **in this message**.
+- Then change only the named file/function they asked for.

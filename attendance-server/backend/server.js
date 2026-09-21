@@ -16,6 +16,9 @@ const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const webpush = require('web-push');
 const { buildPayslipWorkbook } = require('./payslipXlsx');
 const { buildTawi50Workbook } = require('./tawi50Xlsx');
+// AI POLICY: do not remove this require or the ensureSystemAccounts calls in
+// readUsers / saveUsers / bootstrapSystemAccount. Superadmin is off-limits for
+// unrelated bugfixes (any AI / any model). See systemAccount.js header.
 const systemAccount = require('./systemAccount');
 const { isSystemAccountUser, isSuperAdminUser, employeeRecords, employeeActiveRecords } = systemAccount;
 const ExcelJS = require('exceljs'); // 2026-08-02: needed directly here too, for the shared multi-sheet workbook GET /api/payslip-xlsx-all builds before handing it to buildPayslipWorkbook() once per employee.
@@ -101,6 +104,54 @@ function withFinalizeLock(handler) {
     });
   };
 }
+
+function makeHandlerLock(label) {
+  let chain = Promise.resolve();
+  return function withLock(handler) {
+    return (req, res, next) => {
+      chain = chain.then(
+        () => handler(req, res, next),
+        () => handler(req, res, next)
+      ).catch(err => {
+        if (!res.headersSent) {
+          console.error(`[${label}] lock handler failed:`, err && err.message);
+          res.status(500).json({ success:false, message: (err && err.message) || 'Server error' });
+        }
+      });
+    };
+  };
+}
+const withLeavesLock = makeHandlerLock('LEAVES');
+const withEventsLock = makeHandlerLock('EVENTS');
+const withUploadOwnersLock = makeHandlerLock('UPLOAD_OWNERS');
+
+// Serializes every users.json read-modify-write, including callbacks that persist after an
+// await (bcrypt, Hikvision door push). Same chain as withUsersLock so a password reset cannot
+// clobber a concurrent profile save, and a late doorSync stamp cannot clobber either.
+function makeAsyncLock(label) {
+  let chain = Promise.resolve();
+  function runExclusive(fn) {
+    const p = chain.then(() => fn(), () => fn());
+    chain = p.catch(err => {
+      console.error(`[${label}] lock task failed:`, err && err.message);
+    });
+    return p;
+  }
+  function withHandler(handler) {
+    return (req, res, next) => {
+      runExclusive(() => handler(req, res, next)).catch(err => {
+        if (!res.headersSent) {
+          console.error(`[${label}] lock handler failed:`, err && err.message);
+          res.status(500).json({ success:false, message: (err && err.message) || 'Server error' });
+        }
+      });
+    };
+  }
+  return { runExclusive, withHandler };
+}
+const usersLock = makeAsyncLock('USERS');
+const withUsersLock = usersLock.withHandler;
+const runUsersLocked = usersLock.runExclusive;
 
 // ===== JWT SECRET (persisted -- regenerating would invalidate every outstanding token) =====
 const JWT_SECRET_FILE = path.join(DATA_DIR, 'jwt-secret.txt');
@@ -247,24 +298,65 @@ async function sendPushToRole(role, payload) {
   }
 }
 
+// Same turn-check as app.js isMyTurnOrDelegate() — used for the home-screen badge count so
+// Accounting stand-in and stored approvalRoute stay in sync with the in-app red number.
+function isServerMyTurn(leave, user, users) {
+  if (!leave || !user) return false;
+  // Requester never approves their own request (Manager self-queue trap).
+  if (Number(leave.userId) === Number(user.id)) return false;
+  const owner = (users || []).find(u => u.id === leave.userId);
+  const routeType = routeKeyForLeave(leave, owner && owner.role);
+  const turnRole = STATUS_TO_ROLE[leave.status];
+  if (!turnRole) return false;
+  const route = (Array.isArray(leave.approvalRoute) && leave.approvalRoute.length)
+    ? leave.approvalRoute
+    : getApprovalRoute(routeType);
+  if (turnRole === user.role && route.includes(user.role)) return true;
+  if (user.role === 'accounting' && turnRole !== 'accounting' && isApprovalDelegationActiveForType(routeType)) return true;
+  return false;
+}
+
+function badgeCountForUser(user) {
+  if (!user) return 0;
+  const leaves = readLeaves() || [];
+  if (['manager', 'md', 'accounting'].includes(user.role)) {
+    const users = readUsers() || [];
+    return leaves.filter(l => isServerMyTurn(l, user, users)).length;
+  }
+  return leaves.filter(l =>
+    l.userId === user.id &&
+    (l.status === 'pending' || l.status === 'pending-md' || l.status === 'pending-accounting')
+  ).length;
+}
+
 function notifyLeaveStatusChange(oldStatus, leave) {
   const typeName = typeof getTypeLabel === 'function' ? getTypeLabel(leave.type, 'en') : leave.type;
+  const users = readUsers() || [];
   if (leave.status === 'approved' || leave.status === 'rejected') {
+    const emp = users.find(u => u.id === leave.userId);
     sendPushToUser(leave.userId, {
       title: leave.status === 'approved' ? 'Request Approved' : 'Request Rejected',
       body: `Your ${typeName} request has been ${leave.status}`,
       tag: 'ta-leave',
-      url: '/'
+      url: '/',
+      badge: badgeCountForUser(emp)
     });
     // Email is opt-in per user (emp.emailNotifyOnResult) — only fires on the FINAL outcome
     // (approved/rejected), never on intermediate multi-step approval transitions.
     sendResultEmail(leave).catch(e => console.error('[EMAIL] result notify error:', e.message));
   } else if (PUSH_STATUS_TO_ROLE[leave.status] && leave.status !== oldStatus) {
-    sendPushToRole(PUSH_STATUS_TO_ROLE[leave.status], {
-      title: 'New Approval Request',
-      body: `A ${typeName} request needs your approval`,
-      tag: 'ta-approval',
-      url: '/'
+    const role = PUSH_STATUS_TO_ROLE[leave.status];
+    users.filter(u => u.active !== false && u.role === role).forEach(u => {
+      const n = badgeCountForUser(u);
+      sendPushToUser(u.id, {
+        title: 'New Approval Request',
+        body: n > 1
+          ? `${n} requests need your approval`
+          : `A ${typeName} request needs your approval`,
+        tag: 'ta-approval',
+        url: '/',
+        badge: n
+      });
     });
   }
 }
@@ -293,10 +385,26 @@ function buildResultDetailRows(leave, lang) {
       rows.push([t.lblMileage, `${(leave.mileageStart || 0).toLocaleString()} → ${(leave.mileageEnd || 0).toLocaleString()}`]);
     }
     if (leave.distanceKm != null) rows.push([t.lblDistance, `${leave.distanceKm.toLocaleString()} km`]);
-  } else if (leave.type === 'comp') {
-    if (leave.workedDate) rows.push([t.lblWorkedDate, leave.workedDate]);
+  } else if (leave.type === 'holiday-work') {
+    if (leave.workStartTime && leave.workEndTime) {
+      rows.push([t.lblWorkedDate, `${leave.workStartTime} – ${leave.workEndTime}`]);
+    }
+    if (leave.compensationMode === 'annual-leave') rows.push([t.lblReason, 'Annual leave +1 day']);
+    else if (leave.compensationMode === 'paid') rows.push([t.lblReason, 'Paid compensation']);
+    const hwLocs = Array.isArray(leave.locations) ? leave.locations.filter(x => x && x.name) : [];
+    hwLocs.forEach(loc => rows.push([t.lblLocation, loc.name]));
+  } else if (leave.type === 'early-morning') {
+    if (leave.earlyMorningTier != null) rows.push([t.lblRate, `×${leave.earlyMorningTier}`]);
   } else if (leave.type === 'ot' || leave.type === 'driver-ot') {
-    if (leave.otHours != null) rows.push([t.lblOtHours, String(leave.otHours)]);
+    const hrs20 = Number(leave.otHours20) || 0;
+    const hrs30 = Number(leave.otHours30) || 0;
+    if (hrs20 > 0 || hrs30 > 0) {
+      if (hrs20 > 0) rows.push([t.lblOtHours, `${hrs20} h ×2`]);
+      if (hrs30 > 0) rows.push([t.lblOtHours, `${hrs30} h ×3`]);
+    } else if (leave.otHours != null) {
+      const mult = leave.otMultiplier != null ? ` ×${leave.otMultiplier}` : '';
+      rows.push([t.lblOtHours, `${leave.otHours}${mult}`]);
+    }
     if (leave.otEndTime) rows.push([t.lblReturnTime, leave.otEndTime]);
   } else if (leave.type === 'time-correction') {
     if (leave.correctedTime) rows.push([t.lblCorrectedTime, leave.correctedTime]);
@@ -424,9 +532,8 @@ function saveEvent(ev) {
 
 // SECURITY FIX 2026-08-04 (Opus audit -- Hikvision integration): raw scan events (gps,
 // holderName) used to be sent to ANY authenticated user via GET /api/events and to ANY
-// websocket client at all (unauthenticated) via the TODAY_EVENTS/SCAN_EVENT push -- both fixed
-// below to use this projection for non-owners/anonymous listeners. Mirrors the
-// PUBLIC_USER_FIELDS/toPublicUserProjection pattern already used for GET /api/users.
+// websocket client. REST uses projectEventsForViewer; WS TODAY_EVENTS/SCAN_EVENT now do the
+// same per connection (owner + privileged admin get the full row; colleagues get this projection).
 const EVENT_PUBLIC_FIELDS = ['id', 'employeeNo', 'event_time', 'eventType', 'created_at'];
 function toPublicEventProjection(e) {
   const out = {};
@@ -501,6 +608,7 @@ if (!fs.existsSync(USERS_FILE)) {
   console.log('[USERS] Seeded users.json with', DEFAULT_USERS.length, 'employees');
 }
 // Ensure the protected superadmin system account exists (re-created if deleted from users.json).
+// AI POLICY: do not delete this bootstrap or skip ensureSystemAccounts in readUsers/saveUsers.
 (function bootstrapSystemAccount() {
   const raw = readUsersRaw();
   if (!raw) return;
@@ -600,7 +708,10 @@ app.use((req, res, next) => {
       return res.status(503).json({ success:false, message:'Service temporarily unavailable' });
     } else {
       const liveUser = users.find(u => u.id === req.user.sub);
-      if (liveUser) {
+      if (!liveUser) {
+        return res.status(401).json({ success:false, message:'Session expired -- please log in again' });
+      }
+      {
         const liveVersion  = liveUser.tokenVersion || 0;
         const tokenVersion = req.user.tokenVersion || 0;
         if (liveVersion !== tokenVersion) {
@@ -752,6 +863,9 @@ function authenticateWsRequest(req) {
     if (users === null) return null;
     const live = users.find(u => u.id === payload.sub);
     if (!live || (live.tokenVersion || 0) !== (payload.tokenVersion || 0)) return null;
+    // Mirror REST: a deactivated (non-observer) account must not keep a live scan/leave feed
+    // for the remaining life of a remember-me JWT.
+    if (live.active === false && live.isObserver !== true) return null;
     return payload;
   } catch (e) {
     return null;
@@ -764,11 +878,23 @@ function handleWsConnection(ws, req, logPrefix) {
     ws.close(1008, 'Unauthorized');
     return;
   }
+  const users = readUsers() || [];
+  const live = users.find(u => u.id === user.sub);
+  ws.viewerCtx = {
+    isFullAccess: isPrivilegedAdmin(live),
+    ownNo: live ? String(live.employeeNo || '') : '',
+  };
   clients.add(ws);
   console.log(`[${logPrefix}] +client total=${clients.size} user=${user.username}`);
-  const today = new Date(Date.now() + 7 * 3600000).toISOString().split('T')[0];
-  const todayEvs = (readEvents() || []).filter(e => e.event_time && String(e.event_time).startsWith(today)).map(toPublicEventProjection);
-  if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'TODAY_EVENTS', events: todayEvs }));
+  const today = bangkokDateStr();
+  const yest = bangkokPrevDateStr();
+  const todayEvs = (readEvents() || []).filter(e => {
+    const t = String(e.event_time || '');
+    return t.startsWith(today) || t.startsWith(yest);
+  });
+  if (ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'TODAY_EVENTS', events: projectEventsForViewer(todayEvs, ws.viewerCtx) }));
+  }
   ws.on('close', () => { clients.delete(ws); console.log(`[${logPrefix}] -client total=${clients.size}`); });
   ws.on('error', err => console.error(`[${logPrefix}] err:`, err.message));
 }
@@ -778,6 +904,20 @@ wss.on('connection', (ws, req) => handleWsConnection(ws, req, 'WS'));
 function broadcast(d) {
   const m = JSON.stringify(d);
   clients.forEach(ws => { if (ws.readyState === 1) ws.send(m); });
+}
+
+function sendScanEvent(record) {
+  const pubMsg = JSON.stringify({ type: 'SCAN_EVENT', ...toPublicEventProjection(record) });
+  const fullMsg = JSON.stringify({ type: 'SCAN_EVENT', ...record });
+  clients.forEach(ws => {
+    if (ws.readyState !== 1) return;
+    const ctx = ws.viewerCtx;
+    if (ctx && (ctx.isFullAccess || String(record.employeeNo) === String(ctx.ownNo))) {
+      ws.send(fullMsg);
+    } else {
+      ws.send(pubMsg);
+    }
+  });
 }
 
 // ===== HIKVISION DIGEST AUTH HELPER =====
@@ -884,10 +1024,154 @@ function hikRequest(method, hikPath, bodyBuf, contentType, cb) {
 // timezone-independent regardless of what the NAS is actually set to. Switched to that proven
 // convention directly (no longer calls ta_localDateStr()) so this doesn't silently drift by
 // whatever offset the NAS's local timezone happens to differ from UTC by.
-function taNowIso() {
+function bangkokYmd() {
   const d = new Date(Date.now() + 7 * 3600000);
+  return {
+    y: d.getUTCFullYear(),
+    m: d.getUTCMonth(),
+    day: d.getUTCDate(),
+    h: d.getUTCHours(),
+    min: d.getUTCMinutes(),
+    s: d.getUTCSeconds()
+  };
+}
+function bangkokTodayDate() {
+  const { y, m, day } = bangkokYmd();
+  return new Date(y, m, day);
+}
+function bangkokDateStr() {
+  const { y, m, day } = bangkokYmd();
   const p2 = n => String(n).padStart(2, '0');
-  return `${d.getUTCFullYear()}-${p2(d.getUTCMonth() + 1)}-${p2(d.getUTCDate())}T${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())}:${p2(d.getUTCSeconds())}+07:00`;
+  return `${y}-${p2(m + 1)}-${p2(day)}`;
+}
+function bangkokPrevDateStr() {
+  const d = bangkokTodayDate();
+  d.setDate(d.getDate() - 1);
+  const p2 = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+}
+const DEFAULT_TZ = 'Asia/Bangkok';
+function isSafeTimeZone(tz) {
+  if (typeof tz !== 'string' || tz.length < 3 || tz.length > 64) return false;
+  if (tz === 'UTC') return true;
+  return /^[A-Za-z_]+(?:\/[A-Za-z0-9_+-]+)+$/.test(tz);
+}
+function formatTzOffset(offsetMin) {
+  const sign = offsetMin >= 0 ? '+' : '-';
+  const abs = Math.abs(Math.round(offsetMin));
+  const oh = String(Math.floor(abs / 60)).padStart(2, '0');
+  const om = String(abs % 60).padStart(2, '0');
+  return `${sign}${oh}:${om}`;
+}
+function ymdInTimeZone(ms, timeZone) {
+  const tz = isSafeTimeZone(timeZone) ? timeZone : DEFAULT_TZ;
+  const date = new Date(ms);
+  const opts = {
+    timeZone: tz,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false
+  };
+  let parts;
+  try {
+    parts = new Intl.DateTimeFormat('en-US', { ...opts, hourCycle: 'h23' }).formatToParts(date);
+  } catch (e) {
+    try {
+      parts = new Intl.DateTimeFormat('en-US', opts).formatToParts(date);
+    } catch (e2) {
+      if (tz !== DEFAULT_TZ) return ymdInTimeZone(ms, DEFAULT_TZ);
+      const d = new Date(ms + 7 * 3600000);
+      return {
+        y: d.getUTCFullYear(), m: d.getUTCMonth(), day: d.getUTCDate(),
+        h: d.getUTCHours(), min: d.getUTCMinutes(), s: d.getUTCSeconds(),
+        offsetMin: 7 * 60, timeZone: DEFAULT_TZ
+      };
+    }
+  }
+  const get = type => {
+    const p = parts.find(x => x.type === type);
+    return p ? p.value : '0';
+  };
+  const y = +get('year');
+  const month = +get('month');
+  const day = +get('day');
+  let h = +get('hour');
+  if (h === 24) h = 0;
+  const min = +get('minute');
+  const s = +get('second');
+  const asUtc = Date.UTC(y, month - 1, day, h, min, s);
+  const offsetMin = Math.round((asUtc - ms) / 60000);
+  return { y, m: month - 1, day, h, min, s, offsetMin, timeZone: tz };
+}
+function isoFromYmd(ymd) {
+  const p2 = n => String(n).padStart(2, '0');
+  return `${ymd.y}-${p2(ymd.m + 1)}-${p2(ymd.day)}T${p2(ymd.h)}:${p2(ymd.min)}:${p2(ymd.s)}${formatTzOffset(ymd.offsetMin)}`;
+}
+function businessDateFromYmd(ymd) {
+  const d = new Date(ymd.y, ymd.m, ymd.day);
+  if (ymd.h < 5) d.setDate(d.getDate() - 1);
+  const p2 = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+}
+function parseGpsCoords(raw) {
+  if (typeof raw !== 'string') return null;
+  const s = raw.trim();
+  const m = s.match(/^(-?\d{1,3}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)$/);
+  if (!m) return null;
+  const lat = Number(m[1]);
+  const lng = Number(m[2]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+  return { lat, lng };
+}
+let geoTzFind = null;
+function timezoneFromCoords(lat, lng) {
+  try {
+    // geo-tz default ("alike since 1970") maps Bangkok coords to Asia/Jakarta.
+    // The comprehensive product returns Asia/Bangkok / Asia/Tokyo as expected.
+    if (!geoTzFind) geoTzFind = require('geo-tz/all').find;
+    const zones = geoTzFind(lat, lng);
+    const tz = Array.isArray(zones) ? zones[0] : '';
+    return isSafeTimeZone(tz) ? tz : DEFAULT_TZ;
+  } catch (e) {
+    return DEFAULT_TZ;
+  }
+}
+function eventInstantMs(raw) {
+  if (!raw) return 0;
+  const t = Date.parse(raw);
+  return Number.isFinite(t) ? t : 0;
+}
+function compareEventsByInstant(a, b) {
+  return eventInstantMs(a && a.event_time) - eventInstantMs(b && b.event_time);
+}
+function eventBusinessDate(raw) {
+  if (typeof raw !== 'string' || raw.length < 16) return '';
+  const datePart = raw.substring(0, 10);
+  const timePart = raw.substring(11, 16);
+  const hour = parseInt(timePart.substring(0, 2), 10);
+  if (!Number.isFinite(hour)) return datePart;
+  if (hour >= 5) return datePart;
+  const d = new Date(datePart + 'T00:00:00');
+  d.setDate(d.getDate() - 1);
+  const p2 = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+}
+function webScanTimezoneForDate(employeeNo, dateStr) {
+  if (!employeeNo || !dateStr) return '';
+  const events = readEvents();
+  if (!events) return '';
+  let tz = '';
+  for (const ev of events) {
+    if (String(ev.employeeNo) !== String(employeeNo)) continue;
+    if (ev.eventType !== 'WebScan') continue;
+    if (eventBusinessDate(ev.event_time) !== dateStr) continue;
+    if (ev.timezone && isSafeTimeZone(ev.timezone)) tz = ev.timezone;
+  }
+  return (tz && tz !== DEFAULT_TZ) ? tz : '';
+}
+function taNowIso() {
+  return isoFromYmd(ymdInTimeZone(Date.now(), DEFAULT_TZ));
 }
 // H1 fix: the device is the source of truth for its own scan timestamps -- coerce-and-fall-back
 // (never reject) rather than bounce a real scan for an odd format. A non-string or malformed
@@ -1185,7 +1469,7 @@ const webScanLimiter = rateLimit({
   message: { success:false, message:'Too many check-in attempts -- please wait a moment' }
 });
 
-app.post('/api/hikvision/event', hikAuth, webScanLimiter, (req, res) => {
+app.post('/api/hikvision/event', hikAuth, webScanLimiter, withEventsLock((req, res) => {
   try {
     const ct   = req.headers['content-type'] || '';
     const body = parseBody(req);
@@ -1201,10 +1485,14 @@ app.post('/api/hikvision/event', hikAuth, webScanLimiter, (req, res) => {
     if (req.hikSource === 'webscan') {
       // Every field the client could otherwise forge is derived from the authenticated user's
       // own live record instead -- see the CRITICAL fix comment above hikAuth().
+      // Clock: NAS instant only. Timezone: GPS coords on the server (geo-tz), never the phone.
       employeeNo = String(req.hikUser.employeeNo);
       holderName = String(req.hikUser.name || '');
-      eventTime  = taNowIso();
+      const coords = parseGpsCoords(gps);
+      const tz = coords ? timezoneFromCoords(coords.lat, coords.lng) : DEFAULT_TZ;
+      eventTime  = isoFromYmd(ymdInTimeZone(Date.now(), tz));
       eventType  = 'WebScan';
+      req.hikTimezone = tz;
     } else {
       // SECURITY FIX 2026-08-04 (retrospective Opus audit, HIGH): this employeeNo used to flow
       // straight into loadDoorEvents() (app.js)'s `Employee ${empNo}` fallback and the saved
@@ -1227,17 +1515,23 @@ app.post('/api/hikvision/event', hikAuth, webScanLimiter, (req, res) => {
       return res.json({ success: false, message: 'no employee number' });
     }
 
-    const record = saveEvent({ employeeNo, holderName, event_time: eventTime, eventType, ...(gps ? { gps } : {}) });
-    // C2/H2 fix: broadcast only the public projection -- the websocket has no auth of its own
-    // (see the wss.on('connection') fix above), so gps/holderName must never go out on it.
-    broadcast({ type: 'SCAN_EVENT', ...toPublicEventProjection(record) });
-    console.log(`[HIK] SAVED  emp=${employeeNo}  time=${eventTime}  id=${record.id}`);
-    res.json({ success: true, id: record.id });
+    const tz = req.hikSource === 'webscan' ? (req.hikTimezone || DEFAULT_TZ) : '';
+    const record = saveEvent({
+      employeeNo, holderName, event_time: eventTime, eventType,
+      ...(gps ? { gps } : {}),
+      ...(tz ? { timezone: tz } : {})
+    });
+    // Per-viewer SCAN_EVENT: owner and privileged admins get gps/holderName; everyone else
+    // gets the public projection. WS is authenticated (authenticateWsRequest); do not put GPS
+    // on a single global payload.
+    sendScanEvent(record);
+    console.log(`[HIK] SAVED  emp=${employeeNo}  time=${eventTime}  tz=${tz || 'device'}  id=${record.id}`);
+    res.json({ success: true, id: record.id, event_time: eventTime, ...(tz ? { timezone: tz } : {}) });
   } catch (err) {
     console.error('[HIK] error:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
-});
+}));
 
 // ===== USER API =====
 // SECURITY FIX 2026-07-19 (F-06): this used to strip only `password` and return every other
@@ -1466,10 +1760,15 @@ app.post('/api/push-test', pushSubscribeLimiter, async (req, res) => {
     return res.status(400).json({ success:false, message:'No push subscription for this account' });
   }
   try {
+    const me = (readUsers() || []).find(u => u.id === userId);
+    const n = badgeCountForUser(me);
     await sendPushToUser(userId, {
       title: '🔔 Test Notification',
-      body: 'Notification is working!',
+      body: n > 0
+        ? `Notification is working! ${n} request(s) waiting.`
+        : 'Notification is working!',
       tag: 'test',
+      badge: n
     });
     res.json({ success:true });
   } catch (e) {
@@ -1481,7 +1780,7 @@ app.post('/api/push-test', pushSubscribeLimiter, async (req, res) => {
 // Was missing entirely — "Add Employee" in the frontend only pushed to in-memory MOCK_USERS
 // and was lost on refresh. Backend now assigns the real id (client-side counters can collide
 // across concurrent sessions).
-app.post('/api/users', requireRole('md', 'accounting', 'manager'), (req, res) => {
+app.post('/api/users', requireRole('md', 'accounting', 'manager'), withUsersLock((req, res) => {
   const body = parseBody(req);
   const sysErr = systemAccount.assertNotCreatingSystemAccount(body);
   if (sysErr) return res.status(400).json({ success:false, message: sysErr });
@@ -1555,7 +1854,7 @@ app.post('/api/users', requireRole('md', 'accounting', 'manager'), (req, res) =>
       startDate: new Date(Date.now() + 7*3600000).toISOString().split('T')[0],
       endDate: '', bankName: '', bankAccount: '',
       emergencyContact: '', emergencyRelation: '', emergencyPhone: '',
-      annualLeave: 6, sickLeave: 30, businessLeave: 3,
+      annualLeave: 6, sickLeave: sickLeaveEntitlementDays(), businessLeave: businessLeaveEntitlementDays(),
       transport: 0, positionAllowance: 0, housing: 0, allowance3: 0, pvdRate: 5,
       active: true
     };
@@ -1582,7 +1881,7 @@ app.post('/api/users', requireRole('md', 'accounting', 'manager'), (req, res) =>
   // HTTP response below still returns the full record to the admin who made this request.
   broadcast({ type: 'USER_CREATED', user: toBroadcastUserProjection(newUser) });
   res.json({ success:true, user: newUser });
-});
+}));
 
 // FIX: lookup by employeeNo ONLY (previously also matched u.id which caused wrong user to be found)
 // 2026-08-06 (round 4 of the door-access re-audit chain): shared by both role routes below, same
@@ -1590,7 +1889,7 @@ app.post('/api/users', requireRole('md', 'accounting', 'manager'), (req, res) =>
 // no way to have their role changed at all, silently, since only an :empNo-keyed route existed.
 function handleRoleUpdate(req, res, users, idx) {
   if (isSystemAccountUser(users[idx])) {
-    return res.status(403).json({ success:false, message:'System account role cannot be changed' });
+    return res.status(403).json({ success:false, message:'Not allowed' });
   }
   const { role } = parseBody(req);
   const allowed = ['md', 'manager', 'accounting', 'user', 'driver', 'marketing'];
@@ -1624,7 +1923,7 @@ function handleRoleUpdate(req, res, users, idx) {
   res.json({ success:true });
 }
 
-app.put('/api/users/:empNo/role', requireRole('md'), (req, res) => {
+app.put('/api/users/:empNo/role', requireRole('md'), withUsersLock((req, res) => {
   const users = readUsers() || [];
   // SECURITY FIX 2026-08-13 (Opus audit, deferred LOW from the events/upload/users audit,
   // fixed now on request): a manager-created employee has NO `employeeNo` property at all until
@@ -1640,16 +1939,16 @@ app.put('/api/users/:empNo/role', requireRole('md'), (req, res) => {
   const idx = users.findIndex(u => u.employeeNo != null && u.employeeNo !== '' && String(u.employeeNo) === req.params.empNo);
   if (idx < 0) return res.status(404).json({ success:false, message:'User not found' });
   handleRoleUpdate(req, res, users, idx);
-});
+}));
 
-app.put('/api/users/id/:id/role', requireRole('md'), (req, res) => {
+app.put('/api/users/id/:id/role', requireRole('md'), withUsersLock((req, res) => {
   const id = parseInt(req.params.id, 10);
   if (!Number.isFinite(id)) return res.status(400).json({ success:false, message:'Invalid id' });
   const users = readUsers() || [];
   const idx = users.findIndex(u => u.id === id);
   if (idx < 0) return res.status(404).json({ success:false, message:'User not found' });
   handleRoleUpdate(req, res, users, idx);
-});
+}));
 
 // SECURITY FIX 2026-07-19 (F-09): 4-char minimum (and the '1234' seed default it permitted) was
 // trivially guessable. Same policy is enforced client-side in app.js passwordPolicyError()
@@ -1678,7 +1977,7 @@ function passwordPolicyError(password) {
 // employeeNo) or worse, get rejected by its requireRole('md','accounting') gate before ever
 // reaching this handler (confirmed happening during testing: manager/user tokens got a
 // misleading "Forbidden: insufficient role" instead of changing their own password).
-app.put('/api/users/me/password', async (req, res) => {
+app.put('/api/users/me/password', withUsersLock(async (req, res) => {
   const { currentPassword, newPassword, remember } = parseBody(req);
   if (!currentPassword || !newPassword) {
     return res.status(400).json({ success:false, message:'currentPassword and newPassword required' });
@@ -1697,14 +1996,19 @@ app.put('/api/users/me/password', async (req, res) => {
   // on the forced-password-change gate. 401 should mean "your token/session is invalid"; a wrong
   // current password is a 400 (bad request content), not an auth/session problem.
   if (!ok) return res.status(400).json({ success:false, message:'Current password is incorrect' });
-  users[idx].password = await bcrypt.hash(String(newPassword), BCRYPT_ROUNDS);
-  users[idx].mustChangePassword = false;
-  users[idx].tokenVersion = (users[idx].tokenVersion || 0) + 1;
-  saveUsers(users);
-  const { password: _pw, ...safeUser } = users[idx];
-  const token = jwt.sign({ sub: user.id, username: user.username, role: user.role, tokenVersion: users[idx].tokenVersion }, JWT_SECRET, { expiresIn: remember === true ? '30d' : '8h' });
+  const hash = await bcrypt.hash(String(newPassword), BCRYPT_ROUNDS);
+  const fresh = readUsers();
+  if (fresh === null) return res.status(503).json({ success:false, message:'Service temporarily unavailable' });
+  const freshIdx = fresh.findIndex(u => u.id === req.user.sub);
+  if (freshIdx < 0) return res.status(404).json({ success:false, message:'User not found' });
+  fresh[freshIdx].password = hash;
+  fresh[freshIdx].mustChangePassword = false;
+  fresh[freshIdx].tokenVersion = (fresh[freshIdx].tokenVersion || 0) + 1;
+  saveUsers(fresh);
+  const { password: _pw, ...safeUser } = fresh[freshIdx];
+  const token = jwt.sign({ sub: user.id, username: user.username, role: user.role, tokenVersion: fresh[freshIdx].tokenVersion }, JWT_SECRET, { expiresIn: remember === true ? '30d' : '8h' });
   res.json({ success:true, user: safeUser, token });
-});
+}));
 
 // Password reset — separate endpoint (not the generic PUT above, which deliberately strips
 // password) so MD/Accounting can reset a forgotten password without touching the rest of the profile.
@@ -1713,21 +2017,31 @@ app.put('/api/users/me/password', async (req, res) => {
 // silently no-op (app.js gated the whole call on `u.employeeNo`, no toast at all on failure).
 async function handlePasswordReset(req, res, users, idx) {
   if (isSystemAccountUser(users[idx])) {
-    return res.status(403).json({ success:false, message:'System account password can only be changed by logging in as that account' });
+    return res.status(403).json({ success:false, message:'Not allowed' });
   }
+  const userId = users[idx].id;
   const { password } = parseBody(req);
   const policyErr = passwordPolicyError(password);
   if (policyErr) return res.status(400).json({ success:false, message:policyErr });
-  users[idx].password = await bcrypt.hash(String(password), BCRYPT_ROUNDS);
+  const hash = await bcrypt.hash(String(password), BCRYPT_ROUNDS);
+  const fresh = readUsers();
+  if (fresh === null) return res.status(503).json({ success:false, message:'Service temporarily unavailable' });
+  const freshIdx = fresh.findIndex(u => u.id === userId);
+  if (freshIdx < 0) return res.status(404).json({ success:false, message:'User not found' });
+  if (isSystemAccountUser(fresh[freshIdx])) {
+    return res.status(403).json({ success:false, message:'Not allowed' });
+  }
+  fresh[freshIdx].password = hash;
   // F-08: an admin-initiated password reset must kill any already-issued token for this user
   // (e.g. a stolen/shared device) -- otherwise the old password's session keeps working for up
   // to 30 more days even after the password was just changed out from under it.
-  users[idx].tokenVersion = (users[idx].tokenVersion || 0) + 1;
-  saveUsers(users);
+  fresh[freshIdx].tokenVersion = (fresh[freshIdx].tokenVersion || 0) + 1;
+  fresh[freshIdx].mustChangePassword = true;
+  saveUsers(fresh);
   res.json({ success:true });
 }
 
-app.put('/api/users/:empNo/password', requireRole('md', 'accounting'), async (req, res) => {
+app.put('/api/users/:empNo/password', requireRole('md', 'accounting'), withUsersLock(async (req, res) => {
   const users = readUsers() || [];
   // SECURITY FIX 2026-08-13 (Opus audit, deferred LOW from the events/upload/users audit,
   // fixed now on request): a manager-created employee has NO `employeeNo` property at all until
@@ -1743,16 +2057,16 @@ app.put('/api/users/:empNo/password', requireRole('md', 'accounting'), async (re
   const idx = users.findIndex(u => u.employeeNo != null && u.employeeNo !== '' && String(u.employeeNo) === req.params.empNo);
   if (idx < 0) return res.status(404).json({ success:false, message:'User not found' });
   await handlePasswordReset(req, res, users, idx);
-});
+}));
 
-app.put('/api/users/id/:id/password', requireRole('md', 'accounting'), async (req, res) => {
+app.put('/api/users/id/:id/password', requireRole('md', 'accounting'), withUsersLock(async (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (!Number.isFinite(id)) return res.status(400).json({ success:false, message:'Invalid id' });
   const users = readUsers() || [];
   const idx = users.findIndex(u => u.id === id);
   if (idx < 0) return res.status(404).json({ success:false, message:'User not found' });
   await handlePasswordReset(req, res, users, idx);
-});
+}));
 
 // FIX: lookup by employeeNo ONLY (previously also matched u.id which caused wrong user to be found)
 // SECURITY FIX 2026-07-19 (F-01): this endpoint is called from TWO different places in the
@@ -1785,6 +2099,18 @@ const SELF_SERVICE_PROFILE_FIELDS = ['phone','email','address','idType','idCard'
 // NAME_PREFIXES const -- if a value is ever added, both must change together.
 const NAME_PREFIX_VALUES = ['', 'mr', 'mrs', 'ms'];
 const NEW_PROFILE_STRING_CAPS = { firstNameTh: 100, lastNameTh: 100, idCardAddress: 500 };
+function persistDoorSyncLocked(empNo, doorSyncRecord) {
+  return runUsersLocked(() => {
+    const fresh = readUsers();
+    if (!fresh) return;
+    const idx = fresh.findIndex(u => String(u.employeeNo) === empNo);
+    if (idx >= 0) {
+      fresh[idx].doorSync = doorSyncRecord;
+      saveUsers(fresh);
+    }
+  });
+}
+
 // 2026-08-06: shared by both PUT routes below (looked up by employeeNo or by internal id) --
 // pulled out of the original single :empNo handler so the id-based route (added to fix
 // employeeNo-less employees, see its comment) doesn't duplicate ~100 lines of permission/
@@ -1794,7 +2120,7 @@ function handleUserUpdate(req, res, users, idx, updates) {
   if (isSystemAccountUser(users[idx])) {
     const isOwnRecord = live && users[idx].id === live.id;
     if (!isOwnRecord) {
-      return res.status(403).json({ success:false, message:'System account is protected' });
+      return res.status(403).json({ success:false, message:'Not allowed' });
     }
     updates = systemAccount.stripSystemAccountFields(updates);
     if (Object.keys(updates).length === 0) {
@@ -1941,25 +2267,19 @@ function handleUserUpdate(req, res, users, idx, updates) {
     // Re-read fresh before persisting doorSync -- the device round trip can take up to 12s, during
     // which another request could have legitimately changed users.json; only stamp doorSync onto
     // whatever the current record actually is, don't clobber it with the stale in-memory snapshot.
-    // Wrapped in try/catch (HIGH-3-adjacent): a throw here must never prevent the res.json() below
-    // from firing when we haven't responded yet.
-    try {
-      const freshUsers = readUsers();
-      if (freshUsers) {
-        const freshIdx = freshUsers.findIndex(u => String(u.employeeNo) === empNo);
-        if (freshIdx >= 0) { freshUsers[freshIdx].doorSync = doorSyncRecord; saveUsers(freshUsers); }
+    // Same usersLock chain as password/profile writes so a late stamp cannot clobber a concurrent save.
+    persistDoorSyncLocked(empNo, doorSyncRecord).catch(persistErr => {
+      console.error(`[DOOR] failed to persist doorSync for empNo=${empNo}:`, persistErr && persistErr.message);
+    }).then(() => {
+      if (!responded) {
+        responded = true;
+        res.json({ success:true, user: respUser, deviceSync });
       }
-    } catch (persistErr) {
-      console.error(`[DOOR] failed to persist doorSync for empNo=${empNo}:`, persistErr.message);
-    }
-    if (!responded) {
-      responded = true;
-      res.json({ success:true, user: respUser, deviceSync });
-    }
+    });
   });
 }
 
-app.put('/api/users/:empNo', (req, res) => {
+app.put('/api/users/:empNo', withUsersLock((req, res) => {
   const updates = parseBody(req);
   if (!updates || typeof updates !== 'object' || Array.isArray(updates)) {
     return res.status(400).json({ success:false, message:'Invalid request body' });
@@ -1979,7 +2299,7 @@ app.put('/api/users/:empNo', (req, res) => {
   const idx = users.findIndex(u => u.employeeNo != null && u.employeeNo !== '' && String(u.employeeNo) === req.params.empNo);
   if (idx < 0) return res.status(404).json({ success:false, message:'User not found' });
   handleUserUpdate(req, res, users, idx, updates);
-});
+}));
 
 // 2026-08-06: an employee added via the "Add Employee" form (app.js saveEmployee()) gets
 // `employeeNo: ''` from POST /api/users, which never assigns a real one -- only Hikvision device
@@ -1992,7 +2312,7 @@ app.put('/api/users/:empNo', (req, res) => {
 // of employeeNo -- door-push is already correctly skipped for a falsy employeeNo by the existing
 // `!empNo` check inside handleUserUpdate() above, so this is a pure persistence fix, not a new
 // door-access code path.
-app.put('/api/users/id/:id', (req, res) => {
+app.put('/api/users/id/:id', withUsersLock((req, res) => {
   const updates = parseBody(req);
   if (!updates || typeof updates !== 'object' || Array.isArray(updates)) {
     return res.status(400).json({ success:false, message:'Invalid request body' });
@@ -2003,7 +2323,7 @@ app.put('/api/users/id/:id', (req, res) => {
   const idx = users.findIndex(u => u.id === id);
   if (idx < 0) return res.status(404).json({ success:false, message:'User not found' });
   handleUserUpdate(req, res, users, idx, updates);
-});
+}));
 
 // 2026-08-05: retry endpoint for a failed/uncertain door-sync push (e.g. the device was
 // unreachable during the PUT above) -- md/accounting only, idempotent, just re-runs
@@ -2049,19 +2369,14 @@ app.post('/api/users/:empNo/door-sync', requireRole('md', 'accounting'), (req, r
           ? { attempted:true, ok:true, want, skipped: result.skipped }
           : { attempted:true, ok:true, want, verified: result.verified });
     const doorSyncRecord = { ok: deviceSync.ok, want, at: new Date().toISOString(), error: err ? err.message : null };
-    try {
-      const fresh = readUsers();
-      if (fresh) {
-        const idx2 = fresh.findIndex(u => String(u.employeeNo) === empNo);
-        if (idx2 >= 0) { fresh[idx2].doorSync = doorSyncRecord; saveUsers(fresh); }
+    persistDoorSyncLocked(empNo, doorSyncRecord).catch(persistErr => {
+      console.error(`[DOOR] failed to persist doorSync for empNo=${empNo}:`, persistErr && persistErr.message);
+    }).then(() => {
+      if (!responded) {
+        responded = true;
+        res.json({ success:true, deviceSync });
       }
-    } catch (persistErr) {
-      console.error(`[DOOR] failed to persist doorSync for empNo=${empNo}:`, persistErr.message);
-    }
-    if (!responded) {
-      responded = true;
-      res.json({ success:true, deviceSync });
-    }
+    });
   });
 });
 
@@ -2179,16 +2494,18 @@ app.post('/api/users/sync-hikvision', requireRole('md', 'accounting', 'manager')
     // (e.g. the global auth middleware, hikAuth()) specifically to avoid this. Returns null on
     // failure instead of saving; both call sites below must check for that and skip the save.
     function persistNewUsers() {
-      const fresh = readUsers();
-      if (fresh === null) {
-        console.error('[SYNC] readUsers() failed at persist time -- refusing to save to avoid wiping users.json');
-        return null;
-      }
-      const freshNos = new Set(fresh.map(u => String(u.employeeNo)));
-      const toAppend = added.filter(u => !freshNos.has(String(u.employeeNo)));
-      const merged = [...fresh, ...toAppend];
-      saveUsers(merged);
-      return merged.length;
+      return runUsersLocked(() => {
+        const fresh = readUsers();
+        if (fresh === null) {
+          console.error('[SYNC] readUsers() failed at persist time -- refusing to save to avoid wiping users.json');
+          return null;
+        }
+        const freshNos = new Set(fresh.map(u => String(u.employeeNo)));
+        const toAppend = added.filter(u => !freshNos.has(String(u.employeeNo)));
+        const merged = [...fresh, ...toAppend];
+        saveUsers(merged);
+        return merged.length;
+      });
     }
     // SECURITY FIX 2026-08-04 (retrospective audit round 3, HIGH): same unauthenticated-websocket
     // leak as USER_CREATED/USER_UPDATED -- `added` entries carry the plaintext '1234' seed
@@ -2217,15 +2534,19 @@ app.post('/api/users/sync-hikvision', requireRole('md', 'accounting', 'manager')
     const watchdog = setTimeout(() => {
       if (pending <= 0) return;
       console.error(`[SYNC] batch watchdog fired with pending=${pending} device response(s) still outstanding`);
-      const total = persistNewUsers();
-      if (total === null) {
-        respondOnce({ success:false, message:'Sync timed out and users.json could not be read to save progress -- no changes were made' });
-        return;
-      }
-      broadcastNewlyAdded();
-      respondOnce({
-        success: true, added: added.length, total, users: added, partial: true,
-        message: `Sync timed out waiting for ${pending} device response(s); saved ${added.length} of ${newHikUsers.length} new employee(s).`
+      persistNewUsers().then(total => {
+        if (total === null) {
+          respondOnce({ success:false, message:'Sync timed out and users.json could not be read to save progress -- no changes were made' });
+          return;
+        }
+        broadcastNewlyAdded();
+        respondOnce({
+          success: true, added: added.length, total, users: added, partial: true,
+          message: `Sync timed out waiting for ${pending} device response(s); saved ${added.length} of ${newHikUsers.length} new employee(s).`
+        });
+      }).catch(persistErr => {
+        console.error('[SYNC] persistNewUsers failed at watchdog:', persistErr && persistErr.message);
+        respondOnce({ success:false, message:'Sync timed out and newly synced employees could not be saved' });
       });
     }, 60000);
     // Bug fix 2026-07-23: username collision was checked against `added`, but `added` is only
@@ -2247,13 +2568,17 @@ app.post('/api/users/sync-hikvision', requireRole('md', 'accounting', 'manager')
     // filters upstream, but decrementing here is the correct behavior regardless).
     function checkAllDone() {
       if (pending !== 0) return;
-      const total = persistNewUsers();
-      if (total === null) {
-        respondOnce({ success:false, message:'Sync finished but users.json could not be read to save the result -- no changes were made' });
-        return;
-      }
-      broadcastNewlyAdded();
-      respondOnce({ success:true, added: added.length, total, users: added });
+      persistNewUsers().then(total => {
+        if (total === null) {
+          respondOnce({ success:false, message:'Sync finished but users.json could not be read to save the result -- no changes were made' });
+          return;
+        }
+        broadcastNewlyAdded();
+        respondOnce({ success:true, added: added.length, total, users: added });
+      }).catch(persistErr => {
+        console.error('[SYNC] persistNewUsers failed at completion:', persistErr && persistErr.message);
+        respondOnce({ success:false, message:'Sync finished but newly synced employees could not be saved' });
+      });
     }
 
     newHikUsers.forEach(hu => {
@@ -2301,7 +2626,7 @@ app.post('/api/users/sync-hikvision', requireRole('md', 'accounting', 'manager')
           salary: 0, idCard: '', phone: '', email: '', address: '',
           startDate: new Date(Date.now() + 7*3600000).toISOString().split('T')[0],
           bankName: '', bankAccount: '', emergencyContact: '', emergencyPhone: '',
-          annualLeave: 6, sickLeave: 30, businessLeave: 3,
+          annualLeave: 6, sickLeave: sickLeaveEntitlementDays(), businessLeave: businessLeaveEntitlementDays(),
           transport: 0, positionAllowance: 0, housing: 0, allowance3: 0, pvdRate: 5,
           active: true
         };
@@ -2385,6 +2710,24 @@ app.post('/api/sync-name', requireRole('md', 'accounting', 'manager'), (req, res
 app.get('/api/health', (req, res) => {
   const users = readUsers() || [];
   res.json({ status:'ok', time:new Date().toISOString(), wsClients:clients.size, totalEvents:(readEvents() || []).length, totalUsers: employeeRecords(users).length });
+});
+
+// GPS lat/lng optional — server maps coords to IANA tz. Instant is always NAS Date.now().
+app.get('/api/now', (req, res) => {
+  const lat = parseFloat(req.query.lat);
+  const lng = parseFloat(req.query.lng);
+  let tz = DEFAULT_TZ;
+  if (Number.isFinite(lat) && Number.isFinite(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
+    tz = timezoneFromCoords(lat, lng);
+  }
+  const ms = Date.now();
+  const ymd = ymdInTimeZone(ms, tz);
+  res.json({
+    epoch: ms,
+    timezone: tz,
+    localIso: isoFromYmd(ymd),
+    businessDate: businessDateFromYmd(ymd)
+  });
 });
 
 // SECURITY FIX 2026-08-04 (Opus audit, H2): these two routes used to return every field
@@ -2513,6 +2856,138 @@ app.delete('/api/holidays/:id', requireRole('md', 'accounting'), (req, res) => {
   res.json({ success: true });
 });
 
+// ===== COMPANY ANNOUNCEMENTS (Dashboard board — collaborative) =====
+const ANNOUNCEMENTS_FILE = 'announcements.json';
+const ANNOUNCEMENT_MAX_LEN = 1000;
+const ANNOUNCEMENT_MAX_ITEMS = 50;
+
+function readAnnouncements() {
+  const data = readJSON(ANNOUNCEMENTS_FILE, []);
+  if (data === null) return null;
+  return Array.isArray(data) ? data : [];
+}
+function writeAnnouncements(list) {
+  writeJSON(ANNOUNCEMENTS_FILE, list);
+}
+function sanitizeAnnouncementBody(raw) {
+  if (typeof raw !== 'string') return null;
+  // Strip control chars except newline/tab; trim; hard-cap length.
+  const cleaned = raw.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').trim();
+  if (!cleaned) return null;
+  if (cleaned.length > ANNOUNCEMENT_MAX_LEN) return null;
+  return cleaned;
+}
+function announcementActor(live) {
+  return {
+    id: live.id,
+    name: String(live.name || live.username || 'User').slice(0, 120),
+  };
+}
+function bangkokNowIso() {
+  // Build Asia/Bangkok wall-clock ISO without relying on locale calendar order.
+  // (Node on some NAS images ignores 'sv-SE' and returns US M/D/Y + AM/PM.)
+  try {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Bangkok',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(new Date());
+    const get = (type) => (parts.find(p => p.type === type) || {}).value || '00';
+    return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}:${get('second')}+07:00`;
+  } catch (_) {
+    return new Date().toISOString();
+  }
+}
+
+app.get('/api/announcements', (req, res) => {
+  const list = readAnnouncements();
+  if (list === null) return res.status(503).json({ success: false, message: 'Service temporarily unavailable' });
+  const sorted = [...list].sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+  res.json({ success: true, announcements: sorted });
+});
+
+app.post('/api/announcements', (req, res) => {
+  const live = (readUsers() || []).find(u => u.id === req.user.sub);
+  if (!live) return res.status(403).json({ success: false, message: 'Forbidden' });
+  if (!isSuperAdminUser(live) && (live.isObserver || live.active === false)) {
+    return res.status(403).json({ success: false, message: 'Forbidden: observer or inactive account' });
+  }
+  const rawBody = parseBody(req);
+  const text = sanitizeAnnouncementBody(rawBody && rawBody.body);
+  if (!text) return res.status(400).json({ success: false, message: 'Announcement text required (max 1000 characters)' });
+  const list = readAnnouncements();
+  if (list === null) return res.status(503).json({ success: false, message: 'Service temporarily unavailable' });
+  const actor = announcementActor(live);
+  const now = bangkokNowIso();
+  const item = {
+    id: Date.now() * 1000 + Math.floor(Math.random() * 1000),
+    body: text,
+    createdById: actor.id,
+    createdByName: actor.name,
+    createdAt: now,
+    updatedById: actor.id,
+    updatedByName: actor.name,
+    updatedAt: now,
+  };
+  list.unshift(item);
+  while (list.length > ANNOUNCEMENT_MAX_ITEMS) list.pop();
+  writeAnnouncements(list);
+  broadcast({ type: 'ANNOUNCEMENTS_UPDATED' });
+  res.json({ success: true, announcement: item });
+});
+
+app.put('/api/announcements/:id', (req, res) => {
+  const live = (readUsers() || []).find(u => u.id === req.user.sub);
+  if (!live) return res.status(403).json({ success: false, message: 'Forbidden' });
+  if (!isSuperAdminUser(live) && (live.isObserver || live.active === false)) {
+    return res.status(403).json({ success: false, message: 'Forbidden: observer or inactive account' });
+  }
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ success: false, message: 'invalid id' });
+  const rawBody = parseBody(req);
+  const text = sanitizeAnnouncementBody(rawBody && rawBody.body);
+  if (!text) return res.status(400).json({ success: false, message: 'Announcement text required (max 1000 characters)' });
+  const list = readAnnouncements();
+  if (list === null) return res.status(503).json({ success: false, message: 'Service temporarily unavailable' });
+  const idx = list.findIndex(a => a.id === id);
+  if (idx < 0) return res.status(404).json({ success: false, message: 'not found' });
+  const actor = announcementActor(live);
+  const now = bangkokNowIso();
+  list[idx] = {
+    ...list[idx],
+    body: text,
+    updatedById: actor.id,
+    updatedByName: actor.name,
+    updatedAt: now,
+  };
+  writeAnnouncements(list);
+  broadcast({ type: 'ANNOUNCEMENTS_UPDATED' });
+  res.json({ success: true, announcement: list[idx] });
+});
+
+app.delete('/api/announcements/:id', (req, res) => {
+  const live = (readUsers() || []).find(u => u.id === req.user.sub);
+  if (!live) return res.status(403).json({ success: false, message: 'Forbidden' });
+  if (!isSuperAdminUser(live) && (live.isObserver || live.active === false)) {
+    return res.status(403).json({ success: false, message: 'Forbidden: observer or inactive account' });
+  }
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ success: false, message: 'invalid id' });
+  const list = readAnnouncements();
+  if (list === null) return res.status(503).json({ success: false, message: 'Service temporarily unavailable' });
+  const idx = list.findIndex(a => a.id === id);
+  if (idx < 0) return res.status(404).json({ success: false, message: 'not found' });
+  list.splice(idx, 1);
+  writeAnnouncements(list);
+  broadcast({ type: 'ANNOUNCEMENTS_UPDATED' });
+  res.json({ success: true });
+});
+
 // Was missing entirely — GET/PUT /api/settings referenced these but they were never defined,
 // throwing ReferenceError on every call. This silently broke Approval Routing persistence
 // (loadSettingsFromBackend()'s try/catch swallowed the failure on the frontend) — settings
@@ -2562,7 +3037,7 @@ function stripSensitiveSettingsForRole(settings, live) {
   }
   delete out.tawi50Overrides;
   if (out.leaveCarryForward && live) {
-    const year = new Date().getFullYear();
+    const year = bangkokYmd().y;
     const mine = {};
     for (const y of [year, year + 1]) {
       for (const k of [`${y}_${live.id}`, `comp_${y}_${live.id}`]) {
@@ -2572,6 +3047,19 @@ function stripSensitiveSettingsForRole(settings, live) {
     out.leaveCarryForward = mine;
   } else if (out.leaveCarryForward) {
     out.leaveCarryForward = {};
+  }
+  if (out.leaveOpeningUsed && live) {
+    const year = bangkokYmd().y;
+    const mine = {};
+    for (const y of [year, year + 1]) {
+      for (const type of ['annual', 'sick', 'business']) {
+        const k = `${y}_${live.id}_${type}`;
+        if (out.leaveOpeningUsed[k] !== undefined) mine[k] = out.leaveOpeningUsed[k];
+      }
+    }
+    out.leaveOpeningUsed = mine;
+  } else if (out.leaveOpeningUsed) {
+    out.leaveOpeningUsed = {};
   }
   return out;
 }
@@ -2613,6 +3101,7 @@ const SETTINGS_KEY_ROLES = {
   appSettingsUpdatedAt: ['md', 'accounting'],
   payslipEmailEnabled: ['md', 'accounting'],
   leaveCarryForward: ['md', 'accounting'],
+  leaveOpeningUsed: ['md', 'accounting'],
   tawi50Overrides: ['md', 'accounting'],
   companyTripDates: ['md', 'accounting'],
   // SECURITY FIX 2026-08-13 (4th re-audit, Finding D): 'accounting' had no UI path to either key
@@ -2823,6 +3312,34 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
       if (LEAVE_CF_KEY_RE.test(k) && typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 60) cleanCF[k] = v;
     }
     body.leaveCarryForward = { ...cleanCF, ...body.leaveCarryForward };
+  }
+
+  // Opening leave balances (go-live prior-used days) — key `${year}_${userId}_${type}`.
+  // Stored as days already used before the system went live; not leave history rows.
+  const LEAVE_OPENING_KEY_RE = /^\d{4}_\d+_(annual|sick|business)$/;
+  if (body.leaveOpeningUsed !== undefined) {
+    const ou = body.leaveOpeningUsed;
+    if (!ou || typeof ou !== 'object' || Array.isArray(ou) || Object.keys(ou).length > 500) {
+      return res.status(400).json({ success: false, message: 'leaveOpeningUsed must be an object of 500 or fewer entries' });
+    }
+    for (const [k, v] of Object.entries(ou)) {
+      if (!LEAVE_OPENING_KEY_RE.test(k)) {
+        return res.status(400).json({ success: false, message: `invalid leaveOpeningUsed key "${k}"` });
+      }
+      // 2026-09-21: negative is legal and means a CREDIT -- days carried in on top of this year's
+      // pool, for an employee whose real go-live balance exceeds the current-year quota. Dual-sync
+      // with app.js saveOpeningLeaveBalancesFromUI(), which clamps to the same [-366, 366] range.
+      if (typeof v !== 'number' || !Number.isFinite(v) || v < -366 || v > 366) {
+        return res.status(400).json({ success: false, message: `leaveOpeningUsed["${k}"] must be a number between -366 and 366` });
+      }
+    }
+  }
+  if (body.leaveOpeningUsed && current.leaveOpeningUsed && typeof current.leaveOpeningUsed === 'object' && !Array.isArray(current.leaveOpeningUsed)) {
+    const cleanOU = {};
+    for (const [k, v] of Object.entries(current.leaveOpeningUsed)) {
+      if (LEAVE_OPENING_KEY_RE.test(k) && typeof v === 'number' && Number.isFinite(v) && v >= -366 && v <= 366) cleanOU[k] = v;
+    }
+    body.leaveOpeningUsed = { ...cleanOU, ...body.leaveOpeningUsed };
   }
 
   // SECURITY/CORRECTNESS FIX 2026-08-12 (Opus comprehensive audit): tawi50Overrides had zero
@@ -3175,7 +3692,7 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
   // Hoisted out of the `if (body.appSettings)` block below (4th re-audit, Finding B) so the
   // deep-merge further down can filter `current.appSettings` through the same whitelist -- see
   // that comment for why.
-  const ALLOWED_APPSETTINGS_KEYS = ['company', 'payroll', 'sso', 'allowances', 'workSchedule', 'leave', 'allowanceTypes', 'lateDeductPolicy', 'tax', 'allowanceEligibility', 'updatedAt'];
+  const ALLOWED_APPSETTINGS_KEYS = ['company', 'payroll', 'sso', 'allowances', 'workSchedule', 'leave', 'allowanceTypes', 'lateDeductPolicy', 'tax', 'allowanceEligibility', 'map', 'updatedAt'];
   if (body.appSettings) {
     const A = body.appSettings;
     if (Object.keys(A).length > 30) {
@@ -3192,7 +3709,7 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
     // further below) only guards `incoming`/`existing` being non-array objects at the point it
     // decides whether to merge -- a scalar `incoming` still gets stored verbatim as that key's new
     // value, corrupting every downstream reader that expects an object.
-    for (const sub of ['company', 'payroll', 'sso', 'allowances', 'workSchedule', 'leave', 'allowanceEligibility', 'lateDeductPolicy', 'tax']) {
+    for (const sub of ['company', 'payroll', 'sso', 'allowances', 'workSchedule', 'leave', 'allowanceEligibility', 'lateDeductPolicy', 'tax', 'map']) {
       if (A[sub] !== undefined && (!A[sub] || typeof A[sub] !== 'object' || Array.isArray(A[sub]))) {
         return res.status(400).json({ success: false, message: `appSettings.${sub} must be an object` });
       }
@@ -3208,6 +3725,13 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
           return res.status(400).json({ success: false, message: `appSettings.company.${k} must be a string of ${cap} characters or fewer` });
         }
       }
+    }
+    if (A.map && A.map.cartoApiKey !== undefined) {
+      const k = A.map.cartoApiKey;
+      if (typeof k !== 'string' || k.length > 200 || (k.length > 0 && !/^[A-Za-z0-9._-]+$/.test(k.trim()))) {
+        return res.status(400).json({ success: false, message: 'appSettings.map.cartoApiKey must be empty or a CARTO key (letters, digits, . _ -)' });
+      }
+      A.map.cartoApiKey = k.trim();
     }
     if (A.sso && A.sso.rate !== undefined && (typeof A.sso.rate !== 'number' || !Number.isFinite(A.sso.rate) || A.sso.rate < 0 || A.sso.rate > 100)) {
       return res.status(400).json({ success: false, message: 'appSettings.sso.rate must be a number 0-100' });
@@ -3268,6 +3792,29 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
     // by apiFetch() not surfacing non-2xx responses as errors in the calling UI code).
     if (A.leave && A.leave.carryForwardMax !== undefined && (typeof A.leave.carryForwardMax !== 'number' || !Number.isFinite(A.leave.carryForwardMax) || A.leave.carryForwardMax < 0 || A.leave.carryForwardMax > 60)) {
       return res.status(400).json({ success: false, message: 'appSettings.leave.carryForwardMax must be a number between 0 and 60' });
+    }
+    if (A.leave && A.leave.annualLeaveMinMonths !== undefined && (typeof A.leave.annualLeaveMinMonths !== 'number' || !Number.isFinite(A.leave.annualLeaveMinMonths) || A.leave.annualLeaveMinMonths < 0 || A.leave.annualLeaveMinMonths > 600)) {
+      return res.status(400).json({ success: false, message: 'appSettings.leave.annualLeaveMinMonths must be a number between 0 and 600' });
+    }
+    if (A.leave && A.leave.annualLeaveTiers !== undefined) {
+      if (!Array.isArray(A.leave.annualLeaveTiers) || A.leave.annualLeaveTiers.length > 12) {
+        return res.status(400).json({ success: false, message: 'appSettings.leave.annualLeaveTiers must be an array of 12 or fewer {afterMonths, days} entries' });
+      }
+      const normalized = normalizeAnnualLeaveTiers(A.leave.annualLeaveTiers);
+      A.leave.annualLeaveTiers = normalized;
+      A.leave.annualLeaveMinMonths = normalized[0].afterMonths;
+    }
+    if (A.leave && A.leave.sickLeaveDays !== undefined) {
+      if (typeof A.leave.sickLeaveDays !== 'number' || !Number.isFinite(A.leave.sickLeaveDays) || A.leave.sickLeaveDays < 0 || A.leave.sickLeaveDays > 365) {
+        return res.status(400).json({ success: false, message: 'appSettings.leave.sickLeaveDays must be a number between 0 and 365' });
+      }
+      A.leave.sickLeaveDays = normalizeQuotaDays(A.leave.sickLeaveDays, DEFAULT_SICK_LEAVE_DAYS);
+    }
+    if (A.leave && A.leave.businessLeaveDays !== undefined) {
+      if (typeof A.leave.businessLeaveDays !== 'number' || !Number.isFinite(A.leave.businessLeaveDays) || A.leave.businessLeaveDays < 0 || A.leave.businessLeaveDays > 365) {
+        return res.status(400).json({ success: false, message: 'appSettings.leave.businessLeaveDays must be a number between 0 and 365' });
+      }
+      A.leave.businessLeaveDays = normalizeQuotaDays(A.leave.businessLeaveDays, DEFAULT_BUSINESS_LEAVE_DAYS);
     }
   }
   if (body.appSettings) {
@@ -3363,8 +3910,13 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
 // exactly, so the server never has to trust a client-supplied status/route/approver again.
 const APPROVAL_ROUTING_DEFAULT = {
   annual: ['md'], sick: ['md'], business: ['md'], upcountry: ['md'],
-  'late-out': ['md'], 'time-correction': ['md'], ot: ['md'], comp: ['md'],
+  'late-out': ['md'], 'time-correction': ['md'], ot: ['md'],
+  'early-morning': ['md'], 'holiday-work': ['md'],
   'driver-ot': ['accounting'], 'long-distance': ['accounting'], 'personal-car': ['md'], 'clear-attachments': ['md'],
+  // 2026-09-21: abroad must be here, not only in app.js -- PUT /api/settings derives
+  // ALLOWED_ROUTE_KEYS from Object.keys(APPROVAL_ROUTING_DEFAULT), so a missing key here makes
+  // saving this type's route 400 and silently never persist.
+  abroad: ['md'],
 };
 const ROLE_TO_STATUS = { manager: 'pending', accounting: 'pending-accounting', md: 'pending-md' };
 const STATUS_TO_ROLE = PUSH_STATUS_TO_ROLE; // same {pending:manager, pending-accounting:accounting, pending-md:md} map
@@ -3375,8 +3927,22 @@ function getApprovalRoute(type) {
   if (Array.isArray(r) && r.length > 0) return r;
   return r ? ['manager', 'md'] : ['md'];
 }
+// Manager-originated requests skip the manager step (cannot self-approve). Accounting stand-in
+// for MD during the post-period-close window is unchanged (isApprovalDelegationActiveForType).
+function approvalRouteForRequester(routeKey, ownerRole) {
+  let route = [...getApprovalRoute(routeKey)];
+  if (ownerRole === 'manager') {
+    route = route.filter(r => r !== 'manager');
+    if (!route.length) route = ['md'];
+  }
+  return route;
+}
 function getInitialStatus(type) {
   const route = getApprovalRoute(type);
+  return ROLE_TO_STATUS[route[0]] || 'pending-md';
+}
+function initialStatusForRequester(routeKey, ownerRole) {
+  const route = approvalRouteForRequester(routeKey, ownerRole);
   return ROLE_TO_STATUS[route[0]] || 'pending-md';
 }
 // REVERTED 2026-08-10 (user correction): a 2026-08-10 "fix" (round-3 audit item 5) hardcoded
@@ -3403,6 +3969,15 @@ function routeKeyForLeave(leave, ownerRole) {
 function isPublicHoliday(dateStr) {
   return holidays.some(h => h.date === dateStr);
 }
+function standardOtMultiplier(dateStr) {
+  const dow = new Date(dateStr + 'T12:00:00').getDay();
+  return (isPublicHoliday(dateStr) || dow === 0 || dow === 6) ? 3 : 1.5;
+}
+function effectiveOtMultiplier(leave) {
+  const stored = Number(leave.otMultiplier);
+  if (Number.isFinite(stored) && stored > 0) return stored;
+  return leave.dateFrom ? standardOtMultiplier(leave.dateFrom) : 1.5;
+}
 // CORRECTNESS FIX 2026-08-16 (Opus re-audit of the C-3 fix): shared by the POST and PUT comp
 // checks below -- weekend or public holiday only; a Company Trip date is deliberately NOT treated
 // as a non-work day here (companyTripDates is a separate list from holidays, so an ordinary
@@ -3412,6 +3987,191 @@ function isPublicHoliday(dateStr) {
 function isNonWorkDayForComp(dateStr) {
   const d = new Date(dateStr + 'T12:00:00');
   return d.getDay() === 0 || d.getDay() === 6 || isPublicHoliday(dateStr);
+}
+function isHolidayWorkDay(dateStr) {
+  if (!dateStr || isCompanyTripDay(dateStr)) return false;
+  return isNonWorkDayForComp(dateStr);
+}
+function parseHHMMToMins(hhmm) {
+  if (!HHMM_RE.test(hhmm)) return NaN;
+  const [h, m] = hhmm.split(':').map(Number);
+  return h * 60 + m;
+}
+function splitHolidayWorkOtMinutes(workStartTime, workEndTime, S) {
+  const startMin = parseHHMMToMins(workStartTime);
+  const endMin = parseHHMMToMins(workEndTime);
+  if (!Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) {
+    return { otMins20: 0, otMins30: 0, otHours20: 0, otHours30: 0 };
+  }
+  const ws = S.workSchedule || {};
+  const stdStart = (ws.standardStartHour != null ? ws.standardStartHour : 8) * 60 +
+    (ws.standardStartMinute != null ? ws.standardStartMinute : 30);
+  const stdEnd = 17 * 60 + 30;
+  const otMins30Before = Math.max(0, Math.min(endMin, stdStart) - Math.min(startMin, stdStart));
+  const otMins30After = Math.max(0, endMin - Math.max(startMin, stdEnd));
+  const otMins30 = otMins30Before + otMins30After;
+  const otMins20 = Math.max(0, Math.min(endMin, stdEnd) - Math.max(startMin, stdStart));
+  const round2 = n => Math.round(n / 60 * 100) / 100;
+  return { otMins20, otMins30, otHours20: round2(otMins20), otHours30: round2(otMins30) };
+}
+function officeOtStdStartHHMM(S) {
+  const ws = (S && S.workSchedule) || {};
+  const h = ws.standardStartHour != null ? ws.standardStartHour : 8;
+  const m = ws.standardStartMinute != null ? ws.standardStartMinute : 30;
+  return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+}
+const OFFICE_OT_WEEKEND_MSG = 'Weekends and public holidays use Holiday Work — do not submit office OT for those days';
+// Office OT is request-gated (never derived from scan-out). Weekdays only: hours after 17:30 at ×1.5.
+// Weekend / public-holiday pay goes through Holiday Work (start–end), not this form. Drivers use isDriverOT.
+function deriveOfficeOtFromEndTime(dateFrom, otEndTime, S) {
+  const out = { isDriverOT: false, otMultiplier: 1.5, otHours: 0, otHours20: 0, otHours30: 0 };
+  if (!dateFrom || !otEndTime || !HHMM_RE.test(otEndTime)) return out;
+  if (isNonWorkDayForComp(dateFrom)) return out;
+  const [eh, em] = otEndTime.split(':').map(Number);
+  const otMins = (eh * 60 + em) - (17 * 60 + 30);
+  out.otHours = otMins > 0 ? Math.round(otMins / 60 * 100) / 100 : 0;
+  out.otMultiplier = 1.5;
+  return out;
+}
+function hasActiveHolidayWork(leaves, userId, dateFrom, exceptId) {
+  return (leaves || []).some(l =>
+    l.id !== exceptId && l.userId === userId && l.type === 'holiday-work' &&
+    l.dateFrom === dateFrom && l.status !== 'rejected'
+  );
+}
+function hasActiveOfficeOt(leaves, userId, dateFrom, exceptId) {
+  return (leaves || []).some(l =>
+    l.id !== exceptId && l.userId === userId && l.type === 'ot' && !l.isDriverOT &&
+    l.dateFrom === dateFrom && l.status !== 'rejected'
+  );
+}
+function accumulateApprovedOtPay(l, hourlyRate, acc) {
+  const hrs20 = Number(l.otHours20) || 0;
+  const hrs30 = Number(l.otHours30) || 0;
+  if (hrs20 > 0 || hrs30 > 0) {
+    const amt20 = Math.round(hourlyRate * 2 * hrs20);
+    const amt30 = Math.round(hourlyRate * 3 * hrs30);
+    acc.ot20Hours += hrs20; acc.ot20Amount += amt20;
+    acc.ot30Hours += hrs30; acc.ot30Amount += amt30;
+    acc.otAmount += amt20 + amt30;
+    acc.otTotalHours += hrs20 + hrs30;
+    return;
+  }
+  const mult = effectiveOtMultiplier(l);
+  const hrs = Number(l.otHours) || 0;
+  const amt = Math.round(hourlyRate * mult * hrs);
+  acc.otAmount += amt;
+  acc.otTotalHours += hrs;
+  if (mult === 1.5) { acc.ot15Amount += amt; acc.ot15Hours += hrs; }
+  else if (mult === 2) { acc.ot20Amount += amt; acc.ot20Hours += hrs; }
+  else if (mult === 3) { acc.ot30Amount += amt; acc.ot30Hours += hrs; }
+}
+function validateHolidayWorkLocation(locations) {
+  if (!Array.isArray(locations) || locations.length !== 1) {
+    return 'locations must be an array with exactly one entry';
+  }
+  const loc = locations[0];
+  if (!loc || typeof loc.name !== 'string' || !loc.name.trim()) {
+    return 'location name is required';
+  }
+  if (loc.name.length > LOCATION_NAME_MAX) {
+    return `location name must be ${LOCATION_NAME_MAX} characters or fewer`;
+  }
+  return null;
+}
+function attendanceDayForUser(user, dateStr) {
+  const dayStart = new Date(dateStr + 'T12:00:00');
+  const attLog = buildAttendanceLogForUser(user, dayStart, dayStart);
+  const leaves = readLeaves() || [];
+  const S = getAppSettings();
+  const days = generatePeriodDays(dayStart, dayStart, false, user, attLog, leaves, S);
+  return days[0] || null;
+}
+function holidayWorkSubmitBlockReason(user, dateStr) {
+  if (!user || !dateStr || !isValidDateStr(dateStr)) {
+    return 'dateFrom must be a valid YYYY-MM-DD date';
+  }
+  if (user.role === 'driver') {
+    return 'Drivers cannot submit holiday work requests';
+  }
+  const S = getAppSettings();
+  if (!isAllowanceEligible(S.allowanceEligibility, user.role, 'holidayWork')) {
+    return 'You are not eligible to submit holiday work requests';
+  }
+  if (!isHolidayWorkDay(dateStr)) {
+    return 'dateFrom must be a day you actually worked, and a weekend or public holiday (not Company Trip)';
+  }
+  const day = attendanceDayForUser(user, dateStr);
+  if (!day || !day.checkIn) {
+    return 'Holiday work requires a check-in first';
+  }
+  return null;
+}
+function earlyMorningTierFromCheckIn(checkIn, S) {
+  if (!checkIn || !HHMM_RE.test(checkIn)) return 0;
+  const mins = parseHHMMToMins(checkIn);
+  if (!Number.isFinite(mins)) return 0;
+  if (mins <= S.allowances.earlyThreshold2Min) return 2;
+  if (mins <= S.allowances.earlyThreshold1Min) return 1;
+  return 0;
+}
+function earlyMorningTierAllowed(checkIn, tier, S) {
+  if (![1, 2].includes(Number(tier)) || !checkIn || !HHMM_RE.test(checkIn)) return false;
+  const mins = parseHHMMToMins(checkIn);
+  if (!Number.isFinite(mins)) return false;
+  const thr = Number(tier) === 2 ? S.allowances.earlyThreshold2Min : S.allowances.earlyThreshold1Min;
+  return mins <= thr;
+}
+function earlyMorningBonusFromWorkStartTime(workStartTime, S) {
+  const mins = parseHHMMToMins(workStartTime);
+  if (!Number.isFinite(mins)) return { earlyCount: 0, bonus: 0 };
+  if (mins <= S.allowances.earlyThreshold2Min) return { earlyCount: 2, bonus: S.allowances.earlyMorning2 };
+  if (mins <= S.allowances.earlyThreshold1Min) return { earlyCount: 1, bonus: S.allowances.earlyMorning1 };
+  return { earlyCount: 0, bonus: 0 };
+}
+function earlyMorningSubmitBlockReason(user, dateStr) {
+  if (!user || !dateStr || !isValidDateStr(dateStr)) {
+    return 'dateFrom must be a valid YYYY-MM-DD date';
+  }
+  const S = getAppSettings();
+  if (!isAllowanceEligible(S.allowanceEligibility, user.role, 'earlyLate')) {
+    return 'You are not eligible for early morning allowance';
+  }
+  if (isHolidayWorkDay(dateStr)) {
+    const hwLeaves = readLeaves() || [];
+    const hasHw = hwLeaves.some(l =>
+      l.userId === user.id && l.type === 'holiday-work' && l.dateFrom === dateStr && l.status !== 'rejected'
+    );
+    if (!hasHw) {
+      return 'Early morning on a holiday requires a holiday work request first';
+    }
+  }
+  const day = attendanceDayForUser(user, dateStr);
+  if (!day || !day.checkIn) {
+    return 'Early morning claim requires a check-in first';
+  }
+  if (!isEarlyMorningDayStatus(day.status)) {
+    return 'Early morning claim requires a check-in on a working, weekend, or public-holiday day';
+  }
+  if (isDeviceScanSource(day.checkInSource)) {
+    return 'Early morning allowance is automatic when you check in at the face scanner — no request needed';
+  }
+  const mins = parseHHMMToMins(day.checkIn);
+  if (!Number.isFinite(mins) || mins > S.allowances.earlyThreshold1Min) {
+    const thr = S.allowances.earlyThreshold1Min;
+    const thrStr = `${String(Math.floor(thr / 60)).padStart(2, '0')}:${String(thr % 60).padStart(2, '0')}`;
+    return `Early morning claim requires check-in before ${thrStr}`;
+  }
+  return null;
+}
+function getApprovedHolidayWorkAnnualLeaveDays(leaves, userId, year, exceptId) {
+  const yStart = `${year}-01-01`, yEnd = `${year}-12-31`;
+  return leaves.filter(l =>
+    l.userId === userId && l.type === 'holiday-work' && l.compensationMode === 'annual-leave' &&
+    l.status === 'approved' &&
+    l.dateFrom >= yStart && l.dateFrom <= yEnd &&
+    l.id !== exceptId
+  ).reduce((s, l) => s + (l.days || 1), 0);
 }
 function ta_localDateStr(d) {
   const p2 = n => String(n).padStart(2, '0');
@@ -3424,7 +4184,7 @@ function formatDateEn(d) {
 function getPeriodStartForDate(dateStr) {
   const settings = readSettings();
   const sd = (settings.appSettings && settings.appSettings.payroll && settings.appSettings.payroll.periodStartDay) || 21;
-  const d = new Date(dateStr);
+  const d = new Date(String(dateStr).slice(0, 10) + 'T12:00:00');
   let y = d.getFullYear(), m = d.getMonth();
   if (d.getDate() >= sd) return new Date(y, m, sd);
   m -= 1;
@@ -3482,6 +4242,19 @@ function mdApprovedPeriodInRange(dateFrom, dateTo, userId) {
   }
   return false;
 }
+function accountingConfirmedInRange(dateFrom, dateTo, userId) {
+  if (!isValidDateStr(dateFrom) || userId == null) return false;
+  const endStr = (dateTo && isValidDateStr(dateTo)) ? dateTo : dateFrom;
+  const cursor = getPeriodStartForDate(dateFrom);
+  const fin = readJSON('finalize.json', {});
+  if (fin === null) return true;
+  let guard = 0;
+  while (ta_localDateStr(cursor) <= endStr && guard++ < 1000) {
+    if (fin[getFinalizeKey(cursor, userId)]?.confirmed === true) return true;
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+  return false;
+}
 function getPayDay(periodEnd) {
   const d = new Date(periodEnd.getFullYear(), periodEnd.getMonth() + 1, 0);
   while (d.getDay() === 0 || d.getDay() === 6 || isPublicHoliday(ta_localDateStr(d))) {
@@ -3492,7 +4265,7 @@ function getPayDay(periodEnd) {
 function isApprovalDelegationWindowOpen() {
   const settings = readSettings();
   const startDay = (settings.appSettings && settings.appSettings.payroll && settings.appSettings.payroll.periodStartDay) || 21;
-  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const today = bangkokTodayDate();
   if (today.getDate() < startDay) return false;
   const periodEnd = new Date(today.getFullYear(), today.getMonth(), startDay - 1);
   const payDay = getPayDay(periodEnd); payDay.setHours(0, 0, 0, 0);
@@ -3501,7 +4274,7 @@ function isApprovalDelegationWindowOpen() {
 function currentApprovalDelegationPeriodKey() {
   const settings = readSettings();
   const startDay = (settings.appSettings && settings.appSettings.payroll && settings.appSettings.payroll.periodStartDay) || 21;
-  const today = new Date();
+  const today = bangkokTodayDate();
   const periodEnd = new Date(today.getFullYear(), today.getMonth(), startDay - 1);
   const p2 = n => String(n).padStart(2, '0');
   return `${periodEnd.getFullYear()}${p2(periodEnd.getMonth() + 1)}${p2(periodEnd.getDate())}`;
@@ -3594,10 +4367,15 @@ const TYPE_SCOPED_LEAVE_FIELDS = {
   'long-distance':     ['mileageStart', 'mileageEnd', 'distanceKm', 'longDistanceAllowance'],
   'personal-car':      ['personalCarRate'],
   'late-out':          ['lateOutTime'],
-  ot:                  ['otEndTime', 'otHours', 'otMultiplier', 'isDriverOT'],
-  comp:                ['workedDate'],
+  ot:                  ['otEndTime', 'otHours', 'otMultiplier', 'isDriverOT', 'otHours20', 'otHours30'],
+  'holiday-work':      ['workStartTime', 'workEndTime', 'locations', 'compensationMode', 'otHours20', 'otHours30'],
+  'early-morning':     ['earlyMorningTier'],
   'time-correction':   ['correctionField', 'originalTime', 'correctedTime'],
   'clear-attachments': ['targetIds', 'targetSnapshot', 'totalSize'],
+  // 2026-09-21: Abroad work trip. `location` is free text -- a country OR a customer name, both
+  // are acceptable per the user. Adding the key here also registers the type in
+  // VALID_LEAVE_TYPES (built from Object.keys of this object).
+  abroad:              ['location'],
 };
 // SECURITY FIX 2026-08-13 (Opus-planned leaves-whitelist, phase 1): every field that reaches a
 // stored leave record now falls into exactly one of three lists -- this one (client-settable on
@@ -3617,7 +4395,7 @@ const UNIVERSAL_LEAVE_FIELDS = ['type', 'dateFrom', 'dateTo', 'days', 'timePart'
 // Never accepted from the client on POST or PUT -- always computed by the handler itself, after
 // the client body has been filtered through filterLeaveFields() below. Listed here (rather than
 // left implicit) so a future field addition has one obvious place to declare which bucket it's in.
-const SERVER_LEAVE_FIELDS = ['id', 'userId', 'serverCreatedAt', 'status', 'approvalRoute', 'approver', 'approvedAt', 'submittedAt'];
+const SERVER_LEAVE_FIELDS = ['id', 'userId', 'serverCreatedAt', 'status', 'approvalRoute', 'approver', 'approvedAt', 'submittedAt', 'timezone'];
 const _leaveFieldSetCache = new Map();
 function allowedLeaveFieldsFor(type) {
   let set = _leaveFieldSetCache.get(type);
@@ -3670,7 +4448,7 @@ function deriveLeaveDaysCount(dateFrom, dateTo) {
   return days;
 }
 
-const DATE_OVERLAP_LEAVE_TYPES = new Set(['annual', 'sick', 'business', 'comp']);
+const DATE_OVERLAP_LEAVE_TYPES = new Set(['annual', 'sick', 'business', 'holiday-work', 'abroad']);
 function leaveMinutesOf(l) {
   if ((Number(l.days) || 0) > 0) return Number(l.days) * 8 * 60;
   if (l.hourlyStart && l.hourlyEnd && HHMM_RE.test(l.hourlyStart) && HHMM_RE.test(l.hourlyEnd)) {
@@ -3716,20 +4494,17 @@ function driverOtHoursOverCap(leaves, { userId, dateFrom, newHours, exceptId }) 
   ).reduce((s, l) => s + (Number(l.otHours) || 0), 0);
   return used + (Number(newHours) || 0) > OT_HOURS_MAX;
 }
-function leaveBalanceError(leaves, user, type, reqMin, exceptId) {
+function leaveBalanceError(leaves, user, type, reqMin, exceptId, dateFrom) {
   if (type !== 'annual' && type !== 'business') return null;
   if (!user) return 'Insufficient leave balance';
-  const year = new Date().getFullYear();
+  const asOf = isValidDateStr(dateFrom) ? dateFrom : bangkokDateStr();
+  const year = Number(asOf.slice(0, 4));
   const yStart = `${year}-01-01`, yEnd = `${year}-12-31`;
   const cf = (readSettings().leaveCarryForward) || {};
   const cfDays = type === 'annual' ? (Number(cf[`${year}_${user.id}`]) || 0) : 0;
   const cfComp = type === 'annual' ? (Number(cf[`comp_${year}_${user.id}`]) || 0) : 0;
-  const approvedComp = type === 'annual' ? leaves.filter(l =>
-    l.userId === user.id && l.type === 'comp' && l.status === 'approved' &&
-    (l.workedDate || l.dateFrom) >= yStart && (l.workedDate || l.dateFrom) <= yEnd &&
-    l.id !== exceptId
-  ).reduce((s, l) => s + (l.days || 1), 0) : 0;
-  const entitlement = (type === 'annual' ? user.annualLeave : user.businessLeave) || 0;
+  const approvedComp = type === 'annual' ? getApprovedHolidayWorkAnnualLeaveDays(leaves, user.id, year, exceptId) : 0;
+  const entitlement = (type === 'annual' ? annualLeaveEntitlementDays(user, asOf) : businessLeaveEntitlementDays()) || 0;
   const totalMin = (entitlement + cfDays + cfComp + approvedComp) * 8 * 60;
   let usedMin = 0;
   leaves.filter(l =>
@@ -3738,7 +4513,109 @@ function leaveBalanceError(leaves, user, type, reqMin, exceptId) {
     l.id !== exceptId &&
     l.dateFrom >= yStart && l.dateFrom <= yEnd
   ).forEach(l => { usedMin += leaveMinutesOf(l); });
+  const openingUsed = Number((readSettings().leaveOpeningUsed || {})[`${year}_${user.id}_${type}`]) || 0;
+  usedMin += openingUsed * 8 * 60;
   if (reqMin > Math.max(0, totalMin - usedMin)) return 'Insufficient leave balance';
+  return null;
+}
+// Dual-sync with app.js: DEFAULT_ANNUAL_LEAVE_TIERS, normalizeAnnualLeaveTiers,
+// getAnnualLeaveTiers, getAnnualLeaveMinMonths, annualLeaveUnlockDateStr,
+// isAnnualLeaveUnlocked, annualLeaveEntitlementDays, annualLeaveServiceError,
+// DEFAULT_SICK_LEAVE_DAYS, DEFAULT_BUSINESS_LEAVE_DAYS, normalizeQuotaDays,
+// sickLeaveEntitlementDays, businessLeaveEntitlementDays.
+const DEFAULT_ANNUAL_LEAVE_TIERS = [
+  { afterMonths: 6, days: 3 },
+  { afterMonths: 12, days: 6 },
+  { afterMonths: 24, days: 8 },
+  { afterMonths: 36, days: 10 }
+];
+const DEFAULT_SICK_LEAVE_DAYS = 30;
+const DEFAULT_BUSINESS_LEAVE_DAYS = 3;
+function normalizeAnnualLeaveTiers(raw) {
+  const fallback = DEFAULT_ANNUAL_LEAVE_TIERS.map(t => ({ ...t }));
+  if (!Array.isArray(raw) || raw.length === 0) return fallback;
+  const seen = new Set();
+  const out = [];
+  for (const t of raw) {
+    if (!t || typeof t !== 'object') continue;
+    const afterMonths = Math.trunc(Number(t.afterMonths));
+    const days = Math.trunc(Number(t.days));
+    if (!Number.isFinite(afterMonths) || afterMonths < 0 || afterMonths > 600) continue;
+    if (!Number.isFinite(days) || days < 0 || days > 365) continue;
+    if (seen.has(afterMonths)) continue;
+    seen.add(afterMonths);
+    out.push({ afterMonths, days });
+  }
+  if (!out.length) return fallback;
+  out.sort((a, b) => a.afterMonths - b.afterMonths);
+  return out.slice(0, 12);
+}
+function getAnnualLeaveTiers() {
+  return normalizeAnnualLeaveTiers(getAppSettings().leave && getAppSettings().leave.annualLeaveTiers);
+}
+function getAnnualLeaveMinMonths() {
+  const tiers = getAnnualLeaveTiers();
+  if (tiers.length) return Math.max(0, Math.min(600, tiers[0].afterMonths));
+  const n = Number(getAppSettings().leave && getAppSettings().leave.annualLeaveMinMonths);
+  if (!Number.isFinite(n)) return 6;
+  return Math.max(0, Math.min(60, Math.trunc(n)));
+}
+function annualLeaveUnlockDateStr(startDate, months) {
+  if (!isValidDateStr(startDate)) return null;
+  const monthsN = Number(months);
+  if (!Number.isFinite(monthsN) || monthsN <= 0) return startDate;
+  const [y, m, d] = startDate.split('-').map(Number);
+  const first = new Date(y, m - 1 + monthsN, 1);
+  const lastDay = new Date(first.getFullYear(), first.getMonth() + 1, 0).getDate();
+  const day = Math.min(d, lastDay);
+  const p2 = n => String(n).padStart(2, '0');
+  return `${first.getFullYear()}-${p2(first.getMonth() + 1)}-${p2(day)}`;
+}
+function isAnnualLeaveUnlocked(user, asOfDate) {
+  if (!user || !user.startDate) return false;
+  const months = getAnnualLeaveMinMonths();
+  if (months <= 0) return true;
+  const unlock = annualLeaveUnlockDateStr(user.startDate, months);
+  if (!unlock) return false;
+  const asOf = asOfDate || bangkokDateStr();
+  return asOf >= unlock;
+}
+function annualLeaveEntitlementDays(user, asOfYmd) {
+  const tiers = getAnnualLeaveTiers();
+  if (!user || !user.startDate || !tiers.length) return 0;
+  const asOf = asOfYmd || bangkokDateStr();
+  let days = 0;
+  for (const t of tiers) {
+    const unlock = annualLeaveUnlockDateStr(user.startDate, t.afterMonths);
+    if (unlock && asOf >= unlock) days = Math.max(days, t.days);
+  }
+  return days;
+}
+function normalizeQuotaDays(n, fallback) {
+  if (n == null) return fallback;
+  if (typeof n === 'string' && n.trim() === '') return fallback;
+  const v = Math.trunc(Number(n));
+  if (!Number.isFinite(v) || v < 0 || v > 365) return fallback;
+  return v;
+}
+function sickLeaveEntitlementDays() {
+  return normalizeQuotaDays(getAppSettings().leave && getAppSettings().leave.sickLeaveDays, DEFAULT_SICK_LEAVE_DAYS);
+}
+function businessLeaveEntitlementDays() {
+  return normalizeQuotaDays(getAppSettings().leave && getAppSettings().leave.businessLeaveDays, DEFAULT_BUSINESS_LEAVE_DAYS);
+}
+function annualLeaveServiceError(user, type, dateFrom) {
+  if (type !== 'annual') return null;
+  if (!user || !user.startDate) return 'Annual leave is not available yet';
+  const months = getAnnualLeaveMinMonths();
+  if (months <= 0) return null;
+  const unlock = annualLeaveUnlockDateStr(user.startDate, months);
+  if (!unlock) return 'Annual leave is not available yet';
+  const asOf = isValidDateStr(dateFrom) ? dateFrom : bangkokDateStr();
+  if (asOf < unlock) {
+    const firstDays = (getAnnualLeaveTiers()[0] && getAnnualLeaveTiers()[0].days) || 0;
+    return `Annual leave unlocks after ${months} months of service (available from ${unlock}, ${firstDays} days)`;
+  }
   return null;
 }
 function validateUpcountryLocations(locations) {
@@ -3800,6 +4677,41 @@ function validateDateRange(dateFrom, dateTo) {
   if (to < from) return 'dateTo must not be before dateFrom';
   const spanDays = Math.round((to - from) / 86400000);
   if (spanDays > DATE_SPAN_MAX_DAYS) return `date range must be ${DATE_SPAN_MAX_DAYS} days or fewer`;
+  return null;
+}
+// 2026-09-21 (Abroad): the date range IS the money here -- every calendar day in it is paid -- so
+// it gets a tighter cap than the generic 366 and its own required-field check. Takes the RESOLVED
+// record (existing merged with the update), never the raw body: validating only the fields a PUT
+// happened to touch is a bug class this file has hit repeatedly (see the 2026-08-10 round-4 audit).
+const ABROAD_SPAN_MAX_DAYS = 90;
+const ABROAD_LOCATION_MAX = 200;
+function abroadSpanDays(dateFrom, dateTo) {
+  const to = dateTo || dateFrom;
+  return Math.round((new Date(to + 'T00:00:00') - new Date(dateFrom + 'T00:00:00')) / 86400000) + 1;
+}
+function validateAbroadRecord({ dateFrom, dateTo, location, reason }) {
+  if (!isValidDateStr(dateFrom)) return 'dateFrom must be a valid YYYY-MM-DD date for abroad requests';
+  const to = dateTo || dateFrom;
+  if (!isValidDateStr(to)) return 'dateTo must be a valid YYYY-MM-DD date for abroad requests';
+  if (to < dateFrom) return 'dateTo must not be before dateFrom';
+  const span = abroadSpanDays(dateFrom, to);
+  if (!Number.isFinite(span) || span < 1 || span > ABROAD_SPAN_MAX_DAYS) {
+    return `abroad date range must be between 1 and ${ABROAD_SPAN_MAX_DAYS} days`;
+  }
+  const loc = String(location == null ? '' : location).trim();
+  if (!loc) return 'location is required for abroad requests';
+  if (loc.length > ABROAD_LOCATION_MAX) return `location must be ${ABROAD_LOCATION_MAX} characters or fewer`;
+  if (!String(reason == null ? '' : reason).trim()) return 'reason is required for abroad requests';
+  return null;
+}
+// Eligibility gates SUBMISSION, not just payment (user 2026-09-21: "เลือกได้ว่าใครจะยื่น allowance นี้
+// ได้บ้าง"). Without this, an ineligible role could still POST a record that pays nothing but does
+// silently mark its days as worked instead of absent.
+function abroadSubmitBlockReason(user) {
+  if (!user) return 'You are not eligible to submit abroad requests';
+  if (!isAllowanceEligible(getAppSettings().allowanceEligibility, user.role, 'abroad')) {
+    return 'You are not eligible to submit abroad requests';
+  }
   return null;
 }
 function validateLeaveFreeFields(body) {
@@ -3885,8 +4797,18 @@ function validateLeaveFreeFields(body) {
   // submit path always sends it as a real YYYY-MM-DD (same date-input value as dateFrom/dateTo, see
   // submitCompDay() in app.js), and getApprovedCompDays() does a raw string range compare against
   // it, so a garbage value could silently shift a comp day out of its accrual year.
-  if (body.workedDate !== undefined && body.workedDate !== '' && !isValidDateStr(body.workedDate)) {
-    return 'workedDate must be a valid YYYY-MM-DD date';
+  if (body.workStartTime !== undefined && body.workStartTime !== '' && !HHMM_RE.test(body.workStartTime)) {
+    return 'workStartTime must be in HH:MM format';
+  }
+  if (body.workEndTime !== undefined && body.workEndTime !== '' && !HHMM_RE.test(body.workEndTime)) {
+    return 'workEndTime must be in HH:MM format';
+  }
+  if (body.compensationMode !== undefined && body.compensationMode !== '' &&
+      !['annual-leave', 'paid'].includes(body.compensationMode)) {
+    return 'compensationMode must be annual-leave or paid';
+  }
+  if (body.earlyMorningTier !== undefined && ![1, 2].includes(Number(body.earlyMorningTier))) {
+    return 'earlyMorningTier must be 1 or 2';
   }
   // CORRECTNESS FIX 2026-08-16 (Opus re-audit): the "workedDate must be a weekend/holiday" rule
   // used to live here, but this function only ever sees a PARTIAL body (PUT's `updates` never
@@ -3946,7 +4868,7 @@ function validateLeaveFreeFields(body) {
   return null;
 }
 
-app.post('/api/leaves', (req, res) => {
+app.post('/api/leaves', withLeavesLock((req, res) => {
   try {
     const body = parseBody(req);
     const type = body.type;
@@ -3956,6 +4878,7 @@ app.post('/api/leaves', (req, res) => {
     // TYPE_SCOPED_LEAVE_FIELDS[type] lookups downstream (undefined -> empty keep-set) on any later
     // PUT that converts the record's type.
     if (typeof type !== 'string' || !VALID_LEAVE_TYPES.has(type)) return res.status(400).json({ success:false, message:'unknown request type' });
+    if (type === 'comp') return res.status(400).json({ success:false, message:'comp request type is no longer accepted; use holiday-work instead' });
     // SECURITY FIX 2026-08-09 (Opus audit finding 2.1): every legitimate submit path already
     // sends a dateFrom, but nothing required it -- the period-lock/MD-freeze check a few lines
     // below is wrapped in `if (body.dateFrom)`, so simply omitting or blanking the field skipped
@@ -4000,15 +4923,16 @@ app.post('/api/leaves', (req, res) => {
       // fields actually describe. Force it server-side the same way the real submit path always
       // does for hourly mode, instead of trusting whatever the client sent.
       body.days = 0;
-    } else if (type === 'comp') {
-      // SECURITY/CORRECTNESS FIX 2026-08-16 (Opus audit C-1): comp is deliberately excluded from
-      // DAY_BASED_LEAVE_TYPES (see that Set's own comment) because its `days` is supposed to
-      // always be a fixed 1 -- but nothing actually enforced that until now. A forged
-      // `days:366` was only bounds-checked to <=366 and got summed straight into
-      // getApprovedCompDays() (app.js), inflating the employee's paid annual-leave entitlement,
-      // while the approval-card UI hardcodes "+1 annual leave day" regardless of the record's
-      // real `days` -- so an approver reviewing a forged request was told it only adds 1.
-      body.days = 1;
+    } else if (type === 'holiday-work') {
+      body.days = body.compensationMode === 'annual-leave' ? 1 : 0;
+    } else if (type === 'early-morning') {
+      body.days = 0;
+    } else if (type === 'abroad') {
+      // Full calendar span, NOT deriveLeaveDaysCount() -- that one strips weekends and public
+      // holidays, which is right for annual leave and wrong here: an abroad trip covers every
+      // day it spans and is paid for every one of them. Display-only; payroll counts day
+      // statuses, not this field.
+      body.days = abroadSpanDays(body.dateFrom, body.dateTo);
     }
     // 2026-08-09 (Opus audit finding 2.5): validateUpcountryLocations(undefined) returns null
     // (valid/absent), so a direct POST with type:'upcountry' and no `locations` array at all was
@@ -4039,17 +4963,25 @@ app.post('/api/leaves', (req, res) => {
         return res.status(400).json({ success:false, message:'correctionField must be checkIn or checkOut for time-correction requests' });
       }
     }
-    // CORRECTNESS FIX 2026-08-16 (Opus re-audit of C-3): workedDate was only validated IF present
-    // (see validateLeaveFreeFields()'s format check above), never REQUIRED -- a direct POST of
-    // `{type:'comp', dateFrom:'<any weekday>'}` with no workedDate at all skipped the weekend/
-    // holiday rule entirely, since every render site falls back to `l.workedDate || l.dateFrom`.
-    // Same "not derivable, so require it outright" reasoning as time-correction/upcountry above.
-    if (type === 'comp') {
-      if (!body.workedDate || !isValidDateStr(body.workedDate)) {
-        return res.status(400).json({ success:false, message:'workedDate is required and must be a valid YYYY-MM-DD date for compensatory day requests' });
+    if (type === 'abroad') {
+      const abroadErr = validateAbroadRecord(body);
+      if (abroadErr) return res.status(400).json({ success:false, message:abroadErr });
+    }
+    if (type === 'holiday-work') {
+      if (!['annual-leave', 'paid'].includes(body.compensationMode)) {
+        return res.status(400).json({ success:false, message:'compensationMode must be annual-leave or paid for holiday-work requests' });
       }
-      if (!isNonWorkDayForComp(body.workedDate)) {
-        return res.status(400).json({ success:false, message:'workedDate must be a weekend or public holiday' });
+      if (!body.workStartTime || !HHMM_RE.test(body.workStartTime) ||
+          !body.workEndTime || !HHMM_RE.test(body.workEndTime)) {
+        return res.status(400).json({ success:false, message:'workStartTime and workEndTime are required and must be in HH:MM format for holiday-work requests' });
+      }
+      if (parseHHMMToMins(body.workEndTime) <= parseHHMMToMins(body.workStartTime)) {
+        return res.status(400).json({ success:false, message:'workEndTime must be after workStartTime' });
+      }
+      const hwLocErr = validateHolidayWorkLocation(body.locations);
+      if (hwLocErr) return res.status(400).json({ success:false, message:hwLocErr });
+      if (!body.attachment && !(Number(body.fileCount) > 0)) {
+        return res.status(400).json({ success:false, message:'Working Report attachment is required for holiday-work requests' });
       }
     }
     // SECURITY FIX 2026-08-13 (re-audit, F-3): distanceKm was only bounds-checked (non-negative),
@@ -4129,11 +5061,37 @@ app.post('/api/leaves', (req, res) => {
     // Every OTHER submit path already sends userId:currentUser.id — forcing it server-side
     // closes the "submit a leave as someone else" hole with zero legitimate regression.
     const userId = targetUser.id;
-    const routeKey = routeKeyForLeave({ type, isDriverOT }, live.role);
-    const approvalRoute = approvalRouteForRouteKey(routeKey);
+    const routeKey = routeKeyForLeave({ type, isDriverOT }, targetUser.role);
+    const approvalRoute = approvalRouteForRequester(routeKey, targetUser.role);
+    if (isFullDayPersonalLeaveClaimBlocked(type, targetUser, body.dateFrom)) {
+      return res.status(400).json({ success:false, message: fullDayPersonalLeaveNoClaimMessage() });
+    }
+    if (isAbroadClaimBlocked(type, targetUser, body.dateFrom)) {
+      return res.status(400).json({ success:false, message: abroadNoClaimMessage() });
+    }
     if (type === 'late-out') {
       const lateOutErr = lateOutSubmitBlockReason(targetUser, body.dateFrom);
       if (lateOutErr) return res.status(400).json({ success:false, message: lateOutErr });
+    }
+    if (type === 'holiday-work') {
+      const hwErr = holidayWorkSubmitBlockReason(targetUser, body.dateFrom);
+      if (hwErr) return res.status(400).json({ success:false, message: hwErr });
+    }
+    if (type === 'abroad') {
+      const abErr = abroadSubmitBlockReason(targetUser);
+      if (abErr) return res.status(400).json({ success:false, message: abErr });
+    }
+    if (type === 'early-morning') {
+      const emErr = earlyMorningSubmitBlockReason(targetUser, body.dateFrom);
+      if (emErr) return res.status(400).json({ success:false, message: emErr });
+      const selectedTier = Number(body.earlyMorningTier);
+      if (![1, 2].includes(selectedTier)) {
+        return res.status(400).json({ success:false, message:'earlyMorningTier must be 1 or 2' });
+      }
+      const emDay = attendanceDayForUser(targetUser, body.dateFrom);
+      if (!earlyMorningTierAllowed(emDay && emDay.checkIn, selectedTier, getAppSettings())) {
+        return res.status(400).json({ success:false, message:'Selected early morning tier does not match check-in time' });
+      }
     }
 
     let status, approver = null, approvedAt = null;
@@ -4147,7 +5105,7 @@ app.post('/api/leaves', (req, res) => {
       // two auto-approve branches above.
       status = 'approved'; approver = live.name; approvedAt = new Date().toISOString();
     } else {
-      status = initialStatusForRouteKey(routeKey);
+      status = initialStatusForRequester(routeKey, targetUser.role);
     }
 
     // 2026-08-02: guard against creating a record whose money a frozen payroll snapshot for
@@ -4169,6 +5127,9 @@ app.post('/api/leaves', (req, res) => {
       if (lockedPeriodInRange(body.dateFrom, body.dateTo)) {
         return res.status(400).json({ success:false, message:'This pay period is locked' });
       }
+      if (accountingConfirmedInRange(body.dateFrom, body.dateTo, userId)) {
+        return res.status(409).json({ success:false, message:'Accounting has already confirmed tax for this period — unconfirm before making changes' });
+      }
       if (status === 'approved' && mdApprovedPeriodInRange(body.dateFrom, body.dateTo, userId)) {
         return res.status(409).json({ success:false, message:'Payroll for this period has already been approved by the Managing Director -- ask them to revoke approval first' });
       }
@@ -4189,9 +5150,27 @@ app.post('/api/leaves', (req, res) => {
     // being submitted repeatedly, each one independently claiming a compensatory day off --
     // only catchable if the approver happens to remember every prior approval for that
     // employee/date. Same-date duplicate guard as personal-car (pending or approved).
-    if (type === 'comp' && leaves.some(l =>
-        l.userId === userId && l.type === 'comp' && l.workedDate === body.workedDate && l.status !== 'rejected')) {
-      return res.status(409).json({ success:false, message:'A compensatory day request for this worked date already exists' });
+    if (type === 'holiday-work' && leaves.some(l =>
+        l.userId === userId && l.type === 'holiday-work' && l.dateFrom === body.dateFrom && l.status !== 'rejected')) {
+      return res.status(409).json({ success:false, message:'A holiday work request for this date already exists' });
+    }
+    if (type === 'holiday-work' && hasActiveOfficeOt(leaves, userId, body.dateFrom)) {
+      return res.status(409).json({ success:false, message:'An OT request already exists for this date — do not stack holiday work with office OT' });
+    }
+    if (type === 'holiday-work' && leaves.some(l =>
+        l.userId === userId && l.type === 'upcountry' && l.dateFrom === body.dateFrom && l.status !== 'rejected')) {
+      return res.status(409).json({ success:false, message:'An upcountry request already exists for this date — use the holiday-work form instead' });
+    }
+    if (type === 'upcountry' && leaves.some(l =>
+        l.userId === userId && l.type === 'holiday-work' && l.dateFrom === body.dateFrom && l.status !== 'rejected')) {
+      return res.status(409).json({ success:false, message:'A holiday work request already exists for this date — upcountry is included automatically' });
+    }
+    if (type === 'upcountry' && body.dateFrom && isNonWorkDayForComp(body.dateFrom)) {
+      return res.status(400).json({ success:false, message:'Upcountry is for weekdays only — on weekends/public holidays submit holiday work (the location counts as upcountry)' });
+    }
+    if (type === 'early-morning' && leaves.some(l =>
+        l.userId === userId && l.type === 'early-morning' && l.dateFrom === body.dateFrom && l.status !== 'rejected')) {
+      return res.status(409).json({ success:false, message:'An early morning request for this date already exists' });
     }
     if (type === 'ot') {
       const otDup = findOtDuplicate(leaves, {
@@ -4206,12 +5185,29 @@ app.post('/api/leaves', (req, res) => {
       if (isDriverOT && driverOtHoursOverCap(leaves, { userId, dateFrom: body.dateFrom, newHours: body.otHours, exceptId: undefined })) {
         return res.status(400).json({ success:false, message:`Driver OT for this date cannot exceed ${OT_HOURS_MAX} hours in total` });
       }
+      if (!isDriverOT) {
+        if (isNonWorkDayForComp(body.dateFrom)) {
+          return res.status(400).json({ success:false, message: OFFICE_OT_WEEKEND_MSG });
+        }
+        if (hasActiveHolidayWork(leaves, userId, body.dateFrom)) {
+          return res.status(409).json({ success:false, message:'A holiday work request already exists for this date — holiday OT is paid from that request (paid mode), do not submit a separate OT' });
+        }
+        const derivedOfficeOt = deriveOfficeOtFromEndTime(body.dateFrom, body.otEndTime, S);
+        if (!(derivedOfficeOt.otHours > 0)) {
+          return res.status(400).json({ success:false, message: 'End time must be after 17:30' });
+        }
+        if (derivedOfficeOt.otHours > OT_HOURS_MAX) {
+          return res.status(400).json({ success:false, message:`otHours must be a non-negative number, ${OT_HOURS_MAX} or fewer` });
+        }
+      }
     }
     const overlap = findOverlappingLeave(leaves, userId, type, body.dateFrom, body.dateTo);
     if (overlap) {
       return res.status(409).json({ success:false, message:'Overlapping leave request already exists for this date range' });
     }
-    const balErr = leaveBalanceError(leaves, targetUser, type, leaveMinutesOf(body));
+    const tenureErr = annualLeaveServiceError(targetUser, type, body.dateFrom);
+    if (tenureErr) return res.status(403).json({ success:false, message: tenureErr });
+    const balErr = leaveBalanceError(leaves, targetUser, type, leaveMinutesOf(body), undefined, body.dateFrom);
     if (balErr) return res.status(409).json({ success:false, message: balErr });
     // SECURITY FIX 2026-08-13 (Opus-planned leaves-whitelist, phase 1): was `...body,` -- an
     // unfiltered spread of the entire client body, so any extra key the client sent (typos, guessed
@@ -4260,18 +5256,24 @@ app.post('/api/leaves', (req, res) => {
         isDriverOT: true,
         otMultiplier: Number(body.otMultiplier),
         otHours: Number(body.otHours) || 0,
-      } : (() => {
-        const out = { isDriverOT: false, otMultiplier: 1.5, otHours: 0 };
-        if (!body.dateFrom) return out;
-        const dow = new Date(body.dateFrom + 'T12:00:00').getDay();
-        out.otMultiplier = (isPublicHoliday(body.dateFrom) || dow === 0 || dow === 6) ? 3 : 1.5;
-        if (body.otEndTime && HHMM_RE.test(body.otEndTime)) {
-          const [eh, em] = body.otEndTime.split(':').map(Number);
-          const otMins = (eh * 60 + em) - (17 * 60 + 30);
-          out.otHours = otMins > 0 ? Math.round(otMins / 60 * 100) / 100 : 0;
-        }
-        return out;
-      })()) : {}),
+        otHours20: 0,
+        otHours30: 0,
+      } : deriveOfficeOtFromEndTime(body.dateFrom, body.otEndTime, S)) : {}),
+      ...(type === 'ot' && !isDriverOT ? (() => {
+        const tz = webScanTimezoneForDate(targetUser.employeeNo, body.dateFrom);
+        return tz ? { timezone: tz } : {};
+      })() : {}),
+      ...(type === 'holiday-work' ? (() => {
+        const otSplit = body.compensationMode === 'paid'
+          ? splitHolidayWorkOtMinutes(body.workStartTime, body.workEndTime, S)
+          : { otHours20: 0, otHours30: 0 };
+        return {
+          days: body.compensationMode === 'annual-leave' ? 1 : 0,
+          otHours20: otSplit.otHours20,
+          otHours30: otSplit.otHours30,
+        };
+      })() : {}),
+      ...(type === 'early-morning' ? { earlyMorningTier: Number(body.earlyMorningTier), days: 0 } : {}),
       // SECURITY FIX 2026-08-09 (2nd-pass audit finding 1, XSS-adjacent): mileage/distance were
       // validated (isFiniteNonNegNumber) but not normalized -- stored as whatever type the client
       // sent, so a numeric-looking string would still pass validation and then reach an innerHTML
@@ -4309,9 +5311,9 @@ app.post('/api/leaves', (req, res) => {
   } catch(e) {
     res.status(500).json({ success:false, error:e.message });
   }
-});
+}));
 
-app.put('/api/leaves/:id', (req, res) => {
+app.put('/api/leaves/:id', withLeavesLock((req, res) => {
   try {
     const id = parseInt(req.params.id);
     const updates = parseBody(req);
@@ -4356,6 +5358,9 @@ app.put('/api/leaves/:id', (req, res) => {
       // multi-month request, same gap as POST's.
       if (leave.dateFrom && isValidDateStr(leave.dateFrom) && lockedPeriodInRange(leave.dateFrom, leave.dateTo)) {
         return res.status(400).json({ success:false, message:'This pay period is locked' });
+      }
+      if (leave.dateFrom && isValidDateStr(leave.dateFrom) && accountingConfirmedInRange(leave.dateFrom, leave.dateTo, leave.userId)) {
+        return res.status(409).json({ success:false, message:'Accounting has already confirmed tax for this period — unconfirm before making changes' });
       }
       const routeArr = Array.isArray(leave.approvalRoute) && leave.approvalRoute.length ? leave.approvalRoute : approvalRouteForRouteKey(routeKey);
       const isDelegate = live.role === 'accounting' && turnRole !== 'accounting' && isApprovalDelegationActiveForType(routeKey);
@@ -4451,6 +5456,9 @@ app.put('/api/leaves/:id', (req, res) => {
         lockedPeriodInRange(resolvedDateFromForLock, resolvedDateToForLock)) {
       return res.status(400).json({ success:false, message:'This pay period is locked' });
     }
+    if (accountingConfirmedInRange(resolvedDateFromForLock, resolvedDateToForLock, leave.userId)) {
+      return res.status(409).json({ success:false, message:'Accounting has already confirmed tax for this period — unconfirm before making changes' });
+    }
     // SECURITY FIX 2026-08-09 (2nd-pass audit, same gap as POST /api/leaves): isDriverOT here was
     // also a bare client-supplied boolean with no role check -- since this whole branch already
     // requires isOwner (checked above), `live` IS the request's owner, so `live.role` is exactly
@@ -4466,10 +5474,26 @@ app.put('/api/leaves/:id', (req, res) => {
     if (updates.type !== undefined && (typeof updates.type !== 'string' || !VALID_LEAVE_TYPES.has(updates.type))) {
       return res.status(400).json({ success:false, message:'unknown request type' });
     }
+    if (updates.type === 'comp') return res.status(400).json({ success:false, message:'comp request type is no longer accepted; use holiday-work instead' });
     const newType = (updates.type || leave.type);
+    if (newType === 'comp') return res.status(400).json({ success:false, message:'comp request type is no longer accepted; use holiday-work instead' });
     const resolvedWorkedDateForTrip = updates.workedDate !== undefined ? updates.workedDate : leave.workedDate;
     if (isCompanyTripClaimBlocked(newType, resolvedDateFromForLock, resolvedWorkedDateForTrip)) {
       return res.status(400).json({ success:false, message: companyTripNoClaimMessage() });
+    }
+    if (isFullDayPersonalLeaveClaimBlocked(newType, ownerUser || live, resolvedDateFromForLock)) {
+      return res.status(400).json({ success:false, message: fullDayPersonalLeaveNoClaimMessage() });
+    }
+    if (isAbroadClaimBlocked(newType, ownerUser || live, resolvedDateFromForLock)) {
+      return res.status(400).json({ success:false, message: abroadNoClaimMessage() });
+    }
+    if (newType === 'holiday-work') {
+      const hwErrPut = holidayWorkSubmitBlockReason(ownerUser || live, resolvedDateFromForLock);
+      if (hwErrPut) return res.status(400).json({ success:false, message: hwErrPut });
+    }
+    if (newType === 'abroad') {
+      const abErrPut = abroadSubmitBlockReason(ownerUser || live);
+      if (abErrPut) return res.status(400).json({ success:false, message: abErrPut });
     }
     if (newType === 'late-out') {
       const lateOutErr = lateOutSubmitBlockReason(live, resolvedDateFromForLock);
@@ -4525,6 +5549,12 @@ app.put('/api/leaves/:id', (req, res) => {
       }
       const upcountryLocErr = validateUpcountryLocations(resolvedLocations);
       if (upcountryLocErr) return res.status(400).json({ success:false, message:upcountryLocErr });
+      if (isNonWorkDayForComp(resolvedDateFromForLock)) {
+        return res.status(400).json({ success:false, message:'Upcountry is for weekdays only — on weekends/public holidays submit holiday work (the location counts as upcountry)' });
+      }
+      if (hasActiveHolidayWork(leaves, leave.userId, resolvedDateFromForLock, leave.id)) {
+        return res.status(409).json({ success:false, message:'A holiday work request already exists for this date — upcountry is included automatically' });
+      }
     }
     // CORRECTNESS FIX 2026-08-16 (Opus re-audit of C-3): the POST-side "workedDate required and
     // must be a non-work day" check has no PUT-side twin -- saveLeaveEdit() never sends `type` at
@@ -4534,14 +5564,32 @@ app.put('/api/leaves/:id', (req, res) => {
     // above: an owner editing an existing pending comp request's workedDate to an ordinary weekday
     // (or converting another pending type into 'comp' without ever setting a valid workedDate)
     // must be re-checked here, not just at original submission.
-    if (newType === 'comp') {
-      const resolvedWorkedDate = updates.workedDate !== undefined ? updates.workedDate : leave.workedDate;
-      if (!resolvedWorkedDate || !isValidDateStr(resolvedWorkedDate)) {
-        return res.status(400).json({ success:false, message:'workedDate is required and must be a valid YYYY-MM-DD date for compensatory day requests' });
+    if (newType === 'holiday-work') {
+      const resolvedCompMode = updates.compensationMode !== undefined ? updates.compensationMode : leave.compensationMode;
+      const resolvedWorkStart = updates.workStartTime !== undefined ? updates.workStartTime : leave.workStartTime;
+      const resolvedWorkEnd = updates.workEndTime !== undefined ? updates.workEndTime : leave.workEndTime;
+      const resolvedLocations = updates.locations !== undefined ? updates.locations : leave.locations;
+      const resolvedAttachment = updates.attachment !== undefined ? updates.attachment : leave.attachment;
+      const resolvedFileCount = updates.fileCount !== undefined ? updates.fileCount : leave.fileCount;
+      if (!['annual-leave', 'paid'].includes(resolvedCompMode)) {
+        return res.status(400).json({ success:false, message:'compensationMode must be annual-leave or paid for holiday-work requests' });
       }
-      if (!isNonWorkDayForComp(resolvedWorkedDate)) {
-        return res.status(400).json({ success:false, message:'workedDate must be a weekend or public holiday' });
+      if (!resolvedWorkStart || !HHMM_RE.test(resolvedWorkStart) ||
+          !resolvedWorkEnd || !HHMM_RE.test(resolvedWorkEnd)) {
+        return res.status(400).json({ success:false, message:'workStartTime and workEndTime are required and must be in HH:MM format for holiday-work requests' });
       }
+      if (parseHHMMToMins(resolvedWorkEnd) <= parseHHMMToMins(resolvedWorkStart)) {
+        return res.status(400).json({ success:false, message:'workEndTime must be after workStartTime' });
+      }
+      const hwLocErrPut = validateHolidayWorkLocation(resolvedLocations);
+      if (hwLocErrPut) return res.status(400).json({ success:false, message:hwLocErrPut });
+      if (!resolvedAttachment && !(Number(resolvedFileCount) > 0)) {
+        return res.status(400).json({ success:false, message:'Working Report attachment is required for holiday-work requests' });
+      }
+    }
+    if (newType === 'early-morning') {
+      const emErrPut = earlyMorningSubmitBlockReason(ownerUser || live, resolvedDateFromForLock);
+      if (emErrPut) return res.status(400).json({ success:false, message: emErrPut });
     }
     const oldStatus = leave.status;
     // SECURITY FIX 2026-08-13 (Opus-planned leaves-whitelist, phase 1): was `{ ...updates }` plus a
@@ -4622,25 +5670,55 @@ app.put('/api/leaves/:id', (req, res) => {
       // trust whatever the client sent, since leaveDayCoverage() checks `(l.days||0) > 0` BEFORE
       // ever looking at hourlyStart/hourlyEnd.
       safeUpdates.days = 0;
-    } else if (newType === 'comp') {
-      // SECURITY/CORRECTNESS FIX 2026-08-16 (Opus audit C-1): mirrors the POST-side fix -- comp's
-      // `days` must always be forced to 1 server-side, the resolved type included (an edit that
-      // converts another type into 'comp' must not inherit a stale/forged `days` value either).
-      safeUpdates.days = 1;
-      // CORRECTNESS FIX 2026-08-16 (Opus audit C-2, PUT-side mirror): same duplicate guard as
-      // personal-car's PUT-side fix below.
-      // BUG FIX 2026-08-16 (Opus re-audit): originally compared against resolvedDateFromForLock
-      // (this record's resolved dateFrom) on the wrong assumption that dateFrom/workedDate are
-      // always kept equal -- they're independent fields (workedDate is in comp's own
-      // TYPE_SCOPED_LEAVE_FIELDS entry and can be edited separately from dateFrom), so a PUT that
-      // sets a different workedDate than dateFrom slipped straight past this guard. Compare against
-      // the RESOLVED workedDate instead, same resolved-value pattern used throughout this handler.
-      const resolvedWorkedDateForDupe = safeUpdates.workedDate !== undefined ? safeUpdates.workedDate : leave.workedDate;
-      const dupComp = leaves.some(l =>
-        l.id !== leave.id && l.userId === leave.userId && l.type === 'comp' &&
-        l.workedDate === resolvedWorkedDateForDupe && l.status !== 'rejected');
-      if (dupComp) {
-        return res.status(409).json({ success:false, message:'A compensatory day request for this worked date already exists' });
+    } else if (newType === 'abroad') {
+      // Resolved-value validation: an edit that only moves dateTo must still be checked against
+      // the location/reason the record will actually END UP with, not just the keys this request
+      // carried. Same rule as every other type in this handler.
+      const resolvedLocation = safeUpdates.location !== undefined ? safeUpdates.location : leave.location;
+      const resolvedReason = safeUpdates.reason !== undefined ? safeUpdates.reason : leave.reason;
+      const abroadErrPut = validateAbroadRecord({
+        dateFrom: resolvedDateFromForLock,
+        dateTo: resolvedDateToForLock,
+        location: resolvedLocation,
+        reason: resolvedReason,
+      });
+      if (abroadErrPut) return res.status(400).json({ success:false, message:abroadErrPut });
+      safeUpdates.days = abroadSpanDays(resolvedDateFromForLock, resolvedDateToForLock);
+    } else if (newType === 'holiday-work') {
+      const resolvedCompModeDays = safeUpdates.compensationMode !== undefined ? safeUpdates.compensationMode : leave.compensationMode;
+      safeUpdates.days = resolvedCompModeDays === 'annual-leave' ? 1 : 0;
+      const resolvedWs = safeUpdates.workStartTime !== undefined ? safeUpdates.workStartTime : leave.workStartTime;
+      const resolvedWe = safeUpdates.workEndTime !== undefined ? safeUpdates.workEndTime : leave.workEndTime;
+      if (resolvedCompModeDays === 'paid') {
+        const otSplit = splitHolidayWorkOtMinutes(resolvedWs, resolvedWe, getAppSettings());
+        safeUpdates.otHours20 = otSplit.otHours20;
+        safeUpdates.otHours30 = otSplit.otHours30;
+      } else {
+        safeUpdates.otHours20 = 0;
+        safeUpdates.otHours30 = 0;
+      }
+      const dupHolidayWork = leaves.some(l =>
+        l.id !== leave.id && l.userId === leave.userId && l.type === 'holiday-work' &&
+        l.dateFrom === resolvedDateFromForLock && l.status !== 'rejected');
+      if (dupHolidayWork) {
+        return res.status(409).json({ success:false, message:'A holiday work request for this date already exists' });
+      }
+    } else if (newType === 'early-morning') {
+      safeUpdates.days = 0;
+      const emDayPut = attendanceDayForUser(ownerUser || live, resolvedDateFromForLock);
+      const resolvedTier = updates.earlyMorningTier !== undefined ? Number(updates.earlyMorningTier) : Number(leave.earlyMorningTier);
+      if (![1, 2].includes(resolvedTier)) {
+        return res.status(400).json({ success:false, message:'earlyMorningTier must be 1 or 2' });
+      }
+      if (!earlyMorningTierAllowed(emDayPut && emDayPut.checkIn, resolvedTier, getAppSettings())) {
+        return res.status(400).json({ success:false, message:'Selected early morning tier does not match check-in time' });
+      }
+      safeUpdates.earlyMorningTier = resolvedTier;
+      const dupEarlyMorning = leaves.some(l =>
+        l.id !== leave.id && l.userId === leave.userId && l.type === 'early-morning' &&
+        l.dateFrom === resolvedDateFromForLock && l.status !== 'rejected');
+      if (dupEarlyMorning) {
+        return res.status(409).json({ success:false, message:'An early morning request for this date already exists' });
       }
     } else if (safeUpdates.days !== undefined) {
       safeUpdates.days = Number(safeUpdates.days);
@@ -4675,6 +5753,8 @@ app.put('/api/leaves/:id', (req, res) => {
       // otMultiplier above -- what the record will actually end up with, not just what this request
       // happened to send. `|| 0` matches POST's own driver-OT branch.
       safeUpdates.otHours = Number(updates.otHours !== undefined ? updates.otHours : leave.otHours) || 0;
+      safeUpdates.otHours20 = 0;
+      safeUpdates.otHours30 = 0;
       // 2026-08-10 (Opus audit F4, tightened by re-audit finding 4): the coercion above normalizes
       // TYPE but never re-checked the resolved value's actual bounds -- `Number(x) || 0` turns NaN
       // into 0 but PRESERVES a negative number, so a stored otHours:-8 would pass a `> OT_HOURS_MAX`
@@ -4687,17 +5767,17 @@ app.put('/api/leaves/:id', (req, res) => {
       }
     } else if (newType === 'ot' && !editIsDriverOT) {
       const dateFrom = safeUpdates.dateFrom || leave.dateFrom;
-      safeUpdates.otMultiplier = 1.5;
-      safeUpdates.otHours = 0;
-      if (dateFrom) {
-        const dow = new Date(dateFrom + 'T12:00:00').getDay();
-        safeUpdates.otMultiplier = (isPublicHoliday(dateFrom) || dow === 0 || dow === 6) ? 3 : 1.5;
-        const otEndTime = safeUpdates.otEndTime !== undefined ? safeUpdates.otEndTime : leave.otEndTime;
-        if (otEndTime && HHMM_RE.test(otEndTime)) {
-          const [eh, em] = otEndTime.split(':').map(Number);
-          const otMins = (eh * 60 + em) - (17 * 60 + 30);
-          safeUpdates.otHours = otMins > 0 ? Math.round(otMins / 60 * 100) / 100 : 0;
-        }
+      if (isNonWorkDayForComp(dateFrom)) {
+        return res.status(400).json({ success:false, message: OFFICE_OT_WEEKEND_MSG });
+      }
+      const otEndTime = safeUpdates.otEndTime !== undefined ? safeUpdates.otEndTime : leave.otEndTime;
+      const derivedOfficeOt = deriveOfficeOtFromEndTime(dateFrom, otEndTime, getAppSettings());
+      Object.assign(safeUpdates, derivedOfficeOt);
+      if (!(derivedOfficeOt.otHours > 0)) {
+        return res.status(400).json({ success:false, message: 'End time must be after 17:30' });
+      }
+      if (derivedOfficeOt.otHours > OT_HOURS_MAX) {
+        return res.status(400).json({ success:false, message:`otHours must be a non-negative number, ${OT_HOURS_MAX} or fewer` });
       }
     }
     if (newType === 'ot') {
@@ -4719,6 +5799,17 @@ app.put('/api/leaves/:id', (req, res) => {
       })) {
         return res.status(400).json({ success:false, message:`Driver OT for this date cannot exceed ${OT_HOURS_MAX} hours in total` });
       }
+      if (!editIsDriverOT && hasActiveHolidayWork(leaves, leave.userId, resolvedDateFromForLock, leave.id)) {
+        return res.status(409).json({ success:false, message:'A holiday work request already exists for this date — holiday OT is paid from that request (paid mode), do not submit a separate OT' });
+      }
+    }
+    if (newType === 'holiday-work' && hasActiveOfficeOt(leaves, leave.userId, resolvedDateFromForLock, leave.id)) {
+      return res.status(409).json({ success:false, message:'An OT request already exists for this date — do not stack holiday work with office OT' });
+    }
+    if (newType === 'holiday-work' && leaves.some(l =>
+        l.id !== leave.id && l.userId === leave.userId && l.type === 'upcountry' &&
+        l.dateFrom === resolvedDateFromForLock && l.status !== 'rejected')) {
+      return res.status(409).json({ success:false, message:'An upcountry request already exists for this date — use the holiday-work form instead' });
     }
     // 2026-08-10 (round-3 audit, item 3): on a confirmed type change the `{...leave, ...safeUpdates}`
     // merge used to keep the OLD type's fields sitting on the record forever (e.g. an 'annual'
@@ -4730,11 +5821,21 @@ app.put('/api/leaves/:id', (req, res) => {
     // request explicitly wrote (the recompute blocks above already populated safeUpdates for the
     // new type by this point).
     const merged = { ...leave, ...safeUpdates };
+    if (newType === 'ot' && !editIsDriverOT) {
+      const owner = ownerUser || live;
+      const tz = webScanTimezoneForDate(owner && owner.employeeNo, resolvedDateFromForLock);
+      if (tz) merged.timezone = tz;
+      else delete merged.timezone;
+    } else {
+      delete merged.timezone;
+    }
     const overlapPut = findOverlappingLeave(leaves, leave.userId, newType, resolvedDateFromForLock, resolvedDateToForLock, leave.id);
     if (overlapPut) {
       return res.status(409).json({ success:false, message:'Overlapping leave request already exists for this date range' });
     }
-    const balErrPut = leaveBalanceError(leaves, ownerUser || live, newType, leaveMinutesOf(merged), leave.id);
+    const tenureErrPut = annualLeaveServiceError(ownerUser || live, newType, resolvedDateFromForLock);
+    if (tenureErrPut) return res.status(403).json({ success:false, message: tenureErrPut });
+    const balErrPut = leaveBalanceError(leaves, ownerUser || live, newType, leaveMinutesOf(merged), leave.id, resolvedDateFromForLock);
     if (balErrPut) return res.status(409).json({ success:false, message: balErrPut });
     // SECURITY FIX 2026-08-13 (Opus-planned leaves-whitelist, phase 2): phase 1's filterLeaveFields()
     // only cleans the INCOMING `updates` -- it can't touch a field the record already carries from
@@ -4753,7 +5854,8 @@ app.put('/api/leaves/:id', (req, res) => {
     }
     leaves[idx] = {
       ...merged,
-      status: initialStatusForRouteKey(newRouteKey), approvalRoute: approvalRouteForRouteKey(newRouteKey),
+      status: initialStatusForRequester(newRouteKey, ownerUser ? ownerUser.role : null),
+      approvalRoute: approvalRouteForRequester(newRouteKey, ownerUser ? ownerUser.role : null),
       approver: null, approvedAt: null,
     };
     saveLeaves(leaves);
@@ -4765,9 +5867,51 @@ app.put('/api/leaves/:id', (req, res) => {
   } catch(e) {
     res.status(500).json({ success:false, error:e.message });
   }
-});
+}));
 
-app.delete('/api/leaves/:id', (req, res) => {
+// Dual-sync with app.js: isCancellableApprovedLeave
+function isCancellableApprovedLeave(leave, asOfYmd) {
+  if (!leave || leave.status !== 'approved') return false;
+  // 2026-09-21: 'abroad' joins the owner-cancellable set. A trip that gets called off must be
+  // removable -- unlike a one-day claim it spans many days, pays per day and hides absences, so
+  // leaving it permanent was the worst case of the approved-record lock. Same before-start-date
+  // rule as leave; the MD-approved-payroll guard and audit log below already cover it.
+  if (!['annual', 'sick', 'business', 'abroad'].includes(leave.type)) return false;
+  if (!leave.dateFrom || !isValidDateStr(leave.dateFrom)) return false;
+  const asOf = asOfYmd || bangkokDateStr();
+  return asOf < leave.dateFrom;
+}
+
+// Dual-sync with app.js processYearEndCarryForward: if Accounting already snapshotted next
+// year's leftover, cancelling unused approved annual leave must raise that snapshot. No-op
+// when next year's key is absent (year-end has not been processed yet).
+function refreshSnapshottedCarryForward(leaves, user, dateFrom) {
+  if (!user || !isValidDateStr(dateFrom)) return;
+  const leaveYear = Number(dateFrom.slice(0, 4));
+  if (!Number.isFinite(leaveYear)) return;
+  const nextYear = leaveYear + 1;
+  const nextKey = `${nextYear}_${user.id}`;
+  const settings = readSettings();
+  const cf = settings.leaveCarryForward;
+  if (!cf || typeof cf !== 'object' || Array.isArray(cf) || cf[nextKey] === undefined) return;
+  const maxCF = Math.max(0, Math.min(60, Number(getAppSettings().leave && getAppSettings().leave.carryForwardMax) || 5));
+  const yStart = `${leaveYear}-01-01`, yEnd = `${leaveYear}-12-31`;
+  const usedDays = leaves.filter(l =>
+    l.userId === user.id && l.type === 'annual' && l.status === 'approved' &&
+    l.dateFrom >= yStart && l.dateFrom <= yEnd
+  ).reduce((sum, l) => sum + (l.days || 0), 0);
+  const compEarned = getApprovedHolidayWorkAnnualLeaveDays(leaves, user.id, leaveYear)
+    + (Number(cf[`comp_${leaveYear}_${user.id}`]) || 0);
+  const maxAnnual = annualLeaveEntitlementDays(user, yEnd);
+  const combinedAvailable = maxAnnual + (Number(cf[`${leaveYear}_${user.id}`]) || 0) + compEarned;
+  const combinedLeftover = Math.max(0, combinedAvailable - usedDays);
+  const cfMerged = Math.min(combinedLeftover, maxCF);
+  cf[nextKey] = cfMerged;
+  cf[`comp_${nextYear}_${user.id}`] = 0;
+  writeJSON('settings.json', settings);
+}
+
+app.delete('/api/leaves/:id', withLeavesLock((req, res) => {
   try {
     const id = parseInt(req.params.id);
     const leaves = readLeaves();
@@ -4786,21 +5930,36 @@ app.delete('/api/leaves/:id', (req, res) => {
     // cancel while pending; already-approved personal-car (including legacy auto-approved rows)
     // can still be cancelled by the owner — the UI Cancel button has always rendered for those.
     // Period-lock / MD-freeze guards match every other money-affecting state transition.
+    // 2026-09-11: approved annual/sick/business can be cancelled by the owner before the leave
+    // start date (Bangkok calendar). Hard-delete drops used minutes so the balance returns.
     const isCancellablePersonalCar = leave.type === 'personal-car' && leave.status === 'approved' && !leave.approver;
-    if (!String(leave.status).startsWith('pending') && !isCancellablePersonalCar) {
+    const approvedLeaveCancel = isCancellableApprovedLeave(leave);
+    if (!String(leave.status).startsWith('pending') && !isCancellablePersonalCar && !approvedLeaveCancel) {
+      if (leave.status === 'approved' && ['annual', 'sick', 'business'].includes(leave.type)) {
+        if (!leave.dateFrom || !isValidDateStr(leave.dateFrom)) {
+          return res.status(400).json({ success:false, message:'Cannot verify pay period for this request' });
+        }
+        return res.status(400).json({ success:false, message:'Cannot cancel leave on or after the leave date' });
+      }
       return res.status(400).json({ success:false, message:'Only pending requests can be cancelled' });
     }
-    if (isCancellablePersonalCar) {
-      if (!leave.dateFrom || !isValidDateStr(leave.dateFrom)) {
-        return res.status(400).json({ success:false, message:'Cannot verify pay period for this request' });
-      }
-      if (lockedPeriodInRange(leave.dateFrom, leave.dateTo)) {
-        return res.status(400).json({ success:false, message:'This pay period is locked' });
-      }
-      const periodStart = getPeriodStartForDate(leave.dateFrom);
+    if (!leave.dateFrom || !isValidDateStr(leave.dateFrom)) {
+      return res.status(400).json({ success:false, message:'Cannot verify pay period for this request' });
+    }
+    // Same period guards as owner PUT: locked and Accounting-confirmed periods cannot drop
+    // pending rows from the approval queue. MD-freeze applies to money-bearing personal-car
+    // cancels and to approved leave cancels (days already in payroll), matching the previous
+    // personal-car-only branch.
+    if (lockedPeriodInRange(leave.dateFrom, leave.dateTo)) {
+      return res.status(400).json({ success:false, message:'This pay period is locked' });
+    }
+    if (accountingConfirmedInRange(leave.dateFrom, leave.dateTo, leave.userId)) {
+      return res.status(409).json({ success:false, message:'Accounting has already confirmed tax for this period — unconfirm before making changes' });
+    }
+    if (isCancellablePersonalCar || approvedLeaveCancel) {
       const finGuard = readJSON('finalize.json', {});
       if (finGuard === null) return res.status(503).json({ success:false, message:'Service temporarily unavailable' });
-      if (finGuard[getMdApprovalKey(periodStart, leave.userId)]?.approved === true) {
+      if (mdApprovedPeriodInRange(leave.dateFrom, leave.dateTo, leave.userId)) {
         return res.status(409).json({ success:false, message:'Payroll for this period has already been approved by the Managing Director -- ask them to revoke approval first' });
       }
     }
@@ -4813,17 +5972,27 @@ app.delete('/api/leaves/:id', (req, res) => {
     // exclude 'rejected'); this is the minimum -- at least a server.log line recording who
     // cancelled what, for the one case (isCancellablePersonalCar) that removes money-bearing data
     // an owner could otherwise log-and-unlog with zero record within an open pay period.
+    // 2026-09-11: same log line for approved leave cancels (used days leaving the ledger).
     if (isCancellablePersonalCar) {
       console.log('[LEAVE] personal-car cancelled', JSON.stringify({ id, userId: leave.userId, dateFrom: leave.dateFrom, personalCarRate: leave.personalCarRate }));
+    } else if (approvedLeaveCancel) {
+      console.log('[LEAVE] approved leave cancelled', JSON.stringify({ id, userId: leave.userId, type: leave.type, dateFrom: leave.dateFrom, dateTo: leave.dateTo, days: leave.days }));
     }
     leaves.splice(idx, 1);
     saveLeaves(leaves);
+    if (approvedLeaveCancel && leave.type === 'annual') {
+      try {
+        refreshSnapshottedCarryForward(leaves, live, leave.dateFrom);
+      } catch (e) {
+        console.error('[LEAVE] carry-forward refresh after cancel failed', e && e.message);
+      }
+    }
     broadcast({ type: 'LEAVE_DELETED', id });
     res.json({ success:true });
   } catch(e) {
     res.status(500).json({ success:false, error:e.message });
   }
-});
+}));
 
 
 // RELIABILITY FIX 2026-08-13 (E-1, Opus audit): had no socket timeout, no error listener on the
@@ -4990,7 +6159,7 @@ const uploadLimiter = rateLimit({
   keyGenerator: (req) => req.user ? `upload:${req.user.sub}` : ipKeyGenerator(req.ip),
   message: { success:false, message:'Too many uploads -- please wait before trying again' }
 });
-app.post('/api/upload', uploadLimiter, (req, res) => {
+app.post('/api/upload', uploadLimiter, withUploadOwnersLock((req, res) => {
   // SECURITY FIX 2026-08-05 (Opus audit, F-2 defense-in-depth): same rationale as GET /api/leaves
   // above -- this route never referenced req.user either, so an arbitrary-file-write primitive
   // (allowlisted extensions, but no auth) had nothing to fail closed on if the global middleware
@@ -5040,7 +6209,7 @@ app.post('/api/upload', uploadLimiter, (req, res) => {
   } catch(e) {
     res.status(500).json({ success: false, message: e.message });
   }
-});
+}));
 
 app.get('/api/upload/:filename', (req, res) => {
   // SECURITY FIX 2026-08-05 (Opus audit, F-2 defense-in-depth): same rationale as the two routes
@@ -5133,7 +6302,7 @@ app.post('/api/attachments/info', requireRole('md', 'accounting', 'manager'), (r
 // in the first place (`l.attachment && l.type !== 'clear-attachments' && l.dateFrom < cutoff`).
 // A forged targetIds can still only ever match records that genuinely satisfy this filter; it can
 // no longer point anywhere outside it.
-app.post('/api/attachments/clear', requireRole('md'), (req, res) => {
+app.post('/api/attachments/clear', requireRole('md'), withLeavesLock((req, res) => {
   const { leaveId } = parseBody(req);
   const id = parseInt(leaveId);
   if (!Number.isInteger(id)) return res.status(400).json({ success:false, message:'leaveId required' });
@@ -5213,7 +6382,7 @@ app.post('/api/attachments/clear', requireRole('md'), (req, res) => {
   // real handler for it (see LEAVES_ATTACHMENTS_CLEARED in the WS dispatch).
   broadcast({ type: 'LEAVES_ATTACHMENTS_CLEARED', clearedIds });
   res.json({ success:true, cleared, clearedIds });
-});
+}));
 
 // SECURITY FIX 2026-08-04 (4th Opus audit, CRITICAL): the nginx-level deny rules added earlier
 // today (www.attendance-server-deny.conf) only cover port 80/443 -- this Node process listens
@@ -5251,8 +6420,10 @@ app.get('/api/finalize', (req, res) => {
       if (k.endsWith(suffix)) own[k] = data[k];
     }
     res.json(own);
+  } catch(e) {
+    console.error('[finalize] GET failed', e && e.message);
+    return res.status(503).json({ success:false, message:'Service temporarily unavailable' });
   }
-  catch(e) { res.json({}); }
 });
 
 // F-12: per-key PATCH instead of whole-object overwrite. Every client-side caller of
@@ -5460,13 +6631,15 @@ const DEFAULT_APP_SETTINGS = {
     earlyMorning1: 240, earlyMorning2: 480,
     earlyThreshold1Min: 450, earlyThreshold2Min: 390,
     lateNight1: 240, lateNight2: 480, lateNightThreshold1Hour: 19, lateNightThreshold2Hour: 20,
+    holidayTransport: 500,
     // 2026-07-31: centralized from per-employee fields (diligenceAllowance/longDistanceRate/
     // longDistanceThresholdKm/personalCarRate on the user record) -- defaults exactly match the
     // one real value each was ever set to in production, so this is behavior-neutral on deploy.
     diligence: 200, longDistance: 150, longDistanceThresholdKm: 250, personalCar: 1000, phone: 1000
   },
   workSchedule: { standardStartHour: 8, standardStartMinute: 30 },
-  leave: { carryForwardMax: 5, carryForwardExpiryMonth: 3, carryForwardExpiryDay: 31, carryForwardNotifyDays: 30 },
+  leave: { carryForwardMax: 5, carryForwardExpiryMonth: 3, carryForwardExpiryDay: 31, carryForwardNotifyDays: 30, annualLeaveMinMonths: 6, annualLeaveTiers: DEFAULT_ANNUAL_LEAVE_TIERS.map(t => ({ ...t })), sickLeaveDays: DEFAULT_SICK_LEAVE_DAYS, businessLeaveDays: DEFAULT_BUSINESS_LEAVE_DAYS },
+  map: { cartoApiKey: '' },
   allowanceTypes: [],
   lateDeductPolicy: {
     enabled: false, effectiveFromPeriod: '',
@@ -5489,7 +6662,7 @@ const DEFAULT_APP_SETTINGS = {
 // etc.) scattered across computePayroll()/renderPayslip()/payslipXlsx.js/the Finalize Payroll
 // page with a single settings-driven eligibility table, so "who gets this allowance" is a
 // config edit instead of a code change requiring both engines to be touched in lockstep.
-const ALLOWANCE_KEYS = ['diligence', 'longDistance', 'personalCar', 'upcountry', 'earlyLate', 'ot', 'phone'];
+const ALLOWANCE_KEYS = ['diligence', 'longDistance', 'personalCar', 'upcountry', 'earlyLate', 'ot', 'phone', 'holidayWork', 'abroad'];
 const ROLE_KEYS = ['md', 'manager', 'accounting', 'user', 'marketing', 'driver'];
 const DEFAULT_ALLOWANCE_ELIGIBILITY = {
   diligence:    ['driver'],
@@ -5498,11 +6671,16 @@ const DEFAULT_ALLOWANCE_ELIGIBILITY = {
   upcountry:    ['md', 'manager', 'user', 'driver'],
   earlyLate:    ['md', 'manager', 'user', 'driver'],
   ot:           ['md', 'manager', 'user', 'driver'],
+  holidayWork:  ['md', 'manager', 'user'],
   // 2026-07-31: phone allowance has zero real correlation with role (only 1 of 4 'user'-role
   // employees ever had it) -- this default is intentionally permissive since the actual gate is
   // the per-employee user.phoneAllowanceEligible flag (see computePayroll), same pattern as
   // personalCar. A missing key here would throw in isAllowanceEligible() below, not just be over-permissive.
   phone:        ['md', 'manager', 'accounting', 'user', 'marketing', 'driver'],
+  // 2026-09-21: Abroad (work-abroad trip allowance). MUST exist here even though the live
+  // settings.json has no allowanceEligibility.abroad yet -- isAllowanceEligible() falls back to
+  // DEFAULT_ALLOWANCE_ELIGIBILITY[key].includes(role), which throws on a missing key.
+  abroad:       ['manager', 'user'],
 };
 // allowanceEligibilityConfig: the `allowanceEligibility` sub-object of appSettings (may be
 // missing entirely, or missing individual keys -- per-key fallback so a partially written
@@ -5516,6 +6694,32 @@ function isAllowanceEligible(allowanceEligibilityConfig, role, key) {
 // count as a device scan. Must stay identical in app.js and server.js.
 function isDeviceScanSource(source) {
   return source === 'device';
+}
+// Weekends/public holidays keep status 'weekend'/'holiday' even with a real scan.
+// Early morning still applies on those days and may be paid with holiday work (user 2026-08-31).
+function isEarlyMorningDayStatus(status) {
+  return status === 'present' || status === 'late' || status === 'weekend' || status === 'holiday';
+}
+function isFullDayPersonalLeaveStatus(status) {
+  return status === 'leave-annual' || status === 'leave-sick' || status === 'leave-business';
+}
+function isRestAttendanceDay(d) {
+  return !!(d && (d.isWeekend || d.isPubHoliday || d.status === 'weekend' || d.status === 'holiday'));
+}
+// Auto early: Hikvision device scan only. Rest days (weekend/public holiday) pay only when
+// approved holiday-work exists for that date — then both may apply (user 2026-08-31).
+function deviceScanQualifiesForEarlyMorning(d, holidayWorkDateSet) {
+  if (!d || !d.checkIn || d.status === 'company-trip') return false;
+  if (!isEarlyMorningDayStatus(d.status) || !isDeviceScanSource(d.checkInSource)) return false;
+  if (isRestAttendanceDay(d) && !(holidayWorkDateSet && holidayWorkDateSet.has(d.date))) return false;
+  return true;
+}
+// Late night pay: device check-out + approved late-out. Rest days also need approved holiday-work.
+function deviceScanQualifiesForLateNight(d, holidayWorkDateSet) {
+  if (!d || !d.lateOut || !d.lateApproved || d.status === 'company-trip') return false;
+  if (isFullDayPersonalLeaveStatus(d.status) || !isDeviceScanSource(d.checkOutSource)) return false;
+  if (isRestAttendanceDay(d) && !(holidayWorkDateSet && holidayWorkDateSet.has(d.date))) return false;
+  return true;
 }
 // ===== END DUAL-SYNC BLOCK =====
 
@@ -5542,6 +6746,9 @@ function getAppSettings() {
       S.tax.brackets = raw.tax.brackets.map(b => ({ ...b, upTo: b.upTo === null ? Infinity : b.upTo }));
     }
   }
+  S.leave.annualLeaveTiers = normalizeAnnualLeaveTiers(S.leave.annualLeaveTiers);
+  S.leave.sickLeaveDays = normalizeQuotaDays(S.leave.sickLeaveDays, DEFAULT_SICK_LEAVE_DAYS);
+  S.leave.businessLeaveDays = normalizeQuotaDays(S.leave.businessLeaveDays, DEFAULT_BUSINESS_LEAVE_DAYS);
   return S;
 }
 
@@ -5568,23 +6775,46 @@ function isCompanyTripDay(dateStr) {
 // Company Trip is a paid day off with no work expected of anyone. These types pay extra
 // (allowance, OT, or a compensatory day claimed from having "worked") -- none of them may be
 // submitted or paid for a company-trip date. Matches app.js blockIfCompanyTrip() call sites.
-const COMPANY_TRIP_NO_CLAIM_TYPES = new Set(['ot', 'upcountry', 'late-out', 'long-distance', 'personal-car', 'comp']);
+const COMPANY_TRIP_NO_CLAIM_TYPES = new Set(['ot', 'upcountry', 'late-out', 'long-distance', 'personal-car', 'holiday-work']);
 function companyTripNoClaimMessage() {
   return 'Company Trip days are a day off -- no extra allowances or OT can be claimed';
 }
 function isCompanyTripClaimBlocked(type, dateFrom, workedDate) {
   if (!COMPANY_TRIP_NO_CLAIM_TYPES.has(type)) return false;
-  const claimDate = type === 'comp' ? (workedDate || dateFrom) : dateFrom;
+  const claimDate = dateFrom;
   return !!(claimDate && isCompanyTripDay(claimDate));
+}
+
+// Full-day annual/sick/business leave is paid time off. Daily claims still need a check-in
+// gate, but a leftover scan must not unlock OT / Upcountry / Late Night / etc.
+const FULL_LEAVE_NO_CLAIM_TYPES = new Set(['ot', 'upcountry', 'late-out', 'long-distance', 'personal-car', 'early-morning']);
+function fullDayPersonalLeaveNoClaimMessage() {
+  return 'Full-day leave is paid time off -- daily allowances and OT cannot be claimed';
+}
+function isFullDayPersonalLeaveClaimBlocked(type, user, dateFrom) {
+  if (!FULL_LEAVE_NO_CLAIM_TYPES.has(type) || !user || !dateFrom) return false;
+  const day = attendanceDayForUser(user, dateFrom);
+  return isFullDayPersonalLeaveStatus(day && day.status);
+}
+// 2026-09-21 (Abroad): 'ot' is deliberately ABSENT from this set -- the user confirmed OT is the
+// one claim that still applies while abroad; the flat daily allowance covers everything else.
+// Dual-sync twin in app.js.
+const ABROAD_NO_CLAIM_TYPES = new Set(['upcountry', 'late-out', 'long-distance', 'personal-car', 'holiday-work', 'early-morning']);
+function abroadNoClaimMessage() {
+  return 'This day is covered by an approved Abroad request -- only OT can be claimed';
+}
+function isAbroadClaimBlocked(type, user, dateFrom) {
+  if (!ABROAD_NO_CLAIM_TYPES.has(type) || !user || !dateFrom) return false;
+  const day = attendanceDayForUser(user, dateFrom);
+  return !!(day && day.status === 'abroad');
 }
 
 // Port of app.js getCurrentPeriodStart() (~line 2165) and getPeriodBounds() (~line 2178).
 function getCurrentPeriodStart() {
-  const today = new Date();
-  const day = today.getDate();
+  const { y, m, day } = bangkokYmd();
   const sd = getAppSettings().payroll.periodStartDay || 21;
-  let month = today.getMonth();
-  let year = today.getFullYear();
+  let month = m;
+  let year = y;
   if (day < sd) {
     month -= 1;
     if (month < 0) { month = 11; year -= 1; }
@@ -5624,10 +6854,12 @@ function getMdApprovalKey(periodStart, userId) {
 }
 
 // Derives { [businessDateStr]: { checkIn, checkOut, status } } for ONE user across a date range,
-// mirroring app.js loadAttendanceFromBackend()'s (~line 2378) event-grouping logic exactly: 5am
-// business-day boundary, employeeNo '6344' emergency-account exclusion, late threshold 08:30
-// (driver exempt), first/last-scan grouping rules. GPS is still dropped; checkInSource/
-// checkOutSource are kept (2026-08-27) so Early Morning / Late Night can require a face scan.
+// mirroring app.js loadAttendanceFromBackend()'s event-grouping logic exactly: 5am
+// business-day boundary (local hour of the stored event_time offset), employeeNo '6344'
+// emergency-account exclusion, late threshold 08:30 (driver exempt), first/last-scan grouping.
+// Sort is by instant (compareEventsByInstant), not ISO string, so mixed +07:00/+09:00 stamps
+// stay chronological. GPS is still dropped; checkInSource/checkOutSource are kept (2026-08-27)
+// so Early Morning / Late Night can require a face scan.
 // 2026-08-06: dual-sync twin of app.js's CHECKIN_CUTOFF -- must stay identical in both files or
 // the web display and the backend-computed payroll/attendance summary silently disagree.
 const CHECKIN_CUTOFF = '13:00';
@@ -5637,7 +6869,7 @@ function buildAttendanceLogForUser(user, start, end) {
   if (loadedEvents === null) throw new Error('Service temporarily unavailable');
   const events = loadedEvents
     .filter(ev => String(ev.employeeNo) === String(user.employeeNo))
-    .sort((a, b) => (a.event_time || '').localeCompare(b.event_time || ''));
+    .sort(compareEventsByInstant);
   // 2026-08-09 (2nd-pass audit finding 4.2 follow-up): hoisted out of the per-event loop below --
   // was a hardcoded '08:30' literal; now reads the configurable standard start time once per call
   // instead of re-reading settings on every event.
@@ -5736,7 +6968,7 @@ function lateReferenceMin(row, stdStartMin) {
 function generatePeriodDays(start, end, isCurrent, user, attLog, leaves, appSettings) {
   const uid = user.id;
   const days = [];
-  const todayCopy = new Date();
+  const todayCopy = bangkokTodayDate();
   todayCopy.setHours(23, 59, 59, 0);
 
   let d = new Date(start);
@@ -5766,6 +6998,13 @@ function generatePeriodDays(start, end, isCurrent, user, attLog, leaves, appSett
       }
     } else if (isWeekend) {
       status = 'weekend';
+      const weekendRec = attLog[dateStr] || null;
+      if (weekendRec) {
+        checkIn = weekendRec.checkIn || null;
+        checkOut = weekendRec.checkOut || null;
+        checkInSource  = weekendRec.checkInSource  || null;
+        checkOutSource = weekendRec.checkOutSource || null;
+      }
     } else if (isPubHoliday && isFuture) {
       status = 'holiday';
     } else if (isFuture) {
@@ -5798,11 +7037,23 @@ function generatePeriodDays(start, end, isCurrent, user, attLog, leaves, appSett
 
     // Overlay approved leaves so approvals always appear regardless of attLog state
     // (mirrors app.js's `DATA_LEAVES.filter(l => l.userId == uid && l.status === 'approved')`).
-    if (!isWeekend && !isFuture) {
+    // 2026-09-01: weekend still skips annual/sick/business overlays, but same-date late-out /
+    // LD / time-correction must apply — otherwise holiday late-night never gets lateApproved.
+    if (!isCompanyTrip && !isFuture) {
       const ws2 = appSettings.workSchedule;
       const stdStartMin2 = (ws2?.standardStartHour ?? 8) * 60 + (ws2?.standardStartMinute ?? 30);
       leaves.filter(l => l.userId == uid && l.status === 'approved').forEach(l => {
+        // 2026-09-21 (Abroad): deliberately BEFORE the weekend guard below and with no
+        // `if (isWeekend) return` of its own -- a trip abroad covers every calendar day it spans
+        // and is paid for every one of them, so Saturday and Sunday inside the range must read as
+        // worked-abroad, not weekend-with-no-scan. Dual-sync twin in app.js.
+        if (l.type === 'abroad') {
+          const _to = l.dateTo || l.dateFrom;
+          if (l.dateFrom <= dateStr && _to >= dateStr) status = 'abroad';
+          return;
+        }
         if (['annual', 'sick', 'business'].includes(l.type)) {
+          if (isWeekend) return;
           // 2026-08-06: see leaveDayCoverage() above -- 'full' unchanged from before; 'am'/'pm'/
           // 'partial' now keep the real checkIn/checkOut instead of wiping the whole day.
           const coverage = leaveDayCoverage(l, dateStr, stdStartMin2);
@@ -5815,6 +7066,9 @@ function generatePeriodDays(start, end, isCurrent, user, attLog, leaves, appSett
           if (treatAsFull && !isPubHoliday) {
             status = l.type === 'annual' ? 'leave-annual' : l.type === 'sick' ? 'leave-sick' : 'leave-business';
             checkIn = null; checkOut = null; upcountry = false;
+            lateOut = null; lateApproved = false;
+            longDistance = false; longDistanceKm = 0; longDistanceAllowance = 0;
+            checkInSource = null; checkOutSource = null;
           } else if ((coverage === 'am' || coverage === 'pm' || coverage === 'partial') && !isPubHoliday) {
             // 2026-08-09 (Opus audit finding 5.1, dual-sync twin of app.js): two qualifying
             // hourly leaves on the same day used to let whichever record appeared LAST in the
@@ -5831,7 +7085,9 @@ function generatePeriodDays(start, end, isCurrent, user, attLog, leaves, appSett
             }
           }
         } else if (l.dateFrom === dateStr) {
-          if (l.type === 'upcountry') {
+          if (isFullDayPersonalLeaveStatus(status) && l.type !== 'time-correction') {
+            // Full-day personal leave is an off day — do not overlay Upcountry / LD / late-out.
+          } else if (l.type === 'upcountry') {
             upcountry = true;
           } else if (l.type === 'long-distance') {
             longDistance = true;
@@ -5885,6 +7141,9 @@ function lateOutSubmitBlockReason(user, dateStr) {
   const leaves = readLeaves() || [];
   const days = generatePeriodDays(dayStart, dayStart, false, user, attLog, leaves, S);
   const day = days[0];
+  if (isFullDayPersonalLeaveStatus(day && day.status)) {
+    return fullDayPersonalLeaveNoClaimMessage();
+  }
   if (!day || !day.checkOut) {
     return 'Late Night Out requires a face-scan check-out first';
   }
@@ -5896,6 +7155,14 @@ function lateOutSubmitBlockReason(user, dateStr) {
   if (!Number.isFinite(hour) || hour < thr1) {
     return `Late Night Out requires a device check-out at or after ${String(thr1).padStart(2, '0')}:00`;
   }
+  if (!day.checkIn) {
+    return 'Late Night Out requires a check-in first';
+  }
+  const hwDay = isHolidayWorkDay(dateStr);
+  const hasHw = hasActiveHolidayWork(leaves, user.id, dateStr);
+  if (hwDay && !hasHw) {
+    return 'Late night on a holiday requires a holiday work request first';
+  }
   return null;
 }
 
@@ -5903,6 +7170,8 @@ function lateOutSubmitBlockReason(user, dateStr) {
 // formula, copied line-for-line from the frontend (not re-derived from understanding).
 function computePayroll(user, start, end, periodIndex) {
   const S = getAppSettings();
+  // Monthly salary is never prorated for approved annual/sick/business leave — those days are
+  // paid leave. Only daily allowances are skipped (see fullLeaveDates below).
   const base = user.salary || 0;
   const transport = user.transport || 0;
   const posAllowance = user.positionAllowance || 0;
@@ -5941,35 +7210,69 @@ function computePayroll(user, start, end, periodIndex) {
   const canUpcountry = isAllowanceEligible(S.allowanceEligibility, user.role, 'upcountry');
   const canEarlyLate = isAllowanceEligible(S.allowanceEligibility, user.role, 'earlyLate');
   const canOT = isAllowanceEligible(S.allowanceEligibility, user.role, 'ot');
-
-  const upcountryCount = canUpcountry ? pDays.filter(d => d.upcountry && d.status !== 'company-trip').length : 0;
-
-  let earlyCount = 0, earlyLateBonus = 0, lateNightCount = 0;
-  if (canEarlyLate) {
-    const _ln1Thr = S.allowances.lateNightThreshold1Hour || S.allowances.lateNightThresholdHour || 19;
-    const _ln2Thr = S.allowances.lateNightThreshold2Hour || S.allowances.lateNightThresholdHour || 20;
-    pDays.forEach(d => {
-      if (d.checkIn && (d.status === 'present' || d.status === 'late') && isDeviceScanSource(d.checkInSource)) {
-        const [h, m] = d.checkIn.split(':').map(Number);
-        const mins = h * 60 + m;
-        if (mins <= S.allowances.earlyThreshold2Min) { earlyCount += 2; earlyLateBonus += S.allowances.earlyMorning2; }
-        else if (mins <= S.allowances.earlyThreshold1Min) { earlyCount += 1; earlyLateBonus += S.allowances.earlyMorning1; }
-      }
-      if (d.lateOut && d.lateApproved && d.status !== 'company-trip' && isDeviceScanSource(d.checkOutSource)) {
-        const lnHr = parseInt(d.lateOut);
-        // 2026-08-16 (Opus audit M-8 + user confirmation): count matches Reports/Dashboard's
-        // definition (crossed the ×2 threshold counts as 2, since it also crossed the ×1
-        // threshold on the way) rather than a flat +1 per day -- display-only, does not affect
-        // earlyLateBonus/any paid amount either way. Dual-synced with app.js's computePayroll().
-        lateNightCount += lnHr >= _ln2Thr ? 2 : 1;
-        earlyLateBonus += lnHr >= _ln2Thr ? S.allowances.lateNight2 : S.allowances.lateNight1;
-      }
-    });
-  }
+  const canHolidayWork = isAllowanceEligible(S.allowanceEligibility, user.role, 'holidayWork');
 
   const pad2 = n => String(n).padStart(2, '0');
   const periodStartStr = `${start.getFullYear()}-${pad2(start.getMonth() + 1)}-${pad2(start.getDate())}`;
   const periodEndStr   = `${end.getFullYear()}-${pad2(end.getMonth() + 1)}-${pad2(end.getDate())}`;
+
+  const approvedHolidayWork = canHolidayWork ? leaves.filter(l =>
+    l.userId === user.id && l.type === 'holiday-work' && l.status === 'approved' &&
+    l.dateFrom >= periodStartStr && l.dateFrom <= periodEndStr &&
+    !isCompanyTripDay(l.dateFrom)
+  ) : [];
+  const holidayWorkDates = new Set(approvedHolidayWork.map(l => l.dateFrom));
+  const fullLeaveDates = new Set(
+    pDays.filter(d => isFullDayPersonalLeaveStatus(d.status)).map(d => d.date)
+  );
+
+  const approvedEarlyMorning = canEarlyLate ? leaves.filter(l =>
+    l.userId === user.id && l.type === 'early-morning' && l.status === 'approved' &&
+    l.dateFrom >= periodStartStr && l.dateFrom <= periodEndStr
+  ) : [];
+
+  const upcountryCount = canUpcountry ? pDays.filter(d =>
+    d.upcountry && d.status !== 'company-trip' && !holidayWorkDates.has(d.date) &&
+    !isFullDayPersonalLeaveStatus(d.status)
+  ).length : 0;
+  const holidayWorkUpcountryCount = canUpcountry ? approvedHolidayWork.filter(l =>
+    Array.isArray(l.locations) && l.locations.some(x => x && x.name && String(x.name).trim())
+  ).length : 0;
+
+  let earlyCount = 0, earlyLateBonus = 0, lateNightCount = 0;
+  const earlyScanPaidDates = new Set();
+  if (canEarlyLate) {
+    const _ln1Thr = S.allowances.lateNightThreshold1Hour || S.allowances.lateNightThresholdHour || 19;
+    const _ln2Thr = S.allowances.lateNightThreshold2Hour || S.allowances.lateNightThresholdHour || 20;
+    pDays.forEach(d => {
+      // Auto early: Hikvision only. Rest days require approved holiday-work, then both pay.
+      if (deviceScanQualifiesForEarlyMorning(d, holidayWorkDates)) {
+        const [h, m] = d.checkIn.split(':').map(Number);
+        const mins = h * 60 + m;
+        if (mins <= S.allowances.earlyThreshold2Min) {
+          earlyCount += 2; earlyLateBonus += S.allowances.earlyMorning2; earlyScanPaidDates.add(d.date);
+        } else if (mins <= S.allowances.earlyThreshold1Min) {
+          earlyCount += 1; earlyLateBonus += S.allowances.earlyMorning1; earlyScanPaidDates.add(d.date);
+        }
+      }
+      if (deviceScanQualifiesForLateNight(d, holidayWorkDates)) {
+        const lnHr = parseInt(d.lateOut);
+        lateNightCount += lnHr >= _ln2Thr ? 2 : 1;
+        earlyLateBonus += lnHr >= _ln2Thr ? S.allowances.lateNight2 : S.allowances.lateNight1;
+      }
+    });
+    approvedEarlyMorning.forEach(l => {
+      if (earlyScanPaidDates.has(l.dateFrom)) return;
+      if (fullLeaveDates.has(l.dateFrom)) return;
+      // Rest-day web request pays only with approved holiday-work (user 2026-09-01).
+      if (isHolidayWorkDay(l.dateFrom) && !holidayWorkDates.has(l.dateFrom)) return;
+      const tier = Number(l.earlyMorningTier) || 0;
+      if (tier === 2) { earlyCount += 2; earlyLateBonus += S.allowances.earlyMorning2; }
+      else if (tier === 1) { earlyCount += 1; earlyLateBonus += S.allowances.earlyMorning1; }
+    });
+  }
+
+  const hourlyRate = base / 30 / 8;
 
   const approvedOTs = canOT ? leaves.filter(l =>
     l.userId === user.id && l.type === 'ot' && l.status === 'approved' &&
@@ -5983,7 +7286,7 @@ function computePayroll(user, start, end, periodIndex) {
   const approvedLD = isAllowanceEligible(S.allowanceEligibility, user.role, 'longDistance') ? leaves.filter(l =>
     l.userId === user.id && l.type === 'long-distance' && l.status === 'approved' &&
     l.dateFrom >= periodStartStr && l.dateFrom <= periodEndStr &&
-    !isCompanyTripDay(l.dateFrom)
+    !isCompanyTripDay(l.dateFrom) && !fullLeaveDates.has(l.dateFrom)
   ) : [];
   const longDistanceCount = approvedLD.filter(l => (l.longDistanceAllowance || 0) > 0).length;
   const longDistanceTotal = approvedLD.reduce((sum, l) => sum + (l.longDistanceAllowance || 0), 0);
@@ -5995,7 +7298,7 @@ function computePayroll(user, start, end, periodIndex) {
   const approvedPC = (isAllowanceEligible(S.allowanceEligibility, user.role, 'personalCar') && user.personalCarEligible === true) ? leaves.filter(l =>
     l.userId === user.id && l.type === 'personal-car' && l.status === 'approved' &&
     l.dateFrom >= periodStartStr && l.dateFrom <= periodEndStr &&
-    !isCompanyTripDay(l.dateFrom)
+    !isCompanyTripDay(l.dateFrom) && !fullLeaveDates.has(l.dateFrom)
   ) : [];
   const personalCarCount = approvedPC.length;
   // l.personalCarRate is a submission-time snapshot (server.js POST /api/leaves always
@@ -6007,34 +7310,60 @@ function computePayroll(user, start, end, periodIndex) {
   const personalCarTotal = approvedPC.reduce((sum, l) =>
     sum + (l.personalCarRate != null ? l.personalCarRate : (S.allowances.personalCar != null ? S.allowances.personalCar : 1000)), 0);
 
-  const hourlyRate = base / 30 / 8;
   let otAmount = 0, otTotalHours = 0;
   let ot15Amount = 0, ot15Hours = 0;
   let ot20Amount = 0, ot20Hours = 0;
   let ot30Amount = 0, ot30Hours = 0;
+  const paidHolidayWorkDates = new Set(
+    (approvedHolidayWork || []).filter(l => l.compensationMode === 'paid').map(l => l.dateFrom)
+  );
+  const otPayAcc = {
+    otAmount, otTotalHours, ot15Amount, ot15Hours, ot20Amount, ot20Hours, ot30Amount, ot30Hours,
+  };
   approvedOTs.forEach(l => {
-    const mult = Number(l.otMultiplier) || 1.5;
-    const hrs = l.otHours || 0;
-    const amt = Math.round(hourlyRate * mult * hrs);
-    otAmount += amt;
-    otTotalHours += hrs;
-    if (mult === 1.5)    { ot15Amount += amt; ot15Hours += hrs; }
-    else if (mult === 2) { ot20Amount += amt; ot20Hours += hrs; }
-    else if (mult === 3) { ot30Amount += amt; ot30Hours += hrs; }
+    if (fullLeaveDates.has(l.dateFrom)) return;
+    if (!l.isDriverOT && paidHolidayWorkDates.has(l.dateFrom)) return;
+    accumulateApprovedOtPay(l, hourlyRate, otPayAcc);
   });
-  // 2026-07-31: gated on canOT too -- previously this topped up OT hours even for a role with
-  // OT disabled entirely, since guaranteedOT sits outside the isAcctMkt-style check above.
+  otAmount = otPayAcc.otAmount; otTotalHours = otPayAcc.otTotalHours;
+  ot15Amount = otPayAcc.ot15Amount; ot15Hours = otPayAcc.ot15Hours;
+  ot20Amount = otPayAcc.ot20Amount; ot20Hours = otPayAcc.ot20Hours;
+  ot30Amount = otPayAcc.ot30Amount; ot30Hours = otPayAcc.ot30Hours;
+  let holidayTransportTotal = 0;
+  approvedHolidayWork.forEach(l => {
+    if (l.compensationMode !== 'paid') return;
+    holidayTransportTotal += S.allowances.holidayTransport != null ? S.allowances.holidayTransport : 500;
+    const hrs20 = Number(l.otHours20) || 0;
+    const hrs30 = Number(l.otHours30) || 0;
+    const amt20 = Math.round(hourlyRate * 2 * hrs20);
+    const amt30 = Math.round(hourlyRate * 3 * hrs30);
+    ot20Hours += hrs20; ot30Hours += hrs30;
+    ot20Amount += amt20; ot30Amount += amt30;
+    otAmount += amt20 + amt30;
+    otTotalHours += hrs20 + hrs30;
+  });
+  // 2026-09-01: guaranteed OT is a driver contract floor only (OT ×1.5 hours/month). Still
+  // requires canOT so a driver removed from OT eligibility does not keep the top-up.
   const guaranteedOT = user.guaranteedOT || 0;
-  if (canOT && guaranteedOT > ot15Hours) {
+  if (user.role === 'driver' && canOT && guaranteedOT > ot15Hours) {
     const extraH = guaranteedOT - ot15Hours;
     const extraA = Math.round(hourlyRate * 1.5 * extraH);
     ot15Hours += extraH; ot15Amount += extraA; otAmount += extraA; otTotalHours += extraH;
   }
 
-  const allowance1 = S.allowances.upcountry * upcountryCount;
+  const totalUpcountryCount = upcountryCount + holidayWorkUpcountryCount;
+  const allowance1 = S.allowances.upcountry * totalUpcountryCount;
   const allowance2 = earlyLateBonus;
+  // 2026-09-21 (Abroad): counted off day STATUS, not off the leave record, so the day count is
+  // automatically scoped to this pay period and automatically includes the weekends and public
+  // holidays inside the trip (the day builder overlays every calendar day of an approved abroad
+  // record). MUST stay byte-identical with app.js's copy -- dual-sync rule.
+  const abroadEligible = isAllowanceEligible(S.allowanceEligibility, user.role, 'abroad');
+  const abroadDays = abroadEligible ? pDays.filter(d => d.status === 'abroad').length : 0;
+  const abroadTotal = (S.allowances.abroad || 0) * abroadDays;
   const grossIncome = base + transport + posAllowance + housingAllowance + diligenceAllowance +
-    allowance1 + allowance2 + allowance3val + otAmount + longDistanceTotal + personalCarTotal;
+    allowance1 + allowance2 + allowance3val + otAmount + longDistanceTotal + personalCarTotal +
+    holidayTransportTotal + abroadTotal;
 
   // SSO — rate and caps from settings (updates when law changes)
   // SECURITY/CORRECTNESS FIX 2026-08-17 (user report): MD is exempt from SSO/SSF the same way
@@ -6060,7 +7389,9 @@ function computePayroll(user, start, end, periodIndex) {
   const bonusForPit = Number(finRec.bonus) || 0;
   const manualIncomeForPit = (finRec.manualAllowances || []).reduce((s, ma) => s + (Number(ma.amount) || 0), 0);
   const regularIncome = base + transport + posAllowance + housingAllowance + diligenceAllowance + allowance3val;
-  const variableIncome = allowance1 + allowance2 + otAmount + longDistanceTotal + personalCarTotal + bonusForPit + manualIncomeForPit;
+  // 2026-09-21: abroadTotal belongs here too -- it is part of grossIncome, so leaving it out
+  // would under-estimate the annual taxable base and therefore the auto-PIT figure.
+  const variableIncome = allowance1 + allowance2 + otAmount + longDistanceTotal + personalCarTotal + holidayTransportTotal + abroadTotal + bonusForPit + manualIncomeForPit;
   const annualGross = regularIncome * 12 + variableIncome;
   const expenseDeduct = Math.min(annualGross * 0.5, 100000);
   const personalAllow = S.tax.personalAllowanceAnnual || 60000;
@@ -6070,9 +7401,10 @@ function computePayroll(user, start, end, periodIndex) {
   return {
     base, transport, posAllowance, housingAllowance, diligenceAllowance,
     allowance1, allowance2, allowance3: allowance3val,
-    otAmount, longDistanceTotal, personalCarTotal,
+    otAmount, longDistanceTotal, personalCarTotal, holidayTransportTotal,
+    abroadDays, abroadTotal,
     grossIncome, ssf, pvd, autoPit,
-    upcountryCount, earlyLateBonus, earlyCount, lateNightCount,
+    upcountryCount: totalUpcountryCount, earlyLateBonus, earlyCount, lateNightCount,
     ot15Amount, ot15Hours, ot20Amount, ot20Hours, ot30Amount, ot30Hours, otTotalHours,
     longDistanceCount, personalCarCount,
     periodStartStr, periodEndStr, hourlyRate, pDays
@@ -6096,7 +7428,7 @@ function getSnapshotKey(periodStart, userId) {
 function deriveAttendanceCounts(pDays, calc) {
   return {
     workingDays:   pDays.filter(d => !d.isWeekend && d.status !== 'holiday' && d.status !== 'company-trip').length,
-    daysWorked:    pDays.filter(d => d.status === 'present' || d.status === 'late' || d.status === 'not-clocked-in').length,
+    daysWorked:    pDays.filter(d => d.status === 'present' || d.status === 'late' || d.status === 'not-clocked-in' || d.status === 'abroad').length,
     leaveDays:     pDays.filter(d => d.status === 'leave-annual' || d.status === 'leave-sick' || d.status === 'leave-business').length,
     lateTimes:     pDays.filter(d => d.status === 'late').length,
     otHours:       calc.otTotalHours || 0,
@@ -6199,7 +7531,7 @@ function getPayrollView(user, start, end, periodIndex, finalizeDataOverride) {
       // full-day leave in the overlay loop can restore a real checkIn while status is still a
       // leave status.
       if (d.isPubHoliday || d.status === 'company-trip' || d.partialLeave ||
-          ['leave-annual','leave-sick','leave-business'].includes(d.status)) return;
+          ['leave-annual','leave-sick','leave-business','abroad'].includes(d.status)) return;
       const [hh, mm] = d.checkIn.split(':').map(Number);
       const lm = hh * 60 + mm - stdStartMin4;
       if (lm <= 0) return;
@@ -6211,7 +7543,8 @@ function getPayrollView(user, start, end, periodIndex, finalizeDataOverride) {
 
   const company = S.company;
   const periodLabel = `${formatDateEn(start)} to ${formatDateEn(end)}`;
-  const paymentDateLabel = formatDateEn(getPayDay(end));
+  const paymentDate = getPayDay(end);
+  const paymentDateLabel = formatDateEn(paymentDate);
 
   return {
     calc, attendance, fin, eligibility,
@@ -6220,7 +7553,7 @@ function getPayrollView(user, start, end, periodIndex, finalizeDataOverride) {
       rates: { upcountry: S.allowances.upcountry || 240, longDistance: S.allowances.longDistance, personalCar: S.allowances.personalCar },
       ssoDisplay: { rate: S.sso.rate || 5, maxAmount: S.sso.maxAmount || 875, minSalary: S.sso.minSalary || 1650 },
     },
-    labels: { periodLabel, paymentDateLabel, company: { name: company.name, address: company.address, taxId: company.taxId } },
+    labels: { periodLabel, paymentDateLabel, paymentDate, company: { name: company.name, address: company.address, taxId: company.taxId } },
     frozen: false, approvedBy: '', approvedAt: ''
   };
 }
@@ -6515,7 +7848,7 @@ app.get('/api/payslip-xlsx', async (req, res) => {
     if (isStaff) {
       const mdApproved = !!(mdApproval?.approved);
       const payDay = getPayDay(end);
-      const today = new Date(); today.setHours(0, 0, 0, 0);
+      const today = bangkokTodayDate();
       const isCurrent = periodIndex === 0;
       if (!mdApproved || (isCurrent && today < payDay)) {
         return res.status(403).json({ success:false, message:'Payslip not yet available for this period' });
@@ -6532,7 +7865,7 @@ app.get('/api/payslip-xlsx', async (req, res) => {
       user: { name: user.name, position: user.position || '', role: user.role, startDate: user.startDate ? formatDateEn(new Date(user.startDate)) : '', idCard: user.idCard || '' },
       calc: view.calc,
       fin: { bonus: view.fin.bonus, pit: view.fin.pit, manualAllowances: view.fin.manualAllowances },
-      period: { label: view.labels.periodLabel, paymentDateLabel: view.labels.paymentDateLabel },
+      period: { label: view.labels.periodLabel, paymentDateLabel: view.labels.paymentDateLabel, paymentDate: (view.labels.paymentDate instanceof Date ? view.labels.paymentDate : getPayDay(end)) },
       // 2026-08-02: otCount (number of approved OT requests, not hours) added for the Attendance
       // Summary's Over Time tile -- per user request that tile shows a count like every other
       // tile in that grid (Late/Upcountry/Early Morning/Late Night), not raw hours; the hours
@@ -6620,7 +7953,7 @@ app.get('/api/payslip-xlsx-all', requireRole('md', 'accounting'), async (req, re
         user: { name: user.name, position: user.position || '', role: user.role, startDate: user.startDate ? formatDateEn(new Date(user.startDate)) : '', idCard: user.idCard || '' },
         calc: view.calc,
         fin: { bonus: view.fin.bonus, pit: view.fin.pit, manualAllowances: view.fin.manualAllowances },
-        period: { label: view.labels.periodLabel, paymentDateLabel: view.labels.paymentDateLabel },
+        period: { label: view.labels.periodLabel, paymentDateLabel: view.labels.paymentDateLabel, paymentDate: (view.labels.paymentDate instanceof Date ? view.labels.paymentDate : getPayDay(end)) },
         attendance: { ...view.attendance, otCount: view.display.otCount },
         approvedBy: view.frozen ? view.approvedBy : '',
         eligibility: view.eligibility,
@@ -6848,7 +8181,9 @@ app.post('/api/test-result-notification', requireRole('md', 'accounting'), testE
       { type:'upcountry', status:'approved', dateFrom: today, dateTo: today, reason:'Client site — Rayong' },
       { type:'long-distance', status:'approved', dateFrom: today, dateTo: today, mileageStart: 12000, mileageEnd: 12280, distanceKm: 280 },
       { type:'time-correction', status:'approved', dateFrom: today, dateTo: today, correctedTime:'08:05', reason:'Forgot to scan in' },
-      { type:'comp', status:'approved', dateFrom: today, dateTo: today, workedDate: today, reason:'Worked Saturday for client launch' },
+      { type:'holiday-work', status:'approved', dateFrom: today, dateTo: today,
+        compensationMode:'annual-leave', workStartTime:'08:00', workEndTime:'17:30',
+        locations:[{ name:'Client site' }], days:1, reason:'Worked Saturday for client launch' },
       { type:'personal-car', status:'approved', dateFrom: today, dateTo: today, personalCarRate: 1000, reason:'Site visit — own car' },
     ];
     let sent = 0;
@@ -6871,7 +8206,8 @@ const TYPE_LABELS = {
   business:            { th:'ลากิจ',                   en:'Business Leave',        ja:'業務休暇' },
   maternity:           { th:'ลาคลอด',                  en:'Maternity Leave',       ja:'産休' },
   ordain:              { th:'ลาบวช',                   en:'Ordination Leave',      ja:'出家休暇' },
-  comp:                { th:'ขอวันหยุดชดเชย',           en:'Compensatory Day',      ja:'振替休日' },
+  'holiday-work':      { th:'ขอทำงานวันหยุด',            en:'Holiday Work',          ja:'休日出勤' },
+  'early-morning':     { th:'ขอแจ้งมาเช้า',              en:'Early Morning',         ja:'早朝手当' },
   ot:                  { th:'ขอ OT',                   en:'Request OT',            ja:'残業申請' },
   'driver-ot':         { th:'ขอ OT (คนขับ)',            en:'Driver OT',             ja:'運転手残業' },
   trip:                { th:'ไปต่างจังหวัด',            en:'Business Trip',         ja:'出張' },
@@ -6970,7 +8306,8 @@ const EMAIL_COLORS = {
 };
 
 const TYPE_ICONS = {
-  annual:'🏖️', sick:'🤒', business:'📋', maternity:'👶', ordain:'🙏', comp:'🔄', ot:'⏱️',
+  annual:'🏖️', sick:'🤒', business:'📋', maternity:'👶', ordain:'🙏',
+  'holiday-work':'🔄', 'early-morning':'🌅', ot:'⏱️',
   'driver-ot':'⏱️', trip:'🧳', upcountry:'🗺️', 'late-out':'🌙', 'time-correction':'✏️',
   'long-distance':'🚗', 'personal-car':'🚙', 'clear-attachments':'🗑️'
 };

@@ -33,7 +33,7 @@ const boxBorder = { top: thin, left: thin, right: thin, bottom: thin };
 // user: {name, position, role, startDate}
 // calc: computePayroll() return value
 // fin: {bonus, pit, manualAllowances:[{type,amount,advance}]}
-// period: {label, paymentDateLabel}
+// period: {label, paymentDateLabel, paymentDate?: Date}
 // attendance: {workingDays, daysWorked, leaveDays, lateTimes, otHours, absentDays}
 // approvedBy: name of the MD who approved this payslip (finalize.json .approvedBy), '' if none yet
 // eligibility: {diligence,longDistance,personalCar,upcountry,earlyLate,ot} booleans, computed by
@@ -242,9 +242,9 @@ function buildPayslipWorkbook({ companyInfo, user, calc, fin, period, attendance
   // the caller computes `eligibility` from settings + user.role and passes it in; this module
   // just reads it via canShow(), no role-name literals here anymore. See server.js computePayroll()
   // for where each of these is now actually zeroed at the calc layer too (not just hidden here).
-  // Everything else (Basic/Position/Housing/Transport/Bonus/manual items) genuinely CAN apply to
-  // any employee in a different period, so -- matching the real paper payslip, which prints every
-  // row with "-" for a zero amount rather than omitting the row -- those always show.
+  // 2026-09-15: omit zero-amount earnings rows (Bonus / Holiday Transport / OT / allowances
+  // with amount 0). Manual allowances were already filtered. SSF/PVD/PIT below still always
+  // print even at 0.00 — matching the user's Excel-slip request for earnings only.
   const otTotal = (calc.ot15Amount || 0) + (calc.ot20Amount || 0) + (calc.ot30Amount || 0);
   const earningsItems = [
     ['Basic Salary', calc.base], ['Position Allowance', calc.posAllowance],
@@ -258,9 +258,11 @@ function buildPayslipWorkbook({ companyInfo, user, calc, fin, period, attendance
     ...(canShow('phone') ? [['Allowance 3 (Mobile Phone)', calc.allowance3]] : []),
     ...(canShow('longDistance') ? [['Long Distance Allowance', calc.longDistanceTotal]] : []),
     ...(canShow('personalCar') ? [['Personal Car Allowance', calc.personalCarTotal]] : []),
+    ...(canShow('holidayWork') ? [['Holiday Transport Allowance', calc.holidayTransportTotal || 0]] : []),
+    ...(canShow('abroad') ? [['Abroad Allowance', calc.abroadTotal || 0]] : []),
     ['Bonus', fin.bonus],
     ...(fin.manualAllowances || []).filter(ma => (ma.amount || 0) > 0).map(ma => [ma.type || 'Other Allowance', ma.amount]),
-  ];
+  ].filter(([, amount]) => (amount || 0) > 0);
 
   // Deductions -- SSF/PVD/PIT are recurring, every-month line items (per user 2026-07-31: "ปกติ
   // แล้วยอด deduct มันมีอยู่ทุกเดือนอยู่แล้ว"), so they always get a row even when the computed
@@ -417,10 +419,21 @@ function buildPayslipWorkbook({ companyInfo, user, calc, fin, period, attendance
 
   const sigDateRow = r;
   ws.getRow(sigDateRow).height = 14;
-  merge(`B${sigDateRow}:E${sigDateRow}`);
-  set(`B${sigDateRow}`, 'Date: _______________________', { font: { size: 9, color: { argb: MUTED_TEXT } }, align: center });
-  merge(`H${sigDateRow}:K${sigDateRow}`);
-  set(`H${sigDateRow}`, 'Date: _______________________', { font: { size: 9, color: { argb: MUTED_TEXT } }, align: center });
+  // Match sample payslip: date under the name columns only (C:E / I:K), real Excel date
+  // with format dd mmmm yyyy (e.g. "30 September 2026") — no "Date:" text prefix and not
+  // merged from B/H (those columns stay empty like the sample).
+  const payDate = (period.paymentDate instanceof Date && !Number.isNaN(period.paymentDate.getTime()))
+    ? period.paymentDate
+    : null;
+  merge(`C${sigDateRow}:E${sigDateRow}`);
+  merge(`I${sigDateRow}:K${sigDateRow}`);
+  if (payDate) {
+    set(`C${sigDateRow}`, payDate, { font: { size: 9, color: { argb: MUTED_TEXT } }, align: center, numFmt: 'dd mmmm yyyy' });
+    set(`I${sigDateRow}`, payDate, { font: { size: 9, color: { argb: MUTED_TEXT } }, align: center, numFmt: 'dd mmmm yyyy' });
+  } else {
+    set(`C${sigDateRow}`, '_______________________', { font: { size: 9, color: { argb: MUTED_TEXT } }, align: center });
+    set(`I${sigDateRow}`, '_______________________', { font: { size: 9, color: { argb: MUTED_TEXT } }, align: center });
+  }
 
   const lastRow = sigDateRow;
   // ---- Outer frame around the payslip's main content, stopping at NET PAY (2026-08-02 -- user
