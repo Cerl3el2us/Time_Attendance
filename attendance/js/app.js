@@ -13864,10 +13864,11 @@ function refreshAbroadSpanHint() {
   }
   const rate = Number((APP_SETTINGS.allowances || {}).abroad) || 0;
   hint.style.color = '#64748b';
+  const money = rate ? ` (฿${(rate * days).toLocaleString()})` : '';
   hint.textContent = currentLang === 'ja'
     ? `合計 ${days}日${rate ? `（฿${(rate * days).toLocaleString()}）` : ''}`
-    : L(`${days} days total${rate ? ` (฿${(rate * days).toLocaleString()})` : ''}`,
-        `รวม ${days} วัน${rate ? ` (฿${(rate * days).toLocaleString()})` : ''}`);
+    : L(`${days} ${days === 1 ? 'day' : 'days'} total${money}`,
+        `รวม ${days} วัน${money}`);
 }
 function openAbroadModal(date) {
   if (blockIfObserver()) return;
@@ -13881,10 +13882,10 @@ function openAbroadModal(date) {
   document.getElementById('abroad-location').value = '';
   document.getElementById('abroad-reason').value = '';
   refreshAbroadSpanHint();
-  document.getElementById('abroad-modal').classList.add('active');
+  document.getElementById('abroad-modal').classList.add('show');
 }
 function closeAbroadModal() {
-  document.getElementById('abroad-modal').classList.remove('active');
+  document.getElementById('abroad-modal').classList.remove('show');
   editingLeaveId = null;
 }
 async function submitAbroad() {
@@ -17463,7 +17464,11 @@ function _faqRulesItems() {
 
 function _faqHowToItems() {
   const stdStart = officeOtStdStartHHMM(APP_SETTINGS);
-  const img = name => `<img src="images/faq/${name}" alt="" style="max-width:100%;border:1px solid var(--border);border-radius:8px;margin-top:8px;display:block">`;
+  // 2026-09-21: FAQ screenshots had no cache-buster, so re-shooting one left every browser that
+  // had already opened the FAQ showing the OLD picture indefinitely. Bump this whenever a
+  // screenshot in images/faq/ is replaced.
+  const FAQ_IMG_V = '20260921';
+  const img = name => `<img src="images/faq/${name}?v=${FAQ_IMG_V}" alt="" style="max-width:100%;border:1px solid var(--border);border-radius:8px;margin-top:8px;display:block">`;
   // Same screenshot but captured once per UI language (currently only the install-app item uses
   // this — most other screenshots are Thai-only since the UI chrome around them barely changes).
   const imgLang = base => img(currentLang === 'en' ? base.replace('.png', '_en.png') : currentLang === 'ja' ? base.replace('.png', '_ja.png') : base);
