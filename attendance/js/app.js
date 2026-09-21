@@ -17403,9 +17403,9 @@ function _faqRulesItems() {
     { icon: '✈️', roles: _faqEligibleRoles('abroad'), q: _faq('How much is the Abroad allowance?', 'ทำงานต่างประเทศได้เบี้ยเลี้ยงเท่าไหร่?', '海外勤務手当はいくらですか？'),
       a: _faq(
         // Rate read live from settings, never hardcoded — same rule as every other ฿ answer here.
-        `฿${Number((S.allowances || {}).abroad || 0).toLocaleString()} for EVERY calendar day of an approved Work Abroad trip, weekends and public holidays included. Submit it with a start and end date plus the country or customer — those days then count as worked instead of absent. Only OT can still be claimed on an abroad day; Upcountry, Long Distance, Personal Car, Early Morning, Late Night and Holiday Work cannot. An approved trip can be cancelled by the person who submitted it up until the day before it starts. ${_faqNotEligibleText('abroad')}`,
-        `฿${Number((S.allowances || {}).abroad || 0).toLocaleString()} ต่อวันทุกวันตามปฏิทินในช่วงที่อนุมัติ รวมเสาร์-อาทิตย์และวันหยุดนักขัตฤกษ์ ยื่นโดยระบุวันที่เริ่ม-สิ้นสุด และประเทศหรือชื่อลูกค้า วันเหล่านั้นจะถูกนับเป็นวันทำงานแทนการขาดงาน วันที่แจ้งทำงานต่างประเทศเคลมได้เฉพาะ OT เท่านั้น — Upcountry, Long Distance, รถส่วนตัว, แจ้งมาเช้า, แจ้งกลับดึก และทำงานวันหยุด ยื่นไม่ได้ คำขอที่อนุมัติแล้วผู้ยื่นยกเลิกเองได้จนถึงก่อนวันเริ่มเดินทาง ${_faqNotEligibleText('abroad')}`,
-        `承認された海外勤務期間の暦日すべてに฿${Number((S.allowances || {}).abroad || 0).toLocaleString()}（週末・祝日を含む）。開始日・終了日と国名または顧客名を入力して申請します。該当日は欠勤ではなく勤務として扱われます。海外勤務日に申請できるのはOTのみで、出張・長距離・自家用車・早朝・深夜・休日出勤は申請できません。承認済みの申請は開始日の前日まで申請者本人が取り消せます。${_faqNotEligibleText('abroad')}`
+        `฿${Number((S.allowances || {}).abroad || 0).toLocaleString()} for EVERY calendar day of an approved Work Abroad trip, weekends and public holidays included. Submit it with a start and end date plus the country or customer — those days then count as worked instead of absent. Only OT can still be claimed on an abroad day; Upcountry, Long Distance, Personal Car, Early Morning, Late Night and Holiday Work cannot. An approved trip can be cancelled by the person who submitted it up until the day before it starts.`,
+        `฿${Number((S.allowances || {}).abroad || 0).toLocaleString()} ต่อวันทุกวันตามปฏิทินในช่วงที่อนุมัติ รวมเสาร์-อาทิตย์และวันหยุดนักขัตฤกษ์ ยื่นโดยระบุวันที่เริ่ม-สิ้นสุด และประเทศหรือชื่อลูกค้า วันเหล่านั้นจะถูกนับเป็นวันทำงานแทนการขาดงาน วันที่แจ้งทำงานต่างประเทศเคลมได้เฉพาะ OT เท่านั้น — Upcountry, Long Distance, รถส่วนตัว, แจ้งมาเช้า, แจ้งกลับดึก และทำงานวันหยุด ยื่นไม่ได้ คำขอที่อนุมัติแล้วผู้ยื่นยกเลิกเองได้จนถึงก่อนวันเริ่มเดินทาง`,
+        `承認された海外勤務期間の暦日すべてに฿${Number((S.allowances || {}).abroad || 0).toLocaleString()}（週末・祝日を含む）。開始日・終了日と国名または顧客名を入力して申請します。該当日は欠勤ではなく勤務として扱われます。海外勤務日に申請できるのはOTのみで、出張・長距離・自家用車・早朝・深夜・休日出勤は申請できません。承認済みの申請は開始日の前日まで申請者本人が取り消せます。`
       ) },
     { icon: '🗺️', roles: _faqEligibleRoles('upcountry'), q: _faq('How much is the Upcountry allowance?', 'Upcountry ได้เบี้ยเลี้ยงเท่าไหร่?', '出張手当はいくらですか？'),
       a: _faq(
@@ -17632,6 +17632,33 @@ function _faqHowToItems() {
              '<b>รูปแบบการชดเชย</b> — <b>ลาพักร้อน +1 วัน</b> เพิ่มสิทธิ์ลาหลังอนุมัติ ไม่จ่ายค่าเดินทางวันหยุด และไม่คิด OT ×2/×3 แต่ยังจ่าย Early Morning (สแกน Hikvision) และ Upcountry ถ้ากรอกสถานที่ <b>ชดเชยเป็นเงิน</b> จ่ายค่าเดินทางวันหยุด + OT ×2/×3 ตามเวลาทำงาน รวม Early Morning และ Upcountry แบบเดียวกัน อย่ายื่น Upcountry หรือ OT แยกสำหรับวันหยุดนั้นอีก',
              '<b>補償方式</b> — <b>年次休暇+1日</b>は承認後に残日数+1。休日交通費とOT×2/×3は出ません。顔認証の早朝手当と、場所があれば出張は出ます。<b>金銭補償</b>は休日交通費＋勤務時間からのOT×2/×3。早朝と出張は同じ条件です。その休日に出張や別途OTを重ねて出さないでください。')
       ) + imgLang('holiday_work_modal.png') },
+    { icon: '✈️', q: _faq('How do I report working abroad?', 'แจ้งทำงานต่างประเทศยังไง?', '海外勤務はどう申請しますか？'),
+      a: _faq('Press the ✈️ button in the "Submit Request" card on the Check-in page. Use it for a work trip outside the country, where there is no scanner to check in or out on.',
+              'กดปุ่ม ✈️ ในการ์ด "ยื่นคำขอ" ที่หน้าลงเวลา ใช้สำหรับการไปทำงานต่างประเทศ ซึ่งไม่มีเครื่องสแกนให้ลงเวลาเข้า-ออก',
+              'チェックインページの「申請」カードにある✈️ボタンを押します。スキャナーで打刻できない海外出張に使用します。')
+      + ul(
+        _faq('<b>Start date / End date</b> — the whole trip, up to 90 days. You cannot overlap an existing leave or abroad request.',
+             '<b>วันที่เริ่ม / วันที่สิ้นสุด</b> — ช่วงเดินทางทั้งหมด สูงสุด 90 วัน และต้องไม่ทับกับใบลาหรือคำขอทำงานต่างประเทศที่มีอยู่แล้ว',
+             '<b>開始日・終了日</b> — 出張全期間、最長90日。既存の休暇や海外勤務申請と重複はできません。'),
+        _faq('<b>Country / Customer</b> — required. Either works: write the country, or the customer you are visiting.',
+             '<b>ประเทศ / ลูกค้า</b> — บังคับกรอก จะกรอกเป็นชื่อประเทศ หรือชื่อลูกค้าที่ไปพบก็ได้',
+             '<b>国名 / 顧客名</b> — 必須。国名でも、訪問先の顧客名でもかまいません。'),
+        _faq('<b>Reason</b> — required. Describe the work being done on the trip.',
+             '<b>เหตุผล</b> — บังคับกรอก ระบุงานที่ไปทำในทริปนั้น',
+             '<b>理由</b> — 必須。その出張で行う業務を記入します。'),
+        _faq('The form shows the day count and the total allowance as you pick the dates, so you can check it before submitting.',
+             'ฟอร์มจะแสดงจำนวนวันและยอดเบี้ยเลี้ยงรวมให้เห็นทันทีที่เลือกวันที่ ตรวจสอบได้ก่อนกดยื่น',
+             '日付を選ぶと日数と手当合計がその場で表示されるので、提出前に確認できます。'),
+        _faq('Once approved, every calendar day in the range counts as a working day instead of absent — weekends and public holidays included — and each one earns the allowance.',
+             'เมื่ออนุมัติแล้ว ทุกวันตามปฏิทินในช่วงนั้นจะถูกนับเป็นวันทำงานแทนการขาดงาน รวมเสาร์-อาทิตย์และวันหยุดนักขัตฤกษ์ และได้รับเบี้ยเลี้ยงทุกวัน',
+             '承認されると、期間内の暦日はすべて欠勤ではなく勤務日として扱われ（週末・祝日を含む）、各日に手当が付きます。'),
+        _faq('On those days only <b>OT</b> can still be claimed — Upcountry, Long Distance, Personal Car, Early Morning, Late Night and Holiday Work are all blocked. OT does not need a scan on an abroad day.',
+             'วันเหล่านั้นเคลมได้เฉพาะ <b>OT</b> เท่านั้น — Upcountry, Long Distance, รถส่วนตัว, แจ้งมาเช้า, แจ้งกลับดึก และทำงานวันหยุด ยื่นไม่ได้ทั้งหมด และการยื่น OT ในวันทำงานต่างประเทศไม่ต้องมีการสแกน',
+             'これらの日に申請できるのは<b>OT</b>のみです — 出張・長距離・自家用車・早朝・深夜・休日出勤はすべて不可。海外勤務日のOT申請に打刻は不要です。'),
+        _faq('If the trip is called off, you can cancel it yourself up until the day before it starts. On or after the start date it can no longer be cancelled.',
+             'ถ้าทริปถูกยกเลิก คุณยกเลิกคำขอเองได้จนถึงก่อนวันเริ่มเดินทาง เมื่อถึงวันเริ่มแล้วจะยกเลิกไม่ได้',
+             '出張が中止になった場合、開始日の前日までは自分で取り消せます。開始日以降は取り消せません。')
+      ) + imgLang('abroad_modal.png') },
     { icon: '🔧', q: _faq('How do I request a Time Correction?', 'ขอแก้ไขเวลาย้อนหลังยังไง?', '時刻修正はどう申請しますか？'),
       a: _faq('For fixing a wrong or missing check-in/check-out time. Click the ✏️ icon for that day:', 'สำหรับแก้ไขเวลาเข้า-ออกงานที่ผิดหรือไม่มีข้อมูล กดไอคอน ✏️ ของวันนั้น:', '誤った、または記録されていない出退勤時刻を修正する場合に使用します。その日の✏️アイコンをクリックします：')
       + ul(

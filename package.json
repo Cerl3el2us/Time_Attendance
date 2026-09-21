@@ -1,0 +1,13 @@
+{
+  "name": "time-attendance-tooling",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Lint-only tooling for the Time Attendance app. The app itself ships no build step — attendance/ is served as static files and attendance-server/backend runs plain Node.",
+  "scripts": {
+    "lint": "eslint attendance/js attendance/lang attendance/sw.js attendance-server/backend/server.js attendance-server/backend/payslipXlsx.js attendance-server/backend/systemAccount.js attendance-server/backend/tawi50Xlsx.js attendance-server/backend/tawi50Template.js"
+  },
+  "devDependencies": {
+    "eslint": "^9.0.0",
+    "globals": "^15.0.0"
+  }
+}
