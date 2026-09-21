@@ -599,6 +599,102 @@ function onTypedTimeKeydown(e) {
   commitTypedTime(e.target);
   if (e.target._flatpickr) e.target._flatpickr.close();
 }
+// ===== TYPED DATE ENTRY (2026-09-21) =====
+// Same idea as the time fields: accept bare digits so a date can be keyed in without opening the
+// calendar. Digits are read in the order the field DISPLAYS them — d/m/Y for th/en, Y年m月d日 for
+// ja — so the same keystrokes always mean what the box in front of you says.
+//   th/en: "21092026" -> 21/09/2026   "210926" -> 21/09/2026   "2109" -> 21/09/<this year>
+//          "21" -> 21/<this month>/<this year>
+//   ja:    "20260921" -> 2026年09月21日   "260921" -> same   "0921" -> <this year>年09月21日
+// The calendar is untouched and still opens on click.
+const DATE_DIGITS_MAX = 8;
+function dateDigitsOf(value) {
+  return String(value == null ? '' : value).replace(/\D/g, '').slice(0, DATE_DIGITS_MAX);
+}
+// Returns 'YYYY-MM-DD', or null when the digits cannot be a real calendar date. Never guesses:
+// "31022026" is rejected rather than rolled forward to 3 March, because these dates drive leave,
+// OT and payroll and a silently shifted day is worse than a visible rejection.
+function normalizeTypedDate(raw) {
+  const d = dateDigitsOf(raw);
+  if (!d) return '';
+  const now = bangkokTodayDate();
+  const curY = now.getFullYear(), curM = now.getMonth() + 1;
+  let dd, mm, yy;
+  if (currentLang === 'ja') {
+    if (d.length === 8)      { yy = +d.slice(0, 4); mm = +d.slice(4, 6); dd = +d.slice(6, 8); }
+    else if (d.length === 6) { yy = 2000 + +d.slice(0, 2); mm = +d.slice(2, 4); dd = +d.slice(4, 6); }
+    else if (d.length === 4) { yy = curY; mm = +d.slice(0, 2); dd = +d.slice(2, 4); }
+    else return null;
+  } else {
+    if (d.length === 8)      { dd = +d.slice(0, 2); mm = +d.slice(2, 4); yy = +d.slice(4, 8); }
+    else if (d.length === 6) { dd = +d.slice(0, 2); mm = +d.slice(2, 4); yy = 2000 + +d.slice(4, 6); }
+    else if (d.length === 4) { dd = +d.slice(0, 2); mm = +d.slice(2, 4); yy = curY; }
+    else if (d.length <= 2)  { dd = +d; mm = curM; yy = curY; }
+    else return null;
+  }
+  if (!(yy >= 1900 && yy <= 2999) || mm < 1 || mm > 12 || dd < 1 || dd > 31) return null;
+  // Reject a day that does not exist in that month (31 February, 31 April, 29 Feb in a common year)
+  const probe = new Date(yy, mm - 1, dd);
+  if (probe.getFullYear() !== yy || probe.getMonth() !== mm - 1 || probe.getDate() !== dd) return null;
+  return `${yy}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+}
+function commitTypedDate(fp) {
+  const el = fp.altInput || fp.input;
+  if (!el || !dateDigitsOf(el.value)) { markTimeFieldInvalid(el, false); return; }
+  const iso = normalizeTypedDate(el.value);
+  if (!iso) {
+    el.value = '';
+    fp.clear();
+    markTimeFieldInvalid(el, true);
+    showToast(currentLang === 'ja'
+      ? '⚠️ 日付が正しくありません'
+      : L('⚠️ Invalid date', '⚠️ วันที่ไม่ถูกต้อง'), 'warning');
+    return;
+  }
+  // The greyed-out days in the calendar come from each picker's own `disable` rule; isEnabled()
+  // reads that very rule, so a typed date is held to exactly the same standard as a clicked one.
+  // Without this, typing would be a way around restrictions like "only days you checked in".
+  const probe = new Date(`${iso}T00:00:00`);
+  if (typeof fp.isEnabled === 'function' && !fp.isEnabled(probe, true)) {
+    el.value = '';
+    fp.clear();
+    markTimeFieldInvalid(el, true);
+    showToast(currentLang === 'ja'
+      ? '⚠️ この日付は選べません（カレンダーで灰色の日）'
+      : L('⚠️ That date cannot be used — it is greyed out in the calendar',
+           '⚠️ วันที่นี้เลือกไม่ได้ — เป็นวันที่เทาในปฏิทิน'), 'warning');
+    return;
+  }
+  markTimeFieldInvalid(el, false);
+  fp.setDate(iso, true);   // `true` so onChange fires and the gates/hints refresh as on a click
+}
+function attachTypedDateEntry(fp) {
+  const el = fp && (fp.altInput || fp.input);
+  if (!el || el._typedDateBound) return;
+  el._typedDateBound = true;
+  // Restricted pickers ship allowInput:false, which leaves the visible field readOnly — clear it
+  // so it can be typed into. Their `disable` rule is still enforced in commitTypedDate above.
+  el.readOnly = false;
+  el.setAttribute('inputmode', 'numeric');
+  el.setAttribute('autocomplete', 'off');
+  el.addEventListener('blur', () => commitTypedDate(fp));
+  el.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    commitTypedDate(fp);
+    fp.close();
+  });
+}
+// Runs after every date picker on the page has been (re)built, so bespoke pickers do not each
+// need their own hook. Time pickers are skipped — they have their own handler.
+function attachTypedDateEntryToAll() {
+  document.querySelectorAll('input[id]').forEach(orig => {
+    const fp = orig._flatpickr;
+    if (!fp || fp.config.noCalendar) return;
+    attachTypedDateEntry(fp);
+  });
+}
+
 function attachTypedTimeEntry(inp) {
   if (inp._typedTimeBound) return;
   inp._typedTimeBound = true;
@@ -639,7 +735,12 @@ function initDatePickers() {
     if (inp._flatpickr) inp._flatpickr.destroy();
     inp.setAttribute('placeholder', datePlaceholder);
     if (RESTRICTED_DATE_IDS.has(inp.id)) return;
-    flatpickr(inp, { locale, dateFormat: 'Y-m-d', altInput: true, altFormat, allowInput: true });
+    // allowInput:false, not true — flatpickr's own blur parser is lenient to the point of being
+    // wrong on bare digits ("21092026" came back as 21/08/2033) and it runs after our handler, so
+    // it would undo a correctly parsed date. Turning it off leaves attachTypedDateEntry() as the
+    // single parser for every date field, restricted or not; it clears readOnly itself so the
+    // field is still typable, and clicking still opens the calendar.
+    flatpickr(inp, { locale, dateFormat: 'Y-m-d', altInput: true, altFormat, allowInput: false });
   });
   initHolidayWorkDatePicker();
   initEarlyMorningDatePicker();
@@ -675,6 +776,10 @@ function initDatePickers() {
       },
     });
   });
+  // Last, once every picker above (including the restricted ones built by their own init
+  // functions) exists: let each date field accept typed digits. Done in one sweep rather than a
+  // hook inside each picker's own config, so a future picker is covered without remembering to.
+  attachTypedDateEntryToAll();
 }
 function setHolidayWorkDate(dateStr) {
   const inp = document.getElementById('holiday-work-date');
