@@ -312,7 +312,8 @@ function isServerMyTurn(leave, user, users) {
     ? leave.approvalRoute
     : getApprovalRoute(routeType);
   if (turnRole === user.role && route.includes(user.role)) return true;
-  if (user.role === 'accounting' && turnRole !== 'accounting' && isApprovalDelegationActiveForType(routeType)) return true;
+  if (user.role === 'accounting' && turnRole !== 'accounting' && isApprovalDelegationActiveForType(routeType)
+      && delegationCoversLeaveDate(leave)) return true;
   return false;
 }
 
@@ -4279,6 +4280,29 @@ function currentApprovalDelegationPeriodKey() {
   const p2 = n => String(n).padStart(2, '0');
   return `${periodEnd.getFullYear()}${p2(periodEnd.getMonth() + 1)}${p2(periodEnd.getDate())}`;
 }
+// Last day of the pay period the delegation window is closing. The window only opens on/after
+// the period start day, so "this month, startDay - 1" is always that period's end.
+function approvalDelegationPeriodEndStr() {
+  const settings = readSettings();
+  const startDay = (settings.appSettings && settings.appSettings.payroll && settings.appSettings.payroll.periodStartDay) || 21;
+  const today = bangkokTodayDate();
+  const periodEnd = new Date(today.getFullYear(), today.getMonth(), startDay - 1);
+  const p2 = n => String(n).padStart(2, '0');
+  return `${periodEnd.getFullYear()}-${p2(periodEnd.getMonth() + 1)}-${p2(periodEnd.getDate())}`;
+}
+// 2026-09-21 (user-confirmed): the Accounting stand-in exists so a pending request cannot hold up
+// the payroll run that starts on the 21st. A request dated in a LATER period holds up nothing, so
+// it stays with the Managing Director — without this the window quietly handed Accounting
+// authority over next month's leave too. dateFrom decides: a request straddling the boundary
+// starts inside the closing period, so it does affect that payroll and remains delegable.
+// A legacy record with no usable date keeps the old behaviour rather than becoming un-approvable
+// by anyone — the same "never create a stuck queue" reasoning as the period-lock check.
+// Dual-sync with app.js.
+function delegationCoversLeaveDate(leave) {
+  const from = leave && leave.dateFrom;
+  if (!from || !isValidDateStr(from)) return true;
+  return from <= approvalDelegationPeriodEndStr();
+}
 function isApprovalDelegationActiveForType(type) {
   if (!isApprovalDelegationWindowOpen()) return false;
   const settings = readSettings();
@@ -5363,7 +5387,8 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
         return res.status(409).json({ success:false, message:'Accounting has already confirmed tax for this period — unconfirm before making changes' });
       }
       const routeArr = Array.isArray(leave.approvalRoute) && leave.approvalRoute.length ? leave.approvalRoute : approvalRouteForRouteKey(routeKey);
-      const isDelegate = live.role === 'accounting' && turnRole !== 'accounting' && isApprovalDelegationActiveForType(routeKey);
+      const isDelegate = live.role === 'accounting' && turnRole !== 'accounting'
+        && isApprovalDelegationActiveForType(routeKey) && delegationCoversLeaveDate(leave);
       const myTurn = (turnRole === live.role && routeArr.includes(live.role)) || isDelegate
         || (isSuperAdminUser(live) && routeArr.includes(turnRole));
       if (!myTurn) return res.status(403).json({ success:false, message:'Forbidden: not your turn to approve this request' });

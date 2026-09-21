@@ -1896,6 +1896,26 @@ function isApprovalDelegationActiveForType(type) {
   return isApprovalDelegationWindowOpen() && isDelegationEnabledForType(type);
 }
 
+// Last day of the pay period the delegation window is closing.
+function approvalDelegationPeriodEndStr() {
+  const startDay = APP_SETTINGS.payroll.periodStartDay || 21;
+  const today = bangkokTodayDate();
+  const periodEnd = new Date(today.getFullYear(), today.getMonth(), startDay - 1);
+  const pad2 = n => String(n).padStart(2, '0');
+  return `${periodEnd.getFullYear()}-${pad2(periodEnd.getMonth() + 1)}-${pad2(periodEnd.getDate())}`;
+}
+// 2026-09-21 (user-confirmed): the Accounting stand-in exists so a pending request cannot hold up
+// the payroll run that starts on the 21st. A request dated in a LATER period holds up nothing, so
+// it stays with the Managing Director. dateFrom decides: a request straddling the boundary starts
+// inside the closing period, so it does affect that payroll and remains delegable. A record with
+// no usable date keeps the old behaviour rather than becoming un-approvable by anyone.
+// Dual-sync with server.js delegationCoversLeaveDate().
+function delegationCoversLeaveDate(l) {
+  const from = l && l.dateFrom;
+  if (!from || !/^\d{4}-\d{2}-\d{2}$/.test(from)) return true;
+  return from <= approvalDelegationPeriodEndStr();
+}
+
 // Who may flip a given type's delegation switch: MD always; Manager only for types where
 // Manager currently appears in that type's own configured route (their own scope of authority).
 function canToggleApprovalDelegationForType(type) {
@@ -1920,7 +1940,8 @@ function isMyTurnOrDelegate(l, role, routeType) {
   // every role's approval list with no way to act on it through the UI.
   const route = (Array.isArray(l.approvalRoute) && l.approvalRoute.length) ? l.approvalRoute : getApprovalRoute(type);
   if (turnRole === role && route.includes(role)) return true;
-  if (role === 'accounting' && turnRole !== 'accounting' && isApprovalDelegationActiveForType(type)) return true;
+  if (role === 'accounting' && turnRole !== 'accounting' && isApprovalDelegationActiveForType(type)
+      && delegationCoversLeaveDate(l)) return true;
   return false;
 }
 function isMyTurnNow(l, routeType) {
