@@ -1268,7 +1268,7 @@ window.LANG_JA = {
 
   // 2026-08-16 UX hint additions (Opus gap review, items 1-7)
   "ℹ️ This balance counts approved leave only — pending requests are also reserved when you submit a new one.": "ℹ️ この残日数は承認済みの休暇のみをカウントしています — 新規申請時には承認待ちの申請分も差し引かれます。",
-  "📌 The 🌙 / ⏱️ / 🚗 buttons only appear on days that already have a check-out time — if you forgot to clock out, submit a ✏️ time correction first and they will appear.": "📌 🌙 / ⏱️ / 🚗 ボタンは退勤時刻が記録されている日にのみ表示されます — 退勤の打刻を忘れた場合は、まず✏️で時刻修正を申請してください。その後ボタンが表示されます。",
+  "📌 The ⏱️ and 🚗 buttons appear on days with a check-in; 🌙 needs a scan-out after the late-night threshold. If you forgot to clock in or out, submit a ✏️ time correction first and they will appear.": "📌 ⏱️ と 🚗 のボタンは出勤打刻がある日に表示されます。🌙 は深夜基準時刻より後の退勤打刻が必要です。出勤・退勤の打刻を忘れた場合は、まず✏️で時刻修正を申請してください。その後ボタンが表示されます。",
   "📌 The Upcountry allowance is paid once per day no matter how many stops — the extra rows are for recording the trip details only.": "📌 Upcountry手当は訪問先の数に関わらず1日1回のみ支給されます — 複数の入力欄は訪問の詳細を記録するためのものです。",
   "ℹ️ You can only edit or cancel a request while it is still \"Pending\" — once approved, ask your approver to revoke it. Cancelling permanently removes the request from your history.": "ℹ️ 編集・取り消しができるのは「承認待ち」の申請のみです — 承認後は承認者に取り消しを依頼してください。取り消すと申請履歴から完全に削除されます。",
   "ℹ️ Pending requests can be edited or cancelled. Approved Annual/Sick/Business leave can still be cancelled if today is before the leave start date — the days return to your balance. On or after that date it cannot be cancelled. Cancelling permanently removes the request from your history.": "ℹ️ 保留中の申請は編集・キャンセルできます。承認済みの年次・病気・私用休暇は開始日の前日までキャンセルでき、日数は残日数に戻ります。当日以降はキャンセル不可。キャンセルすると履歴から完全に削除されます。",
