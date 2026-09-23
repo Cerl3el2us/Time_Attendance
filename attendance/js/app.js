@@ -13395,6 +13395,10 @@ function lateOutAllowanceForHour(hour) {
   return hour >= thr2 ? (S.lateNight2 || 480) : (S.lateNight1 || 240);
 }
 
+// 2026-09-23 (web check-out review): reads ONE generatePeriodDays() row -- the same source payroll
+// uses -- so the corrected check-out, its source and the Accounting/MD review always agree with
+// what will be paid. Full-day leave is checked first because that overlay clears the times.
+// A check-out before 05:00 is after midnight on the same business day (lateNightCheckoutMins).
 function canSubmitLateNightForDate(dateStr, userId, opts) {
   const uid = userId || (currentUser && currentUser.id);
   if (!uid || !dateStr) return { ok: false, reason: 'missing' };
@@ -13405,32 +13409,32 @@ function canSubmitLateNightForDate(dateStr, userId, opts) {
   }
   const pp = payPeriodBlockedForDate(dateStr, uid);
   if (pp.blocked) return { ok: false, reason: pp.reason };
-  const times = attendanceTimesForDate(dateStr, uid);
-  if (!times.checkIn) return { ok: false, reason: 'no-checkin' };
-  if (!times.checkOut) return { ok: false, reason: 'no-checkout' };
-  if (!isDeviceScanSource(times.checkOutSource)) {
-    return { ok: false, reason: times.checkOutSource === 'web' ? 'web' : 'no-checkout' };
+  if (isApprovedFullDayPersonalLeaveDate(dateStr, uid)) {
+    return { ok: false, reason: 'full-leave' };
   }
-  const checkOutMins = parseHHMMToMins(times.checkOut);
+  const d = new Date(dateStr + 'T12:00:00');
+  const row = generatePeriodDays(d, d, false, uid)[0] || { date: dateStr };
+  if (!row.checkIn) return { ok: false, reason: 'no-checkin' };
+  if (!row.checkOut) return { ok: false, reason: 'no-checkout' };
   const thr1 = lateOutThresholdHour(1);
+  const checkOutMins = lateNightCheckoutMins(row.checkOut);
   if (!Number.isFinite(checkOutMins) || checkOutMins < thr1 * 60) {
     return { ok: false, reason: 'too-early', thr1 };
+  }
+  if (!lateNightCheckoutOk(row)) {
+    if (row.checkOutSource === 'web') {
+      return { ok: false, reason: row.checkOutReview === 'deny' ? 'web-denied' : 'web-pending', row, thr1 };
+    }
+    return { ok: false, reason: 'no-checkout' };
   }
   const dup = DATA_LEAVES.some(l =>
     l.userId === uid && l.type === 'late-out' && l.dateFrom === dateStr && l.status !== 'rejected' &&
     l.id !== editingLeaveId
   );
   if (dup) return { ok: false, reason: 'duplicate' };
-  if (isApprovedFullDayPersonalLeaveDate(dateStr, uid)) {
-    return { ok: false, reason: 'full-leave' };
-  }
   if (!(opts && opts.ignoreHolidayWork) && isHolidayWorkDay(dateStr) && !hasHolidayWorkClaimOnDate(dateStr, uid, false)) {
     return { ok: false, reason: 'need-holiday-work' };
   }
-  const d = new Date(dateStr + 'T12:00:00');
-  const days = generatePeriodDays(d, d, false, uid);
-  const base = days[0] || { date: dateStr };
-  const row = { ...base, checkOut: times.checkOut, checkOutSource: times.checkOutSource, checkIn: times.checkIn, checkInSource: times.checkInSource };
   return { ok: true, row, thr1 };
 }
 
@@ -13454,20 +13458,22 @@ function lateNightSubmitBlockedMessage(result) {
   if (result.reason === 'period-locked' || result.reason === 'period-frozen' || result.reason === 'period-confirmed') {
     return payPeriodBlockedMessage(result);
   }
-  if (result.reason === 'web') {
-    return currentLang === 'ja'
-      ? '深夜退勤は顔認証端末での退勤が必要です（Webアプリの退勤では申請できません）'
-      : L('Late Night Out requires check-out at the face scanner, not the web app',
-          'แจ้งกลับดึกได้เฉพาะเมื่อสแกนออกที่เครื่อง ไม่ใช่ปุ่ม Check Out บนเว็บ');
+  if (result.reason === 'web-pending') {
+    return L('This web check-out is waiting for Accounting/MD review — 🌙 can be submitted after it is allowed',
+      'เช็กเอาท์ผ่านเว็บนี้รอบัญชี/MD ตรวจสอบ — ยื่น 🌙 ได้หลังได้รับอนุญาต');
+  }
+  if (result.reason === 'web-denied') {
+    return L('Accounting/MD did not allow this web check-out — 🌙 cannot be claimed',
+      'บัญชี/MD ไม่อนุญาตเวลาเช็กเอาท์ผ่านเว็บนี้ — ยื่น 🌙 ไม่ได้');
   }
   if (result.reason === 'no-checkin') {
     return L('Late Night Out requires a check-in first', 'ต้องเช็กอินก่อนจึงจะแจ้งกลับดึกได้');
   }
   if (result.reason === 'too-early') {
     return currentLang === 'ja'
-      ? `顔認証端末で${t}以降に退勤してから申請してください`
-      : L(`Scan out at the face terminal at or after ${t} before submitting`,
-          `ต้องสแกนออกที่เครื่องตั้งแต่ ${t} ขึ้นไป ถึงจะแจ้งกลับดึกได้`);
+      ? `${t}以降に退勤してから申請してください`
+      : L(`Check out at or after ${t} before submitting`,
+          `ต้องเช็กเอาท์ตั้งแต่ ${t} ขึ้นไป ถึงจะแจ้งกลับดึกได้`);
   }
   return currentLang === 'ja'
     ? '先に顔認証端末で退勤してください。事前申請はできません'
@@ -13494,12 +13500,8 @@ function refreshLateOutGate() {
   const targetDate = document.getElementById('lateout-date').value || businessDateStr();
   const gate = canSubmitLateNightForDate(targetDate);
   const checkOutStr = gate.row?.checkOut || '';
-  let checkOutMins = 0;
-  if (checkOutStr) {
-    const [h, m] = checkOutStr.split(':').map(Number);
-    checkOutMins = h * 60 + m;
-  }
-  const deviceOk = isDeviceScanSource(gate.row?.checkOutSource);
+  const checkOutMins = checkOutStr ? (lateNightCheckoutMins(checkOutStr) || 0) : 0;
+  const deviceOk = !!gate.row && lateNightCheckoutOk(gate.row);
 
   const thr1 = lateOutThresholdHour(1);
   const thr2 = lateOutThresholdHour(2);
@@ -13537,7 +13539,7 @@ function refreshLateOutGate() {
   }
 
   if (!can19 && !can20) {
-    if (gate.reason === 'web' || gate.reason === 'no-checkout' || gate.reason === 'missing') {
+    if (gate.reason === 'web-pending' || gate.reason === 'web-denied' || gate.reason === 'no-checkout' || gate.reason === 'missing') {
       noteEl.textContent = lateNightSubmitBlockedMessage(gate);
     } else {
       const thr1Str = `${String(thr1).padStart(2,'0')}:00`;
@@ -13597,11 +13599,7 @@ function selectLateOutTime(hour, skipGate = false) {
   const targetDate = document.getElementById('lateout-date').value || businessDateStr();
   const gate = canSubmitLateNightForDate(targetDate);
   const checkOutStr = gate.row?.checkOut || '';
-  let checkOutMins = 0;
-  if (checkOutStr) {
-    const [h, m] = checkOutStr.split(':').map(Number);
-    checkOutMins = h * 60 + m;
-  }
+  const checkOutMins = checkOutStr ? (lateNightCheckoutMins(checkOutStr) || 0) : 0;
   if (!skipGate && !gate.ok) {
     showToast(lateNightSubmitBlockedMessage(gate), 'warning');
     return;
@@ -14073,11 +14071,7 @@ function refreshHolidayWorkLateNightBundle() {
   if (!gate.ok) { hide(); return; }
   wrap.style.display = '';
   const checkOutStr = gate.row?.checkOut || '';
-  let checkOutMins = 0;
-  if (checkOutStr) {
-    const [h, m] = checkOutStr.split(':').map(Number);
-    checkOutMins = h * 60 + m;
-  }
+  const checkOutMins = checkOutStr ? (lateNightCheckoutMins(checkOutStr) || 0) : 0;
   const thr1 = lateOutThresholdHour(1);
   const thr2 = lateOutThresholdHour(2);
   const amt1 = lateOutAllowanceForHour(thr1);
@@ -14125,8 +14119,7 @@ function selectHwLateOutTime(hour) {
   const date = document.getElementById('holiday-work-date')?.value;
   const gate = canSubmitLateNightForDate(date, currentUser && currentUser.id, { ignoreHolidayWork: true });
   const checkOutStr = gate.row?.checkOut || '';
-  const [h, m] = (checkOutStr || '0:0').split(':').map(Number);
-  const checkOutMins = h * 60 + m;
+  const checkOutMins = checkOutStr ? (lateNightCheckoutMins(checkOutStr) || 0) : 0;
   if (!gate.ok || checkOutMins < hour * 60) return;
   _hwLateOutSelected = hour;
   const _isDark = document.documentElement.getAttribute('data-theme') === 'dark';

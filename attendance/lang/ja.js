@@ -1312,6 +1312,8 @@ window.LANG_JA = {
   "🔄 Holiday Work and 🌙 Late Night submitted — awaiting approval": "🔄 休日出勤と🌙深夜退勤を提出しました — 承認待ち",
   "🔄 Holiday Work submitted, but Late Night failed — submit 🌙 separately": "🔄 休日出勤は提出されましたが、深夜退勤に失敗しました — 🌙を別途提出してください",
   "Late Night Out requires a check-in first": "深夜退勤には先に出勤記録が必要です",
+  "This web check-out is waiting for Accounting/MD review — 🌙 can be submitted after it is allowed": "このWeb退勤は経理/MDの確認待ちです — 承認後に🌙を申請できます",
+  "Accounting/MD did not allow this web check-out — 🌙 cannot be claimed": "経理/MDがこのWeb退勤を承認しませんでした — 🌙は申請できません",
 
   /* 2026-09-21 — Abroad (work-abroad trip request + allowance) */
   "✈️ Report Work Abroad": "✈️ 海外勤務の申請",
