@@ -4265,6 +4265,17 @@ function holidayWorkSubmitBlockReason(user, dateStr) {
   if (!isHolidayWorkDay(dateStr)) {
     return 'dateFrom must be a day you actually worked, and a weekend or public holiday (not Company Trip)';
   }
+  // 2026-09-23 (Opus review C-1): holiday work is claimed after it happens. Without this, the
+  // no-scan Abroad path accepted a future weekend inside an approved trip. Dual-sync with app.js
+  // canSubmitHolidayWorkForDate.
+  if (dateStr > bangkokDateStr()) {
+    return 'Holiday work can only be submitted for a day that has already started';
+  }
+  const hwLeaves = readLeaves();
+  if (hwLeaves === null) return 'Service temporarily unavailable';
+  if (isAbroadTravelDay(hwLeaves, user.id, dateStr)) {
+    return 'This is a travel day of your approved Abroad trip — the annual-leave day is credited automatically, so holiday work cannot be submitted';
+  }
   const day = attendanceDayForUser(user, dateStr);
   // 2026-09-23 (owner): an approved Abroad day needs no scan -- the trip approval is the evidence.
   if (!day || (!day.checkIn && day.status !== 'abroad')) {
@@ -4359,14 +4370,37 @@ function earlyMorningSubmitBlockReason(user, dateStr) {
   }
   return null;
 }
+// 2026-09-23 (owner): an approved Abroad trip earns +1 annual-leave day for each TRAVEL day --
+// its start date and its end date only, never the days in between -- that falls on a weekend or
+// public holiday (Company Trip days excluded). A one-day trip counts once. Counted in the year of
+// the travel day. Travel days cannot also carry Holiday Work. Dual-sync with the other file.
+function abroadTravelCreditDays(abroadLeaves, yStart, yEnd) {
+  let n = 0;
+  abroadLeaves.forEach(l => {
+    new Set([l.dateFrom, l.dateTo || l.dateFrom]).forEach(d => {
+      if (d && d >= yStart && d <= yEnd && isNonWorkDayForComp(d) && !isCompanyTripDay(d)) n++;
+    });
+  });
+  return n;
+}
+function isAbroadTravelDay(leaves, userId, dateStr) {
+  return leaves.some(l =>
+    l.userId === userId && l.type === 'abroad' && l.status === 'approved' &&
+    (l.dateFrom === dateStr || (l.dateTo || l.dateFrom) === dateStr));
+}
+// Earned annual-leave days for the year: holiday work taken as annual leave, plus abroad travel
+// days on a weekend/holiday (2026-09-23). Every caller treats this as the earned pool.
 function getApprovedHolidayWorkAnnualLeaveDays(leaves, userId, year, exceptId) {
   const yStart = `${year}-01-01`, yEnd = `${year}-12-31`;
-  return leaves.filter(l =>
+  const hwDays = leaves.filter(l =>
     l.userId === userId && l.type === 'holiday-work' && l.compensationMode === 'annual-leave' &&
     l.status === 'approved' &&
     l.dateFrom >= yStart && l.dateFrom <= yEnd &&
     l.id !== exceptId
   ).reduce((s, l) => s + (l.days || 1), 0);
+  const abroad = leaves.filter(l =>
+    l.userId === userId && l.type === 'abroad' && l.status === 'approved' && l.id !== exceptId);
+  return hwDays + abroadTravelCreditDays(abroad, yStart, yEnd);
 }
 function ta_localDateStr(d) {
   const p2 = n => String(n).padStart(2, '0');
@@ -4939,6 +4973,15 @@ function validateAbroadRecord({ dateFrom, dateTo, location, reason }) {
 // Eligibility gates SUBMISSION, not just payment (user 2026-09-21: "เลือกได้ว่าใครจะยื่น allowance นี้
 // ได้บ้าง"). Without this, an ineligible role could still POST a record that pays nothing but does
 // silently mark its days as worked instead of absent.
+// 2026-09-23 (owner): a trip's start/end dates are travel days that earn annual leave
+// automatically and cannot carry Holiday Work -- refuse a trip whose travel day already has one.
+const ABROAD_TRAVEL_HW_CONFLICT_MSG = "A holiday work request exists on this trip's start or end date — travel days earn annual leave automatically; cancel that holiday work first";
+function abroadTravelDayHolidayWorkConflict(leaves, userId, dateFrom, dateTo) {
+  const travel = new Set([dateFrom, dateTo || dateFrom]);
+  return leaves.some(l =>
+    l.userId === userId && l.type === 'holiday-work' &&
+    !['rejected', 'cancelled'].includes(l.status) && travel.has(l.dateFrom));
+}
 function abroadSubmitBlockReason(user) {
   if (!user) return 'You are not eligible to submit abroad requests';
   if (!isAllowanceEligible(getAppSettings().allowanceEligibility, user.role, 'abroad')) {
@@ -5319,6 +5362,9 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
     if (type === 'abroad') {
       const abErr = abroadSubmitBlockReason(targetUser);
       if (abErr) return res.status(400).json({ success:false, message: abErr });
+      if (abroadTravelDayHolidayWorkConflict(leaves, targetUser.id, body.dateFrom, body.dateTo)) {
+        return res.status(409).json({ success:false, message: ABROAD_TRAVEL_HW_CONFLICT_MSG });
+      }
     }
     if (type === 'early-morning') {
       const emErr = earlyMorningSubmitBlockReason(targetUser, body.dateFrom);
@@ -5631,7 +5677,7 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
       // 2026-09-23 (Opus audit M-2/M-3): an approval that changes this year's annual pool after
       // year-end carry-forward was already run must rewrite next year's snapshot too -- otherwise
       // approved Dec leave still carries over, and a late-approved holiday-work day is lost.
-      const touchesAnnualPool = leave.type === 'annual' ||
+      const touchesAnnualPool = leave.type === 'annual' || leave.type === 'abroad' ||
         (leave.type === 'holiday-work' && leave.compensationMode === 'annual-leave');
       if (newStatus === 'approved' && touchesAnnualPool && ownerUser) {
         try {
@@ -5752,6 +5798,9 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
     if (newType === 'abroad') {
       const abErrPut = abroadSubmitBlockReason(ownerUser || live);
       if (abErrPut) return res.status(400).json({ success:false, message: abErrPut });
+      if (abroadTravelDayHolidayWorkConflict(leaves, leave.userId, resolvedDateFromForLock, resolvedDateToForLock)) {
+        return res.status(409).json({ success:false, message: ABROAD_TRAVEL_HW_CONFLICT_MSG });
+      }
     }
     if (newType === 'late-out') {
       // Validate the RESOLVED tier (what the record will end up with), not just this request's.
@@ -6298,7 +6347,7 @@ app.delete('/api/leaves/:id', withLeavesLock((req, res) => {
     }
     leaves.splice(idx, 1);
     saveLeaves(leaves);
-    if (approvedLeaveCancel && leave.type === 'annual') {
+    if (approvedLeaveCancel && ['annual', 'abroad'].includes(leave.type)) {
       try {
         refreshSnapshottedCarryForward(leaves, live, leave.dateFrom);
       } catch (e) {
@@ -7069,7 +7118,7 @@ function checkoutReviewTrigger(day, user, S) {
 // Late night pay: device check-out (or an Accounting/MD-allowed web check-out) + approved
 // late-out. Rest days also need approved holiday-work.
 function deviceScanQualifiesForLateNight(d, holidayWorkDateSet) {
-  if (!d || !d.lateOut || !d.lateApproved || d.status === 'company-trip') return false;
+  if (!d || !d.lateOut || !d.lateApproved || d.status === 'company-trip' || d.status === 'abroad') return false;
   if (isFullDayPersonalLeaveStatus(d.status) || !lateNightCheckoutOk(d)) return false;
   if (isRestAttendanceDay(d) && !(holidayWorkDateSet && holidayWorkDateSet.has(d.date))) return false;
   return true;
@@ -7155,7 +7204,7 @@ function isFullDayPersonalLeaveClaimBlocked(type, user, dateFrom) {
 // 2026-09-23 (owner): 'holiday-work' removed -- allowed on an abroad day without a scan, paid OT only.
 const ABROAD_NO_CLAIM_TYPES = new Set(['upcountry', 'late-out', 'long-distance', 'personal-car', 'early-morning']);
 function abroadNoClaimMessage() {
-  return 'This day is covered by an approved Abroad request -- only OT can be claimed';
+  return 'This day is covered by an approved Abroad request -- only OT and Holiday Work can be claimed';
 }
 function isAbroadClaimBlocked(type, user, dateFrom) {
   if (!ABROAD_NO_CLAIM_TYPES.has(type) || !user || !dateFrom) return false;
@@ -7676,6 +7725,8 @@ function computePayroll(user, start, end, periodIndex) {
     approvedEarlyMorning.forEach(l => {
       if (earlyScanPaidDates.has(l.dateFrom)) return;
       if (fullLeaveDates.has(l.dateFrom)) return;
+      // 2026-09-23: never paid on an approved Abroad day (a trip approved after the request).
+      if (abroadDates.has(l.dateFrom)) return;
       // Rest-day web request pays only with approved holiday-work (user 2026-09-01).
       if (isHolidayWorkDay(l.dateFrom) && !holidayWorkDates.has(l.dateFrom)) return;
       const tier = Number(l.earlyMorningTier) || 0;

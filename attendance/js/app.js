@@ -820,7 +820,7 @@ function initHolidayWorkDatePicker() {
       const dateStr = flatpickr.formatDate(dayElem.dateObj, 'Y-m-d');
       if (canSubmitHolidayWorkForDate(dateStr).ok) dayElem.classList.add('hw-day-selectable');
     },
-    onChange() { refreshHolidayWorkGate(); },
+    onChange() { refreshHolidayWorkGate(); refreshHolidayWorkCompHint(); },
   });
 }
 function setEarlyMorningDate(dateStr) {
@@ -1352,7 +1352,7 @@ function checkoutReviewTrigger(day, user, S) {
 // Late night pay: device check-out (or an Accounting/MD-allowed web check-out) + approved
 // late-out. Rest days also need approved holiday-work.
 function deviceScanQualifiesForLateNight(d, holidayWorkDateSet) {
-  if (!d || !d.lateOut || !d.lateApproved || d.status === 'company-trip') return false;
+  if (!d || !d.lateOut || !d.lateApproved || d.status === 'company-trip' || d.status === 'abroad') return false;
   if (isFullDayPersonalLeaveStatus(d.status) || !lateNightCheckoutOk(d)) return false;
   if (isRestAttendanceDay(d) && !(holidayWorkDateSet && holidayWorkDateSet.has(d.date))) return false;
   return true;
@@ -1700,6 +1700,10 @@ function canSubmitHolidayWorkForDate(dateStr, userId) {
     return { ok: false, reason: 'ineligible' };
   }
   if (!isHolidayWorkDay(dateStr)) return { ok: false, reason: 'not-holiday' };
+  // 2026-09-23 (Opus review C-1): claimed after it happens -- dual-sync with server
+  // holidayWorkSubmitBlockReason.
+  if (dateStr > bangkokDateStr()) return { ok: false, reason: 'future' };
+  if (isAbroadTravelDay(DATA_LEAVES, uid, dateStr)) return { ok: false, reason: 'abroad-travel-day' };
   const pp = payPeriodBlockedForDate(dateStr, uid);
   if (pp.blocked) return { ok: false, reason: pp.reason };
   const times = attendanceTimesForDate(dateStr, uid);
@@ -1748,6 +1752,14 @@ function holidayWorkSubmitBlockedMessage(result) {
   }
   if (result.reason === 'no-checkin') {
     return L('Holiday work requires a check-in first', 'ต้องเช็กอินก่อนจึงจะยื่นขอทำงานวันหยุดได้');
+  }
+  if (result.reason === 'future') {
+    return L('Holiday work can only be submitted for a day that has already started',
+      'ยื่นขอทำงานวันหยุดได้เฉพาะวันที่ถึงแล้วเท่านั้น');
+  }
+  if (result.reason === 'abroad-travel-day') {
+    return L('This is a travel day of your Abroad trip — the annual-leave day is credited automatically, so holiday work cannot be submitted',
+      'วันนี้เป็นวันเดินทางของทริปทำงานต่างประเทศ — ได้วันลาพักร้อนชดเชยอัตโนมัติแล้ว จึงยื่นขอทำงานวันหยุดไม่ได้');
   }
   if (result.reason === 'duplicate') {
     return L('A holiday work request already exists for this date', 'มีคำขอทำงานวันหยุดวันนี้อยู่แล้ว');
@@ -2631,13 +2643,36 @@ async function saveOpeningLeaveBalancesFromUI(year) {
   }
 }
 
+// 2026-09-23 (owner): an approved Abroad trip earns +1 annual-leave day for each TRAVEL day --
+// its start date and its end date only, never the days in between -- that falls on a weekend or
+// public holiday (Company Trip days excluded). A one-day trip counts once. Counted in the year of
+// the travel day. Travel days cannot also carry Holiday Work. Dual-sync with the other file.
+function abroadTravelCreditDays(abroadLeaves, yStart, yEnd) {
+  let n = 0;
+  abroadLeaves.forEach(l => {
+    new Set([l.dateFrom, l.dateTo || l.dateFrom]).forEach(d => {
+      if (d && d >= yStart && d <= yEnd && isNonWorkDayForComp(d) && !isCompanyTripDay(d)) n++;
+    });
+  });
+  return n;
+}
+function isAbroadTravelDay(leaves, userId, dateStr) {
+  return leaves.some(l =>
+    l.userId === userId && l.type === 'abroad' && l.status === 'approved' &&
+    (l.dateFrom === dateStr || (l.dateTo || l.dateFrom) === dateStr));
+}
+// Earned annual-leave days for the year: holiday work taken as annual leave, plus abroad travel
+// days on a weekend/holiday (2026-09-23). Every caller treats this as the earned pool.
+// Dual-sync with server.js getApprovedHolidayWorkAnnualLeaveDays.
 function getApprovedHolidayWorkDays(year, userId) {
   const yStart = `${year}-01-01`, yEnd = `${year}-12-31`;
-  return DATA_LEAVES.filter(l =>
+  const hwDays = DATA_LEAVES.filter(l =>
     l.userId === userId && l.type === 'holiday-work' && l.compensationMode === 'annual-leave' &&
     l.status === 'approved' &&
     l.dateFrom >= yStart && l.dateFrom <= yEnd
   ).reduce((s, l) => s + (l.days || 1), 0);
+  const abroad = DATA_LEAVES.filter(l => l.userId === userId && l.type === 'abroad' && l.status === 'approved');
+  return hwDays + abroadTravelCreditDays(abroad, yStart, yEnd);
 }
 
 // Shared leave-balance math — keeps the profile card (renderLeaveBalanceCard) and the leave-page
@@ -10507,6 +10542,8 @@ function computePayroll(user, start, end, periodIndex) {
     approvedEarlyMorning.forEach(l => {
       if (earlyScanPaidDates.has(l.dateFrom)) return;
       if (fullLeaveDates.has(l.dateFrom)) return;
+      // 2026-09-23: never paid on an approved Abroad day (a trip approved after the request).
+      if (abroadDates.has(l.dateFrom)) return;
       // Rest-day web request pays only with approved holiday-work (user 2026-09-01).
       if (isHolidayWorkDay(l.dateFrom) && !holidayWorkDates.has(l.dateFrom)) return;
       const tier = Number(l.earlyMorningTier) || 0;
@@ -14275,6 +14312,17 @@ function refreshHolidayWorkCompHint() {
   const el = document.getElementById('holiday-work-comp-hint');
   const sel = document.getElementById('holiday-work-comp-mode');
   if (!el || !sel) return;
+  // 2026-09-23 (owner): on an approved Abroad day neither mode pays Upcountry or holiday transport
+  // (the Abroad allowance covers the day), and no scan is needed.
+  const hwDate = document.getElementById('holiday-work-date')?.value;
+  if (hwDate && isApprovedAbroadDate(hwDate)) {
+    el.textContent = sel.value === 'paid'
+      ? L('Abroad day: pays OT ×2/×3 from start–end times only — no holiday transport, no Upcountry. No scan needed.',
+          'วันทำงานต่างประเทศ: จ่ายเฉพาะ OT ×2/×3 จากเวลาเริ่ม–เลิก — ไม่จ่ายค่าเดินทางวันหยุดและ Upcountry ไม่ต้องสแกน')
+      : L('Abroad day: adds 1 annual-leave day only — no holiday transport, no Upcountry, no OT. No scan needed.',
+          'วันทำงานต่างประเทศ: เพิ่มลาพักร้อน 1 วันเท่านั้น — ไม่จ่ายค่าเดินทางวันหยุด Upcountry และ OT ไม่ต้องสแกน');
+    return;
+  }
   if (sel.value === 'paid') {
     el.textContent = L(
       'Pays holiday transport and OT ×2/×3 from start–end times. Early Morning (Hikvision) and Upcountry (if you entered a location) still pay.',
@@ -15784,9 +15832,9 @@ function blockIfAbroadDay(dateStr, type, silent = false) {
   if (!ABROAD_NO_CLAIM_TYPES.has(type)) return false;
   if (!isApprovedAbroadDate(dateStr)) return false;
   if (!silent) showToast(currentLang === 'ja'
-    ? '✈️ この日は海外勤務として承認済みです — 申請できるのはOTのみです'
-    : L('✈️ This day is an approved Abroad day — only OT can be claimed',
-        '✈️ วันนี้เป็นวันทำงานต่างประเทศที่อนุมัติแล้ว — เคลมได้เฉพาะ OT'), 'warning');
+    ? '✈️ この日は海外勤務として承認済みです — 申請できるのはOTと休日出勤のみです'
+    : L('✈️ This day is an approved Abroad day — only OT and Holiday Work can be claimed',
+        '✈️ วันนี้เป็นวันทำงานต่างประเทศที่อนุมัติแล้ว — เคลมได้เฉพาะ OT และทำงานวันหยุด'), 'warning');
   return true;
 }
 function blockIfCompanyTrip(dateStr, silent = false) {
@@ -18045,16 +18093,16 @@ function _faqRulesItems() {
       ) },
     { icon: '🔄', roles: _faqEligibleRoles('holidayWork'), q: _faq('How does Holiday Work pay work?', 'ขอทำงานวันหยุดได้เงินยังไง?', '休日出勤の支給はどうなりますか？'),
       a: _faq(
-        `For a weekend or public holiday you actually checked in (not a Company Trip). Location (Upcountry) is required. After approval, pick one compensation mode: <b>Annual leave +1 day</b> adds 1 day to annual leave — no holiday transport and no OT ×2/×3 from the start–end times; Early Morning (device scan or 🌅 request) and Upcountry still pay. <b>Paid</b> pays holiday transport ฿${(S.allowances.holidayTransport != null ? S.allowances.holidayTransport : 500).toLocaleString()}/day, plus Upcountry, plus OT from your start–end times (×2 between ${stdStart} and 17:30 excluding the 12:00–13:00 lunch hour, ×3 outside that), plus Early Morning the same way. Start–end must fall within your actual check-in and check-out. If you already scanned out late, you can tick 🌙 on this form or submit 🌙 after Holiday Work. Drivers use Driver OT instead. ${_faqNotEligibleText('holidayWork')}`,
-        `สำหรับเสาร์-อาทิตย์หรือวันหยุดนักขัตฤกษ์ที่ลงเวลาเข้างานจริง (ไม่ใช่วัน Company Trip) ต้องกรอกสถานที่ (Upcountry) หลังอนุมัติเลือกโหมดอย่างใดอย่างหนึ่ง: <b>ลาพักร้อน +1 วัน</b> เพิ่มสิทธิ์ลา 1 วัน — ไม่จ่ายค่าเดินทางวันหยุด และไม่คิด OT ×2/×3 จากเวลาเริ่ม–เลิก แต่ยังจ่าย Early Morning (สแกนเครื่องหรือยื่น 🌅) และ Upcountry <b>ชดเชยเป็นเงิน</b> จ่ายค่าเดินทางวันหยุด ฿${(S.allowances.holidayTransport != null ? S.allowances.holidayTransport : 500).toLocaleString()}/วัน รวม Upcountry และ OT จากเวลาเริ่ม–เลิก (×2 ช่วง ${stdStart}–17:30 ไม่นับพักเที่ยง 12:00–13:00, ×3 นอกช่วงนั้น) รวม Early Morning แบบเดียวกัน เวลาเริ่ม–เลิกต้องอยู่ในช่วงเวลาสแกนเข้า–ออกจริง ถ้าสแกนออกดึกแล้ว ติ๊ก 🌙 ในฟอร์มนี้ได้ หรือยื่น 🌙 หลัง Holiday Work คนขับใช้ขอ OT แบบ Driver แทน ${_faqNotEligibleText('holidayWork')}`,
-        `実際に出勤記録がある週末・祝日が対象です（社員旅行日を除く）。場所（出張）は必須です。承認後はいずれか一方。<b>年次休暇+1日</b>は残日数+1 — 休日交通費と開始〜終了からのOT×2/×3は出ません。早朝手当と出張は出ます。<b>金銭補償</b>は休日交通費1日฿${(S.allowances.holidayTransport != null ? S.allowances.holidayTransport : 500).toLocaleString()}、出張、開始〜終了からのOT（${stdStart}〜17:30は×2、ただし昼休み12:00〜13:00を除く。それ以外は×3）、同じ早朝手当。開始〜終了は実際の出勤・退勤打刻の範囲内である必要があります。すでに深夜退勤していればこのフォームで🌙にチェックするか、休日出勤の後に🌙を出します。DriverはDriver OTです。${_faqNotEligibleText('holidayWork')}`
+        `For a weekend or public holiday you actually checked in (not a Company Trip). Location (Upcountry) is required. After approval, pick one compensation mode: <b>Annual leave +1 day</b> adds 1 day to annual leave — no holiday transport and no OT ×2/×3 from the start–end times; Early Morning (device scan or 🌅 request) and Upcountry still pay. <b>Paid</b> pays holiday transport ฿${(S.allowances.holidayTransport != null ? S.allowances.holidayTransport : 500).toLocaleString()}/day, plus Upcountry, plus OT from your start–end times (×2 between ${stdStart} and 17:30 excluding the 12:00–13:00 lunch hour, ×3 outside that), plus Early Morning the same way. Start–end must fall within your actual check-in and check-out. If you already scanned out late, you can tick 🌙 on this form or submit 🌙 after Holiday Work. Drivers use Driver OT instead. On a day inside an approved Abroad trip no scan is needed, but neither mode pays Upcountry or holiday transport; the trip's start and end dates (travel days) cannot carry Holiday Work — a travel day on a weekend or public holiday earns +1 annual-leave day automatically instead. Holiday Work can only be submitted for a day that has already started. ${_faqNotEligibleText('holidayWork')}`,
+        `สำหรับเสาร์-อาทิตย์หรือวันหยุดนักขัตฤกษ์ที่ลงเวลาเข้างานจริง (ไม่ใช่วัน Company Trip) ต้องกรอกสถานที่ (Upcountry) หลังอนุมัติเลือกโหมดอย่างใดอย่างหนึ่ง: <b>ลาพักร้อน +1 วัน</b> เพิ่มสิทธิ์ลา 1 วัน — ไม่จ่ายค่าเดินทางวันหยุด และไม่คิด OT ×2/×3 จากเวลาเริ่ม–เลิก แต่ยังจ่าย Early Morning (สแกนเครื่องหรือยื่น 🌅) และ Upcountry <b>ชดเชยเป็นเงิน</b> จ่ายค่าเดินทางวันหยุด ฿${(S.allowances.holidayTransport != null ? S.allowances.holidayTransport : 500).toLocaleString()}/วัน รวม Upcountry และ OT จากเวลาเริ่ม–เลิก (×2 ช่วง ${stdStart}–17:30 ไม่นับพักเที่ยง 12:00–13:00, ×3 นอกช่วงนั้น) รวม Early Morning แบบเดียวกัน เวลาเริ่ม–เลิกต้องอยู่ในช่วงเวลาสแกนเข้า–ออกจริง ถ้าสแกนออกดึกแล้ว ติ๊ก 🌙 ในฟอร์มนี้ได้ หรือยื่น 🌙 หลัง Holiday Work คนขับใช้ขอ OT แบบ Driver แทน วันที่อยู่ในทริปทำงานต่างประเทศที่อนุมัติแล้วไม่ต้องสแกน แต่ทั้งสองโหมดไม่จ่าย Upcountry และค่าเดินทางวันหยุด วันเริ่มและวันสิ้นสุดทริป (วันเดินทาง) ยื่นทำงานวันหยุดไม่ได้ — ถ้าตรงเสาร์-อาทิตย์หรือวันหยุดนักขัตฤกษ์จะได้วันลาพักร้อนเพิ่ม 1 วันอัตโนมัติแทน และยื่นขอทำงานวันหยุดได้เฉพาะวันที่ถึงแล้วเท่านั้น ${_faqNotEligibleText('holidayWork')}`,
+        `実際に出勤記録がある週末・祝日が対象です（社員旅行日を除く）。場所（出張）は必須です。承認後はいずれか一方。<b>年次休暇+1日</b>は残日数+1 — 休日交通費と開始〜終了からのOT×2/×3は出ません。早朝手当と出張は出ます。<b>金銭補償</b>は休日交通費1日฿${(S.allowances.holidayTransport != null ? S.allowances.holidayTransport : 500).toLocaleString()}、出張、開始〜終了からのOT（${stdStart}〜17:30は×2、ただし昼休み12:00〜13:00を除く。それ以外は×3）、同じ早朝手当。開始〜終了は実際の出勤・退勤打刻の範囲内である必要があります。すでに深夜退勤していればこのフォームで🌙にチェックするか、休日出勤の後に🌙を出します。DriverはDriver OTです。承認済みの海外勤務期間内の日は打刻不要ですが、どちらのモードでも出張手当・休日交通費は出ません。出発日・帰着日（移動日）は休日出勤を申請できず、土日・祝日にあたる移動日は代わりに年次休暇が自動で1日加算されます。休日出勤はすでに始まった日のみ申請できます。${_faqNotEligibleText('holidayWork')}`
       ) },
     { icon: '✈️', roles: _faqEligibleRoles('abroad'), q: _faq('How much is the Abroad allowance?', 'ทำงานต่างประเทศได้เบี้ยเลี้ยงเท่าไหร่?', '海外勤務手当はいくらですか？'),
       a: _faq(
         // Rate read live from settings, never hardcoded — same rule as every other ฿ answer here.
-        `฿${Number((S.allowances || {}).abroad || 0).toLocaleString()} for EVERY calendar day of an approved Work Abroad trip, weekends and public holidays included. Submit it with a start and end date plus the country or customer — those days then count as worked instead of absent. Only OT and Holiday Work can still be claimed on an abroad day (no scan needed; Holiday Work there pays its OT ×2/×3 only — no Upcountry or holiday transport); Upcountry, Long Distance, Personal Car, Early Morning and Late Night cannot. An approved trip can be cancelled by the person who submitted it up until the day before it starts.`,
-        `฿${Number((S.allowances || {}).abroad || 0).toLocaleString()} ต่อวันทุกวันตามปฏิทินในช่วงที่อนุมัติ รวมเสาร์-อาทิตย์และวันหยุดนักขัตฤกษ์ ยื่นโดยระบุวันที่เริ่ม-สิ้นสุด และประเทศหรือชื่อลูกค้า วันเหล่านั้นจะถูกนับเป็นวันทำงานแทนการขาดงาน วันที่แจ้งทำงานต่างประเทศเคลมได้เฉพาะ OT และทำงานวันหยุด (ไม่ต้องสแกน ทำงานวันหยุดในช่วงนี้ได้เฉพาะ OT ×2/×3 ไม่ได้ Upcountry และค่าเดินทางวันหยุด) — Upcountry, Long Distance, รถส่วนตัว, แจ้งมาเช้า และแจ้งกลับดึก ยื่นไม่ได้ คำขอที่อนุมัติแล้วผู้ยื่นยกเลิกเองได้จนถึงก่อนวันเริ่มเดินทาง`,
-        `承認された海外勤務期間の暦日すべてに฿${Number((S.allowances || {}).abroad || 0).toLocaleString()}（週末・祝日を含む）。開始日・終了日と国名または顧客名を入力して申請します。該当日は欠勤ではなく勤務として扱われます。海外勤務日に申請できるのはOTと休日出勤のみです（打刻不要。この期間の休日出勤はOT×2/×3のみで、出張手当・休日交通費は出ません）。出張・長距離・自家用車・早朝・深夜は申請できません。承認済みの申請は開始日の前日まで申請者本人が取り消せます。`
+        `฿${Number((S.allowances || {}).abroad || 0).toLocaleString()} for EVERY calendar day of an approved Work Abroad trip, weekends and public holidays included. Submit it with a start and end date plus the country or customer — those days then count as worked instead of absent. Only OT and Holiday Work can still be claimed on an abroad day (no scan needed; Holiday Work there never pays Upcountry or holiday transport in either mode — paid mode pays its OT ×2/×3, annual-leave mode adds the leave day); Upcountry, Long Distance, Personal Car, Early Morning and Late Night cannot. If the trip's start or end date (travel day) falls on a weekend or public holiday (not a Company Trip day), you get +1 annual-leave day for each such day automatically once the trip is approved — travel days themselves cannot carry Holiday Work. An approved trip can be cancelled by the person who submitted it up until the day before it starts.`,
+        `฿${Number((S.allowances || {}).abroad || 0).toLocaleString()} ต่อวันทุกวันตามปฏิทินในช่วงที่อนุมัติ รวมเสาร์-อาทิตย์และวันหยุดนักขัตฤกษ์ ยื่นโดยระบุวันที่เริ่ม-สิ้นสุด และประเทศหรือชื่อลูกค้า วันเหล่านั้นจะถูกนับเป็นวันทำงานแทนการขาดงาน วันที่แจ้งทำงานต่างประเทศเคลมได้เฉพาะ OT และทำงานวันหยุด (ไม่ต้องสแกน ทำงานวันหยุดในช่วงนี้ไม่ได้ Upcountry และค่าเดินทางวันหยุดทั้งสองโหมด — แบบเงินได้ OT ×2/×3 แบบวันลาได้เพิ่มวันลา) — Upcountry, Long Distance, รถส่วนตัว, แจ้งมาเช้า และแจ้งกลับดึก ยื่นไม่ได้ ถ้าวันเริ่มหรือวันสิ้นสุดทริป (วันเดินทาง) ตรงเสาร์-อาทิตย์หรือวันหยุดนักขัตฤกษ์ (ไม่ใช่วัน Company Trip) จะได้วันลาพักร้อนเพิ่มวันละ 1 วันอัตโนมัติเมื่อทริปได้รับอนุมัติ และวันเดินทางยื่นทำงานวันหยุดไม่ได้ คำขอที่อนุมัติแล้วผู้ยื่นยกเลิกเองได้จนถึงก่อนวันเริ่มเดินทาง`,
+        `承認された海外勤務期間の暦日すべてに฿${Number((S.allowances || {}).abroad || 0).toLocaleString()}（週末・祝日を含む）。開始日・終了日と国名または顧客名を入力して申請します。該当日は欠勤ではなく勤務として扱われます。海外勤務日に申請できるのはOTと休日出勤のみです（打刻不要。この期間の休日出勤はどちらのモードでも出張手当・休日交通費は出ません — 金銭補償はOT×2/×3、年休モードは休暇加算）。出張・長距離・自家用車・早朝・深夜は申請できません。出発日または帰着日（移動日）が土日・祝日（社員旅行日を除く）にあたる場合、承認時に該当日ごとに年次休暇が自動で1日加算されます。移動日には休日出勤を申請できません。承認済みの申請は開始日の前日まで申請者本人が取り消せます。`
       ) },
     { icon: '🗺️', roles: _faqEligibleRoles('upcountry'), q: _faq('How much is the Upcountry allowance?', 'Upcountry ได้เบี้ยเลี้ยงเท่าไหร่?', '出張手当はいくらですか？'),
       a: _faq(
