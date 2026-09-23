@@ -6890,10 +6890,45 @@ function deviceScanQualifiesForEarlyMorning(d, holidayWorkDateSet) {
   if (isRestAttendanceDay(d) && !(holidayWorkDateSet && holidayWorkDateSet.has(d.date))) return false;
   return true;
 }
-// Late night pay: device check-out + approved late-out. Rest days also need approved holiday-work.
+// 2026-09-23 (web check-out Late Night review): a check-out before 05:00 belongs to the same
+// business day (after midnight), so it compares as 24:00 + time. NaN for anything not HH:MM.
+function lateNightCheckoutMins(hhmm) {
+  if (typeof hhmm !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(hhmm)) return NaN;
+  const [h, m] = hhmm.split(':').map(Number);
+  const mins = h * 60 + m;
+  return mins < 5 * 60 ? mins + 24 * 60 : mins;
+}
+// An Accounting/MD review applies only to a web check-out, and only while the day's current
+// effective check-out is still the time that was reviewed -- a later web tap or an approved
+// time-correction puts the day back to pending (null).
+function checkoutReviewDecisionFor(review, checkOut, checkOutSource) {
+  if (!review || checkOutSource !== 'web' || !checkOut || review.checkOut !== checkOut) return null;
+  return review.decision === 'allow' || review.decision === 'deny' ? review.decision : null;
+}
+// Late Night can be paid after a face-scanner check-out, or after a web check-out that
+// Accounting/MD allowed (d.checkOutReview is set by generatePeriodDays).
+function lateNightCheckoutOk(d) {
+  if (!d) return false;
+  return isDeviceScanSource(d.checkOutSource) || (d.checkOutSource === 'web' && d.checkOutReview === 'allow');
+}
+// A day Accounting/MD must review: a web check-out at/after the Late Night x1 time, on a worked
+// day that is not full-day personal leave / Company Trip / Abroad, for a role eligible for earlyLate.
+function checkoutReviewTrigger(day, user, S) {
+  if (!day || !user || !S || !day.checkIn || !day.checkOut || day.isFuture) return false;
+  if (day.checkOutSource !== 'web') return false;
+  if (isFullDayPersonalLeaveStatus(day.status) || day.status === 'company-trip' ||
+      day.status === 'abroad' || day.status === 'future') return false;
+  if (!isAllowanceEligible(S.allowanceEligibility, user.role, 'earlyLate')) return false;
+  const a = S.allowances || {};
+  const thr1 = a.lateNightThreshold1Hour || a.lateNightThresholdHour || 19;
+  const mins = lateNightCheckoutMins(day.checkOut);
+  return Number.isFinite(mins) && mins >= thr1 * 60;
+}
+// Late night pay: device check-out (or an Accounting/MD-allowed web check-out) + approved
+// late-out. Rest days also need approved holiday-work.
 function deviceScanQualifiesForLateNight(d, holidayWorkDateSet) {
   if (!d || !d.lateOut || !d.lateApproved || d.status === 'company-trip') return false;
-  if (isFullDayPersonalLeaveStatus(d.status) || !isDeviceScanSource(d.checkOutSource)) return false;
+  if (isFullDayPersonalLeaveStatus(d.status) || !lateNightCheckoutOk(d)) return false;
   if (isRestAttendanceDay(d) && !(holidayWorkDateSet && holidayWorkDateSet.has(d.date))) return false;
   return true;
 }
