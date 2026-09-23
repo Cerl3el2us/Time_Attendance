@@ -3013,6 +3013,20 @@ app.delete('/api/announcements/:id', (req, res) => {
   res.json({ success: true });
 });
 
+// ===== WEB CHECK-OUT LATE NIGHT REVIEWS (2026-09-23) =====
+// { "<userId>_<YYYY-MM-DD>": { decision:'allow'|'deny', checkOut, rawCheckOut, by, byId, at } }
+// Own file, not a settings key -- PUT /api/settings deep-merges object keys, which would make a
+// cleared review impossible to delete. Unreadable/corrupt file => null => callers fail closed.
+const CHECKOUT_REVIEWS_FILE = 'checkout-reviews.json';
+const CHECKOUT_REVIEWS_UNAVAILABLE = 'Service temporarily unavailable';
+const withCheckoutReviewsLock = makeHandlerLock('CHECKOUT_REVIEWS');
+function readCheckoutReviews() {
+  const data = readJSON(CHECKOUT_REVIEWS_FILE, {});
+  if (data === null) return null;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  return data;
+}
+
 // Was missing entirely — GET/PUT /api/settings referenced these but they were never defined,
 // throwing ReferenceError on every call. This silently broke Approval Routing persistence
 // (loadSettingsFromBackend()'s try/catch swallowed the failure on the frontend) — settings
@@ -4109,12 +4123,14 @@ function validateHolidayWorkLocation(locations) {
   }
   return null;
 }
-function attendanceDayForUser(user, dateStr) {
+// `reviews`: the checkout-reviews map (PUT /api/checkout-reviews passes it so the derived day
+// carries checkOutReview). Other callers do not need review decisions and pass nothing.
+function attendanceDayForUser(user, dateStr, reviews = {}) {
   const dayStart = new Date(dateStr + 'T12:00:00');
   const attLog = buildAttendanceLogForUser(user, dayStart, dayStart);
   const leaves = readLeaves() || [];
   const S = getAppSettings();
-  const days = generatePeriodDays(dayStart, dayStart, false, user, attLog, leaves, S);
+  const days = generatePeriodDays(dayStart, dayStart, false, user, attLog, leaves, S, reviews);
   return days[0] || null;
 }
 function holidayWorkSubmitBlockReason(user, dateStr) {
@@ -7182,8 +7198,9 @@ function lateReferenceMin(row, stdStartMin) {
   return (plStartMin <= stdStartMin && plEndMin > stdStartMin) ? plEndMin : stdStartMin;
 }
 
-function generatePeriodDays(start, end, isCurrent, user, attLog, leaves, appSettings) {
+function generatePeriodDays(start, end, isCurrent, user, attLog, leaves, appSettings, reviews = {}) {
   const uid = user.id;
+  const reviewMap = reviews || {};
   const days = [];
   const todayCopy = bangkokTodayDate();
   todayCopy.setHours(23, 59, 59, 0);
@@ -7251,6 +7268,10 @@ function generatePeriodDays(start, end, isCurrent, user, attLog, leaves, appSett
         status = isPubHoliday ? 'holiday' : 'absent';
       }
     }
+
+    // 2026-09-23: the scanned check-out before any time-correction overlay -- shown to reviewers
+    // as "21:00 (corrected from 17:40)". Dual-sync twin in app.js.
+    const rawCheckOut = checkOut;
 
     // Overlay approved leaves so approvals always appear regardless of attLog state
     // (mirrors app.js's `DATA_LEAVES.filter(l => l.userId == uid && l.status === 'approved')`).
@@ -7339,7 +7360,10 @@ function generatePeriodDays(start, end, isCurrent, user, attLog, leaves, appSett
       }
     }
 
-    days.push({ date: dateStr, isWeekend, isPubHoliday, isFuture, status, checkIn, checkOut, lateOut, upcountry, longDistance, longDistanceKm, longDistanceAllowance, lateApproved, firstScanAfterCutoff, partialLeave, checkInSource, checkOutSource });
+    // 2026-09-23: after the overlay, so a review counts only for the effective (corrected) web
+    // check-out it was made on. Dual-sync twin in app.js.
+    const checkOutReview = checkoutReviewDecisionFor(reviewMap[`${uid}_${dateStr}`], checkOut, checkOutSource);
+    days.push({ date: dateStr, isWeekend, isPubHoliday, isFuture, status, checkIn, checkOut, lateOut, upcountry, longDistance, longDistanceKm, longDistanceAllowance, lateApproved, firstScanAfterCutoff, partialLeave, checkInSource, checkOutSource, checkOutReview, rawCheckOut });
     d.setDate(d.getDate() + 1);
   }
   return days;
@@ -7422,7 +7446,11 @@ function computePayroll(user, start, end, periodIndex) {
   const isCurrent = periodIndex === 0;
   const attLog = buildAttendanceLogForUser(user, start, end);
   const leaves = readLeaves() || [];
-  const pDays = generatePeriodDays(start, end, isCurrent, user, attLog, leaves, S);
+  // 2026-09-23: an Accounting/MD-allowed web check-out pays Late Night like a device scan. Never
+  // treat an unreadable reviews file as "no reviews" -- that would silently change payroll.
+  const reviews = readCheckoutReviews();
+  if (reviews === null) throw new Error('Service temporarily unavailable');
+  const pDays = generatePeriodDays(start, end, isCurrent, user, attLog, leaves, S, reviews);
 
   const canUpcountry = isAllowanceEligible(S.allowanceEligibility, user.role, 'upcountry');
   const canEarlyLate = isAllowanceEligible(S.allowanceEligibility, user.role, 'earlyLate');
