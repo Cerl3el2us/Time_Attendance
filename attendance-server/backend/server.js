@@ -4374,11 +4374,14 @@ function earlyMorningSubmitBlockReason(user, dateStr) {
 // its start date and its end date only, never the days in between -- that falls on a weekend or
 // public holiday (Company Trip days excluded). A one-day trip counts once. Counted in the year of
 // the travel day. Travel days cannot also carry Holiday Work. Dual-sync with the other file.
+// Owner decision 2026-09-23: a travel day counts only once it has ARRIVED (<= today, Bangkok),
+// so cancelling a future trip can never take back leave that was already spent.
 function abroadTravelCreditDays(abroadLeaves, yStart, yEnd) {
+  const today = bangkokDateStr();
   let n = 0;
   abroadLeaves.forEach(l => {
     new Set([l.dateFrom, l.dateTo || l.dateFrom]).forEach(d => {
-      if (d && d >= yStart && d <= yEnd && isNonWorkDayForComp(d) && !isCompanyTripDay(d)) n++;
+      if (d && d >= yStart && d <= yEnd && d <= today && isNonWorkDayForComp(d) && !isCompanyTripDay(d)) n++;
     });
   });
   return n;

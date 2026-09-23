@@ -2647,11 +2647,14 @@ async function saveOpeningLeaveBalancesFromUI(year) {
 // its start date and its end date only, never the days in between -- that falls on a weekend or
 // public holiday (Company Trip days excluded). A one-day trip counts once. Counted in the year of
 // the travel day. Travel days cannot also carry Holiday Work. Dual-sync with the other file.
+// Owner decision 2026-09-23: a travel day counts only once it has ARRIVED (<= today, Bangkok),
+// so cancelling a future trip can never take back leave that was already spent.
 function abroadTravelCreditDays(abroadLeaves, yStart, yEnd) {
+  const today = bangkokDateStr();
   let n = 0;
   abroadLeaves.forEach(l => {
     new Set([l.dateFrom, l.dateTo || l.dateFrom]).forEach(d => {
-      if (d && d >= yStart && d <= yEnd && isNonWorkDayForComp(d) && !isCompanyTripDay(d)) n++;
+      if (d && d >= yStart && d <= yEnd && d <= today && isNonWorkDayForComp(d) && !isCompanyTripDay(d)) n++;
     });
   });
   return n;
@@ -18111,9 +18114,9 @@ function _faqRulesItems() {
     { icon: '✈️', roles: _faqEligibleRoles('abroad'), q: _faq('How much is the Abroad allowance?', 'ทำงานต่างประเทศได้เบี้ยเลี้ยงเท่าไหร่?', '海外勤務手当はいくらですか？'),
       a: _faq(
         // Rate read live from settings, never hardcoded — same rule as every other ฿ answer here.
-        `฿${Number((S.allowances || {}).abroad || 0).toLocaleString()} for EVERY calendar day of an approved Work Abroad trip, weekends and public holidays included. Submit it with a start and end date plus the country or customer — those days then count as worked instead of absent. Only OT and Holiday Work can still be claimed on an abroad day (no scan needed; Holiday Work there never pays Upcountry or holiday transport in either mode — paid mode pays its OT ×2/×3, annual-leave mode adds the leave day); Upcountry, Long Distance, Personal Car, Early Morning and Late Night cannot. If the trip's start or end date (travel day) falls on a weekend or public holiday (not a Company Trip day), you get +1 annual-leave day for each such day automatically once the trip is approved — travel days themselves cannot carry Holiday Work. An approved trip can be cancelled by the person who submitted it up until the day before it starts.`,
-        `฿${Number((S.allowances || {}).abroad || 0).toLocaleString()} ต่อวันทุกวันตามปฏิทินในช่วงที่อนุมัติ รวมเสาร์-อาทิตย์และวันหยุดนักขัตฤกษ์ ยื่นโดยระบุวันที่เริ่ม-สิ้นสุด และประเทศหรือชื่อลูกค้า วันเหล่านั้นจะถูกนับเป็นวันทำงานแทนการขาดงาน วันที่แจ้งทำงานต่างประเทศเคลมได้เฉพาะ OT และทำงานวันหยุด (ไม่ต้องสแกน ทำงานวันหยุดในช่วงนี้ไม่ได้ Upcountry และค่าเดินทางวันหยุดทั้งสองโหมด — แบบเงินได้ OT ×2/×3 แบบวันลาได้เพิ่มวันลา) — Upcountry, Long Distance, รถส่วนตัว, แจ้งมาเช้า และแจ้งกลับดึก ยื่นไม่ได้ ถ้าวันเริ่มหรือวันสิ้นสุดทริป (วันเดินทาง) ตรงเสาร์-อาทิตย์หรือวันหยุดนักขัตฤกษ์ (ไม่ใช่วัน Company Trip) จะได้วันลาพักร้อนเพิ่มวันละ 1 วันอัตโนมัติเมื่อทริปได้รับอนุมัติ และวันเดินทางยื่นทำงานวันหยุดไม่ได้ คำขอที่อนุมัติแล้วผู้ยื่นยกเลิกเองได้จนถึงก่อนวันเริ่มเดินทาง`,
-        `承認された海外勤務期間の暦日すべてに฿${Number((S.allowances || {}).abroad || 0).toLocaleString()}（週末・祝日を含む）。開始日・終了日と国名または顧客名を入力して申請します。該当日は欠勤ではなく勤務として扱われます。海外勤務日に申請できるのはOTと休日出勤のみです（打刻不要。この期間の休日出勤はどちらのモードでも出張手当・休日交通費は出ません — 金銭補償はOT×2/×3、年休モードは休暇加算）。出張・長距離・自家用車・早朝・深夜は申請できません。出発日または帰着日（移動日）が土日・祝日（社員旅行日を除く）にあたる場合、承認時に該当日ごとに年次休暇が自動で1日加算されます。移動日には休日出勤を申請できません。承認済みの申請は開始日の前日まで申請者本人が取り消せます。`
+        `฿${Number((S.allowances || {}).abroad || 0).toLocaleString()} for EVERY calendar day of an approved Work Abroad trip, weekends and public holidays included. Submit it with a start and end date plus the country or customer — those days then count as worked instead of absent. Only OT and Holiday Work can still be claimed on an abroad day (no scan needed; Holiday Work there never pays Upcountry or holiday transport in either mode — paid mode pays its OT ×2/×3, annual-leave mode adds the leave day); Upcountry, Long Distance, Personal Car, Early Morning and Late Night cannot. If the trip's start or end date (travel day) falls on a weekend or public holiday (not a Company Trip day), you get +1 annual-leave day for each such day automatically once that travel day arrives (the trip must be approved) — travel days themselves cannot carry Holiday Work. An approved trip can be cancelled by the person who submitted it up until the day before it starts.`,
+        `฿${Number((S.allowances || {}).abroad || 0).toLocaleString()} ต่อวันทุกวันตามปฏิทินในช่วงที่อนุมัติ รวมเสาร์-อาทิตย์และวันหยุดนักขัตฤกษ์ ยื่นโดยระบุวันที่เริ่ม-สิ้นสุด และประเทศหรือชื่อลูกค้า วันเหล่านั้นจะถูกนับเป็นวันทำงานแทนการขาดงาน วันที่แจ้งทำงานต่างประเทศเคลมได้เฉพาะ OT และทำงานวันหยุด (ไม่ต้องสแกน ทำงานวันหยุดในช่วงนี้ไม่ได้ Upcountry และค่าเดินทางวันหยุดทั้งสองโหมด — แบบเงินได้ OT ×2/×3 แบบวันลาได้เพิ่มวันลา) — Upcountry, Long Distance, รถส่วนตัว, แจ้งมาเช้า และแจ้งกลับดึก ยื่นไม่ได้ ถ้าวันเริ่มหรือวันสิ้นสุดทริป (วันเดินทาง) ตรงเสาร์-อาทิตย์หรือวันหยุดนักขัตฤกษ์ (ไม่ใช่วัน Company Trip) จะได้วันลาพักร้อนเพิ่มวันละ 1 วันอัตโนมัติเมื่อถึงวันเดินทางนั้น (ทริปต้องได้รับอนุมัติ) และวันเดินทางยื่นทำงานวันหยุดไม่ได้ คำขอที่อนุมัติแล้วผู้ยื่นยกเลิกเองได้จนถึงก่อนวันเริ่มเดินทาง`,
+        `承認された海外勤務期間の暦日すべてに฿${Number((S.allowances || {}).abroad || 0).toLocaleString()}（週末・祝日を含む）。開始日・終了日と国名または顧客名を入力して申請します。該当日は欠勤ではなく勤務として扱われます。海外勤務日に申請できるのはOTと休日出勤のみです（打刻不要。この期間の休日出勤はどちらのモードでも出張手当・休日交通費は出ません — 金銭補償はOT×2/×3、年休モードは休暇加算）。出張・長距離・自家用車・早朝・深夜は申請できません。出発日または帰着日（移動日）が土日・祝日（社員旅行日を除く）にあたる場合、その移動日になった時点で該当日ごとに年次休暇が自動で1日加算されます（出張の承認が必要）。移動日には休日出勤を申請できません。承認済みの申請は開始日の前日まで申請者本人が取り消せます。`
       ) },
     { icon: '🗺️', roles: _faqEligibleRoles('upcountry'), q: _faq('How much is the Upcountry allowance?', 'Upcountry ได้เบี้ยเลี้ยงเท่าไหร่?', '出張手当はいくらですか？'),
       a: _faq(
