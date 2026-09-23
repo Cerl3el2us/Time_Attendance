@@ -3065,6 +3065,21 @@ function handlePutCheckoutReview(req, res) {
     if (decision !== 'allow' && decision !== 'deny' && decision !== null) {
       return res.status(400).json({ success: false, message: "decision must be 'allow', 'deny' or null" });
     }
+    // FIX (final review, T10/concurrency): the client now sends the check-out time it displayed
+    // when allowing/denying, so a stale screen (someone else's later web tap, or an approved time
+    // correction, changed the effective check-out since this screen was loaded) can be caught
+    // instead of silently reviewing the wrong time. Required for allow/deny; optional for a
+    // decision:null clear (clearing doesn't assert any particular check-out was reviewed).
+    // Validated for format only -- never stored; the stored value stays server-derived (day.checkOut
+    // below), same as before this fix.
+    const bodyCheckOut = body.checkOut;
+    if (decision === 'allow' || decision === 'deny') {
+      if (typeof bodyCheckOut !== 'string' || !HHMM_RE.test(bodyCheckOut)) {
+        return res.status(400).json({ success: false, message: 'checkOut is required and must be in HH:MM format' });
+      }
+    } else if (bodyCheckOut !== undefined && bodyCheckOut !== null && (typeof bodyCheckOut !== 'string' || !HHMM_RE.test(bodyCheckOut))) {
+      return res.status(400).json({ success: false, message: 'checkOut must be in HH:MM format' });
+    }
     if (userId === live.id) {
       return res.status(403).json({ success: false, message: 'You cannot review your own check-out' });
     }
@@ -3091,6 +3106,13 @@ function handlePutCheckoutReview(req, res) {
     const day = attendanceDayForUser(target, dateStr, reviews);
     if (!checkoutReviewTrigger(day, target, getAppSettings())) {
       return res.status(400).json({ success: false, message: 'This day has no web check-out at or after the Late Night time to review' });
+    }
+    // FIX (final review, T10/concurrency): re-derive the real check-out and compare against what
+    // the reviewer's screen showed. If they differ, someone else's action (another web check-out,
+    // an approved time correction) moved the goalposts between when the screen loaded and when
+    // Allow/Deny was clicked -- refuse rather than silently recording a review of the wrong time.
+    if ((decision === 'allow' || decision === 'deny') && bodyCheckOut !== day.checkOut) {
+      return res.status(409).json({ success: false, message: 'Check-out time changed — reload and review again' });
     }
     const key = `${userId}_${dateStr}`;
     let review = null;
@@ -7487,7 +7509,24 @@ function lateOutSubmitBlockReason(user, dateStr, lateOutTime) {
   if (isFullDayPersonalLeaveStatus(day && day.status)) {
     return fullDayPersonalLeaveNoClaimMessage();
   }
-  if (!day || !day.checkOut) {
+  // FIX (final review, T3): company-trip/abroad used to fall through into the checkOut/review
+  // checks below, where checkoutReviewTrigger() never fires for them -- resulting in a day that
+  // can NEVER be reviewed reporting "waiting for Accounting/MD review" forever. Report the real,
+  // specific reason instead, matching app.js's canSubmitLateNightForDate().
+  if (day && day.status === 'company-trip') {
+    return 'This date is a Company Trip day — Late Night Out cannot be claimed';
+  }
+  if (day && day.status === 'abroad') {
+    return 'This day is an approved Abroad day — Late Night Out cannot be claimed';
+  }
+  // FIX (final review, T3): checkIn used to be checked AFTER the checkout/tier/review checks
+  // below, so a day with no check-in at all (but some stray web checkOut value) could report
+  // "waiting for Accounting/MD review" -- a state that can never clear -- instead of the real,
+  // fixable "check in first" reason.
+  if (!day || !day.checkIn) {
+    return 'Late Night Out requires a check-in first';
+  }
+  if (!day.checkOut) {
     return 'Late Night Out requires a check-out first';
   }
   const thr1 = S.allowances.lateNightThreshold1Hour || S.allowances.lateNightThresholdHour || 19;
@@ -7496,7 +7535,11 @@ function lateOutSubmitBlockReason(user, dateStr, lateOutTime) {
     return `Late Night Out requires a check-out at or after ${String(thr1).padStart(2, '0')}:00`;
   }
   if (!lateNightCheckoutOk(day)) {
-    if (day.checkOutSource === 'web') {
+    // FIX (final review, T3): gate on the actual trigger predicate (checkoutReviewTrigger),
+    // not merely `checkOutSource === 'web'` -- keeps this consistent with app.js and with
+    // whatever day.status exclusions checkoutReviewTrigger() applies (future-proof if that list
+    // changes) instead of duplicating the exclusion list here.
+    if (checkoutReviewTrigger(day, user, S)) {
       return day.checkOutReview === 'deny'
         ? 'This web check-out was not allowed by Accounting/MD -- Late Night Out cannot be claimed'
         : 'This web check-out is waiting for Accounting/MD review before Late Night Out can be submitted';
@@ -7508,9 +7551,6 @@ function lateOutSubmitBlockReason(user, dateStr, lateOutTime) {
     if (!Number.isFinite(tierMins) || tierMins > outMins) {
       return `The selected return time is later than your check-out (${day.checkOut})`;
     }
-  }
-  if (!day.checkIn) {
-    return 'Late Night Out requires a check-in first';
   }
   const hwDay = isHolidayWorkDay(dateStr);
   const hasHw = hasActiveHolidayWork(leaves, user.id, dateStr);

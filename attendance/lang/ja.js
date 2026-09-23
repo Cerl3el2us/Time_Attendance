@@ -1354,6 +1354,9 @@ window.LANG_JA = {
   "✅ Check-out allowed": "✅ 退勤を許可しました",
   "❌ Check-out marked as not allowed": "❌ 退勤を不許可にしました",
   "↩️ Review cleared": "↩️ 確認結果を取り消しました",
+  // 2026-09-23 (final review, T10/concurrency): another reviewer's action moved the real
+  // check-out between page load and Allow/Deny — server refuses with 409, client shows this
+  "⚠️ Check-out time changed — reload and review again": "⚠️ 退勤時刻が変更されました — 再読み込みしてもう一度確認してください",
   "This employee already has a 🌙 Late Night request for this day. Mark the check-out as not allowed anyway? The 🌙 will not be paid while it stays not allowed.":
     "この社員はこの日の🌙深夜残業申請をすでに提出しています。それでも退勤を不許可にしますか？不許可のままだと🌙は支払われません。",
 

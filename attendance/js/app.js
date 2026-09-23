@@ -4937,6 +4937,10 @@ async function logout() {
   checkedIn = false;
   checkInTime = null;
   attendanceLog = {};
+  // FIX (final review, T5): reset the checkout-reviews map on logout -- otherwise a previous
+  // MD/Accounting user's full review map (visible to isLeaveFullAccess roles) lingers in memory
+  // for the next user who logs into this same tab/browser.
+  DATA_CHECKOUT_REVIEWS = {};
   clearInterval(clockInterval);
   if (gpsWatchId !== null) { navigator.geolocation.clearWatch(gpsWatchId); gpsWatchId = null; }
   destroyGpsMap();
@@ -5249,6 +5253,11 @@ function initApp(startPage) {
       if (currentPage === 'attendance') renderAttendanceTable();
       if (currentPage === 'checkin') { restoreTodayLog(); updateScanButton(); }
       if (currentPage === 'reports') renderReports();
+      // FIX (final review, T4): the Approvals page's "Web check-outs awaiting review" box
+      // (checkoutReviewPendingItems) reads attendanceLog, but this initial load never re-rendered
+      // the Approvals page -- an MD/Accounting user who opened Approvals before attendanceLog
+      // finished loading would see an empty/stale box until some unrelated action re-rendered it.
+      if (currentPage === 'approval') renderApprovals();
     }
   });
 }
@@ -6831,7 +6840,10 @@ function buildCheckoutReviewHtml(row, targetUser, withButtons) {
   if (withButtons && canReviewCheckoutFor(targetUser) && !payPeriodBlockedForDate(row.date, targetUser.id).blocked) {
     const uid = Number(targetUser.id);
     const d = escapeJsAttr(row.date);
-    const btn = (color, title, arg, label) => `<button class="btn btn-ghost btn-sm" style="color:${color};padding:0 4px;margin-left:2px" title="${escapeHtml(title)}" onclick="setCheckoutReview(${uid}, '${d}', ${arg})">${label}</button>`;
+    // FIX (final review, T10/concurrency): pass the check-out time this screen is actually
+    // showing so the server can refuse (409) if it no longer matches the real, current check-out.
+    const co = escapeJsAttr(row.checkOut || '');
+    const btn = (color, title, arg, label) => `<button class="btn btn-ghost btn-sm" style="color:${color};padding:0 4px;margin-left:2px" title="${escapeHtml(title)}" onclick="setCheckoutReview(${uid}, '${d}', ${arg}, '${co}')">${label}</button>`;
     html += decision
       ? btn('#64748b', L('Undo review', 'ยกเลิกผลตรวจสอบ'), 'null', '↩️')
       : btn('#059669', L('Allow this web check-out (unlocks 🌙)', 'อนุญาตเวลาออกผ่านเว็บนี้ (ปลดล็อก 🌙)'), "'allow'", '✅') +
@@ -6840,7 +6852,10 @@ function buildCheckoutReviewHtml(row, targetUser, withButtons) {
   return `<div class="checkout-review">${html}${rawNote}</div>`;
 }
 
-async function setCheckoutReview(userId, dateStr, decision) {
+// `checkOut`: the HH:MM check-out time this screen was actually displaying when the button was
+// clicked (final review, T10/concurrency) -- the server re-derives the real check-out itself and
+// refuses with 409 if it no longer matches, so a stale screen can never review the wrong time.
+async function setCheckoutReview(userId, dateStr, decision, checkOut) {
   if (blockIfObserver()) return;
   const uid = Number(userId);
   if (!currentUser || uid === Number(currentUser.id) || !isMdAccountingView()) return;
@@ -6852,10 +6867,21 @@ async function setCheckoutReview(userId, dateStr, decision) {
   try {
     const res = await apiFetch('/api/checkout-reviews', {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: uid, date: dateStr, decision }),
+      body: JSON.stringify({ userId: uid, date: dateStr, decision, checkOut: checkOut || undefined }),
     });
     const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.message || ('HTTP ' + res.status));
+    if (!res.ok || !data.success) {
+      if (res.status === 409) {
+        // Someone else's action changed the real check-out since this screen loaded --
+        // re-fetch both attendance (the real check-out moved) and reviews, then re-render,
+        // instead of leaving a stale row/chip on screen.
+        showToast(L('⚠️ Check-out time changed — reload and review again', '⚠️ เวลาออกเปลี่ยนไปแล้ว — โหลดใหม่แล้วตรวจสอบอีกครั้ง'), 'warning');
+        await Promise.all([loadAttendanceFromBackend(), loadCheckoutReviewsFromBackend()]);
+        rerenderAfterCheckoutReviews();
+        return;
+      }
+      throw new Error(data.message || ('HTTP ' + res.status));
+    }
     const key = attKey(uid, dateStr);
     if (decision === null) delete DATA_CHECKOUT_REVIEWS[key];
     else DATA_CHECKOUT_REVIEWS[key] = data.review;
@@ -11454,8 +11480,8 @@ function checkoutReviewPendingBoxHtml(items) {
       <td style="padding:6px 8px;white-space:nowrap">${escapeHtml(fmtDate(new Date(day.date + 'T12:00:00')))}</td>
       <td style="padding:6px 8px;white-space:nowrap">🌐 ${escapeHtml(day.checkOut)}${raw}</td>
       <td style="padding:6px 8px;white-space:nowrap;text-align:right">
-        <button class="btn btn-ghost btn-sm" style="color:#059669" title="${escapeHtml(L('Allow this web check-out (unlocks 🌙)', 'อนุญาตเวลาออกผ่านเว็บนี้ (ปลดล็อก 🌙)'))}" onclick="setCheckoutReview(${uid}, '${d}', 'allow')">✅</button>
-        <button class="btn btn-ghost btn-sm" style="color:#dc2626" title="${escapeHtml(L('Do not allow this web check-out', 'ไม่อนุญาตเวลาออกผ่านเว็บนี้'))}" onclick="setCheckoutReview(${uid}, '${d}', 'deny')">❌</button>
+        <button class="btn btn-ghost btn-sm" style="color:#059669" title="${escapeHtml(L('Allow this web check-out (unlocks 🌙)', 'อนุญาตเวลาออกผ่านเว็บนี้ (ปลดล็อก 🌙)'))}" onclick="setCheckoutReview(${uid}, '${d}', 'allow', '${escapeJsAttr(day.checkOut || '')}')">✅</button>
+        <button class="btn btn-ghost btn-sm" style="color:#dc2626" title="${escapeHtml(L('Do not allow this web check-out', 'ไม่อนุญาตเวลาออกผ่านเว็บนี้'))}" onclick="setCheckoutReview(${uid}, '${d}', 'deny', '${escapeJsAttr(day.checkOut || '')}')">❌</button>
       </td>
     </tr>`;
   }).join('');
@@ -13566,9 +13592,16 @@ function canSubmitLateNightForDate(dateStr, userId, opts) {
     return { ok: false, reason: 'too-early', thr1 };
   }
   if (!lateNightCheckoutOk(row)) {
-    if (row.checkOutSource === 'web') {
+    // FIX (final review, T3/T6): web-pending/web-denied used to fire for ANY web check-out that
+    // failed lateNightCheckoutOk(), including days checkoutReviewTrigger() would never trigger a
+    // review for at all (company-trip, abroad) -- those days can never clear review ("waiting for
+    // review" forever). Gate on the actual trigger predicate so the reason matches what Accounting/
+    // MD would ever be asked to review, and report the real, specific reason otherwise.
+    if (checkoutReviewTrigger(row, user, APP_SETTINGS)) {
       return { ok: false, reason: row.checkOutReview === 'deny' ? 'web-denied' : 'web-pending', row, thr1 };
     }
+    if (row.status === 'company-trip') return { ok: false, reason: 'company-trip' };
+    if (row.status === 'abroad') return { ok: false, reason: 'abroad' };
     return { ok: false, reason: 'no-checkout' };
   }
   const dup = DATA_LEAVES.some(l =>
@@ -13599,6 +13632,20 @@ function lateNightSubmitBlockedMessage(result) {
     return L('This date is full-day leave — daily allowances cannot be claimed',
       'วันนี้เป็นวันลาเต็มวัน — ยื่นเบี้ยรายวันไม่ได้');
   }
+  // FIX (final review, T3/T6): company-trip/abroad days used to fall through to the generic
+  // web-pending message even though checkoutReviewTrigger() would never fire a review for them.
+  if (result.reason === 'company-trip') {
+    return currentLang === 'ja'
+      ? 'この日は社員旅行日です — 深夜手当は申請できません'
+      : L('This date is a Company Trip day — Late Night Out cannot be claimed',
+          'วันนี้เป็นวัน Company Trip — ยื่นแจ้งกลับดึกไม่ได้');
+  }
+  if (result.reason === 'abroad') {
+    return currentLang === 'ja'
+      ? 'この日は海外勤務として承認済みです — 深夜手当は申請できません'
+      : L('This day is an approved Abroad day — Late Night Out cannot be claimed',
+          'วันนี้เป็นวันทำงานต่างประเทศที่อนุมัติแล้ว — ยื่นแจ้งกลับดึกไม่ได้');
+  }
   if (result.reason === 'period-locked' || result.reason === 'period-frozen' || result.reason === 'period-confirmed') {
     return payPeriodBlockedMessage(result);
   }
@@ -13619,10 +13666,14 @@ function lateNightSubmitBlockedMessage(result) {
       : L(`Check out at or after ${t} before submitting`,
           `ต้องเช็กเอาท์ตั้งแต่ ${t} ขึ้นไป ถึงจะแจ้งกลับดึกได้`);
   }
+  // FIX (final review, T6): this used to be face-terminal-only text ("Scan out at the face
+  // terminal first"), which is wrong now that a web check-out is also a valid path to Late
+  // Night Out -- kept only as a generic, source-neutral last resort for any reason not handled
+  // above (e.g. 'missing').
   return currentLang === 'ja'
-    ? '先に顔認証端末で退勤してください。事前申請はできません'
-    : L('Scan out at the face terminal first — Late Night Out cannot be submitted in advance',
-        'ต้องสแกนออกที่เครื่องก่อน จึงจะแจ้งกลับดึกได้ — ยื่นล่วงหน้าไม่ได้');
+    ? '退勤してから申請してください。事前申請はできません'
+    : L('Check out first — Late Night Out cannot be submitted in advance',
+        'ต้องเช็กเอาท์ก่อน จึงจะแจ้งกลับดึกได้ — ยื่นล่วงหน้าไม่ได้');
 }
 
 function updateLateOutEntryVisibility() {
@@ -13683,16 +13734,15 @@ function refreshLateOutGate() {
   }
 
   if (!can19 && !can20) {
-    if (gate.reason === 'web-pending' || gate.reason === 'web-denied' || gate.reason === 'no-checkout' || gate.reason === 'missing') {
-      noteEl.textContent = lateNightSubmitBlockedMessage(gate);
-    } else {
-      const thr1Str = `${String(thr1).padStart(2,'0')}:00`;
-      noteEl.textContent = checkOutStr
-        ? (currentLang === 'ja'
-            ? `⏰ 退勤時刻 ${checkOutStr} — 深夜勤務の条件を満たしていません（${thr1Str}以降である必要があります）`
-            : L(`⏰ Check-out ${checkOutStr} — does not meet late-night criteria (must be after ${thr1Str})`, `⏰ เวลาออก ${checkOutStr} — ยังไม่ถึงเงื่อนไขแจ้งกลับดึก (ต้องหลัง ${thr1Str})`))
-        : lateNightSubmitBlockedMessage({ reason: 'no-checkout' });
-    }
+    // FIX (final review, T6): previously only web-pending/web-denied/no-checkout/missing routed
+    // through lateNightSubmitBlockedMessage(gate) -- every other reason (too-early, duplicate,
+    // full-leave, need-holiday-work, period-locked, ...) carries no `row`, so checkOutStr was
+    // always '' and this fell back to the face-terminal-only "Scan out at the face terminal
+    // first" text, which is wrong once web check-outs are a valid path. `row` is in practice only
+    // ever populated for web-pending/web-denied (and the ok:true case, handled in the else branch
+    // below), so route every failure reason through the single source of truth instead of
+    // building a separate ad-hoc message here.
+    noteEl.textContent = lateNightSubmitBlockedMessage(gate);
   } else {
     noteEl.textContent = checkOutStr
       ? (currentLang === 'ja' ? `⏰ 退勤時刻: ${checkOutStr}` : L(`⏰ Check-out time: ${checkOutStr}`, `⏰ เวลาออกงาน: ${checkOutStr}`))
@@ -16912,6 +16962,11 @@ function processLiveScanEvent(ev) {
 
   saveSession();
   if (currentPage === 'attendance') renderAttendanceTable();
+  // FIX (final review, T4): the Approvals page's "Web check-outs awaiting review" box
+  // (checkoutReviewPendingItems) reads attendanceLog, but a live scan updating attendanceLog here
+  // never re-rendered it -- Accounting/MD sitting on the Approvals page would not see a newly
+  // triggering web check-out appear until some unrelated re-render happened.
+  if (currentPage === 'approval') renderApprovals();
   renderDashboard();
   // If event is for the current user, refresh both the checkin page's button state AND the
   // today's log timeline — previously only updateScanButton() was called here, so a live device
