@@ -1703,7 +1703,9 @@ function canSubmitHolidayWorkForDate(dateStr, userId) {
   const pp = payPeriodBlockedForDate(dateStr, uid);
   if (pp.blocked) return { ok: false, reason: pp.reason };
   const times = attendanceTimesForDate(dateStr, uid);
-  if (!times.checkIn) return { ok: false, reason: 'no-checkin' };
+  // 2026-09-23 (owner): an approved Abroad day needs no scan (dual-sync: server
+  // holidayWorkSubmitBlockReason).
+  if (!times.checkIn && !isApprovedAbroadDate(dateStr, uid)) return { ok: false, reason: 'no-checkin' };
   const d = new Date(dateStr + 'T12:00:00');
   const days = generatePeriodDays(d, d, false, uid);
   const base = days[0] || { date: dateStr };
@@ -10447,6 +10449,10 @@ function computePayroll(user, start, end, periodIndex) {
   const fullLeaveDates = new Set(
     pDays.filter(d => isFullDayPersonalLeaveStatus(d.status)).map(d => d.date)
   );
+  // 2026-09-23 (owner): Holiday Work on an approved Abroad day pays its OT (x2/x3) only -- no
+  // Upcountry and no holiday transport, the Abroad allowance already covers the day.
+  // Dual-sync with the other file's computePayroll.
+  const abroadDates = new Set(pDays.filter(d => d.status === 'abroad').map(d => d.date));
 
   const approvedEarlyMorning = canEarlyLate ? DATA_LEAVES.filter(l =>
     l.userId === user.id && l.type === 'early-morning' && l.status === 'approved' &&
@@ -10458,6 +10464,7 @@ function computePayroll(user, start, end, periodIndex) {
     !isFullDayPersonalLeaveStatus(d.status)
   ).length : 0;
   const holidayWorkUpcountryCount = canUpcountry ? approvedHolidayWork.filter(l =>
+    !abroadDates.has(l.dateFrom) &&
     Array.isArray(l.locations) && l.locations.some(x => x && x.name && String(x.name).trim())
   ).length : 0;
 
@@ -10564,7 +10571,9 @@ function computePayroll(user, start, end, periodIndex) {
   let holidayTransportTotal = 0;
   approvedHolidayWork.forEach(l => {
     if (l.compensationMode !== 'paid') return;
-    holidayTransportTotal += S.allowances.holidayTransport != null ? S.allowances.holidayTransport : 500;
+    if (!abroadDates.has(l.dateFrom)) {
+      holidayTransportTotal += S.allowances.holidayTransport != null ? S.allowances.holidayTransport : 500;
+    }
     const hrs20 = Number(l.otHours20) || 0;
     const hrs30 = Number(l.otHours30) || 0;
     const amt20 = Math.round(hourlyRate * 2 * hrs20);
@@ -15761,7 +15770,8 @@ function blockIfObserver(silent = false) {
 // 2026-09-21 (Abroad): 'ot' is deliberately ABSENT -- OT is the one claim that still applies while
 // abroad (user-confirmed); the flat daily allowance covers everything else. Dual-sync twin of
 // server.js's ABROAD_NO_CLAIM_TYPES / isAbroadClaimBlocked().
-const ABROAD_NO_CLAIM_TYPES = new Set(['upcountry', 'late-out', 'long-distance', 'personal-car', 'holiday-work', 'early-morning']);
+// 2026-09-23 (owner): 'holiday-work' removed -- allowed on an abroad day without a scan, paid OT only.
+const ABROAD_NO_CLAIM_TYPES = new Set(['upcountry', 'late-out', 'long-distance', 'personal-car', 'early-morning']);
 function isApprovedAbroadDate(dateStr, userId) {
   if (!dateStr) return false;
   const uid = userId || (currentUser ? currentUser.id : null);
@@ -18042,9 +18052,9 @@ function _faqRulesItems() {
     { icon: '✈️', roles: _faqEligibleRoles('abroad'), q: _faq('How much is the Abroad allowance?', 'ทำงานต่างประเทศได้เบี้ยเลี้ยงเท่าไหร่?', '海外勤務手当はいくらですか？'),
       a: _faq(
         // Rate read live from settings, never hardcoded — same rule as every other ฿ answer here.
-        `฿${Number((S.allowances || {}).abroad || 0).toLocaleString()} for EVERY calendar day of an approved Work Abroad trip, weekends and public holidays included. Submit it with a start and end date plus the country or customer — those days then count as worked instead of absent. Only OT can still be claimed on an abroad day; Upcountry, Long Distance, Personal Car, Early Morning, Late Night and Holiday Work cannot. An approved trip can be cancelled by the person who submitted it up until the day before it starts.`,
-        `฿${Number((S.allowances || {}).abroad || 0).toLocaleString()} ต่อวันทุกวันตามปฏิทินในช่วงที่อนุมัติ รวมเสาร์-อาทิตย์และวันหยุดนักขัตฤกษ์ ยื่นโดยระบุวันที่เริ่ม-สิ้นสุด และประเทศหรือชื่อลูกค้า วันเหล่านั้นจะถูกนับเป็นวันทำงานแทนการขาดงาน วันที่แจ้งทำงานต่างประเทศเคลมได้เฉพาะ OT เท่านั้น — Upcountry, Long Distance, รถส่วนตัว, แจ้งมาเช้า, แจ้งกลับดึก และทำงานวันหยุด ยื่นไม่ได้ คำขอที่อนุมัติแล้วผู้ยื่นยกเลิกเองได้จนถึงก่อนวันเริ่มเดินทาง`,
-        `承認された海外勤務期間の暦日すべてに฿${Number((S.allowances || {}).abroad || 0).toLocaleString()}（週末・祝日を含む）。開始日・終了日と国名または顧客名を入力して申請します。該当日は欠勤ではなく勤務として扱われます。海外勤務日に申請できるのはOTのみで、出張・長距離・自家用車・早朝・深夜・休日出勤は申請できません。承認済みの申請は開始日の前日まで申請者本人が取り消せます。`
+        `฿${Number((S.allowances || {}).abroad || 0).toLocaleString()} for EVERY calendar day of an approved Work Abroad trip, weekends and public holidays included. Submit it with a start and end date plus the country or customer — those days then count as worked instead of absent. Only OT and Holiday Work can still be claimed on an abroad day (no scan needed; Holiday Work there pays its OT ×2/×3 only — no Upcountry or holiday transport); Upcountry, Long Distance, Personal Car, Early Morning and Late Night cannot. An approved trip can be cancelled by the person who submitted it up until the day before it starts.`,
+        `฿${Number((S.allowances || {}).abroad || 0).toLocaleString()} ต่อวันทุกวันตามปฏิทินในช่วงที่อนุมัติ รวมเสาร์-อาทิตย์และวันหยุดนักขัตฤกษ์ ยื่นโดยระบุวันที่เริ่ม-สิ้นสุด และประเทศหรือชื่อลูกค้า วันเหล่านั้นจะถูกนับเป็นวันทำงานแทนการขาดงาน วันที่แจ้งทำงานต่างประเทศเคลมได้เฉพาะ OT และทำงานวันหยุด (ไม่ต้องสแกน ทำงานวันหยุดในช่วงนี้ได้เฉพาะ OT ×2/×3 ไม่ได้ Upcountry และค่าเดินทางวันหยุด) — Upcountry, Long Distance, รถส่วนตัว, แจ้งมาเช้า และแจ้งกลับดึก ยื่นไม่ได้ คำขอที่อนุมัติแล้วผู้ยื่นยกเลิกเองได้จนถึงก่อนวันเริ่มเดินทาง`,
+        `承認された海外勤務期間の暦日すべてに฿${Number((S.allowances || {}).abroad || 0).toLocaleString()}（週末・祝日を含む）。開始日・終了日と国名または顧客名を入力して申請します。該当日は欠勤ではなく勤務として扱われます。海外勤務日に申請できるのはOTと休日出勤のみです（打刻不要。この期間の休日出勤はOT×2/×3のみで、出張手当・休日交通費は出ません）。出張・長距離・自家用車・早朝・深夜は申請できません。承認済みの申請は開始日の前日まで申請者本人が取り消せます。`
       ) },
     { icon: '🗺️', roles: _faqEligibleRoles('upcountry'), q: _faq('How much is the Upcountry allowance?', 'Upcountry ได้เบี้ยเลี้ยงเท่าไหร่?', '出張手当はいくらですか？'),
       a: _faq(
@@ -18295,9 +18305,9 @@ function _faqHowToItems() {
         _faq('Once approved, every calendar day in the range counts as a working day instead of absent — weekends and public holidays included — and each one earns the allowance.',
              'เมื่ออนุมัติแล้ว ทุกวันตามปฏิทินในช่วงนั้นจะถูกนับเป็นวันทำงานแทนการขาดงาน รวมเสาร์-อาทิตย์และวันหยุดนักขัตฤกษ์ และได้รับเบี้ยเลี้ยงทุกวัน',
              '承認されると、期間内の暦日はすべて欠勤ではなく勤務日として扱われ（週末・祝日を含む）、各日に手当が付きます。'),
-        _faq('On those days only <b>OT</b> can still be claimed — Upcountry, Long Distance, Personal Car, Early Morning, Late Night and Holiday Work are all blocked. OT does not need a scan on an abroad day.',
-             'วันเหล่านั้นเคลมได้เฉพาะ <b>OT</b> เท่านั้น — Upcountry, Long Distance, รถส่วนตัว, แจ้งมาเช้า, แจ้งกลับดึก และทำงานวันหยุด ยื่นไม่ได้ทั้งหมด และการยื่น OT ในวันทำงานต่างประเทศไม่ต้องมีการสแกน',
-             'これらの日に申請できるのは<b>OT</b>のみです — 出張・長距離・自家用車・早朝・深夜・休日出勤はすべて不可。海外勤務日のOT申請に打刻は不要です。'),
+        _faq('On those days only <b>OT</b> and <b>Holiday Work</b> can still be claimed — Upcountry, Long Distance, Personal Car, Early Morning and Late Night are all blocked. Neither needs a scan on an abroad day; Holiday Work still needs start–end times, location and the Working Report, and pays its OT ×2/×3 only (no Upcountry or holiday transport).',
+             'วันเหล่านั้นเคลมได้เฉพาะ <b>OT</b> และ<b>ทำงานวันหยุด</b> — Upcountry, Long Distance, รถส่วนตัว, แจ้งมาเช้า และแจ้งกลับดึก ยื่นไม่ได้ทั้งหมด ทั้งสองอย่างไม่ต้องสแกนในวันทำงานต่างประเทศ ทำงานวันหยุดยังต้องกรอกเวลาเริ่ม–เลิก สถานที่ และแนบ Working Report และได้เฉพาะ OT ×2/×3 (ไม่ได้ Upcountry และค่าเดินทางวันหยุด)',
+             'これらの日に申請できるのは<b>OT</b>と<b>休日出勤</b>のみです — 出張・長距離・自家用車・早朝・深夜はすべて不可。海外勤務日はどちらも打刻不要です。休日出勤は開始〜終了時刻・場所・Working Reportが必要で、支給はOT×2/×3のみです（出張手当・休日交通費なし）。'),
         _faq('If the trip is called off, you can cancel it yourself up until the day before it starts. On or after the start date it can no longer be cancelled.',
              'ถ้าทริปถูกยกเลิก คุณยกเลิกคำขอเองได้จนถึงก่อนวันเริ่มเดินทาง เมื่อถึงวันเริ่มแล้วจะยกเลิกไม่ได้',
              '出張が中止になった場合、開始日の前日までは自分で取り消せます。開始日以降は取り消せません。')

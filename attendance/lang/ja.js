@@ -1325,7 +1325,7 @@ window.LANG_JA = {
   "Describe the work on this trip...": "今回の出張で行う業務を入力してください...",
   "✈️ Submit Request": "✈️ 申請する",
   "📌 Days in this range are not counted as absent, and each day earns the Abroad allowance — weekends and public holidays included.": "📌 この期間の日は欠勤として扱われず、週末・祝日を含め毎日、海外勤務手当が支給されます。",
-  "📌 On these days only OT can still be claimed.": "📌 これらの日に申請できるのはOTのみです。",
+  "📌 On these days only OT and Holiday Work can still be claimed.": "📌 これらの日に申請できるのはOTと休日出勤のみです。",
   "✈️ Abroad": "✈️ 海外勤務手当",
   "Abroad (฿/day)": "海外勤務（฿/日）",
   "Abroad Allowance": "海外勤務手当",

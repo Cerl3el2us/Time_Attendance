@@ -4266,7 +4266,8 @@ function holidayWorkSubmitBlockReason(user, dateStr) {
     return 'dateFrom must be a day you actually worked, and a weekend or public holiday (not Company Trip)';
   }
   const day = attendanceDayForUser(user, dateStr);
-  if (!day || !day.checkIn) {
+  // 2026-09-23 (owner): an approved Abroad day needs no scan -- the trip approval is the evidence.
+  if (!day || (!day.checkIn && day.status !== 'abroad')) {
     return 'Holiday work requires a check-in first';
   }
   return null;
@@ -4698,6 +4699,9 @@ function findOverlappingLeave(leaves, userId, type, dateFrom, dateTo, exceptId) 
     l.userId === userId &&
     l.id !== exceptId &&
     DATE_OVERLAP_LEAVE_TYPES.has(l.type) &&
+    // 2026-09-23 (owner): Holiday Work is allowed on an approved Abroad day, so those two types
+    // may overlap each other (every other pair still may not).
+    !((type === 'abroad' && l.type === 'holiday-work') || (type === 'holiday-work' && l.type === 'abroad')) &&
     !['rejected', 'cancelled'].includes(l.status) &&
     l.dateFrom &&
     l.dateFrom <= aTo && (l.dateTo || l.dateFrom) >= dateFrom
@@ -7148,7 +7152,8 @@ function isFullDayPersonalLeaveClaimBlocked(type, user, dateFrom) {
 // 2026-09-21 (Abroad): 'ot' is deliberately ABSENT from this set -- the user confirmed OT is the
 // one claim that still applies while abroad; the flat daily allowance covers everything else.
 // Dual-sync twin in app.js.
-const ABROAD_NO_CLAIM_TYPES = new Set(['upcountry', 'late-out', 'long-distance', 'personal-car', 'holiday-work', 'early-morning']);
+// 2026-09-23 (owner): 'holiday-work' removed -- allowed on an abroad day without a scan, paid OT only.
+const ABROAD_NO_CLAIM_TYPES = new Set(['upcountry', 'late-out', 'long-distance', 'personal-car', 'early-morning']);
 function abroadNoClaimMessage() {
   return 'This day is covered by an approved Abroad request -- only OT can be claimed';
 }
@@ -7627,6 +7632,10 @@ function computePayroll(user, start, end, periodIndex) {
   const fullLeaveDates = new Set(
     pDays.filter(d => isFullDayPersonalLeaveStatus(d.status)).map(d => d.date)
   );
+  // 2026-09-23 (owner): Holiday Work on an approved Abroad day pays its OT (x2/x3) only -- no
+  // Upcountry and no holiday transport, the Abroad allowance already covers the day.
+  // Dual-sync with the other file's computePayroll.
+  const abroadDates = new Set(pDays.filter(d => d.status === 'abroad').map(d => d.date));
 
   const approvedEarlyMorning = canEarlyLate ? leaves.filter(l =>
     l.userId === user.id && l.type === 'early-morning' && l.status === 'approved' &&
@@ -7638,6 +7647,7 @@ function computePayroll(user, start, end, periodIndex) {
     !isFullDayPersonalLeaveStatus(d.status)
   ).length : 0;
   const holidayWorkUpcountryCount = canUpcountry ? approvedHolidayWork.filter(l =>
+    !abroadDates.has(l.dateFrom) &&
     Array.isArray(l.locations) && l.locations.some(x => x && x.name && String(x.name).trim())
   ).length : 0;
 
@@ -7734,7 +7744,9 @@ function computePayroll(user, start, end, periodIndex) {
   let holidayTransportTotal = 0;
   approvedHolidayWork.forEach(l => {
     if (l.compensationMode !== 'paid') return;
-    holidayTransportTotal += S.allowances.holidayTransport != null ? S.allowances.holidayTransport : 500;
+    if (!abroadDates.has(l.dateFrom)) {
+      holidayTransportTotal += S.allowances.holidayTransport != null ? S.allowances.holidayTransport : 500;
+    }
     const hrs20 = Number(l.otHours20) || 0;
     const hrs30 = Number(l.otHours30) || 0;
     const amt20 = Math.round(hourlyRate * 2 * hrs20);
