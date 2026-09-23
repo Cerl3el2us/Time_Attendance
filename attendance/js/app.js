@@ -6871,7 +6871,14 @@ async function setCheckoutReview(userId, dateStr, decision, checkOut) {
     });
     const data = await res.json();
     if (!res.ok || !data.success) {
-      if (res.status === 409) {
+      // PUT /api/checkout-reviews can 409 for three different reasons: a stale check-out (the
+      // real check-out moved since this screen loaded, marked with code:'CHECKOUT_CHANGED'), or
+      // the period already being accounting-confirmed / MD-approved (ordinary lock states, same
+      // as any other rejection). Only the stale-check-out case means "reload and try again" --
+      // the other two must fall through to the normal error path so the server's own message
+      // (e.g. "Payroll for this period has already been approved...") reaches the user instead of
+      // a misleading "check-out time changed" toast.
+      if (res.status === 409 && data.code === 'CHECKOUT_CHANGED') {
         // Someone else's action changed the real check-out since this screen loaded --
         // re-fetch both attendance (the real check-out moved) and reviews, then re-render,
         // instead of leaving a stale row/chip on screen.
@@ -11502,6 +11509,29 @@ function checkoutReviewPendingBoxHtml(items) {
   </div>`;
 }
 
+// Refreshes ONLY the "Web check-outs awaiting review" box inside the Approvals summary bar --
+// creating it, updating its rows, or removing it if it's now empty -- without touching the rest
+// of the Approvals page or `_approvalSelected`. renderApprovals() itself calls this (DRY: one
+// place builds/updates the box) but a live scan on the Approvals page must NOT go through the
+// full renderApprovals(), since that clears `_approvalSelected` and redraws every Quick Table
+// checkbox, wiping out an MD's in-progress bulk selection whenever anyone scans in/out.
+function refreshCheckoutReviewPendingBox() {
+  const summEl = document.getElementById('approval-summary-bar');
+  if (!summEl) return;
+  const items = checkoutReviewPendingItems();
+  let box = document.getElementById('checkout-review-pending-box');
+  if (!items.length) {
+    if (box) box.remove();
+    return;
+  }
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'checkout-review-pending-box';
+    summEl.insertBefore(box, summEl.firstChild);
+  }
+  box.innerHTML = checkoutReviewPendingBoxHtml(items);
+}
+
 function renderApprovals() {
   const catEl  = document.getElementById('approval-categories');
   const histEl = document.getElementById('approval-history-section');
@@ -11536,13 +11566,7 @@ function renderApprovals() {
   // ── Summary bar: tab + toolbar ──
   if (summEl) {
     // Web check-out Late Night reviews (MD/Accounting only; hidden when empty).
-    const _crItems = checkoutReviewPendingItems();
-    if (_crItems.length) {
-      const _crBox = document.createElement('div');
-      _crBox.id = 'checkout-review-pending-box';
-      _crBox.innerHTML = checkoutReviewPendingBoxHtml(_crItems);
-      summEl.appendChild(_crBox);
-    }
+    refreshCheckoutReviewPendingBox();
     // Tab bar
     const tabBar = document.createElement('div');
     tabBar.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px';
@@ -13584,6 +13608,17 @@ function canSubmitLateNightForDate(dateStr, userId, opts) {
   }
   const d = new Date(dateStr + 'T12:00:00');
   const row = generatePeriodDays(d, d, false, uid)[0] || { date: dateStr };
+  // FIX (re-review): company-trip/abroad must be checked here, before the no-checkin/no-checkout
+  // checks below -- matching lateOutSubmitBlockReason()'s order on the server (checked right after
+  // the full-day-personal-leave check, before its own !day.checkIn check). Late Night can never be
+  // claimed on a Company Trip or Abroad day at all (see deviceScanQualifiesForLateNight()'s own
+  // `d.status === 'company-trip'` exclusion -- it isn't just about web check-outs never triggering
+  // review), so this must fire regardless of check-in/check-out state, not only when a web
+  // check-out separately fails lateNightCheckoutOk(). Without this, a Company Trip/Abroad day with
+  // no check-in reported 'no-checkin' on the client but the specific Company Trip/Abroad message
+  // on the server.
+  if (row.status === 'company-trip') return { ok: false, reason: 'company-trip' };
+  if (row.status === 'abroad') return { ok: false, reason: 'abroad' };
   if (!row.checkIn) return { ok: false, reason: 'no-checkin' };
   if (!row.checkOut) return { ok: false, reason: 'no-checkout' };
   const thr1 = lateOutThresholdHour(1);
@@ -13594,14 +13629,13 @@ function canSubmitLateNightForDate(dateStr, userId, opts) {
   if (!lateNightCheckoutOk(row)) {
     // FIX (final review, T3/T6): web-pending/web-denied used to fire for ANY web check-out that
     // failed lateNightCheckoutOk(), including days checkoutReviewTrigger() would never trigger a
-    // review for at all (company-trip, abroad) -- those days can never clear review ("waiting for
-    // review" forever). Gate on the actual trigger predicate so the reason matches what Accounting/
-    // MD would ever be asked to review, and report the real, specific reason otherwise.
+    // review for at all -- those days can never clear review ("waiting for review" forever). Gate
+    // on the actual trigger predicate so the reason matches what Accounting/MD would ever be asked
+    // to review, and report the real, specific reason otherwise. (company-trip/abroad are now
+    // handled above, before this branch is ever reached.)
     if (checkoutReviewTrigger(row, user, APP_SETTINGS)) {
       return { ok: false, reason: row.checkOutReview === 'deny' ? 'web-denied' : 'web-pending', row, thr1 };
     }
-    if (row.status === 'company-trip') return { ok: false, reason: 'company-trip' };
-    if (row.status === 'abroad') return { ok: false, reason: 'abroad' };
     return { ok: false, reason: 'no-checkout' };
   }
   const dup = DATA_LEAVES.some(l =>
@@ -16966,7 +17000,10 @@ function processLiveScanEvent(ev) {
   // (checkoutReviewPendingItems) reads attendanceLog, but a live scan updating attendanceLog here
   // never re-rendered it -- Accounting/MD sitting on the Approvals page would not see a newly
   // triggering web check-out appear until some unrelated re-render happened.
-  if (currentPage === 'approval') renderApprovals();
+  // FIX (re-review): was calling the full renderApprovals(), which clears `_approvalSelected` and
+  // redraws every Quick Table checkbox -- any live scan (from ANY employee) while an MD had a
+  // bulk selection in progress silently wiped it. Refresh only the pending-review box instead.
+  if (currentPage === 'approval') refreshCheckoutReviewPendingBox();
   renderDashboard();
   // If event is for the current user, refresh both the checkin page's button state AND the
   // today's log timeline — previously only updateScanButton() was called here, so a live device

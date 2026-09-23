@@ -3112,7 +3112,11 @@ function handlePutCheckoutReview(req, res) {
     // an approved time correction) moved the goalposts between when the screen loaded and when
     // Allow/Deny was clicked -- refuse rather than silently recording a review of the wrong time.
     if ((decision === 'allow' || decision === 'deny') && bodyCheckOut !== day.checkOut) {
-      return res.status(409).json({ success: false, message: 'Check-out time changed — reload and review again' });
+      // Machine-readable marker: this is the ONLY 409 reason from this endpoint that means "the
+      // check-out time itself moved, reload and re-review" -- the other two 409s above (accounting
+      // confirmed / MD approved) are period-lock states, not a stale check-out, and must not carry
+      // this code so the client only shows the "reload and review again" toast for this one case.
+      return res.status(409).json({ success: false, code: 'CHECKOUT_CHANGED', message: 'Check-out time changed — reload and review again' });
     }
     const key = `${userId}_${dateStr}`;
     let review = null;
