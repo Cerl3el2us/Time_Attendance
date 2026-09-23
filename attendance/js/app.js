@@ -3134,9 +3134,11 @@ function exportDataBackup(role) {
     data.leaves   = DATA_LEAVES;
     data.settings = { periodLocks: PERIOD_LOCKS, leaveCarryForward: LEAVE_CARRY_FORWARD, leaveOpeningUsed: LEAVE_OPENING_USED, tawi50Overrides: TAWI50_OVERRIDES, appSettings: _safeAppSettings };
     data.finalize = finalizeData;
+    data.checkoutReviews = DATA_CHECKOUT_REVIEWS;
   } else {
     data.finalize = finalizeData;
     data.settings = { appSettings: _safeAppSettings, tawi50Overrides: TAWI50_OVERRIDES };
+    data.checkoutReviews = DATA_CHECKOUT_REVIEWS;
   }
   const json = JSON.stringify(data, null, 2);
   const blob = new Blob([json], { type: 'application/json' });
@@ -17897,9 +17899,9 @@ function _faqRulesItems() {
       ) },
     { icon: '🌙', roles: _faqEligibleRoles('earlyLate'), q: _faq('How does the Late Night Allowance / "report late-out" work?', 'Late Night Allowance / แจ้งกลับดึก คำนวณยังไง?', '深夜手当・「深夜退勤報告」はどう機能しますか？'),
       a: _faq(
-        `On a weekday: check in, then scan out at the face terminal at or after ${String(thr1).padStart(2,'0')}:00 → +฿${amt1} (or ${String(thr2).padStart(2,'0')}:00 → +฿${amt2}). You must submit 🌙. A web Check Out cannot be used. On a holiday: submit Holiday Work first (or tick 🌙 on that form if you already scanned out), then 🌙 is paid only after both Holiday Work and Late Night are approved. ${_faqNotEligibleText('earlyLate')}`,
-        `วันธรรมดา: เช็กอินแล้วสแกนออกที่เครื่องตั้งแต่ ${String(thr1).padStart(2,'0')}:00 → +฿${amt1} (หรือ ${String(thr2).padStart(2,'0')}:00 → +฿${amt2}) ต้องยื่น 🌙 กด Check Out บนเว็บไม่ได้ วันหยุด: ต้องยื่น Holiday Work ก่อน (หรือติ๊ก 🌙 ในฟอร์มนั้นถ้าสแกนออกแล้ว) จ่ายเมื่อทั้ง Holiday Work และแจ้งกลับดึกอนุมัติแล้ว ${_faqNotEligibleText('earlyLate')}`,
-        `平日：出勤したうえで端末退勤が${String(thr1).padStart(2,'0')}:00以降 → +฿${amt1}（${String(thr2).padStart(2,'0')}:00以降は+฿${amt2}）。🌙申請が必要。Web退勤不可。休日：先に休日出勤（またはそのフォームで🌙にチェック）。両方承認後に支給。${_faqNotEligibleText('earlyLate')}`
+        `On a weekday: check in, then check out at or after ${String(thr1).padStart(2,'0')}:00 → +฿${amt1} (or ${String(thr2).padStart(2,'0')}:00 → +฿${amt2}); a check-out after midnight (00:00–04:59, same working day) counts as the ${String(thr2).padStart(2,'0')}:00 tier. You must submit 🌙. A face-scanner check-out unlocks 🌙 straight away. A web Check Out after ${String(thr1).padStart(2,'0')}:00 is first reviewed by Accounting/MD: if they allow it you can submit 🌙 as usual (it still needs normal approval); if they do not, 🌙 is not paid. If you scan out at the terminal and later also tap Check Out on the web, the later web tap becomes your check-out and needs review. On a holiday: submit Holiday Work first (or tick 🌙 on that form if you already checked out), then 🌙 is paid only after both Holiday Work and Late Night are approved. ${_faqNotEligibleText('earlyLate')}`,
+        `วันธรรมดา: เช็กอินแล้วเช็กเอาท์ตั้งแต่ ${String(thr1).padStart(2,'0')}:00 → +฿${amt1} (หรือ ${String(thr2).padStart(2,'0')}:00 → +฿${amt2}) เช็กเอาท์หลังเที่ยงคืน (00:00–04:59 ของวันทำงานเดียวกัน) นับเป็นขั้น ${String(thr2).padStart(2,'0')}:00 ต้องยื่น 🌙 สแกนออกที่เครื่องยื่น 🌙 ได้ทันที ถ้ากด Check Out บนเว็บหลัง ${String(thr1).padStart(2,'0')}:00 บัญชี/MD จะตรวจสอบก่อน: ถ้าอนุญาตก็ยื่น 🌙 ได้ตามปกติ (ยังต้องรออนุมัติตามปกติ) ถ้าไม่อนุญาต 🌙 จะไม่จ่าย ถ้าสแกนออกที่เครื่องแล้วมากด Check Out บนเว็บทีหลัง เวลาเว็บที่หลังกว่าจะกลายเป็นเวลาออกและต้องรอตรวจสอบ วันหยุด: ต้องยื่น Holiday Work ก่อน (หรือติ๊ก 🌙 ในฟอร์มนั้นถ้าเช็กเอาท์แล้ว) จ่ายเมื่อทั้ง Holiday Work และแจ้งกลับดึกอนุมัติแล้ว ${_faqNotEligibleText('earlyLate')}`,
+        `平日：出勤後、${String(thr1).padStart(2,'0')}:00以降に退勤 → +฿${amt1}（${String(thr2).padStart(2,'0')}:00以降は+฿${amt2}）。深夜0時以降（同じ勤務日の00:00〜04:59）の退勤は${String(thr2).padStart(2,'0')}:00区分として扱います。🌙申請が必要です。顔認証端末での退勤ならすぐ🌙を申請できます。${String(thr1).padStart(2,'0')}:00以降のWeb退勤は先に経理／MDが確認します：許可されれば通常どおり🌙を申請でき（通常の承認は必要）、不許可なら🌙は支給されません。端末で退勤した後にWebで退勤を押すと、後のWeb打刻が退勤時刻になり確認が必要です。休日：先に休日出勤（またはそのフォームで🌙にチェック）。両方承認後に支給。${_faqNotEligibleText('earlyLate')}`
       ) },
     { icon: '⏰', roles: ['md','accounting','manager','user','driver','marketing'], q: _faq('What happens if I\'m late?', 'มาสายแล้วเป็นยังไง?', '遅刻したらどうなりますか？'),
       a: !S.lateDeductPolicy.enabled
@@ -18069,12 +18071,12 @@ function _faqHowToItems() {
     { icon: '🌙', q: _faq('How do I report a late-night out?', 'แจ้งกลับดึกยังไง?', '深夜退勤の報告はどうしますか？'),
       a: _faq('Click the 🌙 icon for that day:', 'กดไอคอน 🌙 ของวันนั้น:', 'その日の🌙アイコンをクリックします：')
       + ul(
-        _faq('<b>Date</b> — only dates with a device check-out at or after the configured time are selectable (dark). A web Check Out cannot unlock this. Locked / confirmed / frozen pay periods are grayed out.',
-             '<b>วันที่</b> — เลือกได้เฉพาะวันที่สแกนออกที่เครื่องถึงเกณฑ์เวลาแล้ว (สีเข้ม) กด Check Out บนเว็บแล้วยื่นไม่ได้ รอบที่ล็อก / Confirm / แช่แข็งแล้วเป็นสีเทา',
-             '<b>日付</b> — 端末退勤が設定時刻以降の日だけ選べます（濃い色）。Web退勤では申請できません。ロック／確定／凍結済み期間は灰色です。'),
-        _faq('<b>Return time</b> — pick whichever of the two tier buttons matches your actual return time; this determines the allowance amount. The 🌙 button appears only after you have scanned out at the face terminal at or after the configured time (default 19:00). On a holiday row it stays hidden until that scan; on a weekday it keeps a placeholder slot. A web Check Out cannot be used to claim this, and advance requests are not allowed.',
-             '<b>เวลาที่กลับ</b> — เลือกปุ่ม tier ที่ตรงกับเวลาที่กลับจริง จะกำหนดจำนวนเบี้ยเลี้ยงที่ได้ ปุ่ม 🌙 จะขึ้นเมื่อสแกนออกที่เครื่องถึงเกณฑ์เวลาแล้วเท่านั้น (ค่าเริ่มต้น 19:00) แถววันหยุดจะซ่อนจนกว่าจะสแกน แถววันธรรมดามีช่องว่างรอไว้ กด Check Out บนเว็บแล้วยื่นไม่ได้ และยื่นล่วงหน้าไม่ได้',
-             '<b>帰宅時刻</b> — 実際の帰宅時刻に合う方の区分ボタンを選択します。これにより支給額が決まります。🌙ボタンは顔認証端末で設定時刻（既定19:00）以降に退勤したときだけ表示されます。休日行はそのスキャンまで非表示、平日行はプレースホルダー枠があります。Webアプリの退勤では申請できず、事前申請もできません。'),
+        _faq('<b>Date</b> — only dates with a check-out at or after the configured time are selectable (dark): a face-scanner check-out, or a web Check Out that Accounting/MD has allowed. A check-out after midnight (up to 04:59) belongs to the same working day. Locked / confirmed / frozen pay periods are grayed out.',
+             '<b>วันที่</b> — เลือกได้เฉพาะวันที่เช็กเอาท์ถึงเกณฑ์เวลาแล้ว (สีเข้ม): สแกนออกที่เครื่อง หรือกด Check Out บนเว็บที่บัญชี/MD อนุญาตแล้ว เช็กเอาท์หลังเที่ยงคืน (ถึง 04:59) นับเป็นวันทำงานเดียวกัน รอบที่ล็อก / Confirm / แช่แข็งแล้วเป็นสีเทา',
+             '<b>日付</b> — 設定時刻以降に退勤した日だけ選べます（濃い色）：顔認証端末での退勤、または経理／MDが許可したWeb退勤。深夜0時以降（04:59まで）の退勤は同じ勤務日です。ロック／確定／凍結済み期間は灰色です。'),
+        _faq('<b>Return time</b> — pick whichever of the two tier buttons matches your actual return time; this determines the allowance amount, and it cannot be later than your check-out. The 🌙 button appears only once the day qualifies (default 19:00). On a holiday row it stays hidden until then; on a weekday it keeps a placeholder slot. After a web Check Out the row shows ⏳ until Accounting/MD reviews it — ✅ means you can submit 🌙, ❌ means it will not be paid. Advance requests are not allowed.',
+             '<b>เวลาที่กลับ</b> — เลือกปุ่ม tier ที่ตรงกับเวลาที่กลับจริง จะกำหนดจำนวนเบี้ยเลี้ยงที่ได้ และต้องไม่หลังเวลาเช็กเอาท์ ปุ่ม 🌙 จะขึ้นเมื่อวันนั้นเข้าเกณฑ์แล้วเท่านั้น (ค่าเริ่มต้น 19:00) แถววันหยุดจะซ่อนจนกว่าจะเข้าเกณฑ์ แถววันธรรมดามีช่องว่างรอไว้ ถ้ากด Check Out บนเว็บ แถวจะขึ้น ⏳ จนกว่าบัญชี/MD จะตรวจสอบ — ✅ แปลว่ายื่น 🌙 ได้ ❌ แปลว่าไม่จ่าย ยื่นล่วงหน้าไม่ได้',
+             '<b>帰宅時刻</b> — 実際の帰宅時刻に合う方の区分ボタンを選択します。これにより支給額が決まり、退勤時刻より後にはできません。🌙ボタンはその日が条件を満たしたときだけ表示されます（既定19:00）。休日行はそれまで非表示、平日行はプレースホルダー枠があります。Web退勤の場合は経理／MDが確認するまで⏳が表示され、✅なら🌙を申請でき、❌なら支給されません。事前申請はできません。'),
         _faq('<b>Reason / work done</b> — optional but recommended.',
              '<b>เหตุผล / งานที่ทำ</b> — ไม่บังคับ แต่แนะนำให้กรอก',
              '<b>理由・作業内容</b> — 任意ですが記入を推奨します。')
