@@ -5184,7 +5184,8 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
       return res.status(400).json({ success:false, message: abroadNoClaimMessage() });
     }
     if (type === 'late-out') {
-      const lateOutErr = lateOutSubmitBlockReason(targetUser, body.dateFrom);
+      const lateOutErr = lateOutSubmitBlockReason(targetUser, body.dateFrom, body.lateOutTime);
+      if (lateOutErr === CHECKOUT_REVIEWS_UNAVAILABLE) return res.status(503).json({ success:false, message: lateOutErr });
       if (lateOutErr) return res.status(400).json({ success:false, message: lateOutErr });
     }
     if (type === 'holiday-work') {
@@ -5631,7 +5632,10 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
       if (abErrPut) return res.status(400).json({ success:false, message: abErrPut });
     }
     if (newType === 'late-out') {
-      const lateOutErr = lateOutSubmitBlockReason(live, resolvedDateFromForLock);
+      // Validate the RESOLVED tier (what the record will end up with), not just this request's.
+      const lateOutErr = lateOutSubmitBlockReason(live, resolvedDateFromForLock,
+        updates.lateOutTime !== undefined ? updates.lateOutTime : leave.lateOutTime);
+      if (lateOutErr === CHECKOUT_REVIEWS_UNAVAILABLE) return res.status(503).json({ success:false, message: lateOutErr });
       if (lateOutErr) return res.status(400).json({ success:false, message: lateOutErr });
     }
     const requestedIsDriverOT = updates.isDriverOT !== undefined ? updates.isDriverOT : leave.isDriverOT;
@@ -7369,32 +7373,49 @@ function generatePeriodDays(start, end, isCurrent, user, attLog, leaves, appSett
   return days;
 }
 
-// 2026-08-27: Late Night Out may only be submitted after a face-scanner check-out that already
-// meets the ×1 threshold. Time-correction overlays the displayed clock time but does not change
-// source — a web check-out cannot unlock this claim.
-function lateOutSubmitBlockReason(user, dateStr) {
+// 2026-08-27: Late Night Out may only be submitted after a check-out that already meets the ×1
+// threshold. 2026-09-23 (web check-out review): a face-scanner check-out qualifies directly; a web
+// check-out qualifies only after Accounting/MD allowed that exact effective check-out time (see
+// checkoutReviewTrigger / PUT /api/checkout-reviews). A check-out before 05:00 is after midnight
+// on the same business day and reaches the top tier. The chosen tier (lateOutTime) may not be
+// later than the real check-out -- this used to be checked only in the browser.
+// Returns CHECKOUT_REVIEWS_UNAVAILABLE when the reviews file cannot be read (callers answer 503).
+function lateOutSubmitBlockReason(user, dateStr, lateOutTime) {
   if (!user || !dateStr || !isValidDateStr(dateStr)) {
     return 'dateFrom must be a valid YYYY-MM-DD date';
   }
+  const reviews = readCheckoutReviews();
+  if (reviews === null) return CHECKOUT_REVIEWS_UNAVAILABLE;
   const S = getAppSettings();
   const dayStart = new Date(dateStr + 'T12:00:00');
   const attLog = buildAttendanceLogForUser(user, dayStart, dayStart);
   const leaves = readLeaves() || [];
-  const days = generatePeriodDays(dayStart, dayStart, false, user, attLog, leaves, S);
+  const days = generatePeriodDays(dayStart, dayStart, false, user, attLog, leaves, S, reviews);
   const day = days[0];
   if (isFullDayPersonalLeaveStatus(day && day.status)) {
     return fullDayPersonalLeaveNoClaimMessage();
   }
   if (!day || !day.checkOut) {
-    return 'Late Night Out requires a face-scan check-out first';
+    return 'Late Night Out requires a check-out first';
   }
-  if (!isDeviceScanSource(day.checkOutSource)) {
+  const thr1 = S.allowances.lateNightThreshold1Hour || S.allowances.lateNightThresholdHour || 19;
+  const outMins = lateNightCheckoutMins(day.checkOut);
+  if (!Number.isFinite(outMins) || outMins < thr1 * 60) {
+    return `Late Night Out requires a check-out at or after ${String(thr1).padStart(2, '0')}:00`;
+  }
+  if (!lateNightCheckoutOk(day)) {
+    if (day.checkOutSource === 'web') {
+      return day.checkOutReview === 'deny'
+        ? 'This web check-out was not allowed by Accounting/MD -- Late Night Out cannot be claimed'
+        : 'This web check-out is waiting for Accounting/MD review before Late Night Out can be submitted';
+    }
     return 'Late Night Out requires check-out at the face scanner, not the web app';
   }
-  const hour = parseInt(day.checkOut, 10);
-  const thr1 = S.allowances.lateNightThreshold1Hour || S.allowances.lateNightThresholdHour || 19;
-  if (!Number.isFinite(hour) || hour < thr1) {
-    return `Late Night Out requires a device check-out at or after ${String(thr1).padStart(2, '0')}:00`;
+  if (lateOutTime !== undefined && lateOutTime !== null && lateOutTime !== '') {
+    const tierMins = lateNightCheckoutMins(lateOutTime);
+    if (!Number.isFinite(tierMins) || tierMins > outMins) {
+      return `The selected return time is later than your check-out (${day.checkOut})`;
+    }
   }
   if (!day.checkIn) {
     return 'Late Night Out requires a check-in first';
