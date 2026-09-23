@@ -1327,4 +1327,13 @@ window.LANG_JA = {
   "✈️ Abroad": "✈️ 海外勤務手当",
   "Abroad (฿/day)": "海外勤務（฿/日）",
   "Abroad Allowance": "海外勤務手当",
+  // 2026-09-23: Holiday Work / OT times must fall inside the day's real scans (scanWindowError)
+  "⚠️ A check-in is required for this date": "⚠️ この日の出勤打刻がありません",
+  "⚠️ Start time cannot be earlier than your check-in": "⚠️ 開始時刻は出勤打刻より前にできません",
+  "⚠️ A check-out is required for this date — submit a time correction first": "⚠️ この日の退勤打刻がありません — 先に打刻修正を申請してください",
+  "⚠️ End time cannot be later than your check-out": "⚠️ 終了時刻は退勤打刻より後にできません",
+  // 2026-09-23: office OT is filed after scanning out
+  "Scan out first, then submit OT": "先に退勤打刻をしてからOTを申請してください",
+  "No check-out on this date — submit a time correction first, then OT": "この日の退勤打刻がありません — 先に打刻修正を申請してからOTを申請してください",
+  "Weekdays with a check-in and a check-out only. Weekends and public holidays use Holiday Work.": "出勤・退勤の打刻がある平日のみ選択できます。土日・祝日は休日出勤を申請してください。",
 };

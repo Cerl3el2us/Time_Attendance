@@ -961,6 +961,12 @@ function checkedInDateBlockedMessage(result) {
   if (result.reason === 'no-checkin' || result.reason === 'missing') {
     return L('Only dates you actually checked in are selectable', 'เลือกได้เฉพาะวันที่ลงเวลาเข้างาน');
   }
+  if (result.reason === 'no-checkout') {
+    return result.date === businessDateStr()
+      ? L('Scan out first, then submit OT', 'กรุณาสแกนออกงานก่อน แล้วค่อยยื่น OT')
+      : L('No check-out on this date — submit a time correction first, then OT',
+          'วันที่เลือกไม่มีเวลาสแกนออกงาน — กรุณายื่นขอแก้ไขเวลาก่อน แล้วค่อยยื่น OT');
+  }
   if (result.reason === 'full-leave') {
     return L('This date is full-day leave — daily allowances and OT cannot be claimed',
       'วันนี้เป็นวันลาเต็มวัน — ยื่นเบี้ยรายวันหรือ OT ไม่ได้');
@@ -1004,7 +1010,7 @@ function canSubmitOTForDate(dateStr, userId) {
   if (!isAllowanceEligible(APP_SETTINGS.allowanceEligibility, user.role, 'ot')) {
     return { ok: false, reason: 'ineligible' };
   }
-  return canSelectCheckedInDate(dateStr, uid, (ds, id) => {
+  return canSelectCheckedInDate(dateStr, uid, (ds, id, times) => {
     if (user.role === 'driver') return { ok: true };
     if (isNonWorkDayForComp(ds)) return { ok: false, reason: 'holiday-ot' };
     const dup = DATA_LEAVES.some(l =>
@@ -1017,6 +1023,11 @@ function canSubmitOTForDate(dateStr, userId) {
       l.id !== editingLeaveId
     );
     if (hw) return { ok: false, reason: 'holiday-work-ot' };
+    // 2026-09-23 (owner: OT past 17:30 can't be known in advance, so it is filed after scanning
+    // out): office OT end may not be later than the check-out (scanWindowError), so a day with no
+    // check-out can never pass -- refuse it here with the right advice instead of letting the
+    // employee fill the whole form first. Drivers returned above; approved Abroad days need no scan.
+    if (!times.checkOut && !isApprovedAbroadDate(ds, id)) return { ok: false, reason: 'no-checkout', date: ds };
     return { ok: true };
   // 2026-09-21: staff on a work-abroad trip normally never scan (no device there), so the
   // scan test is waived on days covered by an APPROVED abroad request — that approval is the
@@ -1506,12 +1517,41 @@ function attendanceTimesForDate(dateStr, userId) {
       if (l.correctionField === 'checkOut') checkOut = l.correctedTime;
     }
   });
-  return { checkIn, checkOut, checkInSource, checkOutSource };
+  return { checkIn, checkOut, checkInSource, checkOutSource, lastScan: rec.lastScan || null };
 }
 function parseHHMMToMins(hhmm) {
   if (!HHMM_RE.test(hhmm)) return NaN;
   const [h, m] = hhmm.split(':').map(Number);
   return h * 60 + m;
+}
+// 2026-09-23 (Opus audit M-1, rule confirmed by the owner): a typed Holiday Work start may not be
+// earlier than the check-in, and a typed Holiday Work / office OT end may not be later than the
+// check-out. Approved time-corrections count; a check-out before 05:00 is after midnight on the
+// same business day; approved Abroad days need no scan. Returns a toast message or null.
+// Dual-sync with server.js scanWindowError.
+function scanWindowError(dateStr, startHHMM, endHHMM, userId) {
+  const uid = userId || (currentUser && currentUser.id);
+  if (isApprovedAbroadDate(dateStr, uid)) return null;
+  const times = attendanceTimesForDate(dateStr, uid);
+  if (!times.checkIn) return L('⚠️ A check-in is required for this date', '⚠️ วันที่เลือกยังไม่มีเวลาสแกนเข้างาน');
+  if (startHHMM && parseHHMMToMins(startHHMM) < parseHHMMToMins(times.checkIn)) {
+    return L('⚠️ Start time cannot be earlier than your check-in', '⚠️ เวลาเริ่มต้องไม่ก่อนเวลาสแกนเข้างาน') + ` (${times.checkIn})`;
+  }
+  if (endHHMM) {
+    // No check-out: fall back to the last scan after check-in (a morning-only day never records
+    // a check-out, since scans before 12:00 are treated as duplicate door scans).
+    const endLimit = times.checkOut || times.lastScan;
+    if (!endLimit) {
+      return L('⚠️ A check-out is required for this date — submit a time correction first',
+        '⚠️ วันที่เลือกยังไม่มีเวลาสแกนออกงาน — กรุณายื่นขอแก้ไขเวลาก่อน');
+    }
+    let outMin = parseHHMMToMins(endLimit);
+    if (outMin < 5 * 60) outMin += 24 * 60;
+    if (parseHHMMToMins(endHHMM) > outMin) {
+      return L('⚠️ End time cannot be later than your check-out', '⚠️ เวลาเลิกต้องไม่หลังเวลาสแกนออกงาน') + ` (${endLimit})`;
+    }
+  }
+  return null;
 }
 function splitHolidayWorkOtMinutes(workStartTime, workEndTime, S) {
   const startMin = parseHHMMToMins(workStartTime);
@@ -1526,7 +1566,12 @@ function splitHolidayWorkOtMinutes(workStartTime, workEndTime, S) {
   const otMins30Before = Math.max(0, Math.min(endMin, stdStart) - Math.min(startMin, stdStart));
   const otMins30After = Math.max(0, endMin - Math.max(startMin, stdEnd));
   const otMins30 = otMins30Before + otMins30After;
-  const otMins20 = Math.max(0, Math.min(endMin, stdEnd) - Math.max(startMin, stdStart));
+  // 2026-09-23 (owner decision): the ×2 window excludes the 12:00-13:00 lunch hour -- the hourly
+  // rate assumes an 8-hour day (salary / 30 / 8), so 08:30-17:30 is 8 paid hours, not 9. Only the
+  // part of lunch the employee actually worked through is removed (13:00-17:00 loses nothing).
+  const x2Start = Math.max(startMin, stdStart), x2End = Math.min(endMin, stdEnd);
+  const lunchMins = Math.max(0, Math.min(x2End, 13 * 60) - Math.max(x2Start, 12 * 60));
+  const otMins20 = Math.max(0, x2End - x2Start - lunchMins);
   const round2 = n => Math.round(n / 60 * 100) / 100;
   return { otMins20, otMins30, otHours20: round2(otMins20), otHours30: round2(otMins30) };
 }
@@ -2609,9 +2654,20 @@ function pendingLeaveMinutes(userId, type, year, exceptId) {
 // Called from Settings page — snapshots remaining annual leave for all users into next year
 async function processYearEndCarryForward(forYear) {
   if (blockIfObserver()) return;
-  const maxCF = APP_SETTINGS.leave.carryForwardMax || 5;
+  // `??` not `||`: a configured 0 means "no carry-forward". Dual-sync with server.js
+  // refreshSnapshottedCarryForward.
+  const rawMax = Number(APP_SETTINGS.leave.carryForwardMax ?? 5);
+  const maxCF = Math.max(0, Math.min(60, Number.isFinite(rawMax) ? rawMax : 5));
   const thisYear = forYear || bangkokYear();
   const endOfYear   = `${thisYear}-12-31`;
+  // 2026-09-23 (Opus audit M-2): one click rewrote every employee's next-year carry-forward with
+  // no confirmation. Later approvals/cancellations now refresh the snapshot server-side, but the
+  // run itself still overwrites whatever is there.
+  const ok = confirm(currentLang === 'ja'
+    ? `${thisYear}年の残り有給休暇を${thisYear + 1}年へ繰り越します（全従業員、最大${maxCF}日）。既存の${thisYear + 1}年繰越値は上書きされます。続行しますか？`
+    : L(`Carry ${thisYear}'s remaining annual leave into ${thisYear + 1} for every employee (max ${maxCF} days)? Existing ${thisYear + 1} carry-forward values will be overwritten.`,
+        `ยกวันลาพักร้อนคงเหลือของปี ${thisYear} ไปปี ${thisYear + 1} ให้พนักงานทุกคน (สูงสุด ${maxCF} วัน)? ยอดยกไปปี ${thisYear + 1} ที่มีอยู่จะถูกเขียนทับ`));
+  if (!ok) return;
 
   DATA_USERS.filter(u => isEmployeeRecord(u) && u.active).forEach(u => {
     // Use the same remaining pool as leave cards (quota + CF + holiday-work comp − approved
@@ -3924,7 +3980,11 @@ async function saveSettingsPage() {
   APP_SETTINGS.workSchedule.standardStartHour   = fi('set-std-hour');
   APP_SETTINGS.workSchedule.standardStartMinute  = fi('set-std-min');
 
-  APP_SETTINGS.leave.carryForwardMax        = fi('set-cf-max');
+  // 2026-09-23: 0 now really means "no carry-forward" (`??` in processYearEndCarryForward), so a
+  // blanked field must keep the current value instead of silently saving 0 via fi()'s `|| 0`.
+  if ((document.getElementById('set-cf-max')?.value ?? '').trim() !== '') {
+    APP_SETTINGS.leave.carryForwardMax      = fi('set-cf-max');
+  }
   APP_SETTINGS.leave.carryForwardExpiryMonth = parseInt(document.getElementById('set-cf-expiry-month')?.value) || 3;
   APP_SETTINGS.leave.carryForwardExpiryDay   = fi('set-cf-expiry-day');
   APP_SETTINGS.leave.carryForwardNotifyDays  = fi('set-cf-notify');
@@ -4599,11 +4659,13 @@ async function loadAttendanceFromBackend() {
       const gps    = ev.gps || '';
 
       if (hour < 5) {
-        if (!rec.checkOut || timePart > rec.checkOut) {
-          rec.checkOut = timePart;
-          rec.checkOutSource = source;
-          if (gps) rec.checkOutGPS = gps;
-        }
+        // 2026-09-23: always overwrite -- events are sorted by instant, so an after-midnight scan
+        // is the latest of the business day. The old `timePart > rec.checkOut` string compare
+        // lost "00:30" to an earlier "12:30" lunch scan, capping the day's check-out at 12:30.
+        // Dual-sync with server.js buildAttendanceLogForUser.
+        rec.checkOut = timePart;
+        rec.checkOutSource = source;
+        if (gps) rec.checkOutGPS = gps;
       } else if (!rec.checkIn && timePart >= CHECKIN_CUTOFF) {
         // No morning check-in on record and it's already past the cutoff — this scan can't be
         // a real arrival time, so record it as check-out instead and leave check-in blank.
@@ -4640,6 +4702,10 @@ async function loadAttendanceFromBackend() {
           rec.checkOutSource = source;
           if (gps) rec.checkOutGPS = gps;
         }
+        // 2026-09-23: latest scan after check-in, morning ones included. Not a check-out (see
+        // above), only scanWindowError's fallback end limit when no check-out exists -- e.g. a
+        // Saturday Holiday Work 08:00-11:30.
+        rec.lastScan = timePart;
       }
     });
 
@@ -13556,10 +13622,16 @@ function openOTModal(date) {
     hint.style.display = '';
     hint.textContent = isDriver
       ? L('Only dates you actually checked in are selectable', 'เลือกได้เฉพาะวันที่ลงเวลาเข้างาน')
-      : L('Weekdays with a check-in only. Weekends and public holidays use Holiday Work.',
-          'เลือกได้เฉพาะวันทำงานที่มีเข้างาน เสาร์-อาทิตย์และวันหยุดบริษัทให้ยื่นขอทำงานวันหยุด');
+      : L('Weekdays with a check-in and a check-out only. Weekends and public holidays use Holiday Work.',
+          'เลือกได้เฉพาะวันทำงานที่สแกนเข้าและสแกนออกแล้ว เสาร์-อาทิตย์และวันหยุดบริษัทให้ยื่นขอทำงานวันหยุด');
     const tzAbbr = timezoneShortLabel(scanTimeZone());
     if (!isDriver && tzAbbr) hint.textContent += ' — ' + t('checkin_tz_ot') + ` (${tzAbbr})`;
+  }
+  // 2026-09-23: the ⏱️ row icon passes its own date. If that exact day has no check-out yet, say
+  // why instead of silently opening the form on some other selectable date.
+  if (date && !isDriver) {
+    const gate = canSubmitOTForDate(date, inspectUser.id);
+    if (!gate.ok && gate.reason === 'no-checkout') { showToast(checkedInDateBlockedMessage(gate), 'warning'); return; }
   }
   initOTDatePicker();
   const targetDate = resolveSelectableDate(date || businessDateStr(), ds => canSubmitOTForDate(ds, inspectUser.id));
@@ -13733,6 +13805,8 @@ async function submitOT() {
       : L('⚠️ End time must be after 17:30', '⚠️ เวลาเลิกงานต้องหลัง 17:30'), 'warning');
     return;
   }
+  const otScanErr = scanWindowError(date, null, endTime);
+  if (otScanErr) { showToast(otScanErr, 'warning'); return; }
   const { otHours, otMultiplier, otHours20, otHours30 } = derived;
 
   let attachment = null, attachmentName = null;
@@ -14237,6 +14311,8 @@ async function submitHolidayWork() {
     showToast(L('⚠️ End time must be after start time', '⚠️ เวลาเลิกงานต้องหลังเวลาเริ่มงาน'), 'warning');
     return;
   }
+  const hwScanErr = scanWindowError(date, workStartTime, workEndTime);
+  if (hwScanErr) { showToast(hwScanErr, 'warning'); return; }
   if (!['annual-leave', 'paid'].includes(compensationMode)) {
     showToast(L('⚠️ Please select a compensation mode', '⚠️ กรุณาเลือกรูปแบบการชดเชย'), 'warning');
     return;
@@ -16571,7 +16647,11 @@ function processLiveScanEvent(ev) {
     // loadAttendanceFromBackend()'s own equivalent path -- an out-of-order live event could
     // overwrite a later, more correct checkOut with an earlier one until the next reload
     // re-derived it correctly, showing a different time live vs after refresh.
-    if (!rec.checkOut || timePart > rec.checkOut) {
+    // 2026-09-23: an after-midnight scan (< 05:00) always beats a same-day daytime check-out
+    // ("00:30" used to lose to "12:30" on a plain string compare); between two after-midnight
+    // scans the later one wins, keeping the out-of-order guard above.
+    const existingIsAfterMidnight = rec.checkOut && rec.checkOut < '05:00';
+    if (!rec.checkOut || !existingIsAfterMidnight || timePart > rec.checkOut) {
       rec.checkOut = timePart;
       rec.checkOutSource = source;
       if (gps) rec.checkOutGPS = gps;
@@ -16612,6 +16692,8 @@ function processLiveScanEvent(ev) {
     if (acceptOut) {
       pushScan({ time: timePart, type: 'out', source, gps: gps || '—' });
     }
+    // Same lastScan as loadAttendanceFromBackend() (scanWindowError's fallback end limit).
+    if (!rec.lastScan || timePart > rec.lastScan) rec.lastScan = timePart;
   }
 
   saveSession();
@@ -17586,9 +17668,9 @@ function _faqRulesItems() {
   return [
     { icon: '⏱️', roles: _faqEligibleRoles('ot'), q: _faq('How is OT calculated?', 'OT คำนวณยังไง?', 'OTはどう計算されますか？'),
       a: _faq(
-        `OT is paid only after you submit an OT request and it is approved — scan-out time is never converted to OT automatically. Office OT is weekdays only, from 17:30 at ×1.5. Weekends and public holidays do not use this form — submit Holiday Work instead (start–end times there pay ×2/×3). Drivers enter OT hours directly for any day they checked in: ×1.5 (weekday after 17:30), ×2 (holiday ${stdStart}–17:30), or ×3 (holiday after 17:30).`,
-        `OT จ่ายเมื่อยื่นขอ OT และได้รับอนุมัติแล้วเท่านั้น — ระบบไม่คำนวณจากเวลาสแกนออกอัตโนมัติ พนักงานออฟฟิศยื่น OT ได้เฉพาะวันทำงาน หลัง 17:30 ×1.5 เสาร์-อาทิตย์และวันหยุดบริษัทอย่ายื่นฟอร์มนี้ ให้ยื่นขอทำงานวันหยุดแทน (กรอกเวลาเริ่ม–เลิก จะได้ ×2/×3) Driver กรอกชั่วโมงตรงได้ทุกวันที่เช็กอินแล้ว: ×1.5 (วันธรรมดาหลัง 17:30), ×2 (วันหยุด ${stdStart}–17:30), ×3 (วันหยุดหลัง 17:30)`,
-        `OTは申請して承認された場合のみ支給されます。退勤スキャンから自動計算はしません。一般社員のOTはこのフォームでは平日のみ（17:30以降×1.5）。土日・祝日はこのフォームを使わず、休日出勤を申請します（開始〜終了時刻から×2/×3）。Driverは出勤記録がある日なら時間を直接入力できます：×1.5（平日17:30以降）、×2（休日${stdStart}〜17:30）、×3（休日17:30以降）。`
+        `OT is paid only after you submit an OT request and it is approved — scan-out time is never converted to OT automatically. Office OT is weekdays only, from 17:30 at ×1.5, and the end time cannot be later than your actual check-out. Weekends and public holidays do not use this form — submit Holiday Work instead (start–end times there pay ×2/×3). Drivers enter OT hours directly for any day they checked in: ×1.5 (weekday after 17:30), ×2 (holiday ${stdStart}–17:30), or ×3 (holiday after 17:30).`,
+        `OT จ่ายเมื่อยื่นขอ OT และได้รับอนุมัติแล้วเท่านั้น — ระบบไม่คำนวณจากเวลาสแกนออกอัตโนมัติ พนักงานออฟฟิศยื่น OT ได้เฉพาะวันทำงาน หลัง 17:30 ×1.5 และเวลาเลิกต้องไม่หลังเวลาสแกนออกจริง เสาร์-อาทิตย์และวันหยุดบริษัทอย่ายื่นฟอร์มนี้ ให้ยื่นขอทำงานวันหยุดแทน (กรอกเวลาเริ่ม–เลิก จะได้ ×2/×3) Driver กรอกชั่วโมงตรงได้ทุกวันที่เช็กอินแล้ว: ×1.5 (วันธรรมดาหลัง 17:30), ×2 (วันหยุด ${stdStart}–17:30), ×3 (วันหยุดหลัง 17:30)`,
+        `OTは申請して承認された場合のみ支給されます。退勤スキャンから自動計算はしません。一般社員のOTはこのフォームでは平日のみ（17:30以降×1.5）。終了時刻は実際の退勤打刻より後にできません。土日・祝日はこのフォームを使わず、休日出勤を申請します（開始〜終了時刻から×2/×3）。Driverは出勤記録がある日なら時間を直接入力できます：×1.5（平日17:30以降）、×2（休日${stdStart}〜17:30）、×3（休日17:30以降）。`
       ) },
     { icon: '🌅', roles: _faqEligibleRoles('earlyLate'), q: _faq('How does the Early Morning Allowance work?', 'Early Morning Allowance คำนวณยังไง?', '早出手当はどう計算されますか？'),
       a: _faq(
@@ -17642,9 +17724,9 @@ function _faqRulesItems() {
       ) },
     { icon: '🔄', roles: _faqEligibleRoles('holidayWork'), q: _faq('How does Holiday Work pay work?', 'ขอทำงานวันหยุดได้เงินยังไง?', '休日出勤の支給はどうなりますか？'),
       a: _faq(
-        `For a weekend or public holiday you actually checked in (not a Company Trip). Location (Upcountry) is required. After approval, pick one compensation mode: <b>Annual leave +1 day</b> adds 1 day to annual leave — no holiday transport and no OT ×2/×3 from the start–end times; Early Morning (device scan or 🌅 request) and Upcountry still pay. <b>Paid</b> pays holiday transport ฿${(S.allowances.holidayTransport != null ? S.allowances.holidayTransport : 500).toLocaleString()}/day, plus Upcountry, plus OT ×2/×3 from your start–end times, plus Early Morning the same way. If you already scanned out late, you can tick 🌙 on this form or submit 🌙 after Holiday Work. Drivers use Driver OT instead. ${_faqNotEligibleText('holidayWork')}`,
-        `สำหรับเสาร์-อาทิตย์หรือวันหยุดนักขัตฤกษ์ที่ลงเวลาเข้างานจริง (ไม่ใช่วัน Company Trip) ต้องกรอกสถานที่ (Upcountry) หลังอนุมัติเลือกโหมดอย่างใดอย่างหนึ่ง: <b>ลาพักร้อน +1 วัน</b> เพิ่มสิทธิ์ลา 1 วัน — ไม่จ่ายค่าเดินทางวันหยุด และไม่คิด OT ×2/×3 จากเวลาเริ่ม–เลิก แต่ยังจ่าย Early Morning (สแกนเครื่องหรือยื่น 🌅) และ Upcountry <b>ชดเชยเป็นเงิน</b> จ่ายค่าเดินทางวันหยุด ฿${(S.allowances.holidayTransport != null ? S.allowances.holidayTransport : 500).toLocaleString()}/วัน รวม Upcountry และ OT ×2/×3 จากเวลาเริ่ม–เลิก รวม Early Morning แบบเดียวกัน ถ้าสแกนออกดึกแล้ว ติ๊ก 🌙 ในฟอร์มนี้ได้ หรือยื่น 🌙 หลัง Holiday Work คนขับใช้ขอ OT แบบ Driver แทน ${_faqNotEligibleText('holidayWork')}`,
-        `実際に出勤記録がある週末・祝日が対象です（社員旅行日を除く）。場所（出張）は必須です。承認後はいずれか一方。<b>年次休暇+1日</b>は残日数+1 — 休日交通費と開始〜終了からのOT×2/×3は出ません。早朝手当と出張は出ます。<b>金銭補償</b>は休日交通費1日฿${(S.allowances.holidayTransport != null ? S.allowances.holidayTransport : 500).toLocaleString()}、出張、開始〜終了からのOT×2/×3、同じ早朝手当。すでに深夜退勤していればこのフォームで🌙にチェックするか、休日出勤の後に🌙を出します。DriverはDriver OTです。${_faqNotEligibleText('holidayWork')}`
+        `For a weekend or public holiday you actually checked in (not a Company Trip). Location (Upcountry) is required. After approval, pick one compensation mode: <b>Annual leave +1 day</b> adds 1 day to annual leave — no holiday transport and no OT ×2/×3 from the start–end times; Early Morning (device scan or 🌅 request) and Upcountry still pay. <b>Paid</b> pays holiday transport ฿${(S.allowances.holidayTransport != null ? S.allowances.holidayTransport : 500).toLocaleString()}/day, plus Upcountry, plus OT from your start–end times (×2 between ${stdStart} and 17:30 excluding the 12:00–13:00 lunch hour, ×3 outside that), plus Early Morning the same way. Start–end must fall within your actual check-in and check-out. If you already scanned out late, you can tick 🌙 on this form or submit 🌙 after Holiday Work. Drivers use Driver OT instead. ${_faqNotEligibleText('holidayWork')}`,
+        `สำหรับเสาร์-อาทิตย์หรือวันหยุดนักขัตฤกษ์ที่ลงเวลาเข้างานจริง (ไม่ใช่วัน Company Trip) ต้องกรอกสถานที่ (Upcountry) หลังอนุมัติเลือกโหมดอย่างใดอย่างหนึ่ง: <b>ลาพักร้อน +1 วัน</b> เพิ่มสิทธิ์ลา 1 วัน — ไม่จ่ายค่าเดินทางวันหยุด และไม่คิด OT ×2/×3 จากเวลาเริ่ม–เลิก แต่ยังจ่าย Early Morning (สแกนเครื่องหรือยื่น 🌅) และ Upcountry <b>ชดเชยเป็นเงิน</b> จ่ายค่าเดินทางวันหยุด ฿${(S.allowances.holidayTransport != null ? S.allowances.holidayTransport : 500).toLocaleString()}/วัน รวม Upcountry และ OT จากเวลาเริ่ม–เลิก (×2 ช่วง ${stdStart}–17:30 ไม่นับพักเที่ยง 12:00–13:00, ×3 นอกช่วงนั้น) รวม Early Morning แบบเดียวกัน เวลาเริ่ม–เลิกต้องอยู่ในช่วงเวลาสแกนเข้า–ออกจริง ถ้าสแกนออกดึกแล้ว ติ๊ก 🌙 ในฟอร์มนี้ได้ หรือยื่น 🌙 หลัง Holiday Work คนขับใช้ขอ OT แบบ Driver แทน ${_faqNotEligibleText('holidayWork')}`,
+        `実際に出勤記録がある週末・祝日が対象です（社員旅行日を除く）。場所（出張）は必須です。承認後はいずれか一方。<b>年次休暇+1日</b>は残日数+1 — 休日交通費と開始〜終了からのOT×2/×3は出ません。早朝手当と出張は出ます。<b>金銭補償</b>は休日交通費1日฿${(S.allowances.holidayTransport != null ? S.allowances.holidayTransport : 500).toLocaleString()}、出張、開始〜終了からのOT（${stdStart}〜17:30は×2、ただし昼休み12:00〜13:00を除く。それ以外は×3）、同じ早朝手当。開始〜終了は実際の出勤・退勤打刻の範囲内である必要があります。すでに深夜退勤していればこのフォームで🌙にチェックするか、休日出勤の後に🌙を出します。DriverはDriver OTです。${_faqNotEligibleText('holidayWork')}`
       ) },
     { icon: '✈️', roles: _faqEligibleRoles('abroad'), q: _faq('How much is the Abroad allowance?', 'ทำงานต่างประเทศได้เบี้ยเลี้ยงเท่าไหร่?', '海外勤務手当はいくらですか？'),
       a: _faq(

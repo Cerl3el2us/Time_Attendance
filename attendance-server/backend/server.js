@@ -728,6 +728,14 @@ app.use((req, res, next) => {
         if (req.method !== 'GET' && liveUser.active === false) {
           return res.status(403).json({ success:false, message:'This account has been deactivated' });
         }
+        // SECURITY FIX 2026-09-23 (Opus audit MEDIUM-4): reads were still allowed, so a
+        // deactivated md/accounting token could read every salary/bank/ID record via
+        // GET /api/users. Login already refuses these accounts; refuse their reads too. Observers
+        // are stored active:false by design and system accounts are exempt at login, so both keep
+        // the same exemption here.
+        if (liveUser.active === false && liveUser.isObserver !== true && !isSystemAccountUser(liveUser)) {
+          return res.status(401).json({ success:false, message:'This account has been deactivated' });
+        }
         // SECURITY FIX 2026-08-04 (Batch C, Hikvision audit): mustChangePassword was checked
         // client-side only (app.js) -- an account still on a seed/default password (e.g.
         // Hikvision sync-created new hires, see POST /api/users/sync-hikvision below) had full
@@ -884,6 +892,8 @@ function handleWsConnection(ws, req, logPrefix) {
   ws.viewerCtx = {
     isFullAccess: isPrivilegedAdmin(live),
     ownNo: live ? String(live.employeeNo || '') : '',
+    userId: user.sub,
+    tokenVersion: user.tokenVersion || 0,
   };
   clients.add(ws);
   console.log(`[${logPrefix}] +client total=${clients.size} user=${user.username}`);
@@ -902,12 +912,39 @@ function handleWsConnection(ws, req, logPrefix) {
 
 wss.on('connection', (ws, req) => handleWsConnection(ws, req, 'WS'));
 
+// SECURITY FIX 2026-09-23 (Opus audit MEDIUM-3): viewerCtx was fixed at connect time, so a
+// socket opened before a demotion, deactivation or password reset kept receiving full scan events
+// (GPS + cardholder name) until it happened to drop. Re-check every open socket against the live
+// user record before each send: close it on a revoked token or deactivated account, and
+// re-derive isFullAccess so a demotion takes effect immediately. One readUsers() per send, not
+// per socket; if the read fails, keep the previous context rather than dropping everyone.
+function refreshWsViewers() {
+  const users = readUsers();
+  if (users === null) return;
+  clients.forEach(ws => {
+    const ctx = ws.viewerCtx;
+    if (!ctx) return;
+    const live = users.find(u => u.id === ctx.userId);
+    const revoked = !live || (live.tokenVersion || 0) !== ctx.tokenVersion ||
+      (live.active === false && live.isObserver !== true);
+    if (revoked) {
+      clients.delete(ws);
+      try { ws.close(1008, 'Session revoked'); } catch (e) { /* already closing */ }
+      return;
+    }
+    ctx.isFullAccess = isPrivilegedAdmin(live);
+    ctx.ownNo = String(live.employeeNo || '');
+  });
+}
+
 function broadcast(d) {
+  refreshWsViewers();
   const m = JSON.stringify(d);
   clients.forEach(ws => { if (ws.readyState === 1) ws.send(m); });
 }
 
 function sendScanEvent(record) {
+  refreshWsViewers();
   const pubMsg = JSON.stringify({ type: 'SCAN_EVENT', ...toPublicEventProjection(record) });
   const fullMsg = JSON.stringify({ type: 'SCAN_EVENT', ...record });
   clients.forEach(ws => {
@@ -1114,30 +1151,8 @@ function businessDateFromYmd(ymd) {
   const p2 = n => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
 }
-function parseGpsCoords(raw) {
-  if (typeof raw !== 'string') return null;
-  const s = raw.trim();
-  const m = s.match(/^(-?\d{1,3}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)$/);
-  if (!m) return null;
-  const lat = Number(m[1]);
-  const lng = Number(m[2]);
-  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
-  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
-  return { lat, lng };
-}
-let geoTzFind = null;
-function timezoneFromCoords(lat, lng) {
-  try {
-    // geo-tz default ("alike since 1970") maps Bangkok coords to Asia/Jakarta.
-    // The comprehensive product returns Asia/Bangkok / Asia/Tokyo as expected.
-    if (!geoTzFind) geoTzFind = require('geo-tz/all').find;
-    const zones = geoTzFind(lat, lng);
-    const tz = Array.isArray(zones) ? zones[0] : '';
-    return isSafeTimeZone(tz) ? tz : DEFAULT_TZ;
-  } catch (e) {
-    return DEFAULT_TZ;
-  }
-}
+// 2026-09-23: parseGpsCoords/timezoneFromCoords (geo-tz) removed -- a web scan's time no longer
+// depends on the client's GPS (see the HIGH-1 fix in POST /api/hikvision/event).
 function eventInstantMs(raw) {
   if (!raw) return 0;
   const t = Date.parse(raw);
@@ -1486,14 +1501,18 @@ app.post('/api/hikvision/event', hikAuth, webScanLimiter, withEventsLock((req, r
     if (req.hikSource === 'webscan') {
       // Every field the client could otherwise forge is derived from the authenticated user's
       // own live record instead -- see the CRITICAL fix comment above hikAuth().
-      // Clock: NAS instant only. Timezone: GPS coords on the server (geo-tz), never the phone.
+      // Clock: NAS instant only, always recorded in Bangkok time.
+      // SECURITY FIX 2026-09-23 (Opus audit HIGH-1): the timezone used to come from the GPS
+      // coordinates the client sends, and attendance reads the wall-clock text of event_time
+      // while ignoring its offset -- so a spoofed location moved the recorded check-in/out by
+      // hours (a 09:40 arrival "in Dubai" stored as 06:40, never late). GPS is client-controlled
+      // and there is no geofence, so it must not decide the time. Days abroad are covered by the
+      // approved Abroad request instead.
       employeeNo = String(req.hikUser.employeeNo);
       holderName = String(req.hikUser.name || '');
-      const coords = parseGpsCoords(gps);
-      const tz = coords ? timezoneFromCoords(coords.lat, coords.lng) : DEFAULT_TZ;
-      eventTime  = isoFromYmd(ymdInTimeZone(Date.now(), tz));
+      eventTime  = taNowIso();
       eventType  = 'WebScan';
-      req.hikTimezone = tz;
+      req.hikTimezone = DEFAULT_TZ;
     } else {
       // SECURITY FIX 2026-08-04 (retrospective Opus audit, HIGH): this employeeNo used to flow
       // straight into loadDoorEvents() (app.js)'s `Employee ${empNo}` fallback and the saved
@@ -2221,7 +2240,14 @@ function handleUserUpdate(req, res, users, idx, updates) {
   // field-presence -- the Edit Employee modal sends active+isObserver on every save, even a
   // phone-number-only edit, so a presence check would push a device call on every unrelated save.
   const before = canOpenDoor(users[idx]);
+  const wasActive = users[idx].active !== false;
   users[idx] = { ...users[idx], ...updates };
+  // SECURITY FIX 2026-09-23 (Opus audit MEDIUM-4): deactivating an account never revoked its
+  // tokens, so a remember-me session (30 days) kept working. Bump tokenVersion on the
+  // active -> inactive transition, same as a password reset; also closes that user's sockets.
+  if (wasActive && users[idx].active === false) {
+    users[idx].tokenVersion = (users[idx].tokenVersion || 0) + 1;
+  }
   const after = canOpenDoor(users[idx]);
   const empNo = String(users[idx].employeeNo || '');
   saveUsers(users);   // HR fact persists first, regardless of whether the device push below succeeds
@@ -2713,14 +2739,12 @@ app.get('/api/health', (req, res) => {
   res.json({ status:'ok', time:new Date().toISOString(), wsClients:clients.size, totalEvents:(readEvents() || []).length, totalUsers: employeeRecords(users).length });
 });
 
-// GPS lat/lng optional — server maps coords to IANA tz. Instant is always NAS Date.now().
+// Instant is always NAS Date.now().
+// 2026-09-23: always Bangkok, matching what a web scan now records (see the HIGH-1 fix in
+// POST /api/hikvision/event) -- the scan-page clock must show the time that will be saved.
+// lat/lng query params are still sent by older clients and are ignored.
 app.get('/api/now', (req, res) => {
-  const lat = parseFloat(req.query.lat);
-  const lng = parseFloat(req.query.lng);
-  let tz = DEFAULT_TZ;
-  if (Number.isFinite(lat) && Number.isFinite(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
-    tz = timezoneFromCoords(lat, lng);
-  }
+  const tz = DEFAULT_TZ;
   const ms = Date.now();
   const ymd = ymdInTimeZone(ms, tz);
   res.json({
@@ -4011,7 +4035,12 @@ function splitHolidayWorkOtMinutes(workStartTime, workEndTime, S) {
   const otMins30Before = Math.max(0, Math.min(endMin, stdStart) - Math.min(startMin, stdStart));
   const otMins30After = Math.max(0, endMin - Math.max(startMin, stdEnd));
   const otMins30 = otMins30Before + otMins30After;
-  const otMins20 = Math.max(0, Math.min(endMin, stdEnd) - Math.max(startMin, stdStart));
+  // 2026-09-23 (owner decision): the ×2 window excludes the 12:00-13:00 lunch hour -- the hourly
+  // rate assumes an 8-hour day (salary / 30 / 8), so 08:30-17:30 is 8 paid hours, not 9. Only the
+  // part of lunch the employee actually worked through is removed (13:00-17:00 loses nothing).
+  const x2Start = Math.max(startMin, stdStart), x2End = Math.min(endMin, stdEnd);
+  const lunchMins = Math.max(0, Math.min(x2End, 13 * 60) - Math.max(x2Start, 12 * 60));
+  const otMins20 = Math.max(0, x2End - x2Start - lunchMins);
   const round2 = n => Math.round(n / 60 * 100) / 100;
   return { otMins20, otMins30, otHours20: round2(otMins20), otHours30: round2(otMins30) };
 }
@@ -4105,6 +4134,36 @@ function holidayWorkSubmitBlockReason(user, dateStr) {
   const day = attendanceDayForUser(user, dateStr);
   if (!day || !day.checkIn) {
     return 'Holiday work requires a check-in first';
+  }
+  return null;
+}
+// 2026-09-23 (Opus audit M-1, rule confirmed by the owner): Holiday Work and office OT are paid
+// from times the employee types, which were never compared with the day's real scans -- a 10:00
+// arrival could claim 06:00-23:59. The typed start may not be earlier than the check-in and the
+// typed end may not be later than the check-out. Uses attendanceDayForUser, so approved
+// time-corrections count. A check-out before 05:00 belongs to the same business day (after
+// midnight) and is later than any typed end, which is capped at 23:59.
+// Dual-sync with app.js scanWindowError.
+function scanWindowError(user, dateStr, startHHMM, endHHMM) {
+  const day = attendanceDayForUser(user, dateStr);
+  // An approved Abroad day deliberately needs no scan (no device abroad; see app.js
+  // canSubmitOTForDate's allowNoScan) -- the trip approval is the evidence.
+  if (day && day.status === 'abroad') return null;
+  if (!day || !day.checkIn) return 'A check-in is required for this date';
+  if (startHHMM && parseHHMMToMins(startHHMM) < parseHHMMToMins(day.checkIn)) {
+    return `Start time cannot be earlier than your check-in (${day.checkIn})`;
+  }
+  if (endHHMM) {
+    // No check-out: fall back to the last scan after check-in (a morning-only day never records
+    // a check-out, since scans before 12:00 are treated as duplicate door scans).
+    const rawDay = day.checkOut ? null : (buildAttendanceLogForUser(user)[dateStr] || {});
+    const endLimit = day.checkOut || (rawDay && rawDay.lastScan);
+    if (!endLimit) return 'A check-out is required for this date — submit a time correction first';
+    let outMin = parseHHMMToMins(endLimit);
+    if (outMin < 5 * 60) outMin += 24 * 60;
+    if (parseHHMMToMins(endHHMM) > outMin) {
+      return `End time cannot be later than your check-out (${endLimit})`;
+    }
   }
   return null;
 }
@@ -4461,6 +4520,17 @@ const VALID_LEAVE_TYPES = new Set(Object.keys(TYPE_SCOPED_LEAVE_FIELDS));
 // logic would be wrong for it). Hourly-mode requests (hourlyStart/hourlyEnd present) legitimately
 // keep days:0 and are left alone by callers of this helper.
 const DAY_BASED_LEAVE_TYPES = new Set(['annual', 'sick', 'business']);
+// SECURITY FIX 2026-09-23 (Opus audit, leave MEDIUM-3): the server only format-checked hourly
+// times, so `{hourlyStart:'08:30'}` with no end over a month-long range was stored as days:0 (costs
+// 0 quota) while leaveDayCoverage() treats a missing end as a FULL day on every date in the range.
+// Hourly leave is one day with both times and end after start -- exactly what submitLeave() sends.
+function hourlyLeaveShapeError(hourlyStart, hourlyEnd, dateFrom, dateTo) {
+  if (!hourlyStart && !hourlyEnd) return null;
+  if (!hourlyStart || !hourlyEnd) return 'hourlyStart and hourlyEnd are both required for hourly leave';
+  if (parseHHMMToMins(hourlyEnd) <= parseHHMMToMins(hourlyStart)) return 'hourlyEnd must be after hourlyStart';
+  if (dateTo && dateTo !== dateFrom) return 'hourly leave must be a single day (dateTo must equal dateFrom)';
+  return null;
+}
 function deriveLeaveDaysCount(dateFrom, dateTo) {
   let days = 0;
   let d = new Date(dateFrom + 'T12:00:00');
@@ -4935,6 +5005,10 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
     // derive it" pattern as distanceKm/otMultiplier/otHours above. Requires dateFrom/dateTo already
     // validated above. Day-mode only (hourlyStart/hourlyEnd absent) -- hourly-mode requests
     // legitimately send days:0 and are left alone.
+    if (DAY_BASED_LEAVE_TYPES.has(type)) {
+      const hourlyErr = hourlyLeaveShapeError(body.hourlyStart, body.hourlyEnd, body.dateFrom, body.dateTo);
+      if (hourlyErr) return res.status(400).json({ success:false, message:hourlyErr });
+    }
     if (DAY_BASED_LEAVE_TYPES.has(type) && body.hourlyStart === undefined && body.hourlyEnd === undefined) {
       body.days = deriveLeaveDaysCount(body.dateFrom, body.dateTo);
     } else if (DAY_BASED_LEAVE_TYPES.has(type)) {
@@ -5100,6 +5174,8 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
     if (type === 'holiday-work') {
       const hwErr = holidayWorkSubmitBlockReason(targetUser, body.dateFrom);
       if (hwErr) return res.status(400).json({ success:false, message: hwErr });
+      const hwScanErr = scanWindowError(targetUser, body.dateFrom, body.workStartTime, body.workEndTime);
+      if (hwScanErr) return res.status(400).json({ success:false, message: hwScanErr });
     }
     if (type === 'abroad') {
       const abErr = abroadSubmitBlockReason(targetUser);
@@ -5220,6 +5296,8 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
         if (!(derivedOfficeOt.otHours > 0)) {
           return res.status(400).json({ success:false, message: 'End time must be after 17:30' });
         }
+        const otScanErr = scanWindowError(targetUser, body.dateFrom, null, body.otEndTime);
+        if (otScanErr) return res.status(400).json({ success:false, message: otScanErr });
         if (derivedOfficeOt.otHours > OT_HOURS_MAX) {
           return res.status(400).json({ success:false, message:`otHours must be a non-negative number, ${OT_HOURS_MAX} or fewer` });
         }
@@ -5411,6 +5489,18 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
       }
       leaves[idx] = { ...leave, status: newStatus, approver: live.name, approvedAt: new Date().toISOString() };
       saveLeaves(leaves);
+      // 2026-09-23 (Opus audit M-2/M-3): an approval that changes this year's annual pool after
+      // year-end carry-forward was already run must rewrite next year's snapshot too -- otherwise
+      // approved Dec leave still carries over, and a late-approved holiday-work day is lost.
+      const touchesAnnualPool = leave.type === 'annual' ||
+        (leave.type === 'holiday-work' && leave.compensationMode === 'annual-leave');
+      if (newStatus === 'approved' && touchesAnnualPool && ownerUser) {
+        try {
+          refreshSnapshottedCarryForward(leaves, ownerUser, leave.dateFrom);
+        } catch (e) {
+          console.error('[LEAVE] carry-forward refresh after approval failed', e && e.message);
+        }
+      }
       // SECURITY FIX 2026-08-13 (re-audit, F-1): same unauthenticated-broadcast leak as
       // LEAVE_CREATED above.
       broadcast({ type: 'LEAVE_UPDATED', leave: toPublicLeaveProjection(leaves[idx]) });
@@ -5515,6 +5605,10 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
     if (newType === 'holiday-work') {
       const hwErrPut = holidayWorkSubmitBlockReason(ownerUser || live, resolvedDateFromForLock);
       if (hwErrPut) return res.status(400).json({ success:false, message: hwErrPut });
+      const hwScanErrPut = scanWindowError(ownerUser || live, resolvedDateFromForLock,
+        updates.workStartTime !== undefined ? updates.workStartTime : leave.workStartTime,
+        updates.workEndTime !== undefined ? updates.workEndTime : leave.workEndTime);
+      if (hwScanErrPut) return res.status(400).json({ success:false, message: hwScanErrPut });
     }
     if (newType === 'abroad') {
       const abErrPut = abroadSubmitBlockReason(ownerUser || live);
@@ -5690,6 +5784,8 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
       // value, and JSON.stringify() drops undefined-valued keys entirely on write.
       if (isExplicitDayModeSave) { safeUpdates.hourlyStart = undefined; safeUpdates.hourlyEnd = undefined; }
     } else if (DAY_BASED_LEAVE_TYPES.has(newType)) {
+      const hourlyErrPut = hourlyLeaveShapeError(resolvedHourlyStart, resolvedHourlyEnd, resolvedDateFromForLock, resolvedDateToForLock);
+      if (hourlyErrPut) return res.status(400).json({ success:false, message:hourlyErrPut });
       // SECURITY/CORRECTNESS FIX 2026-08-13 (M-1, Opus retrospective audit): mirrors the same
       // POST-side fix -- resolved hourly-mode for a day-based type must force days:0 rather than
       // trust whatever the client sent, since leaveDayCoverage() checks `(l.days||0) > 0` BEFORE
@@ -5801,6 +5897,8 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
       if (!(derivedOfficeOt.otHours > 0)) {
         return res.status(400).json({ success:false, message: 'End time must be after 17:30' });
       }
+      const otScanErrPut = scanWindowError(ownerUser || live, dateFrom, null, otEndTime);
+      if (otScanErrPut) return res.status(400).json({ success:false, message: otScanErrPut });
       if (derivedOfficeOt.otHours > OT_HOURS_MAX) {
         return res.status(400).json({ success:false, message:`otHours must be a non-negative number, ${OT_HOURS_MAX} or fewer` });
       }
@@ -5907,9 +6005,70 @@ function isCancellableApprovedLeave(leave, asOfYmd) {
   return asOf < leave.dateFrom;
 }
 
+// Dual-sync with app.js computeLateDeductMinutes (annual-leave balance deduction, NOT the payslip
+// display one inside computePayslipExtras). Same exemptions: weekends, public holidays, company
+// trips, approved annual/sick/business leave days, drivers; approved checkIn time-corrections win.
+function annualLateDeductMinutes(user, year, leaves) {
+  const policy = getAppSettings().lateDeductPolicy;
+  if (!policy || !policy.enabled || !policy.effectiveFromPeriod) return 0;
+  if (!user || user.role === 'driver') return 0;
+  const eff = String(policy.effectiveFromPeriod);
+  const effDateStr = `${eff.slice(0,4)}-${eff.slice(4,6)}-${eff.slice(6,8)}`;
+  const yearStr = String(year);
+  const ws = getAppSettings().workSchedule;
+  const stdStart = (ws?.standardStartHour ?? 8) * 60 + (ws?.standardStartMinute ?? 30);
+  const log = buildAttendanceLogForUser(user);
+  let deductMin = 0;
+  Object.keys(log).forEach(dateStr => {
+    if (!dateStr.startsWith(yearStr) || dateStr < effDateStr) return;
+    const dw = new Date(dateStr + 'T12:00:00').getDay();
+    if (dw === 0 || dw === 6) return;
+    if (isPublicHoliday(dateStr) || isCompanyTripDay(dateStr)) return;
+    const onLeave = leaves.some(l =>
+      l.userId === user.id && l.status === 'approved' &&
+      ['annual','sick','business'].includes(l.type) &&
+      dateStr >= l.dateFrom && dateStr <= (l.dateTo || l.dateFrom));
+    if (onLeave) return;
+    const corr = leaves.find(l =>
+      l.userId === user.id && l.status === 'approved' &&
+      l.type === 'time-correction' && l.correctionField === 'checkIn' && l.dateFrom === dateStr);
+    const effectiveCheckIn = corr ? corr.correctedTime : log[dateStr].checkIn;
+    if (!effectiveCheckIn) return;
+    const [h, m] = effectiveCheckIn.split(':').map(Number);
+    const lateMin = h * 60 + m - stdStart;
+    if (lateMin <= 0) return;
+    const tier = (policy.tiers || []).find(t => lateMin >= t.fromMin && lateMin <= t.toMin);
+    if (tier) deductMin += tier.deductMin;
+  });
+  return deductMin;
+}
+
+// Dual-sync with app.js computeLeaveBalance(u, 'annual', annualLeaveEntitlementDays(u, yearEnd),
+// year).remMin -- the pool processYearEndCarryForward() carries over. Approved-only, year-scoped,
+// hourly-aware (leaveMinutesOf), minus go-live opening used and the late-arrival deduction.
+function annualLeaveRemainingMinutes(leaves, user, year, cf) {
+  const yStart = `${year}-01-01`, yEnd = `${year}-12-31`;
+  const cfDays = Number(cf[`${year}_${user.id}`]) || 0;
+  const compDays = getApprovedHolidayWorkAnnualLeaveDays(leaves, user.id, year)
+    + (Number(cf[`comp_${year}_${user.id}`]) || 0);
+  const effectiveMax = annualLeaveEntitlementDays(user, yEnd) + cfDays + compDays;
+  let usedMin = 0;
+  leaves.filter(l =>
+    l.userId === user.id && l.type === 'annual' && l.status === 'approved' &&
+    l.dateFrom >= yStart && l.dateFrom <= yEnd
+  ).forEach(l => { usedMin += leaveMinutesOf(l); });
+  const openingUsed = Number((readSettings().leaveOpeningUsed || {})[`${year}_${user.id}_annual`]) || 0;
+  usedMin += openingUsed * 8 * 60;
+  return Math.max(0, effectiveMax * 8 * 60 - usedMin - annualLateDeductMinutes(user, year, leaves));
+}
+
 // Dual-sync with app.js processYearEndCarryForward: if Accounting already snapshotted next
-// year's leftover, cancelling unused approved annual leave must raise that snapshot. No-op
-// when next year's key is absent (year-end has not been processed yet).
+// year's leftover, any later change to this year's annual pool (cancelling approved leave,
+// approving annual leave, approving holiday work credited as an annual day) must rewrite that
+// snapshot. No-op when next year's key is absent (year-end has not been processed yet).
+// 2026-09-23 (Opus audit HIGH): used to count only `l.days` and skip opening-used and the late
+// deduction, so it disagreed with the year-end button -- hourly leave counted as nothing and
+// go-live opening balances were ignored, over-carrying days into next year.
 function refreshSnapshottedCarryForward(leaves, user, dateFrom) {
   if (!user || !isValidDateStr(dateFrom)) return;
   const leaveYear = Number(dateFrom.slice(0, 4));
@@ -5919,19 +6078,11 @@ function refreshSnapshottedCarryForward(leaves, user, dateFrom) {
   const settings = readSettings();
   const cf = settings.leaveCarryForward;
   if (!cf || typeof cf !== 'object' || Array.isArray(cf) || cf[nextKey] === undefined) return;
-  const maxCF = Math.max(0, Math.min(60, Number(getAppSettings().leave && getAppSettings().leave.carryForwardMax) || 5));
-  const yStart = `${leaveYear}-01-01`, yEnd = `${leaveYear}-12-31`;
-  const usedDays = leaves.filter(l =>
-    l.userId === user.id && l.type === 'annual' && l.status === 'approved' &&
-    l.dateFrom >= yStart && l.dateFrom <= yEnd
-  ).reduce((sum, l) => sum + (l.days || 0), 0);
-  const compEarned = getApprovedHolidayWorkAnnualLeaveDays(leaves, user.id, leaveYear)
-    + (Number(cf[`comp_${leaveYear}_${user.id}`]) || 0);
-  const maxAnnual = annualLeaveEntitlementDays(user, yEnd);
-  const combinedAvailable = maxAnnual + (Number(cf[`${leaveYear}_${user.id}`]) || 0) + compEarned;
-  const combinedLeftover = Math.max(0, combinedAvailable - usedDays);
-  const cfMerged = Math.min(combinedLeftover, maxCF);
-  cf[nextKey] = cfMerged;
+  // `??` not `||`: a configured 0 means "no carry-forward", not "use the default 5".
+  const rawMax = Number(getAppSettings().leave?.carryForwardMax ?? 5);
+  const maxCF = Math.max(0, Math.min(60, Number.isFinite(rawMax) ? rawMax : 5));
+  const leftoverDays = annualLeaveRemainingMinutes(leaves, user, leaveYear, cf) / 480;
+  cf[nextKey] = Math.min(leftoverDays, maxCF);
   cf[`comp_${nextYear}_${user.id}`] = 0;
   writeJSON('settings.json', settings);
 }
@@ -6918,10 +7069,11 @@ function buildAttendanceLogForUser(user, start, end) {
     const rec = log[businessDate];
     const source = ev.eventType === 'WebScan' ? 'web' : 'device';
     if (hour < 5) {
-      if (!rec.checkOut || timePart > rec.checkOut) {
-        rec.checkOut = timePart;
-        rec.checkOutSource = source;
-      }
+      // 2026-09-23: always overwrite -- events are sorted by instant, so an after-midnight scan
+      // is the latest of the business day ("00:30" used to lose to a "12:30" lunch scan on a
+      // string compare). Dual-sync with app.js loadAttendanceFromBackend.
+      rec.checkOut = timePart;
+      rec.checkOutSource = source;
     } else if (!rec.checkIn && timePart >= CHECKIN_CUTOFF) {
       if (!rec.firstScanAfterCutoff) rec.firstScanAfterCutoff = timePart;
       if (!rec.status) rec.status = 'not-clocked-in';
@@ -6937,9 +7089,14 @@ function buildAttendanceLogForUser(user, start, end) {
       // the first place -- every downstream late-deduction/display site already reads the
       // configurable Settings value (_stdStr7, hoisted above).
       rec.status = (user.role !== 'driver' && timePart > _stdStr7) ? 'late' : 'present';
-    } else if (timePart >= '12:00' && (!rec.checkOut || timePart > rec.checkOut)) {
-      rec.checkOut = timePart;
-      rec.checkOutSource = source;
+    } else {
+      if (timePart >= '12:00' && (!rec.checkOut || timePart > rec.checkOut)) {
+        rec.checkOut = timePart;
+        rec.checkOutSource = source;
+      }
+      // 2026-09-23: latest scan after check-in, morning ones included -- only scanWindowError's
+      // fallback end limit when no check-out exists (dual-sync with app.js).
+      rec.lastScan = timePart;
     }
   });
   return log;
