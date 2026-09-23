@@ -1473,6 +1473,10 @@ async function updateUserRoleBackend(u, role) {
 }
 
 let DATA_LEAVES = [];
+// 2026-09-23: Accounting/MD reviews of web check-outs at/after the Late Night time, keyed
+// "<userId>_<YYYY-MM-DD>" (same format as attKey). GET /api/checkout-reviews is scoped server-side:
+// md/accounting/manager get all, everyone else only their own.
+let DATA_CHECKOUT_REVIEWS = {};
 let DATA_ANNOUNCEMENTS = [];
 let _editingAnnouncementId = null;
 let nextLeaveId = 1;
@@ -4458,6 +4462,10 @@ function generatePeriodDays(start, end, isCurrent, userId) {
       }
     }
 
+    // 2026-09-23: the scanned check-out before any time-correction overlay -- shown to reviewers
+    // as "21:00 (corrected from 17:40)". Dual-sync twin in server.js.
+    const rawCheckOut = checkOut;
+
     // Overlay approved DATA_LEAVES so approvals always appear regardless of attendanceLog state.
     // Skip on company-trip days — status stays company-trip (paid day off); allowance flags
     // from leftover approved claims must not leak into reports that count d.upcountry / lateApproved.
@@ -4572,7 +4580,10 @@ function generatePeriodDays(start, end, isCurrent, userId) {
     }
 
     const holidayName = DATA_HOLIDAYS.find(h => h.date === dateStr)?.name || null;
-    days.push({ date: dateStr, dayName: dayNamesEn[d.getDay()], isWeekend, isPubHoliday, isFuture, isToday, status, checkIn, checkOut, earlyIn, lateOut, upcountry, longDistance, longDistanceKm, longDistanceAllowance, checkInSource, checkOutSource, earlyApproved, lateApproved, checkInGPS, checkOutGPS, holidayName, firstScanAfterCutoff, partialLeave });
+    // 2026-09-23: after the overlay, so a review counts only for the effective (corrected) web
+    // check-out it was made on. Dual-sync twin in server.js.
+    const checkOutReview = uid ? checkoutReviewDecisionFor(DATA_CHECKOUT_REVIEWS[attKey(uid, dateStr)], checkOut, checkOutSource) : null;
+    days.push({ date: dateStr, dayName: dayNamesEn[d.getDay()], isWeekend, isPubHoliday, isFuture, isToday, status, checkIn, checkOut, earlyIn, lateOut, upcountry, longDistance, longDistanceKm, longDistanceAllowance, checkInSource, checkOutSource, earlyApproved, lateApproved, checkInGPS, checkOutGPS, holidayName, firstScanAfterCutoff, partialLeave, checkOutReview, rawCheckOut });
     d.setDate(d.getDate() + 1);
   }
   return days;
@@ -4627,6 +4638,33 @@ async function loadLeavesFromBackend() {
     console.error('[APP] loadLeavesFromBackend error:', e.message);
     return false;
   }
+}
+
+// On failure the previous map is kept (initially {} = nothing allowed), so the browser never shows
+// a web check-out as paid that the server has not confirmed. The server engine is authoritative.
+async function loadCheckoutReviewsFromBackend() {
+  try {
+    const res = await apiFetch('/api/checkout-reviews');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    if (!data || !data.success || !data.reviews || typeof data.reviews !== 'object' || Array.isArray(data.reviews)) {
+      throw new Error('bad payload');
+    }
+    DATA_CHECKOUT_REVIEWS = data.reviews;
+    return true;
+  } catch(e) {
+    console.error('[APP] loadCheckoutReviewsFromBackend error:', e.message);
+    return false;
+  }
+}
+
+function rerenderAfterCheckoutReviews() {
+  updateApprovalBadge();
+  renderDashboard();
+  if (currentPage === 'attendance') renderAttendanceTable();
+  if (currentPage === 'approval') renderApprovals();
+  if (currentPage === 'payslip') renderPayslip();
+  if (currentPage === 'reports') renderReports();
 }
 
 // 2026-08-06 (user report + Opus-planned change): the "is this scan too late in the day to be a
@@ -5201,6 +5239,7 @@ function initApp(startPage) {
     if (currentPage === 'leave-summary') renderLeaveSummary();
     initNotificationPolling();
   });
+  loadCheckoutReviewsFromBackend().then(ok => { if (ok) rerenderAfterCheckoutReviews(); });
   if (currentPage === 'dashboard') fetchExchangeRate();
   loadAttendanceFromBackend().then(ok => {
     if (ok) {
@@ -16810,6 +16849,11 @@ function initHikvisionLive() {
             if (d && d.success && Array.isArray(d.announcements)) DATA_ANNOUNCEMENTS = d.announcements;
           }).catch(() => {});
         }
+      }
+      if (data.type === 'CHECKOUT_REVIEWS_UPDATED') {
+        // Payload-less by design: re-fetch through the role-scoped GET so an employee's socket
+        // never carries anyone else's review.
+        loadCheckoutReviewsFromBackend().then(ok => { if (ok) rerenderAfterCheckoutReviews(); });
       }
       if (data.type === 'USER_CREATED') {
         // SECURITY FIX 2026-08-04: the backend now broadcasts a stripped public projection (no
