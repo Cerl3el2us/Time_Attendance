@@ -1356,4 +1356,9 @@ window.LANG_JA = {
   "↩️ Review cleared": "↩️ 確認結果を取り消しました",
   "This employee already has a 🌙 Late Night request for this day. Mark the check-out as not allowed anyway? The 🌙 will not be paid while it stays not allowed.":
     "この社員はこの日の🌙深夜残業申請をすでに提出しています。それでも退勤を不許可にしますか？不許可のままだと🌙は支払われません。",
+
+  // 2026-09-23: web check-out Late Night review — Approvals page pending box (Task 8)
+  "Web check-outs awaiting review": "確認待ちのWeb退勤",
+  "A web Check Out after the Late Night time. Allow it only if the employee really worked late — Allow just unlocks the 🌙 request, which still needs normal approval.":
+    "深夜残業の基準時刻以降のWeb退勤です。社員が実際に深夜まで勤務した場合のみ許可してください — 許可すると🌙の申請が可能になるだけで、🌙自体は通常どおり承認が必要です。",
 };

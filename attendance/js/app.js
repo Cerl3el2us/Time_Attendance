@@ -11417,6 +11417,63 @@ function buildApprovalCard(l, role) {
 let _approvalQuickMode = false;
 let _approvalSelected = new Set();
 
+// 2026-09-23: web check-outs at/after the Late Night time still waiting for an Accounting/MD
+// review, built client-side with the shared dual-sync trigger. Current + previous pay period,
+// other employees only (never the reviewer's own record), open periods only.
+function checkoutReviewPendingItems() {
+  if (!currentUser || currentUser.isObserver || !isMdAccountingView()) return [];
+  const items = [];
+  const users = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active !== false &&
+    Number(u.id) !== Number(currentUser.id) &&
+    isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'earlyLate'));
+  [0, 1].forEach(idx => {
+    const { start, end, isCurrent } = getPeriodBounds(idx);
+    users.forEach(u => {
+      generatePeriodDays(start, end, isCurrent, u.id).forEach(day => {
+        if (day.checkOutReview || !checkoutReviewTrigger(day, u, APP_SETTINGS)) return;
+        if (payPeriodBlockedForDate(day.date, u.id).blocked) return;
+        items.push({ user: u, day });
+      });
+    });
+  });
+  return items.sort((a, b) => b.day.date.localeCompare(a.day.date) ||
+    String(a.user.name || '').localeCompare(String(b.user.name || '')));
+}
+
+function checkoutReviewPendingBoxHtml(items) {
+  const rows = items.map(({ user, day }) => {
+    const uid = Number(user.id);
+    const d = escapeJsAttr(day.date);
+    const raw = (day.rawCheckOut && day.rawCheckOut !== day.checkOut)
+      ? ` <span style="color:#64748b;font-size:11px">(${escapeHtml(L('corrected from', 'แก้จาก'))} ${escapeHtml(day.rawCheckOut)})</span>`
+      : '';
+    return `<tr>
+      <td style="padding:6px 8px">${escapeHtml(user.name)}</td>
+      <td style="padding:6px 8px;white-space:nowrap">${escapeHtml(fmtDate(new Date(day.date + 'T12:00:00')))}</td>
+      <td style="padding:6px 8px;white-space:nowrap">🌐 ${escapeHtml(day.checkOut)}${raw}</td>
+      <td style="padding:6px 8px;white-space:nowrap;text-align:right">
+        <button class="btn btn-ghost btn-sm" style="color:#059669" title="${escapeHtml(L('Allow this web check-out (unlocks 🌙)', 'อนุญาตเวลาออกผ่านเว็บนี้ (ปลดล็อก 🌙)'))}" onclick="setCheckoutReview(${uid}, '${d}', 'allow')">✅</button>
+        <button class="btn btn-ghost btn-sm" style="color:#dc2626" title="${escapeHtml(L('Do not allow this web check-out', 'ไม่อนุญาตเวลาออกผ่านเว็บนี้'))}" onclick="setCheckoutReview(${uid}, '${d}', 'deny')">❌</button>
+      </td>
+    </tr>`;
+  }).join('');
+  return `<div style="margin-bottom:14px;padding:12px 14px;border:1px solid #f59e0b;border-radius:10px;background:var(--bg-card)">
+    <div style="font-weight:700;color:var(--text);margin-bottom:4px">⚠️ ${escapeHtml(L('Web check-outs awaiting review', 'เช็กเอาท์ผ่านเว็บที่รอตรวจสอบ'))} (${items.length})</div>
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">${escapeHtml(L('A web Check Out after the Late Night time. Allow it only if the employee really worked late — Allow just unlocks the 🌙 request, which still needs normal approval.', 'กด Check Out บนเว็บหลังเวลาแจ้งกลับดึก อนุญาตเฉพาะเมื่อพนักงานทำงานดึกจริง — การอนุญาตแค่เปิดให้ยื่น 🌙 ได้ ส่วน 🌙 ยังต้องอนุมัติตามปกติ'))}</div>
+    <div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr>
+          <th style="padding:6px 8px;text-align:left;color:var(--text-muted)">${escapeHtml(L('Employee', 'ชื่อพนักงาน'))}</th>
+          <th style="padding:6px 8px;text-align:left;color:var(--text-muted)">${escapeHtml(L('Date', 'วันที่'))}</th>
+          <th style="padding:6px 8px;text-align:left;color:var(--text-muted)">${escapeHtml(L('Check Out', 'ออกงาน'))}</th>
+          <th style="padding:6px 8px;text-align:right;color:var(--text-muted)">${escapeHtml(L('Action', 'ดำเนินการ'))}</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
 function renderApprovals() {
   const catEl  = document.getElementById('approval-categories');
   const histEl = document.getElementById('approval-history-section');
@@ -11450,6 +11507,14 @@ function renderApprovals() {
 
   // ── Summary bar: tab + toolbar ──
   if (summEl) {
+    // Web check-out Late Night reviews (MD/Accounting only; hidden when empty).
+    const _crItems = checkoutReviewPendingItems();
+    if (_crItems.length) {
+      const _crBox = document.createElement('div');
+      _crBox.id = 'checkout-review-pending-box';
+      _crBox.innerHTML = checkoutReviewPendingBoxHtml(_crItems);
+      summEl.appendChild(_crBox);
+    }
     // Tab bar
     const tabBar = document.createElement('div');
     tabBar.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px';
