@@ -1338,4 +1338,22 @@ window.LANG_JA = {
   "Scan out first, then submit OT": "先に退勤打刻をしてからOTを申請してください",
   "No check-out on this date — submit a time correction first, then OT": "この日の退勤打刻がありません — 先に打刻修正を申請してからOTを申請してください",
   "Weekdays with a check-in and a check-out only. Weekends and public holidays use Holiday Work.": "出勤・退勤の打刻がある平日のみ選択できます。土日・祝日は休日出勤を申請してください。",
+
+  // 2026-09-23: web check-out Late Night review — attendance row/card chips, reviewer buttons,
+  // detail modal, and the deny-confirmation dialog (Task 7)
+  "✅ Reviewed — you can submit 🌙": "✅ 確認済み — 🌙を申請できます",
+  "❌ Not allowed": "❌ 許可されていません",
+  "🌙 not paid — check-out not allowed": "🌙 未払い — 退勤が許可されていません",
+  "⏳ Awaiting Accounting review": "⏳ 経理の確認待ち",
+  "corrected from": "修正前：",
+  "✅ Allowed": "✅ 許可済み",
+  "⚠️ Review (web)": "⚠️ 要確認（Web）",
+  "Undo review": "確認結果を取り消す",
+  "Allow this web check-out (unlocks 🌙)": "このWeb退勤を許可する（🌙が申請可能に）",
+  "Do not allow this web check-out": "このWeb退勤を許可しない",
+  "✅ Check-out allowed": "✅ 退勤を許可しました",
+  "❌ Check-out marked as not allowed": "❌ 退勤を不許可にしました",
+  "↩️ Review cleared": "↩️ 確認結果を取り消しました",
+  "This employee already has a 🌙 Late Night request for this day. Mark the check-out as not allowed anyway? The 🌙 will not be paid while it stays not allowed.":
+    "この社員はこの日の🌙深夜残業申請をすでに提出しています。それでも退勤を不許可にしますか？不許可のままだと🌙は支払われません。",
 };

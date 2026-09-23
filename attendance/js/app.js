@@ -6790,6 +6790,82 @@ function attAllowIcon(emoji, title) {
   return `<span class="att-allow-icon" title="${escapeHtml(title)}">${emoji}</span>`;
 }
 
+// ===== WEB CHECK-OUT LATE NIGHT REVIEW (2026-09-23) =====
+// Buttons only for an MD/Accounting view of SOMEONE ELSE's record, never for observers.
+// The server enforces the same rules (requireRole + self check).
+function canReviewCheckoutFor(targetUser) {
+  if (!currentUser || !targetUser || currentUser.isObserver) return false;
+  if (Number(targetUser.id) === Number(currentUser.id)) return false;
+  return isMdAccountingView();
+}
+
+// Status chip (+ buttons) under a trigger day's check-out. Employee on their own row: pending /
+// allowed / not allowed (+ "🌙 not paid" if a 🌙 exists). Anyone else: reviewer wording; buttons
+// only when canReviewCheckoutFor() and the pay period is still open.
+function buildCheckoutReviewHtml(row, targetUser, withButtons) {
+  if (!row || !targetUser || !checkoutReviewTrigger(row, targetUser, APP_SETTINGS)) return '';
+  const decision = row.checkOutReview;
+  const chip = (bg, fg, text) => `<span class="badge" style="display:inline-block;margin-top:3px;background:${bg};color:${fg};font-size:10px">${escapeHtml(text)}</span>`;
+  const isSelf = !!currentUser && Number(targetUser.id) === Number(currentUser.id);
+  if (isSelf) {
+    if (decision === 'allow') {
+      return `<div class="checkout-review">${chip('#dcfce7', '#166534', L('✅ Reviewed — you can submit 🌙', '✅ ตรวจแล้ว ยื่น 🌙 ได้'))}</div>`;
+    }
+    if (decision === 'deny') {
+      const hasLateOut = DATA_LEAVES.some(l => l.userId === targetUser.id && l.type === 'late-out' && l.dateFrom === row.date && l.status !== 'rejected');
+      const notPaid = hasLateOut
+        ? `<div style="font-size:10px;color:#991b1b;margin-top:2px">${escapeHtml(L('🌙 not paid — check-out not allowed', '🌙 ไม่จ่าย — เวลาออกไม่ได้รับอนุญาต'))}</div>`
+        : '';
+      return `<div class="checkout-review">${chip('#fee2e2', '#991b1b', L('❌ Not allowed', '❌ ไม่อนุญาต'))}${notPaid}</div>`;
+    }
+    return `<div class="checkout-review">${chip('#fef3c7', '#92400e', L('⏳ Awaiting Accounting review', '⏳ รอบัญชีตรวจสอบ'))}</div>`;
+  }
+  const rawNote = (row.rawCheckOut && row.rawCheckOut !== row.checkOut)
+    ? `<div style="font-size:10px;color:#64748b;margin-top:2px">${escapeHtml(L('corrected from', 'แก้จาก'))} ${escapeHtml(row.rawCheckOut)}</div>`
+    : '';
+  let html = decision === 'allow' ? chip('#dcfce7', '#166534', L('✅ Allowed', '✅ อนุญาตแล้ว'))
+    : decision === 'deny' ? chip('#fee2e2', '#991b1b', L('❌ Not allowed', '❌ ไม่อนุญาต'))
+    : chip('#fef3c7', '#92400e', L('⚠️ Review (web)', '⚠️ ตรวจสอบ (เว็บ)'));
+  if (withButtons && canReviewCheckoutFor(targetUser) && !payPeriodBlockedForDate(row.date, targetUser.id).blocked) {
+    const uid = Number(targetUser.id);
+    const d = escapeJsAttr(row.date);
+    const btn = (color, title, arg, label) => `<button class="btn btn-ghost btn-sm" style="color:${color};padding:0 4px;margin-left:2px" title="${escapeHtml(title)}" onclick="setCheckoutReview(${uid}, '${d}', ${arg})">${label}</button>`;
+    html += decision
+      ? btn('#64748b', L('Undo review', 'ยกเลิกผลตรวจสอบ'), 'null', '↩️')
+      : btn('#059669', L('Allow this web check-out (unlocks 🌙)', 'อนุญาตเวลาออกผ่านเว็บนี้ (ปลดล็อก 🌙)'), "'allow'", '✅') +
+        btn('#dc2626', L('Do not allow this web check-out', 'ไม่อนุญาตเวลาออกผ่านเว็บนี้'), "'deny'", '❌');
+  }
+  return `<div class="checkout-review">${html}${rawNote}</div>`;
+}
+
+async function setCheckoutReview(userId, dateStr, decision) {
+  if (blockIfObserver()) return;
+  const uid = Number(userId);
+  if (!currentUser || uid === Number(currentUser.id) || !isMdAccountingView()) return;
+  if (decision === 'deny') {
+    const hasLateOut = DATA_LEAVES.some(l => l.userId === uid && l.type === 'late-out' && l.dateFrom === dateStr && l.status !== 'rejected');
+    if (hasLateOut && !confirm(L('This employee already has a 🌙 Late Night request for this day. Mark the check-out as not allowed anyway? The 🌙 will not be paid while it stays not allowed.',
+      'พนักงานมีคำขอ 🌙 แจ้งกลับดึกของวันนี้อยู่แล้ว ยืนยันไม่อนุญาตเวลาออก? 🌙 จะไม่ถูกจ่ายตราบที่ยังไม่อนุญาต'))) return;
+  }
+  try {
+    const res = await apiFetch('/api/checkout-reviews', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: uid, date: dateStr, decision }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.message || ('HTTP ' + res.status));
+    const key = attKey(uid, dateStr);
+    if (decision === null) delete DATA_CHECKOUT_REVIEWS[key];
+    else DATA_CHECKOUT_REVIEWS[key] = data.review;
+    rerenderAfterCheckoutReviews();
+    showToast(decision === 'allow' ? L('✅ Check-out allowed', '✅ อนุญาตเวลาออกแล้ว')
+      : decision === 'deny' ? L('❌ Check-out marked as not allowed', '❌ บันทึกไม่อนุญาตเวลาออกแล้ว')
+      : L('↩️ Review cleared', '↩️ ยกเลิกผลตรวจสอบแล้ว'), decision === 'deny' ? 'warning' : 'success');
+  } catch(e) {
+    showToast(L('❌ Could not save: ', '❌ ไม่สามารถบันทึกได้: ') + e.message, 'danger');
+  }
+}
+
 function buildRowActions(row, readOnly, actionUser) {
   const actor = actionUser || currentUser;
   let html = '';
@@ -7252,6 +7328,7 @@ function renderAttendanceTable() {
     const outSrc = row.checkOutSource === 'web'
       ? `<span class="log-source web"    style="font-size:10px;margin-left:4px" title="${L('Recorded via Web App','บันทึกผ่าน Web App')}">🌐</span>`
       : `<span class="log-source device" style="font-size:10px;margin-left:4px" title="${L('Face scanner device','สแกนหน้าอุปกรณ์')}">📷</span>`;
+    const checkoutReviewHtml = buildCheckoutReviewHtml(row, targetUser, true);
 
     // SECURITY FIX 2026-08-04 (Opus audit, C2): this used to escape only the single quote
     // (/'/g) while interpolating into DOUBLE-quoted attributes below -- protecting the wrong
@@ -7283,7 +7360,7 @@ function renderAttendanceTable() {
       <td>${row.partialLeave && row.partialLeave.coverage === 'pm' && !row.checkOut
         ? buildPartialLeaveChip(row.partialLeave)
         : (row.checkOut
-          ? `<span class="time-chip out">⬇️ ${escapeHtml(row.checkOut)}</span>${outSrc}${gpsOutBtn}${buildReturnSubline(row)}`
+          ? `<span class="time-chip out">⬇️ ${escapeHtml(row.checkOut)}</span>${outSrc}${gpsOutBtn}${buildReturnSubline(row)}${checkoutReviewHtml}`
           : (row.checkIn ? `<span style="color:#f59e0b;font-size:11px">⚠️ ${L('No check-out', 'ไม่มีข้อมูลออก')}</span>` : '<span style="color:#cbd5e1">—</span>'))
       }</td>
       <td class="col-hide-mobile"${hasAnyAllowanceTarget ? '' : ' style="display:none"'}>${allowIconsHtml}</td>
@@ -7325,7 +7402,7 @@ function renderAttendanceTable() {
             ${row.partialLeave && row.partialLeave.coverage === 'pm' && !row.checkOut
               ? buildPartialLeaveChip(row.partialLeave)
               : (row.checkOut
-                ? `<span class="time-chip out">⬇️ ${escapeHtml(row.checkOut)}</span>${outSrc}${gpsOutBtn}${buildReturnSubline(row)}`
+                ? `<span class="time-chip out">⬇️ ${escapeHtml(row.checkOut)}</span>${outSrc}${gpsOutBtn}${buildReturnSubline(row)}${checkoutReviewHtml}`
                 : '<span style="color:#cbd5e1;font-size:12px">—</span>')}
           </div>
         </div>
@@ -15154,7 +15231,8 @@ function showAttendanceDetail(date) {
   const canViewOthers = canViewOtherEmployees();
   const targetUserId = canViewOthers ? (selectedAttUserId || currentUser.id) : currentUser.id;
   const isViewingSelf = targetUserId === currentUser.id;
-  const targetRole = (canViewOthers ? (DATA_USERS.find(u => u.id === targetUserId) || currentUser) : currentUser).role;
+  const targetUserObj = canViewOthers ? (DATA_USERS.find(u => u.id === targetUserId) || currentUser) : currentUser;
+  const targetRole = targetUserObj.role;
   const { start, end, isCurrent } = getPeriodBounds(selectedPeriodIndex);
   const days = generatePeriodDays(start, end, isCurrent, targetUserId);
   const row = days.find(d => d.date === date);
@@ -15343,7 +15421,7 @@ function showAttendanceDetail(date) {
     }
   }
   if (row.lateOut && row.status !== 'company-trip' && isAllowanceEligible(APP_SETTINGS.allowanceEligibility, targetRole, 'earlyLate')
-      && isDeviceScanSource(row.checkOutSource)
+      && lateNightCheckoutOk(row)
       && (!isRestAttendanceDay(row) || hasHolidayWorkClaimOnDate(row.date, targetUserId, false))) {
     const [h] = row.lateOut.split(':').map(Number);
     const _ln2Thr = _dA.lateNightThreshold2Hour || _dA.lateNightThresholdHour || 20;
@@ -15351,6 +15429,8 @@ function showAttendanceDetail(date) {
     const approved = row.lateApproved;
     tagsEl.innerHTML += `<span class="badge ${approved?'badge-success':'badge-warning'}">🌙 ${L('Late Night', 'ทำงานดึก')} ${escapeHtml(row.lateOut)} (+${bonus}) ${approved?L('✓ Approved','✓ อนุมัติแล้ว'):L('⏳ Pending','⏳ รออนุมัติ')}</span>`;
   }
+  const _crTag = buildCheckoutReviewHtml(row, targetUserObj, false);
+  if (_crTag) tagsEl.innerHTML += _crTag;
   if (row.upcountry && row.status !== 'company-trip' && isAllowanceEligible(APP_SETTINGS.allowanceEligibility, targetRole, 'upcountry')) {
     tagsEl.innerHTML += `<span class="badge badge-purple">🗺️ ${L('Upcountry', 'Upcountry')} (+฿${_dA.upcountry || 240})</span>`;
   }
