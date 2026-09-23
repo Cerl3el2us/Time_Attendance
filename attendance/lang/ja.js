@@ -1328,6 +1328,7 @@ window.LANG_JA = {
   "📌 On these days only OT and Holiday Work can still be claimed.": "📌 これらの日に申請できるのはOTと休日出勤のみです。",
   "This is a travel day of your Abroad trip — the annual-leave day is credited automatically, so holiday work cannot be submitted": "この日は海外勤務の移動日です — 年次休暇が自動で加算されるため、休日出勤は申請できません",
   "Holiday work can only be submitted for a day that has already started": "休日出勤はすでに始まった日のみ申請できます",
+  "⚠️ A holiday work request exists on this trip's start or end date — travel days earn annual leave automatically; cancel that holiday work first": "⚠️ 出発日または帰着日に休日出勤の申請があります — 移動日は年次休暇が自動加算されるため、先にその休日出勤を取り消してください",
   "Abroad day: pays OT ×2/×3 from start–end times only — no holiday transport, no Upcountry. No scan needed.": "海外勤務日：開始〜終了時刻からのOT×2/×3のみ支給 — 休日交通費・出張手当なし。打刻不要。",
   "Abroad day: adds 1 annual-leave day only — no holiday transport, no Upcountry, no OT. No scan needed.": "海外勤務日：年次休暇1日加算のみ — 休日交通費・出張手当・OTなし。打刻不要。",
   "✈️ Abroad": "✈️ 海外勤務手当",

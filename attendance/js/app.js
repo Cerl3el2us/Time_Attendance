@@ -2656,9 +2656,11 @@ function abroadTravelCreditDays(abroadLeaves, yStart, yEnd) {
   });
   return n;
 }
+// Blocks Holiday Work on a travel day of any trip that is approved OR still pending (Opus review
+// I-1): a pending trip approved later would otherwise pay Holiday Work AND the travel credit.
 function isAbroadTravelDay(leaves, userId, dateStr) {
   return leaves.some(l =>
-    l.userId === userId && l.type === 'abroad' && l.status === 'approved' &&
+    l.userId === userId && l.type === 'abroad' && !['rejected', 'cancelled'].includes(l.status) &&
     (l.dateFrom === dateStr || (l.dateTo || l.dateFrom) === dateStr));
 }
 // Earned annual-leave days for the year: holiday work taken as annual leave, plus abroad travel
@@ -14585,6 +14587,15 @@ async function submitAbroad() {
     return;
   }
   if (!location) { showToast(L('⚠️ Please specify the country or customer', '⚠️ กรุณาระบุประเทศหรือชื่อลูกค้า'), 'warning'); return; }
+  // 2026-09-23: mirrors server abroadTravelDayHolidayWorkConflict -- travel days cannot also carry
+  // Holiday Work (they earn annual leave automatically).
+  if (DATA_LEAVES.some(l => l.userId === currentUser.id && l.type === 'holiday-work' &&
+      !['rejected', 'cancelled'].includes(l.status) && l.id !== editingLeaveId &&
+      (l.dateFrom === dateFrom || l.dateFrom === dateTo))) {
+    showToast(L("⚠️ A holiday work request exists on this trip's start or end date — travel days earn annual leave automatically; cancel that holiday work first",
+      '⚠️ มีคำขอทำงานวันหยุดในวันเริ่มหรือวันสิ้นสุดทริป — วันเดินทางได้วันลาชดเชยอัตโนมัติ กรุณายกเลิกคำขอทำงานวันหยุดนั้นก่อน'), 'warning');
+    return;
+  }
   if (!reason) { showToast(L('⚠️ Please specify the reason', '⚠️ กรุณาระบุเหตุผล'), 'warning'); return; }
 
   const leaveData = {
@@ -15176,7 +15187,7 @@ function renderLeaveBalanceSummary() {
     const cfBadge = cfDays > 0
       ? `<div style="margin-top:3px;font-size:11px;color:#7c3aed">↩ ${currentLang === 'ja' ? `繰越+${cfDays}日` : L(`+${cfDays}d carry-forward`,`+${cfDays} วันยกยอด`)}</div>` : '';
     const compBadge = compDays > 0
-      ? `<div style="margin-top:3px;font-size:11px;color:#059669">🔄 ${currentLang === 'ja' ? `休日出勤+${compDays}日` : L(`+${compDays}d holiday work`,`+${compDays} วันทำงานวันหยุด`)}</div>` : '';
+      ? `<div style="margin-top:3px;font-size:11px;color:#059669">🔄 ${currentLang === 'ja' ? `獲得休暇+${compDays}日（休日出勤・海外移動日）` : L(`+${compDays}d earned (holiday work / abroad travel days)`,`+${compDays} วันที่ได้เพิ่ม (ทำงานวันหยุด / วันเดินทางต่างประเทศ)`)}</div>` : '';
     const openingBadge = openingUsedDays > 0
       ? `<div style="margin-top:3px;font-size:11px;color:#64748b">📋 ${currentLang === 'ja' ? `開通前使用 ${minToStr(openingUsedDays * 480)}含む` : L(`Includes ${minToStr(openingUsedDays * 480)} used before go-live`, `รวมยอดก่อนเปิดระบบ ${minToStr(openingUsedDays * 480)}`)}</div>` : '';
     const lateDeductBadge = lateDeduct.count > 0

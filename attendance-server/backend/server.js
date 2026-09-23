@@ -4383,9 +4383,11 @@ function abroadTravelCreditDays(abroadLeaves, yStart, yEnd) {
   });
   return n;
 }
+// Blocks Holiday Work on a travel day of any trip that is approved OR still pending (Opus review
+// I-1): a pending trip approved later would otherwise pay Holiday Work AND the travel credit.
 function isAbroadTravelDay(leaves, userId, dateStr) {
   return leaves.some(l =>
-    l.userId === userId && l.type === 'abroad' && l.status === 'approved' &&
+    l.userId === userId && l.type === 'abroad' && !['rejected', 'cancelled'].includes(l.status) &&
     (l.dateFrom === dateStr || (l.dateTo || l.dateFrom) === dateStr));
 }
 // Earned annual-leave days for the year: holiday work taken as annual leave, plus abroad travel
@@ -5362,9 +5364,6 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
     if (type === 'abroad') {
       const abErr = abroadSubmitBlockReason(targetUser);
       if (abErr) return res.status(400).json({ success:false, message: abErr });
-      if (abroadTravelDayHolidayWorkConflict(leaves, targetUser.id, body.dateFrom, body.dateTo)) {
-        return res.status(409).json({ success:false, message: ABROAD_TRAVEL_HW_CONFLICT_MSG });
-      }
     }
     if (type === 'early-morning') {
       const emErr = earlyMorningSubmitBlockReason(targetUser, body.dateFrom);
@@ -5425,6 +5424,11 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
     // SECURITY FIX 2026-08-13 (C-2): fail closed on a transient read error instead of silently
     // treating it as "no leaves exist yet" and overwriting leaves.json with an empty array below.
     if (leaves === null) return res.status(503).json({ success:false, message:'Service temporarily unavailable' });
+    // 2026-09-23: a trip's travel days cannot also carry Holiday Work (runs here, after `leaves`
+    // is read -- it used to sit above the read and threw a TDZ ReferenceError on every abroad POST).
+    if (type === 'abroad' && abroadTravelDayHolidayWorkConflict(leaves, userId, body.dateFrom, body.dateTo)) {
+      return res.status(409).json({ success:false, message: ABROAD_TRAVEL_HW_CONFLICT_MSG });
+    }
     // Duplicate personal-car on the same date (pending or approved) is rejected — payroll would
     // otherwise pay both once approved. Same date + rejected is allowed (resubmit after a deny).
     if (type === 'personal-car' && leaves.some(l =>
@@ -5668,6 +5672,12 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
       // shows "approved" to the employee while the money silently never reaches their payslip.
       if (newStatus === 'approved' && isCompanyTripClaimBlocked(leave.type, leave.dateFrom, leave.workedDate)) {
         return res.status(400).json({ success:false, message: companyTripNoClaimMessage() });
+      }
+      // 2026-09-23 (Opus review I-1): re-check the travel-day rule at approval time -- Holiday Work
+      // may have been filed on a travel day while this trip was still pending.
+      if (newStatus === 'approved' && leave.type === 'abroad' &&
+          abroadTravelDayHolidayWorkConflict(leaves, leave.userId, leave.dateFrom, leave.dateTo)) {
+        return res.status(409).json({ success:false, message: ABROAD_TRAVEL_HW_CONFLICT_MSG });
       }
       if (newStatus === 'approved' && mdApprovedPeriodInRange(leave.dateFrom, leave.dateTo, leave.userId)) {
         return res.status(409).json({ success:false, message:'Payroll for this employee/period has already been approved by the Managing Director -- ask them to revoke approval first' });
