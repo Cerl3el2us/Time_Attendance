@@ -3026,6 +3026,98 @@ function readCheckoutReviews() {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
   return data;
 }
+// Full-access roles (md/accounting/manager; managers also browse others' attendance) get every
+// review; everyone else only their own "<id>_" keys.
+function handleGetCheckoutReviews(req, res) {
+  const users = readUsers();
+  if (users === null) return res.status(503).json({ success: false, message: CHECKOUT_REVIEWS_UNAVAILABLE });
+  const live = users.find(u => u.id === req.user.sub);
+  if (!live) return res.status(403).json({ success: false, message: 'Forbidden' });
+  const all = readCheckoutReviews();
+  if (all === null) return res.status(503).json({ success: false, message: CHECKOUT_REVIEWS_UNAVAILABLE });
+  if (isLeaveFullAccess(live)) return res.json({ success: true, reviews: all });
+  const prefix = `${live.id}_`;
+  const own = {};
+  Object.keys(all).forEach(k => { if (k.startsWith(prefix)) own[k] = all[k]; });
+  return res.json({ success: true, reviews: own });
+}
+// Accounting/MD Allow / Deny / clear (decision:null) a web check-out at/after the Late Night time.
+// requireRole('md','accounting') already refuses observers/inactive accounts (superadmin inherits,
+// unchanged). Never on one's own record; never in a locked / Accounting-confirmed / MD-approved
+// period (every decision, including a clear). Times are re-derived here -- never taken from the
+// client. The broadcast carries no review data; clients re-fetch the scoped GET.
+function handlePutCheckoutReview(req, res) {
+  try {
+    const users = readUsers();
+    if (users === null) return res.status(503).json({ success: false, message: CHECKOUT_REVIEWS_UNAVAILABLE });
+    const live = users.find(u => u.id === req.user.sub);
+    if (!live) return res.status(403).json({ success: false, message: 'Forbidden: user record not found' });
+    const body = parseBody(req) || {};
+    const userId = Number(body.userId);
+    const dateStr = body.date;
+    const decision = body.decision;
+    if (!Number.isInteger(userId) || userId <= 0) {
+      return res.status(400).json({ success: false, message: 'userId is required' });
+    }
+    if (typeof dateStr !== 'string' || !isValidDateStr(dateStr)) {
+      return res.status(400).json({ success: false, message: 'date must be a valid YYYY-MM-DD date' });
+    }
+    if (decision !== 'allow' && decision !== 'deny' && decision !== null) {
+      return res.status(400).json({ success: false, message: "decision must be 'allow', 'deny' or null" });
+    }
+    if (userId === live.id) {
+      return res.status(403).json({ success: false, message: 'You cannot review your own check-out' });
+    }
+    const target = users.find(u => u.id === userId);
+    if (!target || isSuperAdminUser(target)) {
+      return res.status(404).json({ success: false, message: 'Employee not found' });
+    }
+    // lockedPeriodInRange() reads settings through readSettings(), which turns a read failure into
+    // {} (= "nothing locked") -- check the raw read first so a failure refuses instead.
+    if (readJSON('settings.json', {}) === null) {
+      return res.status(503).json({ success: false, message: CHECKOUT_REVIEWS_UNAVAILABLE });
+    }
+    if (lockedPeriodInRange(dateStr, dateStr)) {
+      return res.status(400).json({ success: false, message: 'This pay period is locked' });
+    }
+    if (accountingConfirmedInRange(dateStr, dateStr, userId)) {
+      return res.status(409).json({ success: false, message: 'Accounting has already confirmed tax for this period — unconfirm before making changes' });
+    }
+    if (mdApprovedPeriodInRange(dateStr, dateStr, userId)) {
+      return res.status(409).json({ success: false, message: 'Payroll for this period has already been approved by the Managing Director -- ask them to revoke approval first' });
+    }
+    const reviews = readCheckoutReviews();
+    if (reviews === null) return res.status(503).json({ success: false, message: CHECKOUT_REVIEWS_UNAVAILABLE });
+    const day = attendanceDayForUser(target, dateStr, reviews);
+    if (!checkoutReviewTrigger(day, target, getAppSettings())) {
+      return res.status(400).json({ success: false, message: 'This day has no web check-out at or after the Late Night time to review' });
+    }
+    const key = `${userId}_${dateStr}`;
+    let review = null;
+    if (decision === null) {
+      delete reviews[key];
+    } else {
+      review = {
+        decision,
+        checkOut: day.checkOut,
+        rawCheckOut: day.rawCheckOut || null,
+        by: String(live.name || live.username || 'User').slice(0, 120),
+        byId: live.id,
+        at: new Date().toISOString(),
+      };
+      reviews[key] = review;
+    }
+    writeJSON(CHECKOUT_REVIEWS_FILE, reviews);
+    broadcast({ type: 'CHECKOUT_REVIEWS_UPDATED' });
+    return res.json({ success: true, review });
+  } catch (e) {
+    const unavailable = !!(e && e.message === CHECKOUT_REVIEWS_UNAVAILABLE);
+    console.error('[CHECKOUT_REVIEWS] PUT failed:', e && e.message);
+    return res.status(unavailable ? 503 : 500).json({ success: false, message: unavailable ? CHECKOUT_REVIEWS_UNAVAILABLE : 'Server error' });
+  }
+}
+app.get('/api/checkout-reviews', handleGetCheckoutReviews);
+app.put('/api/checkout-reviews', requireRole('md', 'accounting'), withCheckoutReviewsLock(handlePutCheckoutReview));
 
 // Was missing entirely — GET/PUT /api/settings referenced these but they were never defined,
 // throwing ReferenceError on every call. This silently broke Approval Routing persistence
