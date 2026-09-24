@@ -424,7 +424,9 @@ function buildResultDetailRows(leave, lang) {
 // preview the real template/HTML for any request type, in any language, without needing a real
 // user with emailNotifyOnResult enabled. Both default to null/unused so every existing call site
 // (notifyLeaveStatusChange(), the only real caller) is completely unaffected.
-async function sendResultEmail(leave, overrideTo, overrideLang) {
+// 2026-09-24: alsoRevoked = records revoked together with this one (time-correction cascade),
+// listed in one extra row of the same email.
+async function sendResultEmail(leave, overrideTo, overrideLang, alsoRevoked) {
   const users = readUsers() || [];
   const emp = users.find(u => u.id === leave.userId);
   if (!overrideTo && (!emp || !emp.email || !emp.emailNotifyOnResult)) return;
@@ -460,6 +462,9 @@ async function sendResultEmail(leave, overrideTo, overrideLang) {
   if (revoked) {
     detailRows.push([t.lblRevokedBy, String(leave.revokedBy || '—')]);
     if (leave.revokeReason) detailRows.push([t.lblRevokeReason, String(leave.revokeReason)]);
+    if (Array.isArray(alsoRevoked) && alsoRevoked.length) {
+      detailRows.push([t.lblAlsoRevoked, alsoRevoked.map(r => `${getTypeLabel(r.type, lang)} (${r.dateFrom})`).join(', ')]);
+    }
   }
   const detailHtml = detailRows.map(([label, value], i) => `<tr>
     <td style="padding:9px 0;${i < detailRows.length - 1 ? `border-bottom:1px solid ${C.border};` : ''}font-size:12px;color:${C.textFaint};width:38%;vertical-align:top">${label}</td>
@@ -902,6 +907,7 @@ function handleWsConnection(ws, req, logPrefix) {
   const live = users.find(u => u.id === user.sub);
   ws.viewerCtx = {
     isFullAccess: isPrivilegedAdmin(live),
+    leaveFullAccess: isLeaveFullAccess(live),
     ownNo: live ? String(live.employeeNo || '') : '',
     userId: user.sub,
     tokenVersion: user.tokenVersion || 0,
@@ -944,6 +950,7 @@ function refreshWsViewers() {
       return;
     }
     ctx.isFullAccess = isPrivilegedAdmin(live);
+    ctx.leaveFullAccess = isLeaveFullAccess(live);
     ctx.ownNo = String(live.employeeNo || '');
   });
 }
@@ -952,6 +959,30 @@ function broadcast(d) {
   refreshWsViewers();
   const m = JSON.stringify(d);
   clients.forEach(ws => { if (ws.readyState === 1) ws.send(m); });
+}
+
+// 2026-09-24 (owner): a colleague's cancelled / revoked record is not shown to plain users --
+// only the owner and md/accounting/manager (isLeaveFullAccess) see it. Used by GET /api/leaves and
+// by every LEAVE_UPDATED broadcast (broadcastLeaveUpdated). Pure.
+function isHiddenFromColleaguesStatus(s) {
+  return s === 'cancelled' || s === 'revoked';
+}
+function leaveVisibleToViewer(l, viewerId, leaveFullAccess) {
+  if (!l) return false;
+  return !!leaveFullAccess || l.userId === viewerId || !isHiddenFromColleaguesStatus(l.status);
+}
+// LEAVE_UPDATED with the public projection for everyone who may see the record; a plain-user
+// socket that may not see it (a colleague's record just turned cancelled/revoked) gets
+// LEAVE_DELETED {id} instead, so its local copy drops the record.
+function broadcastLeaveUpdated(l) {
+  refreshWsViewers();
+  const shownMsg = JSON.stringify({ type: 'LEAVE_UPDATED', leave: toPublicLeaveProjection(l) });
+  const hiddenMsg = JSON.stringify({ type: 'LEAVE_DELETED', id: l.id });
+  clients.forEach(ws => {
+    if (ws.readyState !== 1) return;
+    const ctx = ws.viewerCtx;
+    ws.send(ctx && leaveVisibleToViewer(l, ctx.userId, ctx.leaveFullAccess) ? shownMsg : hiddenMsg);
+  });
 }
 
 function sendScanEvent(record) {
@@ -3506,6 +3537,26 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
     if (!Array.isArray(cd) || cd.length > 400 || !cd.every(d => typeof d === 'string' && isValidDateStr(d))) {
       return res.status(400).json({ success: false, message: 'companyTripDates must be an array of 400 or fewer valid YYYY-MM-DD dates' });
     }
+    // 2026-09-24 (owner): refuse newly ADDED dates that approved money records already cover
+    // (companyTripConflicts). Pre-existing dates are not re-checked; removals always pass.
+    const beforeTrip = new Set(Array.isArray(current.companyTripDates) ? current.companyTripDates : []);
+    const addedTrip = cd.filter(d => !beforeTrip.has(d));
+    if (addedTrip.length) {
+      const tripLeaves = readLeaves();
+      if (tripLeaves === null) return res.status(503).json({ success: false, message: 'Service temporarily unavailable' });
+      const conflicts = companyTripConflicts(tripLeaves, addedTrip);
+      if (conflicts.length) {
+        const tripUsers = readUsers() || [];
+        return res.status(409).json({
+          success: false, code: 'company-trip-conflict',
+          message: 'Approved allowance / OT / Holiday Work / Abroad records exist on these dates -- revoke or cancel them before adding the Company Trip',
+          conflicts: conflicts.slice(0, 100).map(c => {
+            const u = tripUsers.find(x => x.id === c.userId);
+            return { ...c, name: u ? u.name : '' };
+          }),
+        });
+      }
+    }
   }
 
   // 2026-09-24: the leaveCarryForward validation + stale-entry merge that lived here is gone --
@@ -4757,7 +4808,9 @@ app.get('/api/leaves', (req, res) => {
   const leaves = readLeaves();
   if (leaves === null) return res.status(503).json({ success:false, message:'Service temporarily unavailable' });
   if (isLeaveFullAccess(live)) return res.json(leaves);
-  res.json(leaves.map(l => l.userId === live.id ? l : toPublicLeaveProjection(l)));
+  // 2026-09-24 (owner): colleagues' cancelled / revoked records are left out (leaveVisibleToViewer).
+  res.json(leaves.filter(l => leaveVisibleToViewer(l, live.id, false))
+    .map(l => l.userId === live.id ? l : toPublicLeaveProjection(l)));
 });
 
 // 2026-08-06: Upcountry moved from one free-text "location" string to up to 6 structured
@@ -5992,7 +6045,7 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
       }
       // SECURITY FIX 2026-08-13 (re-audit, F-1): same unauthenticated-broadcast leak as
       // LEAVE_CREATED above.
-      broadcast({ type: 'LEAVE_UPDATED', leave: toPublicLeaveProjection(leaves[idx]) });
+      broadcastLeaveUpdated(leaves[idx]);
       notifyLeaveStatusChange(oldStatus, leaves[idx]);
       return res.json({ success:true, leave: leaves[idx] });
     }
@@ -6495,7 +6548,7 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
     }
     // SECURITY FIX 2026-08-13 (re-audit, F-1): same unauthenticated-broadcast leak as the other
     // 2 leave broadcasts.
-    broadcast({ type: 'LEAVE_UPDATED', leave: toPublicLeaveProjection(leaves[idx]) });
+    broadcastLeaveUpdated(leaves[idx]);
     notifyLeaveStatusChange(oldStatus, leaves[idx]);
     res.json({ success:true, leave: leaves[idx] });
   } catch(e) {
@@ -6833,7 +6886,7 @@ app.delete('/api/leaves/:id', withLeavesLock((req, res) => {
     }
     // A soft-cancelled row stays in everyone's list (greyed), so clients get an update, not a delete.
     if (softCancel) {
-      broadcast({ type: 'LEAVE_UPDATED', leave: toPublicLeaveProjection(leaves[idx]) });
+      broadcastLeaveUpdated(leaves[idx]);
       return res.json({ success:true, leave: leaves[idx] });
     }
     broadcast({ type: 'LEAVE_DELETED', id });
@@ -6858,6 +6911,85 @@ app.delete('/api/leaves/:id', withLeavesLock((req, res) => {
 function isRevocableLeaveType(type) {
   return ['holiday-work', 'ot', 'early-morning', 'late-out', 'upcountry', 'long-distance',
     'personal-car', 'abroad', 'time-correction'].includes(type);
+}
+// 2026-09-24 (owner, review M): revoking an approved time-correction revokes, in the same step,
+// the employee's APPROVED money records on that date whose validity depended on the corrected
+// times: re-run the submit validators' time checks (scanWindowError for office OT / Holiday Work,
+// the Late Night check-out tier + lateNightCheckoutOk + chosen return time, the early-morning
+// check-in tier) against the day WITH and WITHOUT the correction -- a record that passes with it
+// and fails without it is a dependent. When Holiday Work on a rest day goes, the Late Night /
+// early-morning claims on that day lose their Holiday Work prerequisite and go too. Approved
+// Abroad days need no scans (never dependents); driver OT is not scan-validated.
+// dayWith / dayWithout: that date's attendance row (generatePeriodDays) + lastScan.
+// DUAL-SYNC (identical text): app.js / server.js timeCorrectionDependents.
+function timeCorrectionDependents(corr, leaves, dayWith, dayWithout, S) {
+  if (!corr || corr.type !== 'time-correction' || !corr.dateFrom) return [];
+  const a = (S && S.allowances) || {};
+  const sameDay = (leaves || []).filter(l => l && l.id !== corr.id && l.userId === corr.userId &&
+    l.status === 'approved' && l.dateFrom === corr.dateFrom);
+  const fails = (l, day) => {
+    const d = day || {};
+    const checkIn = d.checkIn || null;
+    const endLimit = d.checkOut || d.lastScan || null;
+    const endOk = t => !t || (!!endLimit && lateNightCheckoutMins(t) <= lateNightCheckoutMins(endLimit));
+    if (l.type === 'ot' || l.type === 'holiday-work') {
+      if (d.status === 'abroad') return false;
+      if (!checkIn) return true;
+      if (l.type === 'holiday-work' && l.workStartTime && parseHHMMToMins(l.workStartTime) < parseHHMMToMins(checkIn)) return true;
+      return !endOk(l.type === 'ot' ? l.otEndTime : l.workEndTime);
+    }
+    if (l.type === 'late-out') {
+      if (!checkIn || !d.checkOut) return true;
+      const out = lateNightCheckoutMins(d.checkOut);
+      const thr1 = a.lateNightThreshold1Hour || a.lateNightThresholdHour || 19;
+      if (!Number.isFinite(out) || out < thr1 * 60 || !lateNightCheckoutOk(d)) return true;
+      return !!l.lateOutTime && !(lateNightCheckoutMins(l.lateOutTime) <= out);
+    }
+    if (l.type === 'early-morning') {
+      const mins = checkIn ? parseHHMMToMins(checkIn) : NaN;
+      const thr = Number(l.earlyMorningTier) === 2 ? a.earlyThreshold2Min : a.earlyThreshold1Min;
+      return !Number.isFinite(mins) || !(mins <= thr);
+    }
+    return false;
+  };
+  const checked = sameDay.filter(l => (l.type === 'ot' && !l.isDriverOT) ||
+    ['holiday-work', 'late-out', 'early-morning'].includes(l.type));
+  const deps = checked.filter(l => !fails(l, dayWith) && fails(l, dayWithout));
+  const restDay = !!(dayWithout && (dayWithout.isWeekend || dayWithout.isPubHoliday));
+  if (restDay && deps.some(l => l.type === 'holiday-work')) {
+    sameDay.forEach(l => {
+      if ((l.type === 'late-out' || l.type === 'early-morning') && !deps.includes(l)) deps.push(l);
+    });
+  }
+  return deps.sort((x, y) => (Number(x.id) || 0) - (Number(y.id) || 0));
+}
+// That date's attendance row computed from an explicit leaves list (with / without the correction),
+// plus the day's last raw scan (scanWindowError's end-limit fallback).
+function attendanceDayFromLeaves(user, dateStr, leaves, reviews) {
+  const dayStart = new Date(dateStr + 'T12:00:00');
+  const attLog = buildAttendanceLogForUser(user, dayStart, dayStart);
+  const day = generatePeriodDays(dayStart, dayStart, false, user, attLog, leaves, getAppSettings(), reviews || {})[0] || null;
+  return day ? { ...day, lastScan: (attLog[dateStr] || {}).lastScan || null } : null;
+}
+// 2026-09-24 (owner): every revoke made by an Accounting user (incl. the time-correction cascade)
+// is pushed to every active MD -- employee, type, date(s), who revoked and why. English, like the
+// other push texts (there is no per-user push language).
+function accountingRevokeMdPushBody(actor, ownerUser, records, reason) {
+  const empName = ownerUser ? ownerUser.name : `#${records[0].userId}`;
+  const what = records.map(r => {
+    const range = r.dateTo && r.dateTo !== r.dateFrom ? `${r.dateFrom} to ${r.dateTo}` : r.dateFrom;
+    return `${getTypeLabel(r.type, 'en')} (${range})`;
+  }).join(', ');
+  return (`${actor.name} (Accounting) revoked the approval of ${empName}: ${what}` + (reason ? ` -- reason: ${reason}` : '')).slice(0, 900);
+}
+function notifyMdsOfAccountingRevoke(actor, ownerUser, records, reason) {
+  if (!actor || actor.role !== 'accounting' || !Array.isArray(records) || !records.length) return;
+  const body = accountingRevokeMdPushBody(actor, ownerUser, records, reason);
+  (readUsers() || []).filter(u => u.role === 'md' && u.active !== false && u.id !== actor.id).forEach(md => {
+    Promise.resolve(sendPushToUser(md.id, {
+      title: 'Approval Revoked by Accounting', body, tag: 'ta-leave-revoke', url: '/', badge: badgeCountForUser(md),
+    })).catch(e => console.error('[PUSH] revoke MD notify error:', e && e.message));
+  });
 }
 const REVOKE_REASON_MAX = 500;
 app.post('/api/leaves/:id/revoke', requireRole('md', 'accounting'), withLeavesLock((req, res) => {
@@ -6906,16 +7038,65 @@ app.post('/api/leaves/:id/revoke', requireRole('md', 'accounting'), withLeavesLo
     // (annual-mode Holiday Work, an Abroad trip whose travel-day credit has arrived).
     const earnedErr = earnedDayUsedError(leaves, ownerUser, leave);
     if (earnedErr) return res.status(409).json({ success:false, code: earnedErr.code, message: earnedErr.message });
+    // 2026-09-24 (owner, review M): a time-correction revoke takes the records that depended on
+    // the corrected times with it (timeCorrectionDependents), all-or-nothing, in one write.
+    let dependents = [];
+    if (leave.type === 'time-correction') {
+      if (!ownerUser) return res.status(404).json({ success:false, message:'Employee not found' });
+      const reviews = readCheckoutReviews();
+      if (reviews === null) return res.status(503).json({ success:false, message: CHECKOUT_REVIEWS_UNAVAILABLE });
+      const dayWith = attendanceDayFromLeaves(ownerUser, leave.dateFrom, leaves, reviews);
+      const dayWithout = attendanceDayFromLeaves(ownerUser, leave.dateFrom, leaves.filter(l => l.id !== leave.id), reviews);
+      dependents = timeCorrectionDependents(leave, leaves, dayWith, dayWithout, getAppSettings());
+      // The confirm the revoker saw listed dependentIds; if the server's set differs (data changed
+      // meanwhile, or the browser's copy was stale) nothing is written and the real list goes back.
+      if (Array.isArray(body.dependentIds)) {
+        const want = [...new Set(body.dependentIds.map(Number))].sort((a, b) => a - b).join(',');
+        const have = dependents.map(l => Number(l.id)).sort((a, b) => a - b).join(',');
+        if (want !== have) {
+          return res.status(409).json({ success:false, code:'revoke-dependents-changed',
+            dependents: dependents.map(l => ({ id: l.id, type: l.type, dateFrom: l.dateFrom, dateTo: l.dateTo || l.dateFrom,
+              otEndTime: l.otEndTime, workStartTime: l.workStartTime, workEndTime: l.workEndTime, lateOutTime: l.lateOutTime,
+              earlyMorningTier: l.earlyMorningTier })),
+            message:'The records that depend on this time correction have changed -- review the list and confirm again' });
+        }
+      }
+      for (const dep of dependents) {
+        if (!dep.dateFrom || !isValidDateStr(dep.dateFrom)) {
+          return res.status(400).json({ success:false, dependentId: dep.id, message:'Cannot verify pay period for this request' });
+        }
+        const depTo = (dep.dateTo && isValidDateStr(dep.dateTo)) ? dep.dateTo : dep.dateFrom;
+        if (mdApprovedPeriodInRange(dep.dateFrom, depTo, dep.userId)) {
+          return res.status(409).json({ success:false, code:'period-frozen', dependentId: dep.id, message:'Payroll for this period has already been approved by the Managing Director -- the approval can no longer be revoked' });
+        }
+        if (lockedPeriodInRange(dep.dateFrom, depTo)) {
+          return res.status(400).json({ success:false, code:'period-locked', dependentId: dep.id, message:'This pay period is locked' });
+        }
+        if (accountingConfirmedInRange(dep.dateFrom, depTo, dep.userId)) {
+          return res.status(409).json({ success:false, code:'period-confirmed', dependentId: dep.id, message:'Accounting has already confirmed tax for this period — unconfirm before making changes' });
+        }
+        const depEarnedErr = earnedDayUsedError(leaves, ownerUser, dep);
+        if (depEarnedErr) return res.status(409).json({ success:false, code: depEarnedErr.code, dependentId: dep.id, message: depEarnedErr.message });
+      }
+    }
+    const revokedAt = new Date().toISOString();
     leaves[idx] = {
-      ...leave, status: 'revoked', revokedAt: new Date().toISOString(),
+      ...leave, status: 'revoked', revokedAt,
       revokedById: live.id, revokedBy: live.name, revokeReason: reason,
     };
+    const depIdxs = dependents.map(dep => leaves.findIndex(l => l.id === dep.id)).filter(i => i >= 0);
+    depIdxs.forEach(i => {
+      leaves[i] = { ...leaves[i], status: 'revoked', revokedAt, revokedById: live.id, revokedBy: live.name,
+        revokeReason: reason, revokedWith: leave.id };
+    });
     saveLeaves(leaves);
-    console.log('[LEAVE] approval revoked', JSON.stringify({ id, userId: leave.userId, type: leave.type, dateFrom: leave.dateFrom, dateTo: leave.dateTo, by: live.id }));
+    console.log('[LEAVE] approval revoked', JSON.stringify({ id, userId: leave.userId, type: leave.type, dateFrom: leave.dateFrom, dateTo: leave.dateTo, by: live.id,
+      ...(depIdxs.length ? { withDependents: depIdxs.map(i => leaves[i].id) } : {}) }));
+    const alsoRevoked = depIdxs.map(i => leaves[i]);
     // Earned annual-leave credit goes away with the approval (holiday work taken as a leave day,
     // abroad travel days) -- rewrite next year's carry-forward snapshot like approve/cancel do.
-    const touchesAnnualPool = leave.type === 'abroad' ||
-      (leave.type === 'holiday-work' && leave.compensationMode === 'annual-leave');
+    const touchesAnnualPool = [leave, ...alsoRevoked].some(r => r.type === 'abroad' ||
+      (r.type === 'holiday-work' && r.compensationMode === 'annual-leave'));
     if (touchesAnnualPool && ownerUser) {
       try {
         refreshSnapshottedCarryForward(leaves, ownerUser, leave.dateFrom);
@@ -6923,20 +7104,26 @@ app.post('/api/leaves/:id/revoke', requireRole('md', 'accounting'), withLeavesLo
         console.error('[LEAVE] carry-forward refresh after revoke failed', e && e.message);
       }
     }
-    broadcast({ type: 'LEAVE_UPDATED', leave: toPublicLeaveProjection(leaves[idx]) });
-    // Same push channel notifyLeaveStatusChange() uses for approve/reject results.
+    broadcastLeaveUpdated(leaves[idx]);
+    alsoRevoked.forEach(r => broadcastLeaveUpdated(r));
+    // Same push channel notifyLeaveStatusChange() uses for approve/reject results -- ONE message
+    // listing everything that was revoked.
     const typeName = typeof getTypeLabel === 'function' ? getTypeLabel(leave.type, 'en') : leave.type;
+    const alsoText = alsoRevoked.length
+      ? `, together with: ${alsoRevoked.map(r => `${getTypeLabel(r.type, 'en')} (${r.dateFrom})`).join(', ')}`
+      : '';
     Promise.resolve(sendPushToUser(leave.userId, {
       title: 'Approval Revoked',
-      body: `The approval of your ${typeName} request (${leave.dateFrom}) was revoked`,
+      body: `The approval of your ${typeName} request (${leave.dateFrom}) was revoked${alsoText}`,
       tag: 'ta-leave',
       url: '/',
       badge: badgeCountForUser(ownerUser),
     })).catch(e => console.error('[PUSH] revoke notify error:', e && e.message));
     // 2026-09-24 (owner): the result email follows the employee's own opt-in
     // (emailNotifyOnResult) and language (notifyLangEmail), same template as approve/reject.
-    sendResultEmail(leaves[idx]).catch(e => console.error('[EMAIL] revoke notify error:', e && e.message));
-    res.json({ success:true, leave: leaves[idx] });
+    sendResultEmail(leaves[idx], undefined, undefined, alsoRevoked).catch(e => console.error('[EMAIL] revoke notify error:', e && e.message));
+    notifyMdsOfAccountingRevoke(live, ownerUser, [leaves[idx], ...alsoRevoked], reason);
+    res.json({ success:true, leave: leaves[idx], dependents: alsoRevoked });
   } catch(e) {
     res.status(500).json({ success:false, error:e.message });
   }
@@ -7774,6 +7961,23 @@ const COMPANY_TRIP_NO_CLAIM_TYPES = new Set(['ot', 'upcountry', 'late-out', 'lon
 function companyTripNoClaimMessage(type) {
   if (type === 'abroad') return 'This date range includes a Company Trip day -- Company Trip days pay no allowance of any kind, so they cannot be part of an Abroad trip';
   return 'Company Trip days are a day off -- no extra allowances or OT can be claimed';
+}
+// 2026-09-24 (owner-accepted safety net): a date may not be ADDED to the Company Trip list while an
+// APPROVED money record of any employee covers it -- it would silently stop paying. Returns
+// [{ id, userId, type, date }] sorted by date then employee; [] = no conflict. Dates already on
+// the list are never re-checked (only newly added ones are passed in). Removing dates is always
+// allowed. DUAL-SYNC (identical text): app.js / server.js companyTripConflicts.
+function companyTripConflicts(leaves, addedDates) {
+  const guarded = ['holiday-work', 'ot', 'early-morning', 'late-out', 'upcountry', 'long-distance', 'personal-car', 'abroad'];
+  const isDate = d => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d);
+  const added = [...new Set((addedDates || []).filter(isDate))].sort();
+  const out = [];
+  (leaves || []).forEach(l => {
+    if (!l || l.status !== 'approved' || !guarded.includes(l.type) || !isDate(l.dateFrom)) return;
+    const to = isDate(l.dateTo) && l.dateTo >= l.dateFrom ? l.dateTo : l.dateFrom;
+    added.forEach(d => { if (d >= l.dateFrom && d <= to) out.push({ id: l.id, userId: l.userId, type: l.type, date: d }); });
+  });
+  return out.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (Number(a.userId) || 0) - (Number(b.userId) || 0)));
 }
 // First Company Trip date inside [dateFrom, dateTo], or null. Dual-sync with app.js.
 function companyTripDateInRange(dateFrom, dateTo) {
@@ -9327,7 +9531,7 @@ const EMAIL_I18N = {
     resultApproved: 'คำขอนี้ได้รับการอนุมัติแล้ว',
     resultRejected: 'คำขอนี้ไม่ได้รับการอนุมัติ',
     resultSubjectRevoked: '↩️ คำขอของคุณถูกเพิกถอนการอนุมัติ', resultRevoked: 'ถูกเพิกถอนการอนุมัติ',
-    lblRevokedBy: 'เพิกถอนโดย', lblRevokeReason: 'เหตุผลที่เพิกถอน',
+    lblRevokedBy: 'เพิกถอนโดย', lblRevokeReason: 'เหตุผลที่เพิกถอน', lblAlsoRevoked: 'เพิกถอนพร้อมกัน',
     lblDate: 'วันที่', lblReturnTime: 'เวลาที่กลับ', lblLocation: 'สถานที่ / ลูกค้า',
     lblMileage: 'เลขไมล์', lblDistance: 'ระยะทาง', lblWorkedDate: 'วันที่ไปทำงาน',
     lblCorrectedTime: 'เวลาที่แก้ไข', lblOtHours: 'ชั่วโมง OT', lblRate: 'อัตรา', lblReason: 'เหตุผล', lblRequestedBy: 'ผู้ขอ',
@@ -9350,7 +9554,7 @@ const EMAIL_I18N = {
     resultApproved: 'This request has been approved.',
     resultRejected: 'This request was not approved.',
     resultSubjectRevoked: '↩️ The approval of your request was revoked', resultRevoked: 'Approval revoked',
-    lblRevokedBy: 'Revoked by', lblRevokeReason: 'Reason for revoking',
+    lblRevokedBy: 'Revoked by', lblRevokeReason: 'Reason for revoking', lblAlsoRevoked: 'Also revoked',
     lblDate: 'Date', lblReturnTime: 'Return time', lblLocation: 'Location / Client',
     lblMileage: 'Mileage', lblDistance: 'Distance', lblWorkedDate: 'Worked on',
     lblCorrectedTime: 'Corrected time', lblOtHours: 'OT hours', lblRate: 'Rate', lblReason: 'Reason', lblRequestedBy: 'Requested by',
@@ -9373,7 +9577,7 @@ const EMAIL_I18N = {
     resultApproved: 'この申請は承認されました。',
     resultRejected: 'この申請は承認されませんでした。',
     resultSubjectRevoked: '↩️ 申請の承認が取り消されました', resultRevoked: '承認取り消し',
-    lblRevokedBy: '取り消した人', lblRevokeReason: '取り消しの理由',
+    lblRevokedBy: '取り消した人', lblRevokeReason: '取り消しの理由', lblAlsoRevoked: '同時に取り消された申請',
     lblDate: '日付', lblReturnTime: '帰宅時間', lblLocation: '場所 / 訪問先',
     lblMileage: '走行距離', lblDistance: '距離', lblWorkedDate: '出勤日',
     lblCorrectedTime: '修正後の時刻', lblOtHours: '残業時間', lblRate: 'レート', lblReason: '理由', lblRequestedBy: '申請者',

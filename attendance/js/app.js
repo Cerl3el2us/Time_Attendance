@@ -1748,6 +1748,102 @@ function revokeBlockCode(l) {
   if (pp.blocked) return pp.reason;
   return earnedDayUsedByRecord(l) ? 'earned-day-used' : '';
 }
+// 2026-09-24 (owner, review M): revoking an approved time-correction revokes, in the same step,
+// the employee's APPROVED money records on that date whose validity depended on the corrected
+// times: re-run the submit validators' time checks (scanWindowError for office OT / Holiday Work,
+// the Late Night check-out tier + lateNightCheckoutOk + chosen return time, the early-morning
+// check-in tier) against the day WITH and WITHOUT the correction -- a record that passes with it
+// and fails without it is a dependent. When Holiday Work on a rest day goes, the Late Night /
+// early-morning claims on that day lose their Holiday Work prerequisite and go too. Approved
+// Abroad days need no scans (never dependents); driver OT is not scan-validated.
+// dayWith / dayWithout: that date's attendance row (generatePeriodDays) + lastScan.
+// DUAL-SYNC (identical text): app.js / server.js timeCorrectionDependents.
+function timeCorrectionDependents(corr, leaves, dayWith, dayWithout, S) {
+  if (!corr || corr.type !== 'time-correction' || !corr.dateFrom) return [];
+  const a = (S && S.allowances) || {};
+  const sameDay = (leaves || []).filter(l => l && l.id !== corr.id && l.userId === corr.userId &&
+    l.status === 'approved' && l.dateFrom === corr.dateFrom);
+  const fails = (l, day) => {
+    const d = day || {};
+    const checkIn = d.checkIn || null;
+    const endLimit = d.checkOut || d.lastScan || null;
+    const endOk = t => !t || (!!endLimit && lateNightCheckoutMins(t) <= lateNightCheckoutMins(endLimit));
+    if (l.type === 'ot' || l.type === 'holiday-work') {
+      if (d.status === 'abroad') return false;
+      if (!checkIn) return true;
+      if (l.type === 'holiday-work' && l.workStartTime && parseHHMMToMins(l.workStartTime) < parseHHMMToMins(checkIn)) return true;
+      return !endOk(l.type === 'ot' ? l.otEndTime : l.workEndTime);
+    }
+    if (l.type === 'late-out') {
+      if (!checkIn || !d.checkOut) return true;
+      const out = lateNightCheckoutMins(d.checkOut);
+      const thr1 = a.lateNightThreshold1Hour || a.lateNightThresholdHour || 19;
+      if (!Number.isFinite(out) || out < thr1 * 60 || !lateNightCheckoutOk(d)) return true;
+      return !!l.lateOutTime && !(lateNightCheckoutMins(l.lateOutTime) <= out);
+    }
+    if (l.type === 'early-morning') {
+      const mins = checkIn ? parseHHMMToMins(checkIn) : NaN;
+      const thr = Number(l.earlyMorningTier) === 2 ? a.earlyThreshold2Min : a.earlyThreshold1Min;
+      return !Number.isFinite(mins) || !(mins <= thr);
+    }
+    return false;
+  };
+  const checked = sameDay.filter(l => (l.type === 'ot' && !l.isDriverOT) ||
+    ['holiday-work', 'late-out', 'early-morning'].includes(l.type));
+  const deps = checked.filter(l => !fails(l, dayWith) && fails(l, dayWithout));
+  const restDay = !!(dayWithout && (dayWithout.isWeekend || dayWithout.isPubHoliday));
+  if (restDay && deps.some(l => l.type === 'holiday-work')) {
+    sameDay.forEach(l => {
+      if ((l.type === 'late-out' || l.type === 'early-morning') && !deps.includes(l)) deps.push(l);
+    });
+  }
+  return deps.sort((x, y) => (Number(x.id) || 0) - (Number(y.id) || 0));
+}
+// That date's rows with / without the correction (server: attendanceDayFromLeaves). The
+// "without" row is generatePeriodDays() over DATA_LEAVES minus the correction -- swapped for the
+// duration of the synchronous call only. The server recomputes both and has the final word.
+function timeCorrectionDayRows(corr) {
+  const d = new Date(corr.dateFrom + 'T12:00:00');
+  const lastScan = (attendanceLog[attKey(corr.userId, corr.dateFrom)] || {}).lastScan || null;
+  const row = () => {
+    const r = generatePeriodDays(d, d, false, corr.userId)[0] || null;
+    return r ? { ...r, lastScan } : null;
+  };
+  const dayWith = row();
+  const saved = DATA_LEAVES;
+  let dayWithout = null;
+  try {
+    DATA_LEAVES = saved.filter(l => l.id !== corr.id);
+    dayWithout = row();
+  } finally {
+    DATA_LEAVES = saved;
+  }
+  return { dayWith, dayWithout };
+}
+function timeCorrectionDependentsOf(corr) {
+  if (!corr || corr.type !== 'time-correction' || !corr.dateFrom) return [];
+  const { dayWith, dayWithout } = timeCorrectionDayRows(corr);
+  return timeCorrectionDependents(corr, DATA_LEAVES, dayWith, dayWithout, APP_SETTINGS);
+}
+// One plain-text line (for confirm()) per dependent: type — date — times.
+function revokeDependentLine(l) {
+  const labels = getApprovalTypeLabels();
+  const date = fmtDate(new Date(l.dateFrom + 'T12:00:00'));
+  let times = '';
+  if (l.type === 'ot' && l.otEndTime) times = `→ ${l.otEndTime}`;
+  else if (l.type === 'holiday-work' && l.workStartTime) times = `${l.workStartTime}–${l.workEndTime || ''}`;
+  else if (l.type === 'late-out' && l.lateOutTime) times = l.lateOutTime;
+  else if (l.type === 'early-morning') times = `×${Number(l.earlyMorningTier) === 2 ? 2 : 1}`;
+  return `• ${labels[l.type] || l.type} — ${date}${times ? ` — ${times}` : ''}`;
+}
+function revokeDependentsText(deps) {
+  if (!deps || !deps.length) return '';
+  const head = currentLang === 'ja'
+    ? '次の承認済みの申請は修正後の時刻に基づいているため、一緒に取り消されます:'
+    : L('These approved requests depend on the corrected time and will be revoked too:',
+      'คำขอที่อนุมัติแล้วต่อไปนี้อาศัยเวลาที่แก้ไข จึงจะถูกเพิกถอนไปด้วย:');
+  return '\n\n' + head + '\n' + deps.map(revokeDependentLine).join('\n');
+}
 // Client gate for the "Revoke approval" button -- the server re-checks everything.
 function canRevokeLeaveApproval(l) {
   return isRevokeCandidate(l) && !revokeBlockCode(l);
@@ -4758,6 +4854,39 @@ async function saveApprovalRouting() {
   }
 }
 
+// 2026-09-24 (owner-accepted safety net): a date may not be ADDED to the Company Trip list while an
+// APPROVED money record of any employee covers it -- it would silently stop paying. Returns
+// [{ id, userId, type, date }] sorted by date then employee; [] = no conflict. Dates already on
+// the list are never re-checked (only newly added ones are passed in). Removing dates is always
+// allowed. DUAL-SYNC (identical text): app.js / server.js companyTripConflicts.
+function companyTripConflicts(leaves, addedDates) {
+  const guarded = ['holiday-work', 'ot', 'early-morning', 'late-out', 'upcountry', 'long-distance', 'personal-car', 'abroad'];
+  const isDate = d => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d);
+  const added = [...new Set((addedDates || []).filter(isDate))].sort();
+  const out = [];
+  (leaves || []).forEach(l => {
+    if (!l || l.status !== 'approved' || !guarded.includes(l.type) || !isDate(l.dateFrom)) return;
+    const to = isDate(l.dateTo) && l.dateTo >= l.dateFrom ? l.dateTo : l.dateFrom;
+    added.forEach(d => { if (d >= l.dateFrom && d <= to) out.push({ id: l.id, userId: l.userId, type: l.type, date: d }); });
+  });
+  return out.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (Number(a.userId) || 0) - (Number(b.userId) || 0)));
+}
+// Text for a 'company-trip-conflict' refusal: one line per employee / date / type.
+function companyTripConflictMessage(conflicts) {
+  const labels = getApprovalTypeLabels();
+  const lines = (conflicts || []).slice(0, 20).map(c => {
+    const u = DATA_USERS.find(x => x.id === c.userId);
+    const name = (c.name || (u && u.name) || `#${c.userId}`);
+    return `• ${name} — ${fmtDate(new Date(c.date + 'T12:00:00'))} — ${labels[c.type] || c.type}`;
+  });
+  if ((conflicts || []).length > 20) lines.push('…');
+  const head = currentLang === 'ja'
+    ? 'これらの日には承認済みの手当・OT・休日出勤・海外勤務の記録があります。Company Tripを追加する前に、それらを取り消し（承認取消）またはキャンセルしてください。'
+    : L('These dates already have approved allowance / OT / Holiday Work / Abroad records. Revoke or cancel them before adding the Company Trip.',
+      'วันที่เหล่านี้มีรายการเบี้ยเลี้ยง / OT / ทำงานวันหยุด / ทำงานต่างประเทศ ที่อนุมัติแล้ว กรุณาเพิกถอนหรือยกเลิกรายการเหล่านั้นก่อนเพิ่ม Company Trip');
+  return head + '\n\n' + lines.join('\n');
+}
+// Returns true on success, { code, conflicts } for a Company Trip conflict, false otherwise.
 async function saveCompanyTripDates() {
   if (blockIfObserver()) return false;
   // 2026-08-12 (2nd comprehensive audit, F4): apiFetch() doesn't throw on a non-2xx response (only
@@ -4772,6 +4901,7 @@ async function saveCompanyTripDates() {
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       console.error('[settings] save failed:', data.message || res.status);
+      if (data && data.code === 'company-trip-conflict') return { code: data.code, conflicts: Array.isArray(data.conflicts) ? data.conflicts : [] };
       return false;
     }
     return true;
@@ -16196,6 +16326,12 @@ function revokeErrorMessage(code, fallback) {
   if (code === 'revoke-not-approved') return L('Only approved requests can be revoked', 'เพิกถอนได้เฉพาะคำขอที่อนุมัติแล้ว');
   if (code === 'revoke-type') return L('This request type has no pay to revoke', 'คำขอประเภทนี้ไม่มีเงินที่ต้องเพิกถอน');
   if (code === 'earned-day-used') return earnedDayUsedMessage();
+  if (code === 'revoke-dependents-changed') {
+    return currentLang === 'ja'
+      ? 'この時刻修正に依存する申請が変わりました。もう一度確認してください。'
+      : L('The requests that depend on this time correction have changed. Please confirm again.',
+        'คำขอที่อาศัยการแก้ไขเวลานี้เปลี่ยนไป กรุณายืนยันอีกครั้ง');
+  }
   return fallback || L('Could not revoke the approval', 'เพิกถอนการอนุมัติไม่สำเร็จ');
 }
 async function revokeLeaveApproval(id) {
@@ -16219,26 +16355,47 @@ async function revokeLeaveApproval(id) {
     ? `${empName} のこの申請の承認を取り消しますか？関連する手当・OT・付与された有給は支払われなくなります。記録は履歴に残ります。`
     : L(`Revoke the approval of this request by ${empName}? Its pay, allowance or earned leave day will no longer be given. The record stays in history.`,
       `เพิกถอนการอนุมัติคำขอนี้ของ ${empName}? เงิน/เบี้ยเลี้ยง/วันลาที่ได้จากคำขอนี้จะไม่ได้รับอีก รายการจะยังอยู่ในประวัติ`);
-  if (!confirm(confirmMsg)) return false;
+  // 2026-09-24 (owner): revoking a time correction also revokes the approved requests that
+  // depended on the corrected times (timeCorrectionDependents) -- listed here, sent as
+  // dependentIds so the server refuses if its own list differs.
+  let deps = l.type === 'time-correction' ? timeCorrectionDependentsOf(l) : [];
+  if (!confirm(confirmMsg + revokeDependentsText(deps))) return false;
   const reasonIn = prompt(L('Reason for revoking (optional):', 'เหตุผลที่เพิกถอน (ไม่บังคับ):'), '');
   if (reasonIn === null) return false;
+  let revokedDeps = [];
   try {
-    const res = await apiFetch(`/api/leaves/${id}/revoke`, {
+    const post = () => apiFetch(`/api/leaves/${id}/revoke`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ reason: String(reasonIn).trim().slice(0, 500) }),
-    });
-    const data = await res.json();
+      body: JSON.stringify({ reason: String(reasonIn).trim().slice(0, 500),
+        ...(l.type === 'time-correction' ? { dependentIds: deps.map(x => x.id) } : {}) }),
+    }).then(r => r.json());
+    let data = await post();
+    if (!data.success && data.code === 'revoke-dependents-changed' && Array.isArray(data.dependents)) {
+      // The server's list differs from this browser's -- show the real one and ask once more.
+      deps = data.dependents;
+      const again = currentLang === 'ja'
+        ? 'この時刻修正に依存する申請が変わりました。もう一度確認してください。'
+        : L('The requests that depend on this time correction have changed. Please confirm again.',
+          'คำขอที่อาศัยการแก้ไขเวลานี้เปลี่ยนไป กรุณายืนยันอีกครั้ง');
+      if (!confirm(again + revokeDependentsText(deps))) return false;
+      data = await post();
+    }
     if (!data.success) {
       showToast('❌ ' + revokeErrorMessage(data.code, data.message), 'danger');
       return false;
     }
     const rIdx = DATA_LEAVES.findIndex(x => x.id === id);
     if (rIdx >= 0 && data.leave) DATA_LEAVES[rIdx] = data.leave;
+    revokedDeps = Array.isArray(data.dependents) ? data.dependents : [];
+    revokedDeps.forEach(dl => {
+      const di = DATA_LEAVES.findIndex(x => x.id === dl.id);
+      if (di >= 0) DATA_LEAVES[di] = dl;
+    });
   } catch (e) {
     showToast('❌ ' + revokeErrorMessage('', e.message), 'danger');
     return false;
   }
-  if (l.type === 'abroad' || l.type === 'holiday-work') await loadSettingsFromBackend();
+  if (l.type === 'abroad' || l.type === 'holiday-work' || revokedDeps.some(x => x.type === 'holiday-work')) await loadSettingsFromBackend();
   // 2026-09-24: applyApprovalToLog() wrote this record into this session's attendanceLog when it
   // was approved here (corrected time, upcountry/long-distance/late-out flags) -- rebuild it from
   // the real scans so the day stops showing it.
@@ -17500,11 +17657,16 @@ async function addCompanyTripDate() {
     d.setDate(d.getDate() + 1);
   }
   if (newDates.length === 0) { showToast(L('⚠️ These dates are already set', '⚠️ วันที่เหล่านี้ถูกตั้งค่าไว้แล้ว'), 'warning'); return; }
+  // 2026-09-24 (owner): approved money records on a new date must be revoked/cancelled first --
+  // checked here from the loaded requests, and again by the server (the source of truth).
+  const localConflicts = companyTripConflicts(DATA_LEAVES, newDates);
+  if (localConflicts.length) { alert(companyTripConflictMessage(localConflicts)); return; }
 
   DATA_COMPANY_TRIP_DATES.push(...newDates);
   const ok = await saveCompanyTripDates();
-  if (!ok) {
+  if (ok !== true) {
     DATA_COMPANY_TRIP_DATES = DATA_COMPANY_TRIP_DATES.filter(d => !newDates.includes(d));
+    if (ok && ok.code === 'company-trip-conflict') { alert(companyTripConflictMessage(ok.conflicts)); return; }
     showToast(L('❌ Could not save — you may not have permission for this', '❌ บันทึกไม่สำเร็จ — คุณอาจไม่มีสิทธิ์ทำรายการนี้'), 'danger');
     return;
   }
@@ -17519,7 +17681,7 @@ async function removeCompanyTripDate(date) {
   const before = DATA_COMPANY_TRIP_DATES;
   DATA_COMPANY_TRIP_DATES = DATA_COMPANY_TRIP_DATES.filter(d => d !== date);
   const ok = await saveCompanyTripDates();
-  if (!ok) {
+  if (ok !== true) {
     DATA_COMPANY_TRIP_DATES = before;
     showToast(L('❌ Could not save — you may not have permission for this', '❌ บันทึกไม่สำเร็จ — คุณอาจไม่มีสิทธิ์ทำรายการนี้'), 'danger');
     return;
@@ -18084,7 +18246,12 @@ function initHikvisionLive() {
         // legitimately loaded via the authenticated GET /api/leaves -- same pattern USER_UPDATED
         // already uses above.
         const lIdx = DATA_LEAVES.findIndex(l => l.id === data.leave?.id);
-        if (lIdx >= 0) DATA_LEAVES[lIdx] = { ...DATA_LEAVES[lIdx], ...data.leave };
+        // 2026-09-24 (owner): a plain user does not keep a colleague's cancelled / revoked record
+        // (the server no longer sends it -- GET /api/leaves, broadcastLeaveUpdated); drop it.
+        const seesAllLeaves = !!currentUser && (['md', 'accounting', 'manager'].includes(currentUser.role) || isSuperAdmin());
+        if (lIdx >= 0 && isWithdrawnLeaveStatus(data.leave?.status) && !seesAllLeaves && data.leave.userId !== currentUser?.id) {
+          DATA_LEAVES.splice(lIdx, 1);
+        } else if (lIdx >= 0) DATA_LEAVES[lIdx] = { ...DATA_LEAVES[lIdx], ...data.leave };
         // 2026-09-24: a cancel/revoke of an approved record changes pay, balances and attendance
         // everywhere, and the who/when/reason fields are not in the public broadcast -- refetch
         // (authenticated) and re-render every page LEAVE_DELETED re-renders.

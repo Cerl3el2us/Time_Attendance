@@ -234,7 +234,7 @@ test('DELETE route: guard codes, earned-day check, snapshot refresh for annual-m
   const i = SERVER_SRC.indexOf("app.delete('/api/leaves/:id'");
   const body = SERVER_SRC.slice(i, SERVER_SRC.indexOf('\napp.', i + 10));
   ["code:'period-locked'", "code:'period-confirmed'", "code:'period-frozen'", 'earnedDayUsedError(leaves, live, leave)',
-    "leave.type === 'holiday-work' && leave.compensationMode === 'annual-leave'", "status: 'cancelled'", "type: 'LEAVE_UPDATED'"]
+    "leave.type === 'holiday-work' && leave.compensationMode === 'annual-leave'", "status: 'cancelled'", "broadcastLeaveUpdated(leaves[idx])"]
     .forEach(k => assert.ok(body.includes(k), k));
   // the earned-day check runs before anything is written
   assert.ok(body.indexOf('earnedDayUsedError') < body.indexOf('saveLeaves(leaves)'));
@@ -246,7 +246,8 @@ test('revoke: earned-day check before the write, owner email via sendResultEmail
   const body = SERVER_SRC.slice(i, SERVER_SRC.indexOf('\napp.', i + 10));
   assert.ok(body.includes('earnedDayUsedError(leaves, ownerUser, leave)'));
   assert.ok(body.indexOf('earnedDayUsedError') < body.indexOf('saveLeaves(leaves)'));
-  assert.ok(/sendResultEmail\(leaves\[idx\]\)\.catch\(/.test(body));
+  // 2026-09-24 (review fix 4): the email now also lists the records revoked with a time correction.
+  assert.ok(body.includes('sendResultEmail(leaves[idx], undefined, undefined, alsoRevoked).catch('));
 });
 test('time-correction is revocable on both sides; client Revoke gate = candidate + no block', () => {
   const w = { today, user: USER, leaves: [] };

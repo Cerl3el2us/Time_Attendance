@@ -247,7 +247,8 @@ test('DELETE keeps an approved record as cancelled with who/when; pending still 
   assert.ok(/status: 'cancelled', cancelledAt: new Date\(\)\.toISOString\(\)/.test(body));
   assert.ok(/cancelledById: live\.id, cancelledBy: live\.name/.test(body));
   assert.ok(/leaves\.splice\(idx, 1\)/.test(body), 'pending cancel still hard-deletes');
-  assert.ok(/type: 'LEAVE_UPDATED'/.test(body));
+  // 2026-09-24 (review fix 14): per-viewer broadcast (colleagues' void records hidden).
+  assert.ok(body.includes('broadcastLeaveUpdated(leaves[idx])'));
 });
 test('revoke route: md/accounting only, all three period guards, own-record refusal', () => {
   const i = SERVER_SRC.indexOf("app.post('/api/leaves/:id/revoke', requireRole('md', 'accounting'), withLeavesLock(");
@@ -255,7 +256,7 @@ test('revoke route: md/accounting only, all three period guards, own-record refu
   const body = SERVER_SRC.slice(i, SERVER_SRC.indexOf('\napp.', i + 10));
   ['mdApprovedPeriodInRange', 'lockedPeriodInRange', 'accountingConfirmedInRange', "code:'revoke-own'",
     "status: 'revoked'", 'revokedById: live.id', 'revokeReason: reason', 'refreshSnapshottedCarryForward',
-    "type: 'LEAVE_UPDATED'"].forEach(k => assert.ok(body.includes(k), k));
+    "broadcastLeaveUpdated(leaves[idx])"].forEach(k => assert.ok(body.includes(k), k));
 });
 test('an owner cannot cancel (erase) a cancelled or revoked record again', () => {
   const S = makeServer(world());

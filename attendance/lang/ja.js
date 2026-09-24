@@ -1414,4 +1414,6 @@ window.LANG_JA = {
     "承認済みの休日出勤を取り消しますか？この申請の支給は今期の給与から差し引かれます。その後、同じ日の休日出勤を改めて申請できます（例：有給休暇の付与に変更）。新しい申請は再度承認が必要です。記録は「取消済み」として履歴に残ります。",
   // 2026-09-24: Holiday Work length cap
   "⚠️ Holiday Work cannot be longer than 20 hours": "⚠️ 休日出勤は20時間を超えられません",
+  // 2026-09-24: review fix round -- JA gap found by the diff scan (finalize mobile gross)
+  "Gross": "総支給額",
 };
