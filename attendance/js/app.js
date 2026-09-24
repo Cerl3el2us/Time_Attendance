@@ -11543,9 +11543,16 @@ function checkoutReviewPendingBoxHtml(items) {
       </td>
     </tr>`;
   }).join('');
+  // Time comes from Settings and the MD's name from the current active MD account, so the hint
+  // follows either change without a code edit.
+  const lateTime = String(lateOutThresholdHour(1)).padStart(2, '0') + '.00';
+  const mdName = DATA_USERS.find(u => u.role === 'md' && u.active !== false)?.name || 'Managing Director';
+  const hint = L('A web Check Out after {time}. Allowing it lets the employee request the Late Night allowance (it must first be approved by {md}).',
+    'กด Check Out บนเว็บหลังเวลา {time} — การอนุญาตเป็นการเปิดสิทธิ์ให้ยื่นขอ Allowance กลับดึกได้ (ต้องได้รับการยินยอมจากทาง {md} ก่อน)')
+    .replace(/\{time\}/g, () => lateTime).replace(/\{md\}/g, () => mdName);
   return `<div style="margin-bottom:14px;padding:12px 14px;border:1px solid #f59e0b;border-radius:10px;background:var(--bg-card)">
     <div style="font-weight:700;color:var(--text);margin-bottom:4px">⚠️ ${escapeHtml(L('Web check-outs awaiting review', 'เช็กเอาท์ผ่านเว็บที่รอตรวจสอบ'))} (${items.length})</div>
-    <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">${escapeHtml(L('A web Check Out after the Late Night time. Allow it only if the employee really worked late — Allow just unlocks the 🌙 request, which still needs normal approval.', 'กด Check Out บนเว็บหลังเวลาแจ้งกลับดึก อนุญาตเฉพาะเมื่อพนักงานทำงานดึกจริง — การอนุญาตแค่เปิดให้ยื่น 🌙 ได้ ส่วน 🌙 ยังต้องอนุมัติตามปกติ'))}</div>
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">${escapeHtml(hint)}</div>
     <div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
       <table style="width:100%;border-collapse:collapse;font-size:13px">
         <thead><tr>

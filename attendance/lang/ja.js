@@ -1367,6 +1367,6 @@ window.LANG_JA = {
 
   // 2026-09-23: web check-out Late Night review — Approvals page pending box (Task 8)
   "Web check-outs awaiting review": "確認待ちのWeb退勤",
-  "A web Check Out after the Late Night time. Allow it only if the employee really worked late — Allow just unlocks the 🌙 request, which still needs normal approval.":
-    "深夜残業の基準時刻以降のWeb退勤です。社員が実際に深夜まで勤務した場合のみ許可してください — 許可すると🌙の申請が可能になるだけで、🌙自体は通常どおり承認が必要です。",
+  "A web Check Out after {time}. Allowing it lets the employee request the Late Night allowance (it must first be approved by {md}).":
+    "{time}以降のWeb退勤です。許可すると深夜残業手当を申請できるようになります（事前に{md}の承認が必要です）。",
 };
