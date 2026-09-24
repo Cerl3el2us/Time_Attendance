@@ -319,7 +319,7 @@ const NOTIFICATION_RETENTION_DAYS = 90;
 const NOTIFICATION_MAX_PER_USER = 300;
 // Every kind the server writes (app.js NOTIFICATION_RENDERERS has one renderer per kind).
 const NOTIFICATION_KINDS = ['request-approved', 'request-rejected', 'approval-needed', 'request-revoked',
-  'accounting-revoked', 'approved-cancelled', 'cf-expiry-reminder', 'cf-run-overdue'];
+  'accounting-revoked', 'approved-cancelled', 'cf-expiry-reminder', 'cf-run-overdue', 'cf-manual-decision'];
 // Pages a link may point at (app.js openNotificationLink).
 const NOTIFICATION_LINK_PAGES = ['my-requests', 'approval', 'approval-history', 'leave', 'settings'];
 // null on a read/parse failure or a non-array -- mutating callers fail closed (never overwrite it).
@@ -361,9 +361,27 @@ function buildNotificationItem(id, userId, kind, params, link, nowIso) {
   return { id, userId: Number(userId), createdAt: nowIso, readAt: null,
     kind: typeof kind === 'string' ? kind.slice(0, 40) : 'unknown', params: p, link: sanitizeNotificationLink(link) };
 }
-// Pure. The viewer's own items, newest first, plus the unread count (of ALL own items).
-function notificationsForViewer(items, userId, limit) {
-  const own = (Array.isArray(items) ? items : []).filter(n => n && Number(n.userId) === Number(userId))
+// 2026-09-24 (review LOW, final round): kinds sent to a user BECAUSE of their role -> the roles that
+// receive them. After a role change the user must not keep seeing (or acting on) them: GET
+// /api/notifications hides them and handleRoleUpdate purges them. Kinds not listed are personal.
+const NOTIFICATION_ROLE_KINDS = {
+  'approval-needed': ['manager', 'md', 'accounting'],
+  'accounting-revoked': ['md'],
+  'approved-cancelled': ['md', 'accounting'],
+  'cf-run-overdue': ['md', 'accounting'],
+  'cf-manual-decision': ['md', 'accounting'],
+};
+// Pure. true = `n` may be shown to / kept for a viewer holding `role`. role undefined = no filter.
+function notificationAllowedForRole(n, role) {
+  if (role === undefined || !n) return true;
+  const roles = Object.prototype.hasOwnProperty.call(NOTIFICATION_ROLE_KINDS, n.kind) ? NOTIFICATION_ROLE_KINDS[n.kind] : null;
+  return !roles || roles.includes(role);
+}
+// Pure. The viewer's own items, newest first, plus the unread count (of ALL own items the viewer
+// may see). `role` (optional) = the viewer's live role: role-targeted kinds for another role are
+// left out.
+function notificationsForViewer(items, userId, limit, role) {
+  const own = (Array.isArray(items) ? items : []).filter(n => n && Number(n.userId) === Number(userId) && notificationAllowedForRole(n, role))
     .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)) || String(b.id).localeCompare(String(a.id)));
   const unread = own.filter(n => !n.readAt).length;
   return { items: own.slice(0, limit || NOTIFICATION_MAX_PER_USER), unread };
@@ -417,6 +435,20 @@ function pruneNotificationsFile() {
   if (items === null) return;
   const next = pruneNotifications(items, Date.now());
   if (next.length !== items.length) saveNotifications(next);
+}
+// Pure. `items` without userId's role-targeted items that `role` would not receive.
+function purgeRoleNotifications(items, userId, role) {
+  return (Array.isArray(items) ? items : []).filter(n => !n || Number(n.userId) !== Number(userId) || notificationAllowedForRole(n, role));
+}
+// Role change (handleRoleUpdate): drop the user's role-targeted items of the old role.
+function purgeRoleNotificationsForUser(userId, role) {
+  const items = readNotifications();
+  if (items === null) return;
+  const next = purgeRoleNotifications(items, userId, role);
+  if (next.length !== items.length) {
+    saveNotifications(next);
+    sendNotificationEvent(userId, unreadNotificationCount(next, userId));
+  }
 }
 // Push + inbox to every active md/accounting user except `exceptUserId` (T4 overdue run, T7 cancel).
 function notifyMdAccounting(payload, inbox, exceptUserId) {
@@ -2153,6 +2185,9 @@ function handleRoleUpdate(req, res, users, idx) {
   // itself) to pick up the new role/projection immediately instead of waiting for expiry.
   users[idx].tokenVersion = (users[idx].tokenVersion || 0) + 1;
   saveUsers(users);
+  // 2026-09-24 (review LOW, final round): approvals / MD-Accounting notices of the old role go.
+  try { purgeRoleNotificationsForUser(users[idx].id, role); }
+  catch (e) { console.error('[NOTIFY] role-change purge failed:', e && e.message); }
   // SECURITY FIX 2026-08-04 (retrospective audit round 3, HIGH): same unauthenticated-websocket
   // leak as USER_CREATED above -- this used to send the bcrypt hash and every other private field
   // to every connected client on a simple role change.
@@ -2390,7 +2425,8 @@ function handleUserUpdate(req, res, users, idx, updates) {
     // safeguard) and username (writable with no uniqueness check let a full-admin create a
     // duplicate that made login's users.find() resolve by array order instead of intent). Both
     // are server-managed identity/session fields, same class as doorSync -- never client-settable.
-    const forbidden = ['id', 'employeeNo', 'role', 'password', 'doorSync', 'tokenVersion', 'username'];
+    // 2026-09-24 (review M-1): deactivatedAt / reactivatedAt are server-managed history too.
+    const forbidden = ['id', 'employeeNo', 'role', 'password', 'doorSync', 'tokenVersion', 'username', 'deactivatedAt', 'reactivatedAt'];
     forbidden.forEach(k => delete updates[k]);
     // SECURITY FIX 2026-08-16 (Opus cron audit, M-1): this branch applies a KEY denylist but no
     // VALUE validation at all -- `email` specifically feeds the pending-approval digest's `to`
@@ -2469,7 +2505,12 @@ function handleUserUpdate(req, res, users, idx, updates) {
   // active -> inactive transition, same as a password reset; also closes that user's sockets.
   if (wasActive && users[idx].active === false) {
     users[idx].tokenVersion = (users[idx].tokenVersion || 0) + 1;
+    // 2026-09-24 (review M-1): when the account went inactive (reactivation carry-forward rule).
+    users[idx].deactivatedAt = new Date().toISOString();
   }
+  // Reactivation keeps deactivatedAt as history (carryForwardForReactivatedUser reads it) and
+  // records when it came back.
+  if (!wasActive && users[idx].active !== false) users[idx].reactivatedAt = new Date().toISOString();
   const after = canOpenDoor(users[idx]);
   const empNo = String(users[idx].employeeNo || '');
   saveUsers(users);   // HR fact persists first, regardless of whether the device push below succeeds
@@ -3165,7 +3206,11 @@ app.get('/api/notifications', (req, res) => {
   if (!req.user) return res.status(401).json({ success:false, message:'Unauthorized' });
   const items = readNotifications();
   if (items === null) return res.status(503).json({ success:false, message: NOTIFICATIONS_UNAVAILABLE });
-  const out = notificationsForViewer(items, req.user.sub);
+  // Live role (not the token's): role-targeted items of a role the viewer no longer holds are hidden.
+  // A super-admin view is left unfiltered.
+  const live = (readUsers() || []).find(u => u.id === req.user.sub);
+  const viewerRole = live && !isSuperAdminUser(live) ? live.role : undefined;
+  const out = notificationsForViewer(items, req.user.sub, undefined, viewerRole);
   res.json({ success:true, items: out.items, unread: out.unread });
 });
 const withNotificationsLock = makeHandlerLock('NOTIFICATIONS');
@@ -6942,10 +6987,15 @@ function carryForwardAutoRunYear(todayStr, runs, firstSourceYear) {
 function isCarryForwardRunMonth(todayStr) {
   return typeof todayStr === 'string' && (todayStr.slice(5, 7) === '01' || todayStr.slice(5, 7) === '02');
 }
-function carryForwardRunRefusal(todayStr, fromYear, firstSourceYear) {
-  if (typeof todayStr !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(todayStr) || !isCarryForwardRunMonth(todayStr)) return 'cf-not-jan-feb';
+// 2026-09-24 (owner, final round): the manual run is allowed in ANY month while that source year's
+// run is not recorded -- the month gate ('cf-not-jan-feb') is gone; the automatic job stays
+// January-February (isCarryForwardRunMonth). `runs` (settings.leaveCarryForwardRuns, optional):
+// a recorded year -> 'cf-already-processed' (runYearEndCarryForward refuses it too, with the run).
+function carryForwardRunRefusal(todayStr, fromYear, firstSourceYear, runs) {
+  if (typeof todayStr !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(todayStr)) return 'cf-bad-year';
   if (!Number.isInteger(fromYear) || fromYear !== Number(todayStr.slice(0, 4)) - 1) return 'cf-bad-year';
   if (Number.isInteger(firstSourceYear) && fromYear < firstSourceYear) return 'cf-before-system-start';
+  if (runs && typeof runs === 'object' && !Array.isArray(runs) && runs[String(fromYear)]) return 'cf-already-processed';
   return null;
 }
 // First year whose leave can be carried forward = the year of the first real pay period
@@ -6997,16 +7047,42 @@ function runYearEndCarryForward(fromYear, actor) {
 // 2026-09-24 (owner, round 7): an employee reactivated after last year's run was recorded, with no
 // carry-forward key for this year, gets the SAME computation the run does (computeYearEndCarryForward
 // for that one user), written in one whole-file settings read-modify-write. Existing keys are never
-// overwritten. Returns the written entries or null.
+// overwritten.
+// 2026-09-24 (review M-1, final round): only when they were active at the END of the source year --
+// user.deactivatedAt (set by handleUserUpdate on active -> inactive) on/after 1 January of the
+// current year (Bangkok). Deactivated before that, or no deactivatedAt on record (deactivated before
+// this was tracked): nothing is written and MD + Accounting get a push + inbox item
+// ('cf-manual-decision') -- someone who left mid-year and came back must be decided by a person.
+// Pure. Returns 'write', 'ask' or null (nothing to do).
+function reactivationCarryForwardAction(user, todayStr, runs, cf) {
+  if (!user || user.active === false || typeof todayStr !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(todayStr)) return null;
+  const year = Number(todayStr.slice(0, 4));
+  if (!plainObj(runs)[String(year - 1)]) return null;
+  if (plainObj(cf)[`${year}_${user.id}`] !== undefined) return null;
+  const ms = typeof user.deactivatedAt === 'string' ? Date.parse(user.deactivatedAt) : NaN;
+  if (!Number.isFinite(ms)) return 'ask';
+  const deactivatedBkk = new Date(ms + 7 * 3600000).toISOString().slice(0, 10);
+  return deactivatedBkk >= `${year}-01-01` ? 'write' : 'ask';
+}
+// Returns the written entries, { ask: true } when MD / Accounting were asked, or null.
 function carryForwardForReactivatedUser(user) {
   if (!user || isSystemAccountUser(user) || user.active === false) return null;
   const year = Number(bangkokDateStr().slice(0, 4));
   const fromYear = year - 1;
   const settings = readJSON('settings.json', {});
   if (settings === null || typeof settings !== 'object' || Array.isArray(settings)) return null;
-  if (!plainObj(settings.leaveCarryForwardRuns)[String(fromYear)]) return null;
   const cf = plainObj(settings.leaveCarryForward);
-  if (cf[`${year}_${user.id}`] !== undefined) return null;
+  const action = reactivationCarryForwardAction(user, bangkokDateStr(), settings.leaveCarryForwardRuns, cf);
+  if (action === null) return null;
+  if (action === 'ask') {
+    console.log('[CF] reactivated employee needs a manual carry-forward decision', JSON.stringify({ userId: user.id, fromYear, deactivatedAt: user.deactivatedAt || null }));
+    notifyMdAccounting({ title: 'Carry-forward needs a decision',
+      body: `${user.name || `#${user.id}`} was reactivated -- their ${fromYear} carry-forward was not written automatically; decide it in Settings`,
+      tag: 'ta-cf-reactivated', url: '/' },
+    { kind: 'cf-manual-decision', params: { employeeName: user.name || '', userId: user.id, year: fromYear,
+      deactivatedAt: typeof user.deactivatedAt === 'string' ? user.deactivatedAt : null }, link: { page: 'settings' } }, null);
+    return { ask: true };
+  }
   const leaves = readLeaves();
   if (leaves === null) return null;
   const computed = computeYearEndCarryForward(leaves, [user], fromYear, cf, getAppSettings().leave?.carryForwardMax);
@@ -7055,13 +7131,19 @@ function addDaysToDateStr(dateStr, n) {
   const p2 = x => String(x).padStart(2, '0');
   return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
 }
+// Reminders (overdue run, carry-forward expiry) are sent only from 09:00 Bangkok (review M-2): the
+// hourly tick at 00:07 would otherwise push them in the middle of the night.
+const CF_REMINDER_MIN_HOUR = 9;
 // T4: last year's run still not recorded on/after 15 January -> MD + Accounting are reminded once
-// per day (settings.cfRunOverdueRemindersSent[<Bangkok date>], server-owned) until it is done --
-// but only through February: after the run window closes the run can no longer be made, so a
-// reminder would ask for the impossible. Pure. Returns the source year or null.
-function carryForwardOverdueReminderYear(todayStr, runs, sentMap, firstSourceYear) {
+// per day (settings.cfRunOverdueRemindersSent[<Bangkok date>], server-owned) from 09:00 until it
+// is done. 2026-09-24 (owner, final round): the manual button now works in ANY month while the
+// run is not recorded, so the reminder no longer stops at the end of February -- it continues
+// until the run is recorded (or the year rolls over: only last year can be run). Pure. Returns the
+// source year or null. `bangkokHour` omitted = no hour gate (tests of the date logic).
+function carryForwardOverdueReminderYear(todayStr, runs, sentMap, firstSourceYear, bangkokHour) {
   if (typeof todayStr !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(todayStr)) return null;
-  if (!isCarryForwardRunMonth(todayStr) || todayStr.slice(5) < '01-15') return null;
+  if (bangkokHour !== undefined && !(Number(bangkokHour) >= CF_REMINDER_MIN_HOUR)) return null;
+  if (todayStr.slice(5) < '01-15') return null;
   const fromYear = Number(todayStr.slice(0, 4)) - 1;
   if (Number.isInteger(firstSourceYear) && fromYear < firstSourceYear) return null;
   if (plainObj(runs)[String(fromYear)]) return null;
@@ -7072,23 +7154,54 @@ function remindOverdueCarryForwardRun() {
   const settings = readJSON('settings.json', {});
   if (settings === null || typeof settings !== 'object' || Array.isArray(settings)) return;
   const today = bangkokDateStr();
-  const fromYear = carryForwardOverdueReminderYear(today, settings.leaveCarryForwardRuns, settings.cfRunOverdueRemindersSent, carryForwardFirstSourceYear());
+  const fromYear = carryForwardOverdueReminderYear(today, settings.leaveCarryForwardRuns, settings.cfRunOverdueRemindersSent, carryForwardFirstSourceYear(), bangkokYmd().h);
   if (fromYear === null) return;
   // Recorded BEFORE sending, so a failing send can never repeat the reminder the same day.
   settings.cfRunOverdueRemindersSent = pruneDatedMap({ ...plainObj(settings.cfRunOverdueRemindersSent), [today]: new Date().toISOString() }, today);
   writeJSON('settings.json', settings);
   console.log(`[CF] carry-forward ${fromYear} -> ${fromYear + 1} still not run -- reminding MD / Accounting`);
   notifyMdAccounting({ title: 'Year-end carry-forward not run yet',
-    body: `The carry-forward of ${fromYear} annual leave into ${fromYear + 1} has not run yet -- run it in Settings (January or February only)`,
+    body: `The carry-forward of ${fromYear} annual leave into ${fromYear + 1} has not run yet -- run it in Settings`,
     tag: 'ta-cf-run', url: '/' }, { kind: 'cf-run-overdue', params: { year: fromYear }, link: { page: 'settings' } }, null);
 }
-// T2: carry-forward expiry reminders on (expiry date - 29 days) and (expiry date - 7 days) --
-// 1 Nov and 23 Nov for a 30 Nov expiry. Pure.
-function cfExpiryReminderDates(expiryStr) {
-  return [addDaysToDateStr(expiryStr, -29), addDaysToDateStr(expiryStr, -7)];
+// T2: carry-forward expiry reminders. 2026-09-24 (owner, final round): stage 'first' on (expiry -
+// leave.carryForwardNotifyDays), stage 'second' on (expiry - 7 days), skipped when notifyDays <= 7.
+// Pure. notifyDays: the Settings value (missing / invalid = 30, capped at 365).
+function cfNotifyDaysOf(v) {
+  const n = Math.trunc(Number(v));
+  return Number.isFinite(n) && n >= 1 ? Math.min(365, n) : 30;
 }
-function cfExpiryReminderDue(todayStr, expiryStr, sentMap) {
-  return cfExpiryReminderDates(expiryStr).includes(todayStr) && !plainObj(sentMap)[todayStr];
+function cfExpiryReminderStages(expiryStr, notifyDays) {
+  const n = cfNotifyDaysOf(notifyDays);
+  const out = [{ stage: 'first', date: addDaysToDateStr(expiryStr, -n) }];
+  if (n > 7) out.push({ stage: 'second', date: addDaysToDateStr(expiryStr, -7) });
+  return out;
+}
+// Which reminder to send now, or null. Pure. `candidates` = [{ year, expiry }] (this year's and next
+// year's expiry: an early-in-the-year expiry has its first reminder in the previous December).
+// Catch-up: a stage is due from its date up to and including the expiry date (never after), on the
+// first tick at/after 09:00 Bangkok; it is sent once per (expiry date, stage) -- sent-map key
+// `<expiry>_<stage>`. When a later stage is already due, the earlier unsent one is superseded
+// (marked sent too, never sent as a second message). A year whose carry-forward run is not recorded
+// yet (source year on/after the system start) waits for it: the catch-up sends once the run exists.
+// Returns { year, expiry, stage, markKeys }.
+function cfExpiryReminderDue(todayStr, bangkokHour, candidates, notifyDays, sentMap, runs, firstSourceYear) {
+  if (typeof todayStr !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(todayStr)) return null;
+  if (!(Number(bangkokHour) >= CF_REMINDER_MIN_HOUR)) return null;
+  const sent = plainObj(sentMap);
+  for (const c of (candidates || [])) {
+    if (!c || typeof c.expiry !== 'string' || todayStr > c.expiry) continue;
+    const src = Number(c.year) - 1;
+    if (!plainObj(runs)[String(src)] && !(Number.isInteger(firstSourceYear) && src < firstSourceYear)) continue;
+    const due = cfExpiryReminderStages(c.expiry, notifyDays).filter(s => s.date <= todayStr);
+    if (!due.length) continue;
+    const latest = due[due.length - 1];
+    const key = `${c.expiry}_${latest.stage}`;
+    if (sent[key]) continue;
+    return { year: Number(c.year), expiry: c.expiry, stage: latest.stage,
+      markKeys: due.map(s => `${c.expiry}_${s.stage}`).filter(k => !sent[k]) };
+  }
+  return null;
 }
 // Active employees whose carry-forward is still at risk for `year`: what the FIFO rule would
 // forfeit if the expiry date were today (carryForwardForfeitMinutes as seen after the expiry,
@@ -7111,18 +7224,24 @@ function cfAmountText(minutes, lang) {
 function runCfExpiryReminders() {
   if (!carryForwardExpiryEnabled()) return;
   const today = bangkokDateStr();
-  const year = Number(today.slice(0, 4));
-  const expiry = carryForwardExpiryDateStr(year);
+  const thisYear = Number(today.slice(0, 4));
+  const candidates = [thisYear, thisYear + 1].map(y => ({ year: y, expiry: carryForwardExpiryDateStr(y) }));
   const settings = readJSON('settings.json', {});
   if (settings === null || typeof settings !== 'object' || Array.isArray(settings)) return;
-  if (!cfExpiryReminderDue(today, expiry, settings.cfExpiryRemindersSent)) return;
+  const due = cfExpiryReminderDue(today, bangkokYmd().h, candidates, (getAppSettings().leave || {}).carryForwardNotifyDays,
+    settings.cfExpiryRemindersSent, settings.leaveCarryForwardRuns, carryForwardFirstSourceYear());
+  if (!due) return;
+  const { year, expiry } = due;
   const leaves = readLeaves();
   const users = readUsers();
   if (leaves === null || users === null) return;
-  settings.cfExpiryRemindersSent = pruneDatedMap({ ...plainObj(settings.cfExpiryRemindersSent), [today]: new Date().toISOString() }, today);
+  const nowIso = new Date().toISOString();
+  const marks = {};
+  due.markKeys.forEach(k => { marks[k] = nowIso; });
+  settings.cfExpiryRemindersSent = pruneDatedMap({ ...plainObj(settings.cfExpiryRemindersSent), ...marks }, today);
   writeJSON('settings.json', settings);
   const atRisk = carryForwardAtRiskList(leaves, users, year, plainObj(settings.leaveCarryForward));
-  console.log(`[CF] expiry reminder ${today} (expiry ${expiry}): ${atRisk.length} employee(s) with carry-forward at risk`);
+  console.log(`[CF] expiry reminder ${today} (expiry ${expiry}, ${due.stage}): ${atRisk.length} employee(s) with carry-forward at risk`);
   atRisk.forEach(({ user, minutes }) => {
     Promise.resolve(sendPushToUser(user.id, {
       title: 'Carry-forward leave expiring',
@@ -7150,14 +7269,14 @@ async function sendCfExpiryEmail(user, minutes, expiryStr) {
 }
 
 // Manual button (Settings -> Year-End Carry-Forward). md/accounting only; requireRole already
-// refuses observers and inactive accounts. Only the year that has just ended can be processed.
+// refuses observers and inactive accounts. Only the year that has just ended can be processed; any
+// month (final round), once (runYearEndCarryForward -> 409 cf-already-processed).
 app.post('/api/leave-carry-forward/run', requireRole('md', 'accounting'), withLeavesLock((req, res) => {
   const body = parseBody(req) || {};
   const year = Number(body.year);
   const refusal = carryForwardRunRefusal(bangkokDateStr(), year, carryForwardFirstSourceYear());
   if (refusal) {
     const msg = {
-      'cf-not-jan-feb': 'Carry-forward can only be run in January or February',
       'cf-bad-year': 'Only last year can be carried forward',
       'cf-before-system-start': 'That year is before the system started',
     }[refusal];
@@ -7404,7 +7523,7 @@ function timeCorrectionDependents(corr, leaves, dayWith, dayWithout, S) {
       if (!checkIn || !d.checkOut) return true;
       const out = lateNightCheckoutMins(d.checkOut);
       const thr1 = a.lateNightThreshold1Hour || a.lateNightThresholdHour || 19;
-      if (!Number.isFinite(out) || out < thr1 * 60 || !lateNightCheckoutOk(d)) return true;
+      if (!Number.isFinite(out) || out < lateNightThresholdMins(thr1) || !lateNightCheckoutOk(d)) return true;
       return !!l.lateOutTime && !(lateNightCheckoutMins(l.lateOutTime) <= out);
     }
     if (l.type === 'early-morning') {
@@ -8343,8 +8462,16 @@ function lateNightCheckoutMins(hhmm) {
 // the x2 threshold hour, else 1. Used to compare the parseInt() hour of lateOut, which read "01:30" as hour 1
 // and paid x1 for a check-out past midnight; lateNightCheckoutMins puts before-05:00 on the
 // previous evening's clock (+24h).
+// 2026-09-24 (review LOW, final round): a threshold HOUR before 05 (e.g. 01 = 01:00 after
+// midnight) is normalised with the same +24h rule as the check-out, so ×2 from 01:00 means 25:00
+// on that clock, not 01:00 of the evening before (which paid ×2 for every Late Night). Pure.
+function lateNightThresholdMins(hour) {
+  const h = Number(hour);
+  if (!Number.isFinite(h)) return NaN;
+  return h < 5 ? h * 60 + 24 * 60 : h * 60;
+}
 function lateNightPoints(lateOut, thr2Hour) {
-  return lateNightCheckoutMins(lateOut) >= Number(thr2Hour) * 60 ? 2 : 1;
+  return lateNightCheckoutMins(lateOut) >= lateNightThresholdMins(thr2Hour) ? 2 : 1;
 }
 // An Accounting/MD review applies only to a web check-out, and only while the day's current
 // effective check-out is still the time that was reviewed -- a later web tap or an approved
@@ -8370,7 +8497,7 @@ function checkoutReviewTrigger(day, user, S) {
   const a = S.allowances || {};
   const thr1 = a.lateNightThreshold1Hour || a.lateNightThresholdHour || 19;
   const mins = lateNightCheckoutMins(day.checkOut);
-  return Number.isFinite(mins) && mins >= thr1 * 60;
+  return Number.isFinite(mins) && mins >= lateNightThresholdMins(thr1);
 }
 // Late night pay: device check-out (or an Accounting/MD-allowed web check-out) + approved
 // late-out. Rest days also need approved holiday-work.
@@ -8876,7 +9003,7 @@ function lateOutSubmitBlockReason(user, dateStr, lateOutTime) {
   }
   const thr1 = S.allowances.lateNightThreshold1Hour || S.allowances.lateNightThresholdHour || 19;
   const outMins = lateNightCheckoutMins(day.checkOut);
-  if (!Number.isFinite(outMins) || outMins < thr1 * 60) {
+  if (!Number.isFinite(outMins) || outMins < lateNightThresholdMins(thr1)) {
     return `Late Night Out requires a check-out at or after ${String(thr1).padStart(2, '0')}:00`;
   }
   if (!lateNightCheckoutOk(day)) {

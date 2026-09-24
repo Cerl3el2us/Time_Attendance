@@ -35,7 +35,7 @@ function extractConstObject(src, name) {
 }
 
 const FNS = ['isAllowanceEligible', 'isDeviceScanSource', 'isFullDayPersonalLeaveStatus',
-  'lateNightCheckoutMins', 'checkoutReviewDecisionFor', 'lateNightCheckoutOk', 'checkoutReviewTrigger'];
+  'lateNightCheckoutMins', 'lateNightThresholdMins', 'checkoutReviewDecisionFor', 'lateNightCheckoutOk', 'checkoutReviewTrigger'];
 function load(src) {
   const ctx = {};
   vm.createContext(ctx);

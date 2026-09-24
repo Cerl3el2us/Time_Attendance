@@ -54,7 +54,7 @@ const CLIENT_FNS = [...SHARED, 'leaveRecordMinutes', 'getApprovedHolidayWorkDays
   'getCarryForwardCompKey', 'getCarryForwardDays', 'getCarryForwardCompDays', 'getOpeningUsedKey', 'getOpeningUsedDays',
   'computeLeaveBalance', 'localDateStr', 'annualGateRemainingMinutes', 'isYearEndCountedLeaveStatus', 'annualLeaveRemainingMinutes', 'earnedDayUsageOf', 'earnedDayUsedByRecord', 'approvedCancelBlockCode',
   'isRevokeCandidate', 'revokeBlockCode', 'canRevokeLeaveApproval', 'attendanceTimesForDate', 'attKey',
-  'carryForwardFirstSourceYear', 'carryForwardNextRunJanuaryYear', 'carryForwardRefusalText',
+  'carryForwardFirstSourceYear', 'carryForwardRefusalText',
   'isSafeTimeZone', 'tzOffsetMinutesAt', 'abroadLocalTimeText'];
 const SERVER_FNS = [...SHARED, 'leaveMinutesOf', 'getApprovedHolidayWorkAnnualLeaveDays', 'deriveLeaveDaysCount',
   'ta_localDateStr', 'isValidDateStr', 'isYearEndCountedLeaveStatus', 'annualLeaveRemainingMinutes', 'leaveBalanceRemainingMinutes', 'leaveBalanceError',
@@ -334,18 +334,23 @@ test('not opted in -> no email', async () => {
   assert.strictEqual(sent.length, 0);
 });
 
-console.log('T5 carry-forward: January-February only (round 7), never before the system started');
+console.log('T5 carry-forward: manual run any month while not recorded (final round), never before the system started');
 test('carryForwardRunRefusal (both sides)', () => {
   const w = { today, user: USER, leaves: [] };
   for (const [side, X] of both(w)) {
     assert.strictEqual(X.carryForwardRunRefusal('2027-01-15', 2026, 2026), null, side);
-    assert.strictEqual(X.carryForwardRunRefusal('2027-02-01', 2026, 2026), null, `${side} round 7: February allowed`);
+    assert.strictEqual(X.carryForwardRunRefusal('2027-02-01', 2026, 2026), null, `${side} February allowed`);
     assert.strictEqual(X.carryForwardRunRefusal('2027-02-28', 2026, 2026), null, side);
-    assert.strictEqual(X.carryForwardRunRefusal('2027-03-01', 2026, 2026), 'cf-not-jan-feb', side);
-    assert.strictEqual(X.carryForwardRunRefusal('2026-09-24', 2025, 2026), 'cf-not-jan-feb', side);
+    assert.strictEqual(X.carryForwardRunRefusal('2027-03-01', 2026, 2026), null, `${side} final round: March allowed while not recorded`);
+    assert.strictEqual(X.carryForwardRunRefusal('2027-12-31', 2026, 2026, {}), null, `${side} any month`);
+    assert.strictEqual(X.carryForwardRunRefusal('2027-09-24', 2026, 2026, { 2025: { at: 'x' } }), null, `${side} another year recorded`);
+    assert.strictEqual(X.carryForwardRunRefusal('2027-09-24', 2026, 2026, { 2026: { at: 'x' } }), 'cf-already-processed', side);
+    assert.strictEqual(X.carryForwardRunRefusal('2027-01-10', 2026, 2026, { 2026: { at: 'x' } }), 'cf-already-processed', `${side} January too`);
+    assert.strictEqual(X.carryForwardRunRefusal('2027-09-24', 2025, 2026, {}), 'cf-bad-year', `${side} last year only`);
+    assert.strictEqual(X.carryForwardRunRefusal('2026-09-24', 2025, 2026), 'cf-before-system-start', side);
     assert.strictEqual(X.carryForwardRunRefusal('2027-01-15', 2025, 2026), 'cf-bad-year', side);
     assert.strictEqual(X.carryForwardRunRefusal('2026-01-15', 2025, 2026), 'cf-before-system-start', side);
-    assert.strictEqual(X.carryForwardRunRefusal('', 2026, 2026), 'cf-not-jan-feb', side);
+    assert.strictEqual(X.carryForwardRunRefusal('', 2026, 2026), 'cf-bad-year', side);
     assert.strictEqual(X.carryForwardFirstSourceYear(), 2026, side);
   }
 });
@@ -359,13 +364,14 @@ test('automatic run skips a year before the system started', () => {
   const i = SERVER_SRC.indexOf("app.post('/api/leave-carry-forward/run'");
   assert.ok(SERVER_SRC.slice(i, i + 800).includes('carryForwardRunRefusal(bangkokDateStr(), year, carryForwardFirstSourceYear())'));
 });
-test('button text outside January names the next automatic January', () => {
+test('refusal texts (final round: no month refusal any more); button passes the recorded runs', () => {
   const C = makeClient({ today: '2026-09-24', user: USER, leaves: [] });
-  assert.strictEqual(C.carryForwardNextRunJanuaryYear('2026-09-24'), 2027);
-  assert.strictEqual(C.carryForwardNextRunJanuaryYear('2027-01-10'), 2027);
-  assert.strictEqual(C.carryForwardNextRunJanuaryYear('2027-02-10'), 2027, 'February is still this window');
-  assert.strictEqual(C.carryForwardNextRunJanuaryYear('2027-03-10'), 2028);
-  assert.strictEqual(C.carryForwardRefusalText('cf-not-jan-feb', '2026-09-24'), 'Carry-forward runs automatically in January 2027 (the button works in January–February only)');
+  assert.strictEqual(C.carryForwardRefusalText('cf-already-processed'), 'Carry-forward already processed');
+  assert.strictEqual(C.carryForwardRefusalText('cf-bad-year'), 'Only last year can be carried forward');
+  assert.ok(C.carryForwardRefusalText('cf-before-system-start').startsWith('Years before the system started (2026)'));
+  assert.ok(!/cf-not-jan-feb/.test(APP_SRC.replace(/\/\/[^\n]*/g, '')), 'no client code uses the old code');
+  assert.ok(!/cf-not-jan-feb/.test(SERVER_SRC.replace(/\/\/[^\n]*/g, '')), 'no server code uses the old code');
+  assert.strictEqual((APP_SRC.match(/carryForwardFirstSourceYear\(\), LEAVE_CARRY_FORWARD_RUNS\)/g) || []).length, 2, 'button + processYearEndCarryForward');
 });
 
 console.log('T6 leaveCarryForward is server-only');

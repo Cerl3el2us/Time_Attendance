@@ -1334,8 +1334,16 @@ function lateNightCheckoutMins(hhmm) {
 // the x2 threshold hour, else 1. Used to compare the parseInt() hour of lateOut, which read "01:30" as hour 1
 // and paid x1 for a check-out past midnight; lateNightCheckoutMins puts before-05:00 on the
 // previous evening's clock (+24h).
+// 2026-09-24 (review LOW, final round): a threshold HOUR before 05 (e.g. 01 = 01:00 after
+// midnight) is normalised with the same +24h rule as the check-out, so ×2 from 01:00 means 25:00
+// on that clock, not 01:00 of the evening before (which paid ×2 for every Late Night). Pure.
+function lateNightThresholdMins(hour) {
+  const h = Number(hour);
+  if (!Number.isFinite(h)) return NaN;
+  return h < 5 ? h * 60 + 24 * 60 : h * 60;
+}
 function lateNightPoints(lateOut, thr2Hour) {
-  return lateNightCheckoutMins(lateOut) >= Number(thr2Hour) * 60 ? 2 : 1;
+  return lateNightCheckoutMins(lateOut) >= lateNightThresholdMins(thr2Hour) ? 2 : 1;
 }
 // An Accounting/MD review applies only to a web check-out, and only while the day's current
 // effective check-out is still the time that was reviewed -- a later web tap or an approved
@@ -1361,7 +1369,7 @@ function checkoutReviewTrigger(day, user, S) {
   const a = S.allowances || {};
   const thr1 = a.lateNightThreshold1Hour || a.lateNightThresholdHour || 19;
   const mins = lateNightCheckoutMins(day.checkOut);
-  return Number.isFinite(mins) && mins >= thr1 * 60;
+  return Number.isFinite(mins) && mins >= lateNightThresholdMins(thr1);
 }
 // Late night pay: device check-out (or an Accounting/MD-allowed web check-out) + approved
 // late-out. Rest days also need approved holiday-work.
@@ -1785,7 +1793,7 @@ function timeCorrectionDependents(corr, leaves, dayWith, dayWithout, S) {
       if (!checkIn || !d.checkOut) return true;
       const out = lateNightCheckoutMins(d.checkOut);
       const thr1 = a.lateNightThreshold1Hour || a.lateNightThresholdHour || 19;
-      if (!Number.isFinite(out) || out < thr1 * 60 || !lateNightCheckoutOk(d)) return true;
+      if (!Number.isFinite(out) || out < lateNightThresholdMins(thr1) || !lateNightCheckoutOk(d)) return true;
       return !!l.lateOutTime && !(lateNightCheckoutMins(l.lateOutTime) <= out);
     }
     if (l.type === 'early-morning') {
@@ -3345,47 +3353,43 @@ function carryForwardStatusHtml(year) {
   const run = LEAVE_CARRY_FORWARD_RUNS[String(year)];
   if (run) return `✅ ${escapeHtml(carryForwardAlreadyDoneText(year, run))}`;
   // 2026-09-24: a year before the system started is never carried forward.
-  if (year < carryForwardFirstSourceYear()) return `ℹ️ ${escapeHtml(carryForwardRefusalText('cf-before-system-start', bangkokDateStr()))}`;
+  if (year < carryForwardFirstSourceYear()) return `ℹ️ ${escapeHtml(carryForwardRefusalText('cf-before-system-start'))}`;
   // Not recorded. In January-February the server job runs it (at start-up and hourly; round 7:
-  // MD / Accounting are reminded daily from 15 January); later in the year it will not run for this
-  // year any more -- say so, and when the next automatic run is.
+  // MD / Accounting are reminded daily from 15 January). 2026-09-24 (owner, final round): later in
+  // the year the automatic job no longer runs it, but the button does -- any month, once.
   if (isCarryForwardRunMonth(bangkokDateStr())) {
     return currentLang === 'ja'
-      ? `⏳ ${year}年 → ${year + 1}年の繰越はまだ実行されていません — サーバーが自動で実行します。実行されない場合は2月末までにこのボタンで実行してください`
-      : L(`⏳ ${year} → ${year + 1} has not run yet — the server runs it automatically; if it does not, use this button by the end of February`,
-          `⏳ ยังไม่ได้ยกยอด ${year} → ${year + 1} — ระบบจะทำให้อัตโนมัติ หากยังไม่ทำ ให้กดปุ่มนี้ภายในสิ้นเดือนกุมภาพันธ์`);
+      ? `⏳ ${year}年 → ${year + 1}年の繰越はまだ実行されていません — サーバーが自動で実行します。実行されない場合はこのボタンで実行してください`
+      : L(`⏳ ${year} → ${year + 1} has not run yet — the server runs it automatically; if it does not, use this button`,
+          `⏳ ยังไม่ได้ยกยอด ${year} → ${year + 1} — ระบบจะทำให้อัตโนมัติ หากยังไม่ทำ ให้กดปุ่มนี้`);
   }
   return currentLang === 'ja'
-    ? `ℹ️ ${year}年の繰越の実行記録はありません（この版より前の実行は記録されていません）。自動実行は毎年1月（ボタンは1〜2月）のみで、次回は${year + 2}年1月（${year + 1}年分）です。`
-    : L(`ℹ️ No carry-forward of ${year} is on record (runs before this version were not logged). The automatic run happens only in January (the button: January–February) — next: January ${year + 2} (for ${year + 1}).`,
-        `ℹ️ ไม่มีบันทึกการยกยอดของปี ${year} (การยกยอดก่อนเวอร์ชันนี้ไม่ได้บันทึกไว้) ระบบยกยอดอัตโนมัติเฉพาะเดือนมกราคม (ปุ่ม: มกราคม–กุมภาพันธ์) — ครั้งถัดไป: มกราคม ${year + 2} (ของปี ${year + 1})`);
+    ? `⏳ ${year}年 → ${year + 1}年の繰越の実行記録はありません（この版より前の実行は記録されていません）。自動実行は1〜2月のみのため、このボタンで実行してください（1回のみ）。`
+    : L(`⏳ No carry-forward of ${year} → ${year + 1} is on record (runs before this version were not logged). The automatic run happens only in January–February, so use this button to run it now (once).`,
+        `⏳ ไม่มีบันทึกการยกยอด ${year} → ${year + 1} (การยกยอดก่อนเวอร์ชันนี้ไม่ได้บันทึกไว้) ระบบยกยอดอัตโนมัติเฉพาะเดือนมกราคม–กุมภาพันธ์ จึงกดปุ่มนี้เพื่อยกยอดได้เลย (ครั้งเดียว)`);
 }
-// 2026-09-24 (owner): the button works only in January (Bangkok), only for the year that has just
-// ended, and never for a year before the system started (the year of APP_FIRST_PERIOD_START).
-// Returns the refusal code or null. DUAL-SYNC: server.js carryForwardRunRefusal (same codes).
-// 2026-09-24 (owner, round 7): January OR February; the code is now 'cf-not-jan-feb'.
+// 2026-09-24 (owner): the button works only for the year that has just ended, and never for a
+// year before the system started (the year of APP_FIRST_PERIOD_START). Returns the refusal code or
+// null. DUAL-SYNC: server.js carryForwardRunRefusal (same codes).
 // DUAL-SYNC (identical text): isCarryForwardRunMonth, carryForwardRunRefusal.
 function isCarryForwardRunMonth(todayStr) {
   return typeof todayStr === 'string' && (todayStr.slice(5, 7) === '01' || todayStr.slice(5, 7) === '02');
 }
-function carryForwardRunRefusal(todayStr, fromYear, firstSourceYear) {
-  if (typeof todayStr !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(todayStr) || !isCarryForwardRunMonth(todayStr)) return 'cf-not-jan-feb';
+// 2026-09-24 (owner, final round): the manual run is allowed in ANY month while that source year's
+// run is not recorded -- the month gate ('cf-not-jan-feb') is gone; the automatic job stays
+// January-February (isCarryForwardRunMonth). `runs` (settings.leaveCarryForwardRuns, optional):
+// a recorded year -> 'cf-already-processed' (runYearEndCarryForward refuses it too, with the run).
+function carryForwardRunRefusal(todayStr, fromYear, firstSourceYear, runs) {
+  if (typeof todayStr !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(todayStr)) return 'cf-bad-year';
   if (!Number.isInteger(fromYear) || fromYear !== Number(todayStr.slice(0, 4)) - 1) return 'cf-bad-year';
   if (Number.isInteger(firstSourceYear) && fromYear < firstSourceYear) return 'cf-before-system-start';
+  if (runs && typeof runs === 'object' && !Array.isArray(runs) && runs[String(fromYear)]) return 'cf-already-processed';
   return null;
 }
 function carryForwardFirstSourceYear() {
   return APP_FIRST_PERIOD_START.getFullYear();
 }
-// The January the next (automatic) run can happen in: this January, or next year's.
-// 2026-09-24 (round 7): the run window is January-February, so February still counts as "this".
-function carryForwardNextRunJanuaryYear(todayStr) {
-  const y = Number(todayStr.slice(0, 4));
-  const first = carryForwardFirstSourceYear() + 1;
-  return Math.max(isCarryForwardRunMonth(todayStr) ? y : y + 1, first);
-}
-function carryForwardRefusalText(code, todayStr) {
-  const janYear = carryForwardNextRunJanuaryYear(todayStr);
+function carryForwardRefusalText(code) {
   if (code === 'cf-before-system-start') {
     const first = carryForwardFirstSourceYear();
     return currentLang === 'ja'
@@ -3393,19 +3397,16 @@ function carryForwardRefusalText(code, todayStr) {
       : L(`Years before the system started (${first}) cannot be carried forward — the first carry-forward is in January ${first + 1} (for ${first})`,
           `ยกยอดปีก่อนเริ่มใช้ระบบ (${first}) ไม่ได้ — การยกยอดครั้งแรกคือเดือนมกราคม ${first + 1} (ของปี ${first})`);
   }
-  if (code === 'cf-bad-year') return L('Only last year can be carried forward', 'ยกยอดได้เฉพาะปีที่แล้วเท่านั้น');
-  return currentLang === 'ja'
-    ? `繰越は${janYear}年1月に自動で実行されます（ボタンは1〜2月のみ）`
-    : L(`Carry-forward runs automatically in January ${janYear} (the button works in January–February only)`,
-        `ระบบจะยกยอดให้อัตโนมัติในเดือนมกราคม ${janYear} (ปุ่มนี้ใช้ได้เฉพาะเดือนมกราคม–กุมภาพันธ์)`);
+  if (code === 'cf-already-processed') return currentLang === 'ja' ? '繰越処理は実行済みです' : L('Carry-forward already processed', 'ยกยอดเรียบร้อยแล้ว');
+  return L('Only last year can be carried forward', 'ยกยอดได้เฉพาะปีที่แล้วเท่านั้น');
 }
 async function processYearEndCarryForward(forYear) {
   if (blockIfObserver()) return;
   const thisYear = forYear || (bangkokYear() - 1);
-  const refusal = carryForwardRunRefusal(bangkokDateStr(), thisYear, carryForwardFirstSourceYear());
-  if (refusal) { showToast(`⚠️ ${carryForwardRefusalText(refusal, bangkokDateStr())}`, 'warning'); return; }
+  const refusal = carryForwardRunRefusal(bangkokDateStr(), thisYear, carryForwardFirstSourceYear(), LEAVE_CARRY_FORWARD_RUNS);
   const done = LEAVE_CARRY_FORWARD_RUNS[String(thisYear)];
-  if (done) { showToast(`⚠️ ${carryForwardAlreadyDoneText(thisYear, done)}`, 'warning'); return; }
+  if (refusal === 'cf-already-processed' && done) { showToast(`⚠️ ${carryForwardAlreadyDoneText(thisYear, done)}`, 'warning'); return; }
+  if (refusal) { showToast(`⚠️ ${carryForwardRefusalText(refusal)}`, 'warning'); return; }
   // `??` not `||`: a configured 0 means "no carry-forward" (server uses the same rule).
   const rawMax = Number(APP_SETTINGS.leave.carryForwardMax ?? 5);
   const maxCF = Math.max(0, Math.min(60, Number.isFinite(rawMax) ? rawMax : 5));
@@ -3430,8 +3431,8 @@ async function processYearEndCarryForward(forYear) {
         renderSettingsPage();
         return;
       }
-      if (['cf-bad-year', 'cf-not-jan-feb', 'cf-before-system-start'].includes(data.code)) {
-        throw new Error(carryForwardRefusalText(data.code, bangkokDateStr()));
+      if (['cf-bad-year', 'cf-before-system-start'].includes(data.code)) {
+        throw new Error(carryForwardRefusalText(data.code));
       }
       throw new Error(data.message || ('HTTP ' + res.status));
     }
@@ -3454,6 +3455,15 @@ function cfAtRiskRows(year) {
     .filter(r => r.atRiskMin > 0)
     .sort((a, b) => b.atRiskMin - a.atRiskMin || String(a.user.name).localeCompare(String(b.user.name)));
 }
+// FAQ: when the expiry reminders go out -- "30 days and 7 days" / "7 days" (DUAL-SYNC with
+// server.js cfNotifyDaysOf: missing / invalid = 30, capped at 365; the second one only above 7).
+function cfNotifyDaysText(lang) {
+  const raw = Math.trunc(Number(APP_SETTINGS.leave && APP_SETTINGS.leave.carryForwardNotifyDays));
+  const n = Number.isFinite(raw) && raw >= 1 ? Math.min(365, raw) : 30;
+  if (lang === 'ja') return n > 7 ? `${n}日前と7日前` : `${n}日前`;
+  if (lang === 'th') return n > 7 ? `${n} วันและ 7 วัน` : `${n} วัน`;
+  return n > 7 ? `${n} days and 7 days` : `${n} days`;
+}
 function cfDaysAndFull(min) {
   const days = Math.round(Math.max(0, min) / 480 * 100) / 100;
   return currentLang === 'ja' ? `${days}日（${minToStrFull(min)}）` : L(`${days} day(s) (${minToStrFull(min)})`, `${days} วัน (${minToStrFull(min)})`);
@@ -3470,9 +3480,9 @@ function cfAtRiskReportHtml() {
     ? (currentLang === 'ja' ? `⌛ ${year}年の繰越 — ${dateTxt}に失効した分` : L(`⌛ ${year} carry-forward forfeited on ${dateTxt}`, `⌛ วันยกยอดปี ${year} ที่หมดอายุไปเมื่อ ${dateTxt}`))
     : (currentLang === 'ja' ? `⏳ 失効予定の繰越（${dateTxt}失効）` : L(`⏳ Carry-forward at risk — expires ${dateTxt}`, `⏳ วันยกยอดที่จะหมดอายุ — หมดอายุ ${dateTxt}`));
   const hint = currentLang === 'ja'
-    ? '繰越分は先に消化されます。失効日までの年次有給（承認待ちを含む）で使われていない分です。対象者には失効日の29日前と7日前に通知されます。'
-    : L('Carried-forward days are used first; this is the part not yet covered by annual leave dated on or before the expiry (pending included). Employees are notified 29 and 7 days before the expiry.',
-        'วันยกยอดจะถูกใช้ก่อน ตัวเลขนี้คือส่วนที่ยังไม่มีวันลาพักร้อน (รวมที่รออนุมัติ) ลงไว้ภายในวันหมดอายุ พนักงานจะได้รับแจ้งเตือน 29 วันและ 7 วันก่อนวันหมดอายุ');
+    ? '繰越分は先に消化されます。失効日までの年次有給（承認待ちを含む）で使われていない分です。対象者には失効日の' + cfNotifyDaysText('ja') + 'に通知されます。'
+    : L('Carried-forward days are used first; this is the part not yet covered by annual leave dated on or before the expiry (pending included). Employees are notified ' + cfNotifyDaysText('en') + ' before the expiry.',
+        'วันยกยอดจะถูกใช้ก่อน ตัวเลขนี้คือส่วนที่ยังไม่มีวันลาพักร้อน (รวมที่รออนุมัติ) ลงไว้ภายในวันหมดอายุ พนักงานจะได้รับแจ้งเตือน ' + cfNotifyDaysText('th') + 'ก่อนวันหมดอายุ');
   const th = (en, thTxt, ja) => `<th style="text-align:left;padding:6px 8px;font-size:12px;color:#64748b;border-bottom:1px solid var(--border)">${escapeHtml(currentLang === 'ja' ? ja : L(en, thTxt))}</th>`;
   const body = rows.length
     ? `<div class="table-wrap"><table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr>
@@ -4214,7 +4224,7 @@ function renderSettingsPage(_skipRefresh) {
       </label>
       ${row2(
         field(L('Expiry Day','วันที่หมดอายุ'), inp('set-cf-expiry-day', s.leave.carryForwardExpiryDay, 'number', 'min="1" max="31"')),
-        field(L('Notify Before Expiry (days)','แจ้งเตือนล่วงหน้าก่อนหมดอายุ (วัน)'), inp('set-cf-notify', s.leave.carryForwardNotifyDays, 'number', 'min="1"'), L('In-app toast window for the employee. Separately, employees with carry-forward still unused get a notification (and an email if they opted in) 29 days and 7 days before the expiry date.', 'ช่วงเวลาที่แสดง toast ในแอปให้พนักงาน นอกจากนี้ พนักงานที่ยังมีวันยกยอดเหลือจะได้รับการแจ้งเตือน (และอีเมลหากเปิดรับไว้) 29 วันและ 7 วันก่อนวันหมดอายุ'))
+        field(L('Notify Before Expiry (days)','แจ้งเตือนล่วงหน้าก่อนหมดอายุ (วัน)'), inp('set-cf-notify', s.leave.carryForwardNotifyDays, 'number', 'min="1"'), L('In-app toast window for the employee. Employees with carry-forward still unused also get a notification (and an email if they opted in) this many days before the expiry date and again 7 days before (from 09:00; the second one only when this is more than 7).', 'ช่วงเวลาที่แสดง toast ในแอปให้พนักงาน นอกจากนี้ พนักงานที่ยังมีวันยกยอดเหลือจะได้รับการแจ้งเตือน (และอีเมลหากเปิดรับไว้) ล่วงหน้าตามจำนวนวันนี้ก่อนวันหมดอายุ และอีกครั้ง 7 วันก่อน (ตั้งแต่ 09:00 ครั้งที่สองเฉพาะเมื่อค่านี้มากกว่า 7)'))
       )}
       ${cfAtRiskReportHtml()}
       ${openingLeaveBalancesSectionHtml()}
@@ -4222,15 +4232,16 @@ function renderSettingsPage(_skipRefresh) {
 
     ${adminSection('↩️', L('Year-End Carry-Forward', 'ยอดวันลายกไปปีหน้า'), `
       <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">
-        ${L('Runs automatically in January (and still in February if the server was off): each employee’s remaining annual leave for last year (up to max, expired carry-forward excluded) is carried into this year. Use the button (January–February) only if it has not run. From 15 January, MD and Accounting get a daily notification until it has run.','ระบบทำให้อัตโนมัติในเดือนมกราคม (และยังทำในเดือนกุมภาพันธ์หากเซิร์ฟเวอร์ปิดอยู่): ยอดวันลาพักร้อนคงเหลือของปีที่แล้ว (ไม่เกินสูงสุด ไม่รวมวันยกยอดที่หมดอายุ) ของพนักงานทุกคนจะถูกยกมาปีนี้ ใช้ปุ่มนี้ (มกราคม–กุมภาพันธ์) เฉพาะเมื่อระบบยังไม่ได้ทำ ตั้งแต่ 15 มกราคม MD และ Accounting จะได้รับแจ้งเตือนทุกวันจนกว่าจะยกยอดเสร็จ')}
+        ${L('Runs automatically in January (and still in February if the server was off): each employee’s remaining annual leave for last year (up to max, expired carry-forward excluded) is carried into this year. If it has not run, use the button (any month, once per year). From 15 January, MD and Accounting get a daily notification (from 09:00) until it has run.','ระบบทำให้อัตโนมัติในเดือนมกราคม (และยังทำในเดือนกุมภาพันธ์หากเซิร์ฟเวอร์ปิดอยู่): ยอดวันลาพักร้อนคงเหลือของปีที่แล้ว (ไม่เกินสูงสุด ไม่รวมวันยกยอดที่หมดอายุ) ของพนักงานทุกคนจะถูกยกมาปีนี้ หากระบบยังไม่ได้ทำ ให้ใช้ปุ่มนี้ (เดือนใดก็ได้ ปีละครั้ง) ตั้งแต่ 15 มกราคม MD และ Accounting จะได้รับแจ้งเตือนทุกวัน (ตั้งแต่ 09:00) จนกว่าจะยกยอดเสร็จ')}
       </p>
       <div style="font-size:13px;margin-bottom:12px">${carryForwardStatusHtml(bangkokYear() - 1)}</div>
       <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
         ${(() => {
-          // 2026-09-24 (owner): January-February only (round 7), never before the system started (server refuses too).
-          const cfRefusal = carryForwardRunRefusal(bangkokDateStr(), bangkokYear() - 1, carryForwardFirstSourceYear());
+          // 2026-09-24 (owner, final round): any month while not yet recorded, never before the
+          // system started (server refuses too).
+          const cfRefusal = carryForwardRunRefusal(bangkokDateStr(), bangkokYear() - 1, carryForwardFirstSourceYear(), LEAVE_CARRY_FORWARD_RUNS);
           if (cfRefusal) {
-            return `<button class="btn btn-primary btn-sm" disabled style="opacity:.55;cursor:not-allowed">↩️ ${escapeHtml(carryForwardRefusalText(cfRefusal, bangkokDateStr()))}</button>`;
+            return `<button class="btn btn-primary btn-sm" disabled style="opacity:.55;cursor:not-allowed">↩️ ${escapeHtml(carryForwardRefusalText(cfRefusal))}</button>`;
           }
           return `<button class="btn btn-primary btn-sm" onclick="processYearEndCarryForward(${bangkokYear() - 1})">
           ↩️ ${currentLang === 'ja' ? `${bangkokYear()-1}年 → ${bangkokYear()}年 繰越処理` : L(`Process ${bangkokYear()-1} → ${bangkokYear()}`, `ประมวลผล ${bangkokYear()-1} → ${bangkokYear()}`)}
@@ -5860,6 +5871,8 @@ async function logout() {
   DATA_CHECKOUT_REVIEWS = {};
   // 2026-09-24 (round 7): the next user of this tab must not see this user's inbox.
   resetNotifications();
+  // 2026-09-24 (review M-3): nor land on this user's Approvals history view.
+  resetApprovalViewState();
   clearInterval(clockInterval);
   if (gpsWatchId !== null) { navigator.geolocation.clearWatch(gpsWatchId); gpsWatchId = null; }
   destroyGpsMap();
@@ -6473,7 +6486,7 @@ function navigateTo(page) {
   if (page === 'myattendance') { clearInterval(myAttLiveTimer); renderMyAttendance(); }
   if (page === 'leave')        renderLeaveHistory();
   if (page === 'my-requests')  renderMyRequests();
-  if (page === 'approval')     renderApprovals();
+  if (page === 'approval')     { resetApprovalViewOnNavigate(); renderApprovals(); }
   if (page === 'payslip')      { renderPayslipEmployeeList(); populatePayslipPeriodDropdown(); renderPayslip(); }
   if (page === 'finalize')     renderFinalize();
   if (page === 'dashboard')    { renderDashboard(); fetchExchangeRate(); }
@@ -12332,6 +12345,18 @@ function leaveTypeLabel(l) {
 // first, with the records that went with it (revokedWith / cancelledWith) nested under it.
 let _approvalView = 'queue';
 let _voidHistoryPeriod = 0;
+// 2026-09-24 (review M-3): opening Approvals shows the queue again -- only openVoidHistoryForDate
+// (history link / notification) keeps the history view for that one navigation.
+let _approvalViewKeepOnce = false;
+function resetApprovalViewOnNavigate() {
+  if (!_approvalViewKeepOnce) _approvalView = 'queue';
+  _approvalViewKeepOnce = false;
+}
+function resetApprovalViewState() {
+  _approvalView = 'queue';
+  _voidHistoryPeriod = 0;
+  _approvalViewKeepOnce = false;
+}
 function renderApprovalViewSwitch() {
   const el = document.getElementById('approval-view-switch');
   if (!el) return;
@@ -12365,7 +12390,9 @@ function openVoidHistoryForDate(dateStr) {
   if (!isMdAccountingView()) return;
   _approvalView = 'void-history';
   _voidHistoryPeriod = periodIndexForDateStr(dateStr);
+  _approvalViewKeepOnce = true;
   navigateTo('approval');
+  _approvalViewKeepOnce = false; // navigateTo refused (role guard) -> never leak into a later visit
 }
 function voidActionAt(l) {
   return (l && (l.status === 'cancelled' ? l.cancelledAt : l.revokedAt)) || '';
@@ -13590,9 +13617,18 @@ const NOTIFICATION_RENDERERS = {
   'cf-run-overdue': p => {
     const y = Number(p.year) || 0;
     return { icon: '📅', text: currentLang === 'ja'
-      ? `${y}年の有給休暇の${y + 1}年への繰越がまだ実行されていません — 設定画面から実行してください（1〜2月のみ）`
-      : L(`The carry-forward of ${y} annual leave into ${y + 1} has not run yet — run it in Settings (January–February only)`,
-          `ยังไม่ได้ยกยอดวันลาพักร้อนปี ${y} ไปปี ${y + 1} — กดทำได้ที่หน้าตั้งค่า (เฉพาะเดือนมกราคม–กุมภาพันธ์)`) };
+      ? `${y}年の有給休暇の${y + 1}年への繰越がまだ実行されていません — 設定画面から実行してください`
+      : L(`The carry-forward of ${y} annual leave into ${y + 1} has not run yet — run it in Settings`,
+          `ยังไม่ได้ยกยอดวันลาพักร้อนปี ${y} ไปปี ${y + 1} — กดทำได้ที่หน้าตั้งค่า`) };
+  },
+  // 2026-09-24 (review M-1, final round): an employee reactivated after the run, who was not active
+  // at the end of that year (or whose deactivation date is unknown) -- no automatic carry-forward.
+  'cf-manual-decision': p => {
+    const y = Number(p.year) || 0;
+    return { icon: '🧮', text: currentLang === 'ja'
+      ? `${p.employeeName || ''}さんが再有効化されました — ${y}年分の繰越は自動では設定されていません。必要に応じて設定画面（導入時の休暇残日数）で決めてください`
+      : L(`${p.employeeName || ''} was reactivated — their ${y} carry-forward was not set automatically; decide it in Settings (opening leave balances) if needed`,
+          `${p.employeeName || ''} ถูกเปิดใช้งานอีกครั้ง — ระบบไม่ได้ยกยอดวันลาปี ${y} ให้อัตโนมัติ กรุณาพิจารณาที่หน้าตั้งค่า (ตั้งยอดลาเปิดระบบ) หากจำเป็น`) };
   },
 };
 function notificationText(n) {
@@ -15058,7 +15094,7 @@ function lateOutThresholdHour(tier) {
 function lateOutAllowanceForHour(hour) {
   const S = APP_SETTINGS.allowances;
   const thr2 = S.lateNightThreshold2Hour || S.lateNightThresholdHour || 20;
-  return hour >= thr2 ? (S.lateNight2 || 480) : (S.lateNight1 || 240);
+  return lateNightThresholdMins(hour) >= lateNightThresholdMins(thr2) ? (S.lateNight2 || 480) : (S.lateNight1 || 240);
 }
 
 // 2026-09-23 (web check-out review): reads ONE generatePeriodDays() row -- the same source payroll
@@ -15095,7 +15131,7 @@ function canSubmitLateNightForDate(dateStr, userId, opts) {
   if (!row.checkOut) return { ok: false, reason: 'no-checkout' };
   const thr1 = lateOutThresholdHour(1);
   const checkOutMins = lateNightCheckoutMins(row.checkOut);
-  if (!Number.isFinite(checkOutMins) || checkOutMins < thr1 * 60) {
+  if (!Number.isFinite(checkOutMins) || checkOutMins < lateNightThresholdMins(thr1)) {
     return { ok: false, reason: 'too-early', thr1 };
   }
   if (!lateNightCheckoutOk(row)) {
@@ -15208,8 +15244,8 @@ function refreshLateOutGate() {
   const thr2 = lateOutThresholdHour(2);
   const amt1 = lateOutAllowanceForHour(thr1);
   const amt2 = lateOutAllowanceForHour(thr2);
-  const can19 = deviceOk && checkOutMins >= thr1 * 60;
-  const can20 = deviceOk && checkOutMins >= thr2 * 60;
+  const can19 = deviceOk && checkOutMins >= lateNightThresholdMins(thr1);
+  const can20 = deviceOk && checkOutMins >= lateNightThresholdMins(thr2);
 
   const btn19 = document.getElementById('lateout-btn-19');
   const btn20 = document.getElementById('lateout-btn-20');
@@ -15803,8 +15839,8 @@ function refreshHolidayWorkLateNightBundle() {
   const btn20 = document.getElementById('hw-lateout-btn-20');
   const noteEl = document.getElementById('hw-lateout-time-note');
   const _isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-  const can19 = checkOutMins >= thr1 * 60;
-  const can20 = checkOutMins >= thr2 * 60;
+  const can19 = checkOutMins >= lateNightThresholdMins(thr1);
+  const can20 = checkOutMins >= lateNightThresholdMins(thr2);
   [btn19, btn20].forEach(b => {
     if (!b) return;
     b.style.borderColor = _isDark ? '#334155' : '#e2e8f0';
@@ -19803,9 +19839,9 @@ function _faqRulesItems() {
       ) },
     { icon: '🏖️', roles: ['md','accounting','manager','user','driver','marketing'], q: _faq('How does Annual Leave carry-forward work?', 'วันลาพักร้อนยกยอดปีถัดไปยังไง?', '年次有給休暇の繰越はどう機能しますか？'),
       a: _faq(
-        `Unused Annual Leave carries over into next year — up to ${S.leave.carryForwardMax} days max. The system does this automatically in January, after the year has ended; nobody needs to press anything (if the server was off, it still runs in February, and MD/Accounting can run it from Settings in January–February). ${S.leave.carryForwardExpiryEnabled !== false ? `Carried-over days are used first. Any carried-over days still unused on ${S.leave.carryForwardExpiryDay}/${S.leave.carryForwardExpiryMonth} are forfeited. If you still have some, you get a notification (and an email if you opted in) 29 days and 7 days before that date.` : 'Carried-over days do not expire.'}`,
-        `วันลาพักร้อนที่เหลือยกไปปีถัดไปได้สูงสุด ${S.leave.carryForwardMax} วัน ระบบยกยอดให้อัตโนมัติในเดือนมกราคม หลังสิ้นปีแล้ว ไม่ต้องกดอะไร (หากเซิร์ฟเวอร์ปิดอยู่ ระบบยังทำให้ในเดือนกุมภาพันธ์ และ MD/Accounting กดทำได้จากหน้าตั้งค่าในเดือนมกราคม–กุมภาพันธ์) ${S.leave.carryForwardExpiryEnabled !== false ? `วันที่ยกยอดจะถูกใช้ก่อน ส่วนที่ยังใช้ไม่หมดภายในวันที่ ${S.leave.carryForwardExpiryDay}/${S.leave.carryForwardExpiryMonth} จะถูกตัดทิ้ง หากยังเหลืออยู่ จะได้รับการแจ้งเตือน (และอีเมลหากเปิดรับไว้) 29 วันและ 7 วันก่อนวันดังกล่าว` : 'วันที่ยกยอดไม่มีวันหมดอายุ'}`,
-        `未消化の年次有給休暇は最大${S.leave.carryForwardMax}日まで翌年に繰り越されます。年が明けた1月にシステムが自動で繰り越すため、操作は不要です（サーバー停止時は2月にも実行され、MD／経理は1〜2月に設定画面から実行できます）。${S.leave.carryForwardExpiryEnabled !== false ? `繰り越した日数から先に消化されます。${S.leave.carryForwardExpiryMonth}月${S.leave.carryForwardExpiryDay}日までに使い切れなかった繰越分は失効します。残っている場合は、その29日前と7日前に通知（希望者にはメールも）が届きます。` : '繰り越した日数に有効期限はありません。'}`
+        `Unused Annual Leave carries over into next year — up to ${S.leave.carryForwardMax} days max. The system does this automatically in January, after the year has ended; nobody needs to press anything (if the server was off, it still runs in February; if it still has not run, MD/Accounting can run it from Settings at any time, once). ${S.leave.carryForwardExpiryEnabled !== false ? `Carried-over days are used first. Any carried-over days still unused on ${S.leave.carryForwardExpiryDay}/${S.leave.carryForwardExpiryMonth} are forfeited. If you still have some, you get a notification (and an email if you opted in) ${cfNotifyDaysText('en')} before that date.` : 'Carried-over days do not expire.'}`,
+        `วันลาพักร้อนที่เหลือยกไปปีถัดไปได้สูงสุด ${S.leave.carryForwardMax} วัน ระบบยกยอดให้อัตโนมัติในเดือนมกราคม หลังสิ้นปีแล้ว ไม่ต้องกดอะไร (หากเซิร์ฟเวอร์ปิดอยู่ ระบบยังทำให้ในเดือนกุมภาพันธ์ หากยังไม่ได้ทำ MD/Accounting กดทำได้จากหน้าตั้งค่าได้ทุกเมื่อ ครั้งเดียว) ${S.leave.carryForwardExpiryEnabled !== false ? `วันที่ยกยอดจะถูกใช้ก่อน ส่วนที่ยังใช้ไม่หมดภายในวันที่ ${S.leave.carryForwardExpiryDay}/${S.leave.carryForwardExpiryMonth} จะถูกตัดทิ้ง หากยังเหลืออยู่ จะได้รับการแจ้งเตือน (และอีเมลหากเปิดรับไว้) ${cfNotifyDaysText('th')}ก่อนวันดังกล่าว` : 'วันที่ยกยอดไม่มีวันหมดอายุ'}`,
+        `未消化の年次有給休暇は最大${S.leave.carryForwardMax}日まで翌年に繰り越されます。年が明けた1月にシステムが自動で繰り越すため、操作は不要です（サーバー停止時は2月にも実行され、それでも未実行の場合はMD／経理がいつでも設定画面から1回実行できます）。${S.leave.carryForwardExpiryEnabled !== false ? `繰り越した日数から先に消化されます。${S.leave.carryForwardExpiryMonth}月${S.leave.carryForwardExpiryDay}日までに使い切れなかった繰越分は失効します。残っている場合は、その${cfNotifyDaysText('ja')}に通知（希望者にはメールも）が届きます。` : '繰り越した日数に有効期限はありません。'}`
       ) },
     { icon: '🏖️', roles: ['md','accounting','manager','user','driver','marketing'], q: _faq('When can a new employee use Annual Leave?', 'พนักงานใหม่ใช้ลาพักร้อนได้เมื่อไหร่?', '新入社員はいつから年次有給を使えますか？'),
       a: _faq(
