@@ -1524,6 +1524,13 @@ let DATA_COMPANY_TRIP_DATES = [];
 function isCompanyTripDay(dateStr) {
   return DATA_COMPANY_TRIP_DATES.includes(dateStr);
 }
+// 2026-09-24 (owner): an Abroad trip may not include a Company Trip day. Returns the first
+// Company Trip date inside [dateFrom, dateTo], or null. Dual-sync with server.js.
+function companyTripDateInRange(dateFrom, dateTo) {
+  const to = dateTo || dateFrom;
+  if (!dateFrom || !to) return null;
+  return (DATA_COMPANY_TRIP_DATES || []).filter(d => d >= dateFrom && d <= to).sort()[0] || null;
+}
 
 const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 function isNonWorkDayForComp(dateStr) {
@@ -1584,9 +1591,11 @@ function scanWindowError(dateStr, startHHMM, endHHMM, userId) {
       return L('⚠️ A check-out is required for this date — submit a time correction first',
         '⚠️ วันที่เลือกยังไม่มีเวลาสแกนออกงาน — กรุณายื่นขอแก้ไขเวลาก่อน');
     }
-    let outMin = parseHHMMToMins(endLimit);
-    if (outMin < 5 * 60) outMin += 24 * 60;
-    if (parseHHMMToMins(endHHMM) > outMin) {
+    // 2026-09-24: the typed end follows the same after-midnight rule as the check-out (an OT end
+    // before 05:00 is after midnight). Holiday Work never gets here with such an end -- its
+    // end-after-start check runs first and refuses it.
+    const outMin = lateNightCheckoutMins(endLimit);
+    if (lateNightCheckoutMins(endHHMM) > outMin) {
       return L('⚠️ End time cannot be later than your check-out', '⚠️ เวลาเลิกต้องไม่หลังเวลาสแกนออกงาน') + ` (${endLimit})`;
     }
   }
@@ -1622,15 +1631,57 @@ function officeOtStdStartHHMM(S) {
 }
 // Office OT is request-gated (never derived from scan-out). Weekdays only: hours after 17:30 at ×1.5.
 // Weekend / public-holiday pay goes through Holiday Work (start–end), not this form. Drivers use submitDriverOT.
+// 2026-09-24 (owner): office OT may run past midnight -- an end time before 05:00 is after
+// midnight of the SAME work day (the check-out convention of lateNightCheckoutMins). The rate is
+// always the start day's: office OT only exists on a weekday (x1.5), so running into a weekend or
+// public holiday after midnight never turns it into x2/x3. Dual-sync with server.js.
 function deriveOfficeOtFromEndTime(dateFrom, otEndTime, S) {
   const out = { isDriverOT: false, otMultiplier: 1.5, otHours: 0, otHours20: 0, otHours30: 0 };
   if (!dateFrom || !otEndTime || !HHMM_RE.test(otEndTime)) return out;
   if (isNonWorkDayForComp(dateFrom)) return out;
-  const [eh, em] = otEndTime.split(':').map(Number);
-  const otMins = (eh * 60 + em) - (17 * 60 + 30);
-  out.otHours = otMins > 0 ? Math.round(otMins / 60 * 100) / 100 : 0;
+  const otMins = lateNightCheckoutMins(otEndTime) - (17 * 60 + 30);
+  out.otHours = otMins > 0 ? round2HalfUp(otMins / 60) : 0;
   out.otMultiplier = 1.5;
   return out;
+}
+// 2026-09-24 (owner): hours are kept to 2 decimal places, rounded half-up at the 3rd decimal
+// (reminder: the owner wants to reconsider this rule later). The epsilon absorbs binary noise
+// such as 1.005 * 100 = 100.49999... Dual-sync with server.js.
+function round2HalfUp(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 0;
+  return Math.sign(x) * Math.round(Math.abs(x) * 100 + 1e-9) / 100;
+}
+function otEndCrossesMidnight(hhmm) {
+  const m = lateNightCheckoutMins(hhmm);
+  return Number.isFinite(m) && m >= 24 * 60;
+}
+// HTML-escaped OT end time, marked "next day" when it is after midnight.
+function otEndTimeLabel(hhmm) {
+  if (!hhmm) return '';
+  const t = escapeHtml(hhmm);
+  return otEndCrossesMidnight(hhmm) ? `${t} (${L('next day', 'วันถัดไป')})` : t;
+}
+// 2026-09-24 (owner): approved Holiday Work in paid mode carries OT hours (otHours20/otHours30)
+// that payroll already pays and already adds to the payslip OT hours -- the OT count/total views
+// (Dashboard, Reports monthly/yearly + detail, OT detail, payslip OT tile) now count it too.
+// Same record filter as computePayroll's approvedHolidayWork (paid + role eligible + not a
+// Company Trip day). Display-only; no pay changes. Dual-sync (count only): server.js getPayrollView.
+function isHolidayWorkOtRecord(l) {
+  return !!l && l.type === 'holiday-work' && l.status === 'approved' && l.compensationMode === 'paid' &&
+    ((Number(l.otHours20) || 0) + (Number(l.otHours30) || 0)) > 0;
+}
+function reportOtRecords(u, startStr, endStr) {
+  if (!u) return [];
+  const canOT = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'ot');
+  const canHW = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'holidayWork');
+  return DATA_LEAVES.filter(l =>
+    l.userId === u.id && l.dateFrom >= startStr && l.dateFrom <= endStr && !isCompanyTripDay(l.dateFrom) &&
+    ((canOT && l.type === 'ot' && l.status === 'approved') || (canHW && isHolidayWorkOtRecord(l))));
+}
+// Rate cell for an OT detail row -- Holiday Work rows are labelled as such.
+function reportOtRateLabel(l) {
+  return l.type === 'holiday-work' ? `🔄 ${L('Holiday Work', 'ทำงานวันหยุด')} ${otRateDisplay(l)}` : otRateDisplay(l);
 }
 function otRecordTotalHours(l) {
   const hrs20 = Number(l.otHours20) || 0;
@@ -1699,6 +1750,8 @@ function canSubmitHolidayWorkForDate(dateStr, userId) {
   if (!isAllowanceEligible(APP_SETTINGS.allowanceEligibility, user.role, 'holidayWork')) {
     return { ok: false, reason: 'ineligible' };
   }
+  // 2026-09-24 (owner): a Company Trip day pays no allowance of any kind, so no Holiday Work.
+  if (isCompanyTripDay(dateStr)) return { ok: false, reason: 'company-trip' };
   if (!isHolidayWorkDay(dateStr)) return { ok: false, reason: 'not-holiday' };
   // 2026-09-23 (Opus review C-1): claimed after it happens -- dual-sync with server
   // holidayWorkSubmitBlockReason.
@@ -1749,6 +1802,10 @@ function holidayWorkSubmitBlockedMessage(result) {
       'Only dates you actually worked are selectable. Weekends or public holidays only (not Company Trip)',
       'เลือกได้เฉพาะวันที่ทำงานจริงเท่านั้น\nเฉพาะวันเสาร์-อาทิตย์หรือวันหยุดนักขัตฤกษ์ (ไม่รวม Company Trip)'
     );
+  }
+  if (result.reason === 'company-trip') {
+    return L('This date is a Company Trip day — no allowance of any kind is paid, so Holiday Work cannot be filed',
+      'วันนี้เป็นวัน Company Trip — ไม่มีเบี้ยเลี้ยงใด ๆ ทั้งสิ้น จึงยื่นขอทำงานวันหยุดไม่ได้');
   }
   if (result.reason === 'no-checkin') {
     return L('Holiday work requires a check-in first', 'ต้องเช็กอินก่อนจึงจะยื่นขอทำงานวันหยุดได้');
@@ -2675,10 +2732,11 @@ function isAbroadTravelDay(leaves, userId, dateStr) {
 // Dual-sync with server.js getApprovedHolidayWorkAnnualLeaveDays.
 function getApprovedHolidayWorkDays(year, userId) {
   const yStart = `${year}-01-01`, yEnd = `${year}-12-31`;
+  // 2026-09-24 (owner): no credit for Holiday Work on a date that later became a Company Trip.
   const hwDays = DATA_LEAVES.filter(l =>
     l.userId === userId && l.type === 'holiday-work' && l.compensationMode === 'annual-leave' &&
     l.status === 'approved' &&
-    l.dateFrom >= yStart && l.dateFrom <= yEnd
+    l.dateFrom >= yStart && l.dateFrom <= yEnd && !isCompanyTripDay(l.dateFrom)
   ).reduce((s, l) => s + (l.days || 1), 0);
   const abroad = DATA_LEAVES.filter(l => l.userId === userId && l.type === 'abroad' && l.status === 'approved');
   return hwDays + abroadTravelCreditDays(abroad, yStart, yEnd);
@@ -7856,12 +7914,8 @@ function renderDashboard() {
     !isCompanyTripDay(l.dateFrom) && !fullLeaveDash.has(l.dateFrom)
   ).length;
 
-  const otLeavesThisPeriod = DATA_LEAVES.filter(l =>
-    l.userId === currentUser.id && l.type === 'ot' && l.status === 'approved' &&
-    l.dateFrom >= startStr && l.dateFrom <= endStr &&
-    !isCompanyTripDay(l.dateFrom)
-  );
-  const otCount = otLeavesThisPeriod.length;
+  // 2026-09-24: includes paid Holiday Work OT (reportOtRecords).
+  const otCount = reportOtRecords(currentUser, startStr, endStr).length;
 
   const longDistanceCount = DATA_LEAVES.filter(l =>
     l.userId === currentUser.id && l.type === 'long-distance' && l.status === 'approved' &&
@@ -9860,11 +9914,8 @@ function computeReportPeriodStats(u, start, end, periodIndex) {
   const startStr = `${start.getFullYear()}-${pad2r(start.getMonth() + 1)}-${pad2r(start.getDate())}`;
   const endStr   = `${end.getFullYear()}-${pad2r(end.getMonth() + 1)}-${pad2r(end.getDate())}`;
   const canOTRow = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'ot');
-  const otDays = canOTRow ? DATA_LEAVES.filter(l =>
-    l.userId === u.id && l.type === 'ot' && l.status === 'approved' &&
-    l.dateFrom >= startStr && l.dateFrom <= endStr &&
-    !isCompanyTripDay(l.dateFrom)
-  ).length : 0;
+  // 2026-09-24: includes paid Holiday Work OT (reportOtRecords).
+  const otDays = canOTRow ? reportOtRecords(u, startStr, endStr).length : 0;
 
   const canPersonalCarRow = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'personalCar') && u.personalCarEligible === true;
   const pcCount = canPersonalCarRow ? DATA_LEAVES.filter(l =>
@@ -10246,11 +10297,8 @@ function showOTDetail(userId) {
   const pad2o = n => String(n).padStart(2,'0');
   const startStr = `${start.getFullYear()}-${pad2o(start.getMonth()+1)}-${pad2o(start.getDate())}`;
   const endStr   = `${end.getFullYear()}-${pad2o(end.getMonth()+1)}-${pad2o(end.getDate())}`;
-  const otLeaves = DATA_LEAVES.filter(l =>
-    l.userId === u.id && l.type === 'ot' && l.status === 'approved' &&
-    l.dateFrom >= startStr && l.dateFrom <= endStr &&
-    !isCompanyTripDay(l.dateFrom)
-  ).sort((a,b) => a.dateFrom.localeCompare(b.dateFrom));
+  // 2026-09-24: includes paid Holiday Work OT rows (reportOtRecords), labelled in the Rate column.
+  const otLeaves = reportOtRecords(u, startStr, endStr).sort((a,b) => a.dateFrom.localeCompare(b.dateFrom));
 
   const title = document.getElementById('ot-detail-title');
   const body  = document.getElementById('ot-detail-body');
@@ -10267,12 +10315,15 @@ function showOTDetail(userId) {
   const rows = otLeaves.map(l => {
     const hrs = otRecordTotalHours(l);
     totalHrs += hrs;
-    const mult = otRateDisplay(l);
+    const mult = reportOtRateLabel(l);
+    const endCell = l.type === 'holiday-work'
+      ? (l.workEndTime ? `${escapeHtml(l.workStartTime || '')}–${escapeHtml(l.workEndTime)}` : '—')
+      : (otEndTimeLabel(l.otEndTime) || '—');
     return `<tr style="border-bottom:1px solid #f1f5f9">
       <td style="padding:10px 14px;font-weight:600">${fmtDate(new Date(l.dateFrom+'T12:00:00'))}</td>
       <td style="padding:10px 14px;text-align:center;color:#ea580c;font-weight:700">${fmtHrs(hrs)}</td>
       <td style="padding:10px 14px;text-align:center;font-size:12px;color:#64748b">${mult}</td>
-      <td style="padding:10px 14px;text-align:center;color:#374151">${escapeHtml(l.otEndTime) || '—'}</td>
+      <td style="padding:10px 14px;text-align:center;color:#374151">${endCell}</td>
     </tr>`;
   }).join('');
 
@@ -10312,7 +10363,8 @@ function buildReportDetailTables(u, days, startStr, endStr) {
   const canOTRpt          = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'ot');
   const canPersonalCarRpt = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'personalCar') && u.personalCarEligible === true;
   const isDriverU = u.role === 'driver';
-  const otLeaves = canOTRpt ? DATA_LEAVES.filter(l=>l.userId===u.id&&l.type==='ot'&&l.status==='approved'&&l.dateFrom>=startStr&&l.dateFrom<=endStr&&!isCompanyTripDay(l.dateFrom)) : [];
+  // 2026-09-24: includes paid Holiday Work OT (reportOtRecords).
+  const otLeaves = canOTRpt ? reportOtRecords(u, startStr, endStr) : [];
   const pcLeaves = canPersonalCarRpt ? DATA_LEAVES.filter(l=>l.userId===u.id&&l.type==='personal-car'&&l.status==='approved'&&l.dateFrom>=startStr&&l.dateFrom<=endStr&&!isCompanyTripDay(l.dateFrom)) : [];
   const pcCount  = pcLeaves.length;
   const pcTotal  = pcLeaves.reduce((sum,l)=>sum+(l.personalCarRate!=null?l.personalCarRate:(APP_SETTINGS.allowances.personalCar!=null?APP_SETTINGS.allowances.personalCar:1000)),0);
@@ -10359,7 +10411,7 @@ function buildReportDetailTables(u, days, startStr, endStr) {
 
   if (otLeaves.length>0) {
     let tot=0;
-    const rows=otLeaves.sort((a,b)=>a.dateFrom.localeCompare(b.dateFrom)).map(l=>{const h=otRecordTotalHours(l);tot+=h;const mult=otRateDisplay(l);return`<tr style="border-bottom:1px solid #f1f5f9"><td style="padding:9px 14px;font-weight:600">${fmtDate(new Date(l.dateFrom+'T12:00:00'))}</td><td style="padding:9px 14px;text-align:center;color:#ea580c;font-weight:700">${fmtHrs(h)}</td><td style="padding:9px 14px;text-align:center;font-size:12px;color:#64748b">${mult}</td></tr>`;}).join('');
+    const rows=otLeaves.sort((a,b)=>a.dateFrom.localeCompare(b.dateFrom)).map(l=>{const h=otRecordTotalHours(l);tot+=h;const mult=reportOtRateLabel(l);return`<tr style="border-bottom:1px solid #f1f5f9"><td style="padding:9px 14px;font-weight:600">${fmtDate(new Date(l.dateFrom+'T12:00:00'))}</td><td style="padding:9px 14px;text-align:center;color:#ea580c;font-weight:700">${fmtHrs(h)}</td><td style="padding:9px 14px;text-align:center;font-size:12px;color:#64748b">${mult}</td></tr>`;}).join('');
     html+=`<div style="padding:10px 16px 6px;font-weight:700;font-size:13px;color:#c2410c;background:#fff7ed;border-top:2px solid #e2e8f0;border-bottom:1px solid #fed7aa">⏱️ OT — ${otLeaves.length} ${L('days','วัน')}</div>
     <table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:#fffbf7">${TH(L('Date','วันที่'),'#fed7aa')}${THC(L('OT Hours','ชั่วโมง OT'),'#fed7aa')}${THC(L('Rate','อัตรา'),'#fed7aa')}</tr></thead><tbody>${rows}</tbody>
     <tfoot><tr style="background:#fff7ed"><td style="padding:8px 14px;font-weight:700;color:#c2410c">${L('Total','รวม')}</td><td style="padding:8px 14px;text-align:center;font-weight:700;color:#ea580c">${fmtHrs(tot)}</td><td></td></tr></tfoot></table>`;
@@ -10408,7 +10460,8 @@ function showReportDetail(userId) {
   const pad2=(n)=>String(n).padStart(2,'0');
   const startStr=`${start.getFullYear()}-${pad2(start.getMonth()+1)}-${pad2(start.getDate())}`;
   const endStr  =`${end.getFullYear()}-${pad2(end.getMonth()+1)}-${pad2(end.getDate())}`;
-  const otLeaves = canOTRpt ? DATA_LEAVES.filter(l=>l.userId===u.id&&l.type==='ot'&&l.status==='approved'&&l.dateFrom>=startStr&&l.dateFrom<=endStr&&!isCompanyTripDay(l.dateFrom)) : [];
+  // 2026-09-24: includes paid Holiday Work OT (reportOtRecords).
+  const otLeaves = canOTRpt ? reportOtRecords(u, startStr, endStr) : [];
   const otDays   = otLeaves.length;
   const ldLeaves = canLongDistRpt ? DATA_LEAVES.filter(l=>l.userId===u.id&&l.type==='long-distance'&&l.status==='approved'&&l.dateFrom>=startStr&&l.dateFrom<=endStr&&!isCompanyTripDay(l.dateFrom)) : [];
   const ldCount  = ldLeaves.length;
@@ -10627,9 +10680,12 @@ function computePayroll(user, start, end, periodIndex) {
   // Dual-sync with the other file's computePayroll.
   const abroadDates = new Set(pDays.filter(d => d.status === 'abroad').map(d => d.date));
 
+  // 2026-09-24 (owner: a Company Trip day pays no allowance of any kind): a web Early Morning
+  // approved before the date was declared a Company Trip is no longer paid. Dual-sync with server.js.
   const approvedEarlyMorning = canEarlyLate ? DATA_LEAVES.filter(l =>
     l.userId === user.id && l.type === 'early-morning' && l.status === 'approved' &&
-    l.dateFrom >= periodStartStr && l.dateFrom <= periodEndStr
+    l.dateFrom >= periodStartStr && l.dateFrom <= periodEndStr &&
+    !isCompanyTripDay(l.dateFrom)
   ) : [];
 
   const upcountryCount = canUpcountry ? pDays.filter(d =>
@@ -10744,6 +10800,8 @@ function computePayroll(user, start, end, periodIndex) {
   ot20Amount = otPayAcc.ot20Amount; ot20Hours = otPayAcc.ot20Hours;
   ot30Amount = otPayAcc.ot30Amount; ot30Hours = otPayAcc.ot30Hours;
   let holidayTransportTotal = 0;
+  // 2026-09-24: display-only count of paid Holiday Work records with OT hours (payslip OT tile).
+  const holidayWorkOtCount = approvedHolidayWork.filter(isHolidayWorkOtRecord).length;
   approvedHolidayWork.forEach(l => {
     if (l.compensationMode !== 'paid') return;
     if (!abroadDates.has(l.dateFrom)) {
@@ -10821,7 +10879,7 @@ function computePayroll(user, start, end, periodIndex) {
     upcountryCount: totalUpcountryCount, holidayWorkUpcountryCount, earlyLateBonus, earlyCount, lateNightCount,
     early2Count, early2Amount, early1Count, early1Amount, lateNight2Count, lateNight2Amount, lateNight1Count, lateNight1Amount,
     ot15Amount, ot15Hours, ot20Amount, ot20Hours, ot30Amount, ot30Hours, otTotalHours,
-    longDistanceCount, personalCarCount,
+    longDistanceCount, personalCarCount, holidayWorkOtCount,
     approvedOTs, approvedLD, approvedPC,
     periodStartStr, periodEndStr, hourlyRate, pDays
   };
@@ -10939,7 +10997,9 @@ function getPayrollView(user, start, end, periodIndex) {
     });
   }
   const display = {
-    otCount: (calc.approvedOTs || []).length,
+    // 2026-09-24: + paid Holiday Work that carries OT hours (already in calc's OT hours/amount).
+    // Dual-sync with server.js getPayrollView's otCount.
+    otCount: (calc.approvedOTs || []).length + (calc.holidayWorkOtCount || 0),
     personalCarRateDisplay: calc.approvedPC?.[0]?.personalCarRate != null
       ? calc.approvedPC[0].personalCarRate : (S.allowances.personalCar != null ? S.allowances.personalCar : 1000),
     lateDeductMinutes,
@@ -11486,7 +11546,7 @@ function leaveTypeLabel(l) {
     const m = Math.round((totHrs - h) * 60);
     const dur = currentLang==='en' ? (m>0?`${h}h${m}m`:`${h}h`) : (m>0?`${h}ชม.${m}น.`:`${h}ชม.`);
     if (l.otEndTime) {
-      const oet = escapeHtml(l.otEndTime);
+      const oet = otEndTimeLabel(l.otEndTime);
       return currentLang==='en' ? `⏱️ Request OT ${dur} (until ${oet})` : `⏱️ ขอ OT ${dur} (ถึง ${oet})`;
     }
     return currentLang==='en' ? `⏱️ Request OT ${dur} (${otRateDisplay(l)})` : `⏱️ ขอ OT ${dur} (${otRateDisplay(l)})`;
@@ -12100,6 +12160,16 @@ async function approveMockLeaveInternal(id) {
   // 2026-08-16 (Opus re-audit of M-4): was a local shadow of the shared top-level
   // effectiveRouteType() -- removed for the same shadowing-landmine reason as renderApprovals().
   if (!isMyTurnNow(l)) return false;
+  // 2026-09-24 (owner): a Company Trip day pays no allowance of any kind -- Holiday Work on one,
+  // or an Abroad trip that includes one, cannot be approved (the server refuses it too).
+  if (l.type === 'holiday-work' && isCompanyTripDay(l.dateFrom)) {
+    showToast(holidayWorkSubmitBlockedMessage({ reason: 'company-trip' }), 'warning');
+    return false;
+  }
+  if (l.type === 'abroad') {
+    const tripDay = companyTripDateInRange(l.dateFrom, l.dateTo);
+    if (tripDay) { showToast(abroadCompanyTripMessage(tripDay), 'warning'); return false; }
+  }
   const turnRole = STATUS_TO_ROLE[l.status];
   const newStatus = computeNextStatus(l.type, l.status, turnRole, l.approvalRoute);
   if (!newStatus) return false;
@@ -12115,6 +12185,11 @@ async function approveMockLeaveInternal(id) {
     body: JSON.stringify({ status: newStatus, approver: currentUser.name, approvedAt: fmtDateTime(new Date()) })
   });
   const data = await res.json();
+  // 2026-09-24 (review M-2): the travel-day conflict refusal gets a translated, actionable message.
+  if (!data.success && data.code === 'abroad-travel-hw-conflict') {
+    throw new Error(L("Holiday work already exists on this trip's start or end date, and a travel day cannot also carry holiday work. Reject this trip (the employee can resubmit it with other dates), or reject that holiday work first if it is still pending",
+      'มีคำขอทำงานวันหยุดอยู่แล้วในวันเริ่มหรือวันสิ้นสุดทริป และวันเดินทางจะมีทำงานวันหยุดด้วยไม่ได้ — ให้ปฏิเสธทริปนี้ (พนักงานยื่นใหม่ด้วยวันที่อื่นได้) หรือปฏิเสธคำขอทำงานวันหยุดนั้นก่อนหากยังรออนุมัติอยู่'));
+  }
   if (!data.success) throw new Error(data.message);
   Object.assign(l, data.leave);
   // Clear Old Attachments: the actual file deletion only happens once MD's approval lands —
@@ -12697,7 +12772,7 @@ function showApprovalDetail(id) {
     const durText = l.days ? (currentLang === 'ja' ? `${Number(l.days)}日` : L(`${Number(l.days)} day(s)`, `${Number(l.days)} วัน`)) : (l.timePart ? formatTimePart(l) : '—');
     detailHtml = row(L('Duration', 'ระยะเวลา'), durText);
   } else if (l.type === 'ot') {
-    detailHtml = (l.otEndTime ? row(L('End Work', 'เวลาเลิกงาน'), `⏱️ ${escapeHtml(l.otEndTime)}`) : '')
+    detailHtml = (l.otEndTime ? row(L('End Work', 'เวลาเลิกงาน'), `⏱️ ${otEndTimeLabel(l.otEndTime)}`) : '')
       + row(L('OT Hours', 'ชั่วโมง OT'), otHoursRateDetail(l));
   } else if (l.type === 'holiday-work') {
     const mode = l.compensationMode === 'paid'
@@ -14199,8 +14274,11 @@ function syncOfficeOtFormHints() {
   const rangeHint = document.getElementById('ot-hours-range-hint');
   const stdStart = officeOtStdStartHHMM(APP_SETTINGS);
   if (hint) {
+    // 2026-09-24: OT may end after midnight -- say how to enter it.
     hint.textContent = L('Weekday OT is calculated from 17:30 (×1.5). Must submit OT — not auto from scan-out.',
-        'วันธรรมดา: OT คำนวณตั้งแต่ 17:30 (×1.5) ต้องยื่นขอ OT ก่อน ระบบไม่คำนวณจากสแกนออกอัตโนมัติ');
+        'วันธรรมดา: OT คำนวณตั้งแต่ 17:30 (×1.5) ต้องยื่นขอ OT ก่อน ระบบไม่คำนวณจากสแกนออกอัตโนมัติ') + ' ' +
+      L('An end time before 05:00 means after midnight (same work day).',
+        'เวลาเลิกก่อน 05:00 หมายถึงหลังเที่ยงคืน (นับเป็นวันทำงานเดียวกัน)');
   }
   if (rangeHint) {
     rangeHint.textContent = L(' (17:30 → specified time)', ' (17:30 → เวลาที่ระบุ)');
@@ -14296,7 +14374,7 @@ async function submitOT() {
   if (!(derived.otHours > 0)) {
     showToast(isNonWorkDayForComp(date)
       ? checkedInDateBlockedMessage({ reason: 'holiday-ot' })
-      : L('⚠️ End time must be after 17:30', '⚠️ เวลาเลิกงานต้องหลัง 17:30'), 'warning');
+      : L('⚠️ End time must be after 17:30 (before 05:00 = after midnight)', '⚠️ เวลาเลิกงานต้องหลัง 17:30 (ก่อน 05:00 = หลังเที่ยงคืน)'), 'warning');
     return;
   }
   const otScanErr = scanWindowError(date, null, endTime);
@@ -14359,7 +14437,9 @@ async function submitDriverOT() {
   if (blockIfObserver()) return;
   const date   = document.getElementById('ot-date').value;
   const reason = document.getElementById('ot-reason').value.trim();
-  const hm = (hId, mId) => (parseInt(document.getElementById(hId).value)||0) + (parseInt(document.getElementById(mId).value)||0)/60;
+  // 2026-09-24 (owner): hours to 2 decimal places, half-up (20 min = 0.33 h). Dual-sync: server
+  // POST/PUT /api/leaves round driver otHours the same way.
+  const hm = (hId, mId) => round2HalfUp((parseInt(document.getElementById(hId).value)||0) + (parseInt(document.getElementById(mId).value)||0)/60);
   const h15 = hm('ot-hours-15', 'ot-mins-15');
   const h20 = hm('ot-hours-20', 'ot-mins-20');
   const h30 = hm('ot-hours-30', 'ot-mins-30');
@@ -14707,6 +14787,14 @@ function closeAbroadModal() {
   document.getElementById('abroad-modal').classList.remove('show');
   editingLeaveId = null;
 }
+// 2026-09-24 (owner): Abroad cannot include a Company Trip day.
+function abroadCompanyTripMessage(tripDay) {
+  const d = fmtDate(new Date(tripDay + 'T12:00:00'));
+  return currentLang === 'ja'
+    ? `⚠️ この期間には社員旅行日（${d}）が含まれています — 社員旅行日は手当が一切付かないため、海外勤務に含めることはできません`
+    : L(`⚠️ This range includes a Company Trip day (${d}) — Company Trip days pay no allowance of any kind, so they cannot be part of an Abroad trip`,
+        `⚠️ ช่วงวันที่นี้มีวัน Company Trip (${d}) — วัน Company Trip ไม่มีเบี้ยเลี้ยงใด ๆ ทั้งสิ้น จึงรวมอยู่ในทริปทำงานต่างประเทศไม่ได้`);
+}
 async function submitAbroad() {
   if (blockIfObserver()) return;
   if (!isAllowanceEligible(APP_SETTINGS.allowanceEligibility, effectiveRole(), 'abroad')) {
@@ -14733,13 +14821,19 @@ async function submitAbroad() {
     return;
   }
   if (!location) { showToast(L('⚠️ Please specify the country or customer', '⚠️ กรุณาระบุประเทศหรือชื่อลูกค้า'), 'warning'); return; }
+  // 2026-09-24 (owner): an Abroad trip may not include a Company Trip day (dual-sync: server
+  // isCompanyTripClaimBlocked).
+  const tripDay = companyTripDateInRange(dateFrom, dateTo);
+  if (tripDay) { showToast(abroadCompanyTripMessage(tripDay), 'warning'); return; }
   // 2026-09-23: mirrors server abroadTravelDayHolidayWorkConflict -- travel days cannot also carry
   // Holiday Work (they earn annual leave automatically).
+  // 2026-09-24 (review L-4): dropped `l.id !== editingLeaveId` -- editingLeaveId is this Abroad
+  // record's id, never a Holiday Work id, so that comparison could never exclude anything.
   if (DATA_LEAVES.some(l => l.userId === currentUser.id && l.type === 'holiday-work' &&
-      !['rejected', 'cancelled'].includes(l.status) && l.id !== editingLeaveId &&
+      !['rejected', 'cancelled'].includes(l.status) &&
       (l.dateFrom === dateFrom || l.dateFrom === dateTo))) {
     showToast(L("⚠️ A holiday work request exists on this trip's start or end date — travel days earn annual leave automatically; cancel that holiday work first",
-      '⚠️ มีคำขอทำงานวันหยุดในวันเริ่มหรือวันสิ้นสุดทริป — วันเดินทางได้วันลาชดเชยอัตโนมัติ กรุณายกเลิกคำขอทำงานวันหยุดนั้นก่อน'), 'warning');
+      '⚠️ มีคำขอทำงานวันหยุดในวันเริ่มหรือวันสิ้นสุดทริป — วันเดินทางได้วันลาพักร้อนอัตโนมัติ กรุณายกเลิกคำขอทำงานวันหยุดนั้นก่อน'), 'warning');
     return;
   }
   if (!reason) { showToast(L('⚠️ Please specify the reason', '⚠️ กรุณาระบุเหตุผล'), 'warning'); return; }
@@ -14804,7 +14898,7 @@ async function submitHolidayWork() {
   const compensationMode = document.getElementById('holiday-work-comp-mode').value;
   const reason = document.getElementById('holiday-work-reason').value.trim();
   if (!date) { showToast(L('⚠️ Please specify the date', '⚠️ กรุณาระบุวันที่'), 'warning'); return; }
-  if (blockIfCompanyTrip(date)) return;
+  if (isCompanyTripDay(date)) { showToast(holidayWorkSubmitBlockedMessage({ reason: 'company-trip' }), 'warning'); return; }
   if (blockIfAbroadDay(date, 'holiday-work')) return;
   const gate = canSubmitHolidayWorkForDate(date);
   if (!gate.ok) {
@@ -16526,7 +16620,7 @@ function renderMyRequests() {
       : l.type === 'ot'
       ? (() => {
           const detail = otHoursRateDetail(l);
-          const oet = l.otEndTime ? escapeHtml(l.otEndTime) : '';
+          const oet = l.otEndTime ? otEndTimeLabel(l.otEndTime) : '';
           return oet
             ? (currentLang === 'ja' ? `⏱️ ${detail} | 終業 ${oet}` : L(`⏱️ ${detail} | end ${oet}`, `⏱️ ${detail} | เลิก ${oet}`))
             : `⏱️ ${detail}`;

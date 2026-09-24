@@ -4192,15 +4192,32 @@ function officeOtStdStartHHMM(S) {
 const OFFICE_OT_WEEKEND_MSG = 'Weekends and public holidays use Holiday Work — do not submit office OT for those days';
 // Office OT is request-gated (never derived from scan-out). Weekdays only: hours after 17:30 at ×1.5.
 // Weekend / public-holiday pay goes through Holiday Work (start–end), not this form. Drivers use isDriverOT.
+// 2026-09-24 (owner): office OT may run past midnight -- an end time before 05:00 is after
+// midnight of the SAME work day (the check-out convention of lateNightCheckoutMins). The rate is
+// always the start day's: office OT only exists on a weekday (x1.5), so running into a weekend or
+// public holiday after midnight never turns it into x2/x3. Dual-sync with app.js.
 function deriveOfficeOtFromEndTime(dateFrom, otEndTime, S) {
   const out = { isDriverOT: false, otMultiplier: 1.5, otHours: 0, otHours20: 0, otHours30: 0 };
   if (!dateFrom || !otEndTime || !HHMM_RE.test(otEndTime)) return out;
   if (isNonWorkDayForComp(dateFrom)) return out;
-  const [eh, em] = otEndTime.split(':').map(Number);
-  const otMins = (eh * 60 + em) - (17 * 60 + 30);
-  out.otHours = otMins > 0 ? Math.round(otMins / 60 * 100) / 100 : 0;
+  const otMins = lateNightCheckoutMins(otEndTime) - (17 * 60 + 30);
+  out.otHours = otMins > 0 ? round2HalfUp(otMins / 60) : 0;
   out.otMultiplier = 1.5;
   return out;
+}
+// 2026-09-24: approved paid-mode Holiday Work with OT hours -- counted as OT in the payslip OT
+// tile (display only). Dual-sync with app.js isHolidayWorkOtRecord.
+function isHolidayWorkOtRecord(l) {
+  return !!l && l.type === 'holiday-work' && l.status === 'approved' && l.compensationMode === 'paid' &&
+    ((Number(l.otHours20) || 0) + (Number(l.otHours30) || 0)) > 0;
+}
+// 2026-09-24 (owner): hours are kept to 2 decimal places, rounded half-up at the 3rd decimal
+// (reminder: the owner wants to reconsider this rule later). The epsilon absorbs binary noise
+// such as 1.005 * 100 = 100.49999... Dual-sync with app.js.
+function round2HalfUp(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 0;
+  return Math.sign(x) * Math.round(Math.abs(x) * 100 + 1e-9) / 100;
 }
 function hasActiveHolidayWork(leaves, userId, dateFrom, exceptId) {
   return (leaves || []).some(l =>
@@ -4281,7 +4298,8 @@ function holidayWorkSubmitBlockReason(user, dateStr) {
   const hwLeaves = readLeaves();
   if (hwLeaves === null) return 'Service temporarily unavailable';
   if (isAbroadTravelDay(hwLeaves, user.id, dateStr)) {
-    return 'This is a travel day of your approved Abroad trip — the annual-leave day is credited automatically, so holiday work cannot be submitted';
+    // 2026-09-24 (review L-1): pending trips block too, so no "approved" -- same text as app.js.
+    return 'This is a travel day of your Abroad trip — the annual-leave day is credited automatically, so holiday work cannot be submitted';
   }
   const day = attendanceDayForUser(user, dateStr);
   // 2026-09-23 (owner): an approved Abroad day needs no scan -- the trip approval is the evidence.
@@ -4294,8 +4312,8 @@ function holidayWorkSubmitBlockReason(user, dateStr) {
 // from times the employee types, which were never compared with the day's real scans -- a 10:00
 // arrival could claim 06:00-23:59. The typed start may not be earlier than the check-in and the
 // typed end may not be later than the check-out. Uses attendanceDayForUser, so approved
-// time-corrections count. A check-out before 05:00 belongs to the same business day (after
-// midnight) and is later than any typed end, which is capped at 23:59.
+// time-corrections count. A check-out (and, since 2026-09-24, a typed OT end) before 05:00 belongs
+// to the same business day (after midnight).
 // Dual-sync with app.js scanWindowError.
 function scanWindowError(user, dateStr, startHHMM, endHHMM) {
   const day = attendanceDayForUser(user, dateStr);
@@ -4312,9 +4330,11 @@ function scanWindowError(user, dateStr, startHHMM, endHHMM) {
     const rawDay = day.checkOut ? null : (buildAttendanceLogForUser(user)[dateStr] || {});
     const endLimit = day.checkOut || (rawDay && rawDay.lastScan);
     if (!endLimit) return 'A check-out is required for this date — submit a time correction first';
-    let outMin = parseHHMMToMins(endLimit);
-    if (outMin < 5 * 60) outMin += 24 * 60;
-    if (parseHHMMToMins(endHHMM) > outMin) {
+    // 2026-09-24: the typed end follows the same after-midnight rule as the check-out (an OT end
+    // before 05:00 is after midnight). Holiday Work never gets here with such an end -- its
+    // end-after-start check runs first and refuses it.
+    const outMin = lateNightCheckoutMins(endLimit);
+    if (lateNightCheckoutMins(endHHMM) > outMin) {
       return `End time cannot be later than your check-out (${endLimit})`;
     }
   }
@@ -4404,10 +4424,11 @@ function isAbroadTravelDay(leaves, userId, dateStr) {
 // days on a weekend/holiday (2026-09-23). Every caller treats this as the earned pool.
 function getApprovedHolidayWorkAnnualLeaveDays(leaves, userId, year, exceptId) {
   const yStart = `${year}-01-01`, yEnd = `${year}-12-31`;
+  // 2026-09-24 (owner): no credit for Holiday Work on a date that later became a Company Trip.
   const hwDays = leaves.filter(l =>
     l.userId === userId && l.type === 'holiday-work' && l.compensationMode === 'annual-leave' &&
     l.status === 'approved' &&
-    l.dateFrom >= yStart && l.dateFrom <= yEnd &&
+    l.dateFrom >= yStart && l.dateFrom <= yEnd && !isCompanyTripDay(l.dateFrom) &&
     l.id !== exceptId
   ).reduce((s, l) => s + (l.days || 1), 0);
   const abroad = leaves.filter(l =>
@@ -5073,6 +5094,9 @@ function validateAbroadRecord({ dateFrom, dateTo, location, reason }) {
 // 2026-09-23 (owner): a trip's start/end dates are travel days that earn annual leave
 // automatically and cannot carry Holiday Work -- refuse a trip whose travel day already has one.
 const ABROAD_TRAVEL_HW_CONFLICT_MSG = "A holiday work request exists on this trip's start or end date — travel days earn annual leave automatically; cancel that holiday work first";
+// Shown to the APPROVER (who cannot cancel the employee's holiday work). Client maps code
+// 'abroad-travel-hw-conflict' to its own TH/EN/JA text.
+const ABROAD_TRAVEL_HW_CONFLICT_APPROVAL_MSG = "Holiday work already exists on this trip's start or end date, and a travel day cannot also carry holiday work. Reject this trip (the employee can resubmit it with other dates), or reject that holiday work first if it is still pending";
 function abroadTravelDayHolidayWorkConflict(leaves, userId, dateFrom, dateTo) {
   const travel = new Set([dateFrom, dateTo || dateFrom]);
   return leaves.some(l =>
@@ -5407,8 +5431,8 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
     // allowances or OT of any kind (OT, upcountry, late-out, long-distance, personal-car, comp).
     // The previous server guard only covered driver OT; the UI's blockIfCompanyTrip() already
     // blocked every submit path. Closing the API hole so a direct POST cannot land a paid claim.
-    if (isCompanyTripClaimBlocked(type, body.dateFrom, body.workedDate)) {
-      return res.status(400).json({ success:false, message: companyTripNoClaimMessage() });
+    if (isCompanyTripClaimBlocked(type, body.dateFrom, body.workedDate, body.dateTo)) {
+      return res.status(400).json({ success:false, code:'company-trip', message: companyTripNoClaimMessage(type) });
     }
 
     // SECURITY/CORRECTNESS FIX 2026-08-11 (Opus re-audit, HIGH-1): Quick Fix Check-In
@@ -5566,7 +5590,7 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
           ? 'A driver OT request for this date and rate already exists'
           : 'An OT request for this date already exists' });
       }
-      if (isDriverOT && driverOtHoursOverCap(leaves, { userId, dateFrom: body.dateFrom, newHours: body.otHours, exceptId: undefined })) {
+      if (isDriverOT && driverOtHoursOverCap(leaves, { userId, dateFrom: body.dateFrom, newHours: round2HalfUp(Number(body.otHours) || 0), exceptId: undefined })) {
         return res.status(400).json({ success:false, message:`Driver OT for this date cannot exceed ${OT_HOURS_MAX} hours in total` });
       }
       if (!isDriverOT) {
@@ -5578,7 +5602,7 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
         }
         const derivedOfficeOt = deriveOfficeOtFromEndTime(body.dateFrom, body.otEndTime, S);
         if (!(derivedOfficeOt.otHours > 0)) {
-          return res.status(400).json({ success:false, message: 'End time must be after 17:30' });
+          return res.status(400).json({ success:false, message: 'End time must be after 17:30 (an end before 05:00 counts as after midnight)' });
         }
         const otScanErr = scanWindowError(targetUser, body.dateFrom, null, body.otEndTime);
         if (otScanErr) return res.status(400).json({ success:false, message: otScanErr });
@@ -5641,7 +5665,8 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
       ...(type === 'ot' ? (isDriverOT ? {
         isDriverOT: true,
         otMultiplier: Number(body.otMultiplier),
-        otHours: Number(body.otHours) || 0,
+        // 2026-09-24 (owner): stored to 2 decimal places, half-up. Dual-sync: app.js submitDriverOT.
+        otHours: round2HalfUp(Number(body.otHours) || 0),
         otHours20: 0,
         otHours30: 0,
       } : deriveOfficeOtFromEndTime(body.dateFrom, body.otEndTime, S)) : {}),
@@ -5765,14 +5790,16 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
       // 2026-08-02: block the transition to 'approved' if this employee's payroll for the
       // request's period is already MD-approved (frozen snapshot) -- otherwise the request
       // shows "approved" to the employee while the money silently never reaches their payslip.
-      if (newStatus === 'approved' && isCompanyTripClaimBlocked(leave.type, leave.dateFrom, leave.workedDate)) {
-        return res.status(400).json({ success:false, message: companyTripNoClaimMessage() });
+      if (newStatus === 'approved' && isCompanyTripClaimBlocked(leave.type, leave.dateFrom, leave.workedDate, leave.dateTo)) {
+        return res.status(400).json({ success:false, code:'company-trip', message: companyTripNoClaimMessage(leave.type) });
       }
       // 2026-09-23 (Opus review I-1): re-check the travel-day rule at approval time -- Holiday Work
       // may have been filed on a travel day while this trip was still pending.
+      // 2026-09-24 (review M-1/M-2): the approver cannot cancel someone else's holiday work, so the
+      // message says what they CAN do; `code` lets app.js show its own TH/EN/JA text.
       if (newStatus === 'approved' && leave.type === 'abroad' &&
           abroadTravelDayHolidayWorkConflict(leaves, leave.userId, leave.dateFrom, leave.dateTo)) {
-        return res.status(409).json({ success:false, message: ABROAD_TRAVEL_HW_CONFLICT_MSG });
+        return res.status(409).json({ success:false, code:'abroad-travel-hw-conflict', message: ABROAD_TRAVEL_HW_CONFLICT_APPROVAL_MSG });
       }
       if (newStatus === 'approved' && mdApprovedPeriodInRange(leave.dateFrom, leave.dateTo, leave.userId)) {
         return res.status(409).json({ success:false, message:'Payroll for this employee/period has already been approved by the Managing Director -- ask them to revoke approval first' });
@@ -5883,8 +5910,8 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
     const newType = (updates.type || leave.type);
     if (newType === 'comp') return res.status(400).json({ success:false, message:'comp request type is no longer accepted; use holiday-work instead' });
     const resolvedWorkedDateForTrip = updates.workedDate !== undefined ? updates.workedDate : leave.workedDate;
-    if (isCompanyTripClaimBlocked(newType, resolvedDateFromForLock, resolvedWorkedDateForTrip)) {
-      return res.status(400).json({ success:false, message: companyTripNoClaimMessage() });
+    if (isCompanyTripClaimBlocked(newType, resolvedDateFromForLock, resolvedWorkedDateForTrip, resolvedDateToForLock)) {
+      return res.status(400).json({ success:false, code:'company-trip', message: companyTripNoClaimMessage(newType) });
     }
     if (isFullDayPersonalLeaveClaimBlocked(newType, ownerUser || live, resolvedDateFromForLock)) {
       return res.status(400).json({ success:false, message: fullDayPersonalLeaveNoClaimMessage() });
@@ -6169,7 +6196,8 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
       // old record's otHours in place, untouched and uncoerced. Resolve-then-coerce exactly like
       // otMultiplier above -- what the record will actually end up with, not just what this request
       // happened to send. `|| 0` matches POST's own driver-OT branch.
-      safeUpdates.otHours = Number(updates.otHours !== undefined ? updates.otHours : leave.otHours) || 0;
+      // 2026-09-24 (owner): 2 decimal places, half-up (same as POST).
+      safeUpdates.otHours = round2HalfUp(Number(updates.otHours !== undefined ? updates.otHours : leave.otHours) || 0);
       safeUpdates.otHours20 = 0;
       safeUpdates.otHours30 = 0;
       // 2026-08-10 (Opus audit F4, tightened by re-audit finding 4): the coercion above normalizes
@@ -6191,7 +6219,7 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
       const derivedOfficeOt = deriveOfficeOtFromEndTime(dateFrom, otEndTime, getAppSettings());
       Object.assign(safeUpdates, derivedOfficeOt);
       if (!(derivedOfficeOt.otHours > 0)) {
-        return res.status(400).json({ success:false, message: 'End time must be after 17:30' });
+        return res.status(400).json({ success:false, message: 'End time must be after 17:30 (an end before 05:00 counts as after midnight)' });
       }
       const otScanErrPut = scanWindowError(ownerUser || live, dateFrom, null, otEndTime);
       if (otScanErrPut) return res.status(400).json({ success:false, message: otScanErrPut });
@@ -7285,12 +7313,24 @@ function isCompanyTripDay(dateStr) {
 // Company Trip is a paid day off with no work expected of anyone. These types pay extra
 // (allowance, OT, or a compensatory day claimed from having "worked") -- none of them may be
 // submitted or paid for a company-trip date. Matches app.js blockIfCompanyTrip() call sites.
-const COMPANY_TRIP_NO_CLAIM_TYPES = new Set(['ot', 'upcountry', 'late-out', 'long-distance', 'personal-car', 'holiday-work']);
-function companyTripNoClaimMessage() {
+// 2026-09-24 (owner: "a Company Trip day pays NO allowance of any kind in any case"): 'early-morning'
+// added (a web claim could still be approved on a trip date) and 'abroad' added -- an Abroad trip
+// whose date RANGE includes any Company Trip day is refused (dual-sync: app.js
+// companyTripDateInRange / submitAbroad / approveMockLeaveInternal).
+const COMPANY_TRIP_NO_CLAIM_TYPES = new Set(['ot', 'upcountry', 'late-out', 'long-distance', 'personal-car', 'holiday-work', 'early-morning', 'abroad']);
+function companyTripNoClaimMessage(type) {
+  if (type === 'abroad') return 'This date range includes a Company Trip day -- Company Trip days pay no allowance of any kind, so they cannot be part of an Abroad trip';
   return 'Company Trip days are a day off -- no extra allowances or OT can be claimed';
 }
-function isCompanyTripClaimBlocked(type, dateFrom, workedDate) {
+// First Company Trip date inside [dateFrom, dateTo], or null. Dual-sync with app.js.
+function companyTripDateInRange(dateFrom, dateTo) {
+  const to = dateTo || dateFrom;
+  if (!dateFrom || !to) return null;
+  return (readSettings().companyTripDates || []).filter(d => d >= dateFrom && d <= to).sort()[0] || null;
+}
+function isCompanyTripClaimBlocked(type, dateFrom, workedDate, dateTo) {
   if (!COMPANY_TRIP_NO_CLAIM_TYPES.has(type)) return false;
+  if (type === 'abroad') return !!companyTripDateInRange(dateFrom, dateTo);
   const claimDate = dateFrom;
   return !!(claimDate && isCompanyTripDay(claimDate));
 }
@@ -7794,9 +7834,12 @@ function computePayroll(user, start, end, periodIndex) {
   // Dual-sync with the other file's computePayroll.
   const abroadDates = new Set(pDays.filter(d => d.status === 'abroad').map(d => d.date));
 
+  // 2026-09-24 (owner: a Company Trip day pays no allowance of any kind): a web Early Morning
+  // approved before the date was declared a Company Trip is no longer paid. Dual-sync with app.js.
   const approvedEarlyMorning = canEarlyLate ? leaves.filter(l =>
     l.userId === user.id && l.type === 'early-morning' && l.status === 'approved' &&
-    l.dateFrom >= periodStartStr && l.dateFrom <= periodEndStr
+    l.dateFrom >= periodStartStr && l.dateFrom <= periodEndStr &&
+    !isCompanyTripDay(l.dateFrom)
   ) : [];
 
   const upcountryCount = canUpcountry ? pDays.filter(d =>
@@ -8065,11 +8108,18 @@ function getPayrollView(user, start, end, periodIndex, finalizeDataOverride) {
   // here rather than widening computePayroll()'s signature, matching this pair's existing "full
   // duplication over a lighter shared approach" rule (see the header comment on computePayroll()).
   const leaves = readLeaves() || [];
-  const otCount = eligibility.ot ? leaves.filter(l =>
-    l.userId === user.id && l.type === 'ot' && l.status === 'approved' &&
+  // 2026-09-24: + paid Holiday Work that carries OT hours (its hours/amount were already in calc).
+  // Dual-sync with app.js getPayrollView's otCount (calc.holidayWorkOtCount there).
+  const hwOtCount = eligibility.holidayWork ? leaves.filter(l =>
+    l.userId === user.id && isHolidayWorkOtRecord(l) &&
     l.dateFrom >= calc.periodStartStr && l.dateFrom <= calc.periodEndStr &&
     !isCompanyTripDay(l.dateFrom)
   ).length : 0;
+  const otCount = (eligibility.ot ? leaves.filter(l =>
+    l.userId === user.id && l.type === 'ot' && l.status === 'approved' &&
+    l.dateFrom >= calc.periodStartStr && l.dateFrom <= calc.periodEndStr &&
+    !isCompanyTripDay(l.dateFrom)
+  ).length : 0) + hwOtCount;
   const firstPC = eligibility.personalCar ? leaves.find(l =>
     l.userId === user.id && l.type === 'personal-car' && l.status === 'approved' &&
     l.dateFrom >= calc.periodStartStr && l.dateFrom <= calc.periodEndStr &&

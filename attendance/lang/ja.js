@@ -1373,4 +1373,11 @@ window.LANG_JA = {
   "Forfeit unused carry-forward days after the expiry date": "有効期限を過ぎた未使用の繰越日数を失効させる",
   "Carried-forward days are used first. When off, carried-forward days never expire and no expiry reminder is shown.": "繰越日数から先に消化されます。オフにすると繰越日数は失効せず、失効前の通知も表示されません。",
   "⚠️ The selected time is entirely within the 12:00–13:00 lunch break": "⚠️ 選択した時間はすべて12:00〜13:00の昼休み内です",
+  // 2026-09-24: payroll batch — Company Trip / OT past midnight / Holiday Work OT in OT views / abroad approval
+  "An end time before 05:00 means after midnight (same work day).": "05:00より前の終了時刻は深夜0時以降（同じ勤務日）として扱います。",
+  "⚠️ End time must be after 17:30 (before 05:00 = after midnight)": "⚠️ 終了時刻は17:30以降にしてください（05:00より前＝深夜0時以降）",
+  "next day": "翌日",
+  "This date is a Company Trip day — no allowance of any kind is paid, so Holiday Work cannot be filed": "この日は社員旅行日です — 手当は一切支給されないため、休日出勤は申請できません",
+  "Holiday Work": "休日出勤",
+  "Holiday work already exists on this trip's start or end date, and a travel day cannot also carry holiday work. Reject this trip (the employee can resubmit it with other dates), or reject that holiday work first if it is still pending": "この出張の出発日または帰着日にすでに休日出勤があり、移動日に休日出勤を重ねることはできません。この出張を却下する（社員は別の日程で再申請できます）か、その休日出勤がまだ承認待ちであれば先に却下してください",
 };
