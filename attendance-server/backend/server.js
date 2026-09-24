@@ -3508,9 +3508,12 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
   // (isValidTawiEntry's stale-entry filter, and the per-request field-name check) can't drift
   // out of sync the way this project's other duplicated field-lists have before.
   const TAWI_OVERRIDE_FIELDS = ['grossOverride', 'pitOverride', 'ssoOverride', 'pvdOverride'];
+  // 2026-09-24: amounts carry satang now (OT/tax 2 dp, PVD 1 dp), so an override may too -- at most
+  // 2 decimal places (was whole baht only).
+  const isTawiAmount = x => typeof x === 'number' && Number.isFinite(x) && x >= 0 && x <= 1e9 && round2HalfUp(x) === x;
   const isValidTawiEntry = (key, v) => TAWI_KEY_RE.test(key) && v && typeof v === 'object' && !Array.isArray(v) &&
     Object.keys(v).every(f => TAWI_OVERRIDE_FIELDS.includes(f)) &&
-    Object.keys(v).every(f => Number.isInteger(v[f]) && v[f] >= 0 && v[f] <= 1e9);
+    Object.keys(v).every(f => isTawiAmount(v[f]));
   if (body.tawi50Overrides !== undefined) {
     const tv = body.tawi50Overrides;
     if (!tv || typeof tv !== 'object' || Array.isArray(tv) || Object.keys(tv).length > 500) {
@@ -3527,8 +3530,8 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
         if (!TAWI_OVERRIDE_FIELDS.includes(f)) {
           return res.status(400).json({ success: false, message: `unknown tawi50Overrides field "${f}"` });
         }
-        if (!Number.isInteger(v[f]) || v[f] < 0 || v[f] > 1e9) {
-          return res.status(400).json({ success: false, message: `tawi50Overrides["${k}"].${f} must be an integer between 0 and 1e9` });
+        if (!isTawiAmount(v[f])) {
+          return res.status(400).json({ success: false, message: `tawi50Overrides["${k}"].${f} must be a number between 0 and 1e9 with at most 2 decimal places` });
         }
       }
     }
@@ -4247,26 +4250,29 @@ function hasActiveOfficeOt(leaves, userId, dateFrom, exceptId) {
     l.dateFrom === dateFrom && !isVoidLeaveStatus(l.status)
   );
 }
+// 2026-09-24 (owner): OT pay is kept to 2 decimal places, rounded half-up at the 3rd decimal
+// (was whole baht). Each amount and each running total goes through round2HalfUp so float noise
+// (0.1 + 0.2) never reaches the payslip.
 function accumulateApprovedOtPay(l, hourlyRate, acc) {
   const hrs20 = Number(l.otHours20) || 0;
   const hrs30 = Number(l.otHours30) || 0;
   if (hrs20 > 0 || hrs30 > 0) {
-    const amt20 = Math.round(hourlyRate * 2 * hrs20);
-    const amt30 = Math.round(hourlyRate * 3 * hrs30);
-    acc.ot20Hours += hrs20; acc.ot20Amount += amt20;
-    acc.ot30Hours += hrs30; acc.ot30Amount += amt30;
-    acc.otAmount += amt20 + amt30;
+    const amt20 = round2HalfUp(hourlyRate * 2 * hrs20);
+    const amt30 = round2HalfUp(hourlyRate * 3 * hrs30);
+    acc.ot20Hours += hrs20; acc.ot20Amount = round2HalfUp(acc.ot20Amount + amt20);
+    acc.ot30Hours += hrs30; acc.ot30Amount = round2HalfUp(acc.ot30Amount + amt30);
+    acc.otAmount = round2HalfUp(acc.otAmount + amt20 + amt30);
     acc.otTotalHours += hrs20 + hrs30;
     return;
   }
   const mult = effectiveOtMultiplier(l);
   const hrs = Number(l.otHours) || 0;
-  const amt = Math.round(hourlyRate * mult * hrs);
-  acc.otAmount += amt;
+  const amt = round2HalfUp(hourlyRate * mult * hrs);
+  acc.otAmount = round2HalfUp(acc.otAmount + amt);
   acc.otTotalHours += hrs;
-  if (mult === 1.5) { acc.ot15Amount += amt; acc.ot15Hours += hrs; }
-  else if (mult === 2) { acc.ot20Amount += amt; acc.ot20Hours += hrs; }
-  else if (mult === 3) { acc.ot30Amount += amt; acc.ot30Hours += hrs; }
+  if (mult === 1.5) { acc.ot15Amount = round2HalfUp(acc.ot15Amount + amt); acc.ot15Hours += hrs; }
+  else if (mult === 2) { acc.ot20Amount = round2HalfUp(acc.ot20Amount + amt); acc.ot20Hours += hrs; }
+  else if (mult === 3) { acc.ot30Amount = round2HalfUp(acc.ot30Amount + amt); acc.ot30Hours += hrs; }
 }
 function validateHolidayWorkLocation(locations) {
   if (!Array.isArray(locations) || locations.length !== 1) {
@@ -7421,7 +7427,8 @@ function calcAnnualTax(taxableIncome) {
     if (b.upTo === Infinity || taxableIncome <= b.upTo) break;
     prev = b.upTo;
   }
-  return Math.round(tax);
+  // 2026-09-24 (owner): 2 decimal places, half-up (was whole baht). Dual-sync.
+  return round2HalfUp(tax);
 }
 
 // Port of app.js isCompanyTripDay() (~line 625) — DATA_COMPANY_TRIP_DATES equivalent is
@@ -8072,11 +8079,12 @@ function computePayroll(user, start, end, periodIndex) {
     }
     const hrs20 = Number(l.otHours20) || 0;
     const hrs30 = Number(l.otHours30) || 0;
-    const amt20 = Math.round(hourlyRate * 2 * hrs20);
-    const amt30 = Math.round(hourlyRate * 3 * hrs30);
+    // 2026-09-24 (owner): 2 decimal places, half-up (was whole baht). Dual-sync.
+    const amt20 = round2HalfUp(hourlyRate * 2 * hrs20);
+    const amt30 = round2HalfUp(hourlyRate * 3 * hrs30);
     ot20Hours += hrs20; ot30Hours += hrs30;
-    ot20Amount += amt20; ot30Amount += amt30;
-    otAmount += amt20 + amt30;
+    ot20Amount = round2HalfUp(ot20Amount + amt20); ot30Amount = round2HalfUp(ot30Amount + amt30);
+    otAmount = round2HalfUp(otAmount + amt20 + amt30);
     otTotalHours += hrs20 + hrs30;
   });
   // 2026-09-01: guaranteed OT is a driver contract floor only (OT ×1.5 hours/month). Still
@@ -8084,8 +8092,9 @@ function computePayroll(user, start, end, periodIndex) {
   const guaranteedOT = user.guaranteedOT || 0;
   if (user.role === 'driver' && canOT && guaranteedOT > ot15Hours) {
     const extraH = guaranteedOT - ot15Hours;
-    const extraA = Math.round(hourlyRate * 1.5 * extraH);
-    ot15Hours += extraH; ot15Amount += extraA; otAmount += extraA; otTotalHours += extraH;
+    // 2026-09-24 (owner): the top-up is OT pay too -- 2 decimal places, half-up. Dual-sync.
+    const extraA = round2HalfUp(hourlyRate * 1.5 * extraH);
+    ot15Hours += extraH; ot15Amount = round2HalfUp(ot15Amount + extraA); otAmount = round2HalfUp(otAmount + extraA); otTotalHours += extraH;
   }
 
   const totalUpcountryCount = upcountryCount + holidayWorkUpcountryCount;
@@ -8098,9 +8107,10 @@ function computePayroll(user, start, end, periodIndex) {
   const abroadEligible = isAllowanceEligible(S.allowanceEligibility, user.role, 'abroad');
   const abroadDays = abroadEligible ? pDays.filter(d => d.status === 'abroad').length : 0;
   const abroadTotal = (S.allowances.abroad || 0) * abroadDays;
-  const grossIncome = base + transport + posAllowance + housingAllowance + diligenceAllowance +
+  // 2026-09-24: OT is now in satang, so the sum is rounded to 2 dp to drop float noise only.
+  const grossIncome = round2HalfUp(base + transport + posAllowance + housingAllowance + diligenceAllowance +
     allowance1 + allowance2 + allowance3val + otAmount + longDistanceTotal + personalCarTotal +
-    holidayTransportTotal + abroadTotal;
+    holidayTransportTotal + abroadTotal);
 
   // SSO — rate and caps from settings (updates when law changes)
   // SECURITY/CORRECTNESS FIX 2026-08-17 (user report): MD is exempt from SSO/SSF the same way
@@ -8117,7 +8127,8 @@ function computePayroll(user, start, end, periodIndex) {
 
   // PVD
   const pvdRate = user.role === 'md' ? 0 : (user.pvdRate !== undefined ? user.pvdRate : 5);
-  const pvd = Math.round(base * pvdRate / 100);
+  // 2026-09-24 (owner): 1 decimal place, half-up at the 2nd decimal (was whole baht). Dual-sync.
+  const pvd = round1HalfUp(base * pvdRate / 100);
 
   // Progressive income tax (Thai ม.40(1)) — estimate only; Accounting can override before Confirm.
   // 2026-08-23: annualize recurring pay only. Variable items (OT, one-off allowances, bonus,
@@ -8133,7 +8144,8 @@ function computePayroll(user, start, end, periodIndex) {
   const expenseDeduct = Math.min(annualGross * 0.5, 100000);
   const personalAllow = S.tax.personalAllowanceAnnual || 60000;
   const annualTaxable = Math.max(0, annualGross - expenseDeduct - personalAllow - ssf * 12 - pvd * 12);
-  const autoPit = Math.round(calcAnnualTax(annualTaxable) / 12);
+  // 2026-09-24 (owner): tax is kept to 2 decimal places, half-up (was whole baht). Dual-sync.
+  const autoPit = round2HalfUp(calcAnnualTax(annualTaxable) / 12);
 
   return {
     base, transport, posAllowance, housingAllowance, diligenceAllowance,
@@ -8344,6 +8356,10 @@ function buildTawi50AnnualTotals(year, finalizeSnapshot) {
   users.forEach(u => {
     if (isSystemAccountUser(u)) return;
     const d = periodData[u.id] || { totalGross: 0, totalSSO: 0, totalPVD: 0, totalPIT: 0 };
+    // 2026-09-24 (owner): the amounts actually paid per payslip -- summed, then rounded to 2 dp only
+    // to drop float noise (never to whole baht). Dual-sync with app.js render50Tawi.
+    d.totalGross = round2HalfUp(d.totalGross); d.totalSSO = round2HalfUp(d.totalSSO);
+    d.totalPVD = round2HalfUp(d.totalPVD); d.totalPIT = round2HalfUp(d.totalPIT);
     const overKey = `${year}_${u.id}`;
     const ov = overrides[overKey] || {};
     const gross = ov.grossOverride !== undefined ? ov.grossOverride : d.totalGross;

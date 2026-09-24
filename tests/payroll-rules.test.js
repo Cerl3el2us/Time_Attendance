@@ -44,13 +44,13 @@ const SETTINGS = {
   payroll: { periodStartDay: 21 },
 };
 
-const SHARED = ['isVoidLeaveStatus', 'round2HalfUp', 'deriveOfficeOtFromEndTime', 'lateNightCheckoutMins', 'parseHHMMToMins',
+const SHARED = ['isVoidLeaveStatus', 'round2HalfUp', 'round1HalfUp', 'deriveOfficeOtFromEndTime', 'lateNightCheckoutMins', 'parseHHMMToMins',
   'isHolidayWorkDay', 'isNonWorkDayForComp', 'isHolidayWorkOtRecord', 'companyTripDateInRange',
   'isFullDayPersonalLeaveStatus', 'isRestAttendanceDay', 'isDeviceScanSource', 'isEarlyMorningDayStatus',
   'deviceScanQualifiesForEarlyMorning', 'deviceScanQualifiesForLateNight', 'lateNightCheckoutOk',
   'accumulateApprovedOtPay', 'effectiveOtMultiplier', 'computePayroll', 'splitHolidayWorkOtMinutes'];
 const CLIENT_FNS = [...SHARED, 'scanWindowError', 'getApprovedHolidayWorkDays', 'abroadTravelCreditDays',
-  'otEndCrossesMidnight', 'canSubmitHolidayWorkForDate', 'standardOtMultiplier'];
+  'otEndCrossesMidnight', 'canSubmitHolidayWorkForDate', 'standardOtMultiplier', 'otPayAmountFromLeave'];
 const SERVER_FNS = [...SHARED, 'scanWindowError', 'getApprovedHolidayWorkAnnualLeaveDays', 'abroadTravelCreditDays',
   'isCompanyTripClaimBlocked', 'companyTripNoClaimMessage', 'standardOtMultiplier'];
 
@@ -240,6 +240,80 @@ test('isHolidayWorkOtRecord both sides', () => {
     assert.strictEqual(X.isHolidayWorkOtRecord(hw({ status: 'pending-md' })), false, side);
     assert.strictEqual(X.isHolidayWorkOtRecord(hw({ otHours20: 0, otHours30: 0 })), false, side);
   }
+});
+
+console.log('T4b money rounding (owner 2026-09-24): OT/tax 2 dp half-up, PVD 1 dp half-up, SSO whole baht');
+test('round1HalfUp both sides', () => {
+  for (const [side, X] of both(world())) {
+    assert.strictEqual(X.round1HalfUp(123.45), 123.5, side);
+    assert.strictEqual(X.round1HalfUp(123.44), 123.4, side);
+    assert.strictEqual(X.round1HalfUp(0.05), 0.1, side);
+    assert.strictEqual(X.round1HalfUp(1234.55), 1234.6, side);
+    assert.strictEqual(X.round1HalfUp(1200), 1200, side);
+    assert.strictEqual(X.round2HalfUp(1.005), 1.01, side);
+    assert.strictEqual(X.round2HalfUp(2.675), 2.68, side);
+  }
+});
+test('OT pay per record and totals: 2 dp half-up, not whole baht (both sides)', () => {
+  const hourly = 24123 / 30 / 8; // 100.5125
+  for (const [side, X] of both(world())) {
+    const acc = { otAmount: 0, otTotalHours: 0, ot15Amount: 0, ot15Hours: 0, ot20Amount: 0, ot20Hours: 0, ot30Amount: 0, ot30Hours: 0 };
+    X.accumulateApprovedOtPay({ otHours: 1, otMultiplier: 1.5 }, hourly, acc);  // 150.76875 -> 150.77
+    X.accumulateApprovedOtPay({ otHours: 0.33, otMultiplier: 1.5 }, hourly, acc); // 49.7536875 -> 49.75
+    X.accumulateApprovedOtPay({ otHours20: 1, otHours30: 0.5 }, hourly, acc);   // 201.025 -> 201.03 ; 150.76875 -> 150.77
+    assert.strictEqual(acc.ot15Amount, 200.52, `${side} x1.5`);
+    assert.strictEqual(acc.ot20Amount, 201.03, `${side} x2`);
+    assert.strictEqual(acc.ot30Amount, 150.77, `${side} x3`);
+    assert.strictEqual(acc.otAmount, 552.32, `${side} total`);
+  }
+  const C = makeClient(world());
+  assert.strictEqual(C.otPayAmountFromLeave({ otHours: 1, otMultiplier: 1.5 }, hourly), 150.77, 'on-screen estimate');
+  assert.strictEqual(C.otPayAmountFromLeave({ otHours20: 1, otHours30: 0.5 }, hourly), 351.8, 'on-screen estimate HW');
+});
+test('computePayroll: PVD 1 dp, driver guaranteed-OT top-up 2 dp, gross parity', () => {
+  const driver = { id: 1, role: 'driver', salary: 24691, pvdRate: 5, guaranteedOT: 10 };
+  const w = world({ user: driver, leaves: [
+    { id: 1, userId: 1, type: 'ot', isDriverOT: true, status: 'approved', dateFrom: '2026-11-24', dateTo: '2026-11-24', otHours: 1.33, otMultiplier: 1.5 },
+  ], pDays: [{ date: '2026-11-24', status: 'present', checkIn: '08:00', checkOut: '19:00' }] });
+  const start = new Date('2026-11-21T12:00:00'), end = new Date('2026-12-20T12:00:00');
+  const hourly = 24691 / 30 / 8; // 102.879166...
+  const expOt = Math.round((hourly * 1.5 * 1.33) * 100) / 100 + Math.round((hourly * 1.5 * (10 - 1.33)) * 100) / 100;
+  const out = [];
+  for (const [side, X] of both(w)) {
+    const r = X.computePayroll(driver, start, end, 1);
+    assert.strictEqual(r.pvd, 1234.6, `${side} PVD 1234.55 -> 1234.6`);
+    assert.strictEqual(r.ssf, 875, `${side} SSO unchanged (whole baht, capped)`);
+    assert.strictEqual(r.ot15Amount, Math.round(expOt * 100) / 100, `${side} OT + top-up`);
+    assert.strictEqual(r.grossIncome, Math.round(r.grossIncome * 100) / 100, `${side} gross has no float noise`);
+    out.push(r);
+  }
+  assert.strictEqual(out[0].grossIncome, out[1].grossIncome);
+  assert.strictEqual(out[0].autoPit, out[1].autoPit);
+});
+test('calcAnnualTax: 2 dp half-up both sides', () => {
+  const brackets = [{ upTo: 150000, rate: 0 }, { upTo: 300000, rate: 5 }, { upTo: Infinity, rate: 10 }];
+  const S = { ...SETTINGS, tax: { ...SETTINGS.tax, brackets } };
+  const cCtx = { APP_SETTINGS: S }; vm.createContext(cCtx);
+  vm.runInContext(extractFunction(APP_SRC, 'round2HalfUp') + '\n' + extractFunction(APP_SRC, 'calcAnnualTax'), cCtx);
+  const sCtx = { getAppSettings: () => S }; vm.createContext(sCtx);
+  vm.runInContext(extractFunction(SERVER_SRC, 'round2HalfUp') + '\n' + extractFunction(SERVER_SRC, 'calcAnnualTax'), sCtx);
+  for (const [side, X] of [['client', cCtx], ['server', sCtx]]) {
+    assert.strictEqual(X.calcAnnualTax(162345.67), 617.28, side);   // 12345.67 x 5% = 617.2835
+    assert.strictEqual(X.calcAnnualTax(150100.1), 5.01, side);      // 100.1 x 5% = 5.005 -> 5.01
+    assert.strictEqual(X.calcAnnualTax(310000.05), 8500.01, side);  // 7500 + 10000.05 x 10% = 8500.005
+    assert.strictEqual(X.calcAnnualTax(100000), 0, side);
+  }
+  assert.ok(/const autoPit = round2HalfUp\(calcAnnualTax\(annualTaxable\) \/ 12\);/.test(APP_SRC));
+  assert.ok(/const autoPit = round2HalfUp\(calcAnnualTax\(annualTaxable\) \/ 12\);/.test(SERVER_SRC));
+});
+test('50 Tawi: no whole-baht rounding left (xlsx cells, server totals, client page)', () => {
+  const X = fs.readFileSync(path.join(ROOT, 'attendance-server/backend/tawi50Xlsx.js'), 'utf8');
+  assert.ok(!/Math\.round\(amounts\./.test(X), 'tawi50Xlsx.js still rounds to whole baht');
+  ['grossIncome', 'pit', 'pvd', 'sso'].forEach(k => assert.ok(X.includes(`money2(amounts.${k})`), k));
+  assert.ok(/d\.totalGross = round2HalfUp\(d\.totalGross\)/.test(SERVER_SRC));
+  assert.ok(/d\.totalGross = round2HalfUp\(d\.totalGross\)/.test(APP_SRC));
+  assert.ok(!/TAWI50_OVERRIDES\[key\]\[field\] = parseInt/.test(APP_SRC), 'override input truncates satang');
+  assert.ok(/round2HalfUp\(x\) === x/.test(SERVER_SRC), 'server accepts 2 dp overrides');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ', 0 failed'}`);

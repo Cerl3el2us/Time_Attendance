@@ -1364,7 +1364,8 @@ function calcAnnualTax(taxableIncome) {
     if (b.upTo === Infinity || taxableIncome <= b.upTo) break;
     prev = b.upTo;
   }
-  return Math.round(tax);
+  // 2026-09-24 (owner): 2 decimal places, half-up (was whole baht). Dual-sync.
+  return round2HalfUp(tax);
 }
 
 // Loaded from backend at startup — do not hardcode
@@ -1739,14 +1740,15 @@ function otRecordTotalHours(l) {
   if (hrs20 > 0 || hrs30 > 0) return Math.round((hrs20 + hrs30) * 100) / 100;
   return Number(l.otHours) || 0;
 }
+// On-screen estimate -- same 2 dp half-up rounding as accumulateApprovedOtPay (2026-09-24).
 function otPayAmountFromLeave(l, hourlyRate) {
   const hrs20 = Number(l.otHours20) || 0;
   const hrs30 = Number(l.otHours30) || 0;
   if (hrs20 > 0 || hrs30 > 0) {
-    return Math.round(hourlyRate * 2 * hrs20) + Math.round(hourlyRate * 3 * hrs30);
+    return round2HalfUp(round2HalfUp(hourlyRate * 2 * hrs20) + round2HalfUp(hourlyRate * 3 * hrs30));
   }
   const mult = effectiveOtMultiplier(l);
-  return Math.round(hourlyRate * mult * (Number(l.otHours) || 0));
+  return round2HalfUp(hourlyRate * mult * (Number(l.otHours) || 0));
 }
 function otRateDisplay(l) {
   const hrs20 = Number(l.otHours20) || 0;
@@ -1770,26 +1772,29 @@ function otHoursRateDetail(l) {
   }
   return `${Number(l.otHours) || 0} ${L('h', 'ชม.')} ${otMultiplierLabel(effectiveOtMultiplier(l))}`;
 }
+// 2026-09-24 (owner): OT pay is kept to 2 decimal places, rounded half-up at the 3rd decimal
+// (was whole baht). Each amount and each running total goes through round2HalfUp so float noise
+// (0.1 + 0.2) never reaches the payslip.
 function accumulateApprovedOtPay(l, hourlyRate, acc) {
   const hrs20 = Number(l.otHours20) || 0;
   const hrs30 = Number(l.otHours30) || 0;
   if (hrs20 > 0 || hrs30 > 0) {
-    const amt20 = Math.round(hourlyRate * 2 * hrs20);
-    const amt30 = Math.round(hourlyRate * 3 * hrs30);
-    acc.ot20Hours += hrs20; acc.ot20Amount += amt20;
-    acc.ot30Hours += hrs30; acc.ot30Amount += amt30;
-    acc.otAmount += amt20 + amt30;
+    const amt20 = round2HalfUp(hourlyRate * 2 * hrs20);
+    const amt30 = round2HalfUp(hourlyRate * 3 * hrs30);
+    acc.ot20Hours += hrs20; acc.ot20Amount = round2HalfUp(acc.ot20Amount + amt20);
+    acc.ot30Hours += hrs30; acc.ot30Amount = round2HalfUp(acc.ot30Amount + amt30);
+    acc.otAmount = round2HalfUp(acc.otAmount + amt20 + amt30);
     acc.otTotalHours += hrs20 + hrs30;
     return;
   }
   const mult = effectiveOtMultiplier(l);
   const hrs = Number(l.otHours) || 0;
-  const amt = Math.round(hourlyRate * mult * hrs);
-  acc.otAmount += amt;
+  const amt = round2HalfUp(hourlyRate * mult * hrs);
+  acc.otAmount = round2HalfUp(acc.otAmount + amt);
   acc.otTotalHours += hrs;
-  if (mult === 1.5) { acc.ot15Amount += amt; acc.ot15Hours += hrs; }
-  else if (mult === 2) { acc.ot20Amount += amt; acc.ot20Hours += hrs; }
-  else if (mult === 3) { acc.ot30Amount += amt; acc.ot30Hours += hrs; }
+  if (mult === 1.5) { acc.ot15Amount = round2HalfUp(acc.ot15Amount + amt); acc.ot15Hours += hrs; }
+  else if (mult === 2) { acc.ot20Amount = round2HalfUp(acc.ot20Amount + amt); acc.ot20Hours += hrs; }
+  else if (mult === 3) { acc.ot30Amount = round2HalfUp(acc.ot30Amount + amt); acc.ot30Hours += hrs; }
 }
 function canSubmitHolidayWorkForDate(dateStr, userId) {
   const uid = userId || (currentUser && currentUser.id);
@@ -3054,6 +3059,13 @@ async function render50Tawi(targetYear) {
 
   const el = document.getElementById('tawi50-body');
   if (!el) return;
+  // 2026-09-24 (owner): the certificate carries the amounts actually paid per payslip (satang
+  // included) -- the sums are only rounded to 2 dp to drop float noise, never to whole baht.
+  // Dual-sync with server.js buildTawi50AnnualTotals.
+  Object.values(periodData).forEach(d => {
+    d.totalGross = round2HalfUp(d.totalGross); d.totalSSO = round2HalfUp(d.totalSSO);
+    d.totalPVD = round2HalfUp(d.totalPVD); d.totalPIT = round2HalfUp(d.totalPIT);
+  });
   const rows = Object.entries(periodData).map(([uid, d]) => {
     const overKey = `${year}_${uid}`;
     const ov = TAWI50_OVERRIDES[overKey] || {};
@@ -3076,23 +3088,23 @@ async function render50Tawi(targetYear) {
       <td style="font-weight:600">${escapeHtml(d.name)}</td>
       <td class="col-hide-mobile" style="color:#94a3b8;font-size:12px">${escapeHtml(d.nationalId)}</td>
       <td style="text-align:right;color:#059669;font-weight:700">
-        <input type="number" class="tawi-input" data-key="${overKey}" data-field="grossOverride"
+        <input type="number" step="0.01" min="0" class="tawi-input" data-key="${overKey}" data-field="grossOverride"
           value="${escapeHtml(String(gross))}" style="width:100px;text-align:right;border:1.5px solid #e2e8f0;border-radius:4px;padding:4px 6px;font-size:13px;color:#059669;font-weight:700">
         <div style="font-size:10px;font-weight:400;color:${d.confirmedCount < periodsInYear ? '#dc2626' : '#94a3b8'};margin-top:2px">${currentLang === 'ja' ? `確定済み ${d.confirmedCount}/${periodsInYear} 期間` : L(`from ${d.confirmedCount}/${periodsInYear} confirmed periods`, `จาก ${d.confirmedCount}/${periodsInYear} รอบที่ Confirm แล้ว`)}</div>
       </td>
       <td class="col-hide-mobile" style="text-align:right;color:#dc2626">
-        <input type="number" class="tawi-input" data-key="${overKey}" data-field="ssoOverride"
+        <input type="number" step="0.01" min="0" class="tawi-input" data-key="${overKey}" data-field="ssoOverride"
           value="${escapeHtml(String(sso))}" style="width:80px;text-align:right;border:1.5px solid #e2e8f0;border-radius:4px;padding:4px 6px;font-size:13px;color:#dc2626">
       </td>
       <td class="col-hide-mobile" style="text-align:right;color:#dc2626">
-        <input type="number" class="tawi-input" data-key="${overKey}" data-field="pvdOverride"
+        <input type="number" step="0.01" min="0" class="tawi-input" data-key="${overKey}" data-field="pvdOverride"
           value="${escapeHtml(String(pvd))}" style="width:80px;text-align:right;border:1.5px solid #e2e8f0;border-radius:4px;padding:4px 6px;font-size:13px;color:#dc2626">
       </td>
       <td style="text-align:right;color:#b45309;font-weight:700">
-        <input type="number" class="tawi-input" data-key="${overKey}" data-field="pitOverride"
+        <input type="number" step="0.01" min="0" class="tawi-input" data-key="${overKey}" data-field="pitOverride"
           value="${escapeHtml(String(pit))}" style="width:90px;text-align:right;border:1.5px solid #e2e8f0;border-radius:4px;padding:4px 6px;font-size:13px;color:#b45309;font-weight:700">
       </td>
-      <td class="col-hide-mobile" style="text-align:right;font-weight:700;font-size:14px;color:var(--primary)">${(gross - sso - pvd - pit).toLocaleString()}</td>
+      <td class="col-hide-mobile" style="text-align:right;font-weight:700;font-size:14px;color:var(--primary)">${fmt2dp(gross - sso - pvd - pit)}</td>
     </tr>`;
   }).filter(Boolean).join('');
   el.innerHTML = rows || `<tr><td colspan="7" style="text-align:center;padding:32px;color:#94a3b8">${L('No confirmed payroll data for this year','ยังไม่มีข้อมูล Payroll ที่ยืนยันแล้วสำหรับปีนี้')}</td></tr>`;
@@ -3102,7 +3114,7 @@ async function render50Tawi(targetYear) {
       const key = inp.dataset.key;
       const field = inp.dataset.field;
       if (!TAWI50_OVERRIDES[key]) TAWI50_OVERRIDES[key] = {};
-      TAWI50_OVERRIDES[key][field] = parseInt(inp.value) || 0;
+      TAWI50_OVERRIDES[key][field] = parseMoney2(inp.value);
       try {
         await apiFetch(`/api/settings`, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ tawi50Overrides: TAWI50_OVERRIDES }) });
         showToast(L('✅ Override saved', '✅ บันทึกการแก้ไขแล้ว'), 'success');
@@ -3117,11 +3129,11 @@ function export50TawiCSV(year) {
   document.querySelectorAll('#tawi50-body tr').forEach(tr => {
     const tds = tr.querySelectorAll('td');
     if (tds.length < 7) return;
-    const gross = parseInt(tds[2].querySelector('input')?.value) || 0;
-    const sso   = parseInt(tds[3].querySelector('input')?.value) || 0;
-    const pvd   = parseInt(tds[4].querySelector('input')?.value) || 0;
-    const pit   = parseInt(tds[5].querySelector('input')?.value) || 0;
-    rows.push([tds[0].textContent.trim(), tds[1].textContent.trim(), gross, sso, pvd, pit, gross - sso - pvd - pit]);
+    const gross = parseMoney2(tds[2].querySelector('input')?.value);
+    const sso   = parseMoney2(tds[3].querySelector('input')?.value);
+    const pvd   = parseMoney2(tds[4].querySelector('input')?.value);
+    const pit   = parseMoney2(tds[5].querySelector('input')?.value);
+    rows.push([tds[0].textContent.trim(), tds[1].textContent.trim(), gross, sso, pvd, pit, round2HalfUp(gross - sso - pvd - pit)]);
   });
   downloadCSV(`50Tawi_${yr}.csv`, rows);
 }
@@ -3143,7 +3155,7 @@ async function download50TawiXlsx(year) {
   // were never actually going to be in the file.
   const namesInTable = Array.from(document.querySelectorAll('#tawi50-body tr')).filter(tr => {
     const grossInput = tr.querySelector('input[data-field="grossOverride"]');
-    return grossInput && (parseInt(grossInput.value) || 0) > 0;
+    return grossInput && parseMoney2(grossInput.value) > 0;
   }).map(tr => tr.querySelector('td')?.textContent.trim()).filter(Boolean);
   const incomplete = DATA_USERS.filter(u => namesInTable.includes(u.name) &&
     (!u.namePrefix || !u.firstNameTh || !u.lastNameTh || !u.idCardAddress || !u.idCard || !u.employeeNo)
@@ -3234,7 +3246,7 @@ function exportBankCSV() {
     const pit = calc.fin.pit;
     const bonus = calc.fin.bonus;
     const manualNet = calc.fin.manualAllowances.reduce((s, ma) => s + (ma.amount || 0) - (ma.advance || 0), 0);
-    const net = calc.grossIncome + bonus + manualNet - calc.ssf - calc.pvd - pit;
+    const net = round2HalfUp(calc.grossIncome + bonus + manualNet - calc.ssf - calc.pvd - pit);
     rows.push([u.bankAccount || '', u.name, net, u.bankName || APP_SETTINGS.company.bankName || 'Bangkok Bank', u.bankBranch || '', `เงินเดือน ${p2(start.getDate())}/${p2(start.getMonth()+1)}/${start.getFullYear()}`]);
   });
   downloadCSV(`Bangkok_Bank_${dateStr}.csv`, rows);
@@ -3284,7 +3296,7 @@ function exportPayrollSummaryCSV() {
     const pit = c.fin.pit;
     const bonus = c.fin.bonus;
     const manualNet = c.fin.manualAllowances.reduce((s, ma) => s + (ma.amount || 0) - (ma.advance || 0), 0);
-    const net = c.grossIncome + bonus + manualNet - c.ssf - c.pvd - pit;
+    const net = round2HalfUp(c.grossIncome + bonus + manualNet - c.ssf - c.pvd - pit);
     rows.push([
       u.name, u.position || '',
       c.base, c.transport || 0, c.posAllowance || 0, c.housingAllowance || 0, c.diligenceAllowance || 0,
@@ -7608,7 +7620,7 @@ function renderAttendanceTable() {
       const salary = empUser?.salary || 0;
       const hourlyRate = salary > 0 ? salary / 30 / 8 : 0;
       const amount = hourlyRate > 0 ? otPayAmountFromLeave(approvedOT, hourlyRate) : 0;
-      const amountStr = amount > 0 ? ` (฿${amount.toLocaleString()})` : '';
+      const amountStr = amount > 0 ? ` (฿${fmt2dp(amount)})` : '';
       otBadge = attAllowIcon('⏱️', `OT ${dur}${amountStr}`);
     }
 
@@ -10875,11 +10887,12 @@ function computePayroll(user, start, end, periodIndex) {
     }
     const hrs20 = Number(l.otHours20) || 0;
     const hrs30 = Number(l.otHours30) || 0;
-    const amt20 = Math.round(hourlyRate * 2 * hrs20);
-    const amt30 = Math.round(hourlyRate * 3 * hrs30);
+    // 2026-09-24 (owner): 2 decimal places, half-up (was whole baht). Dual-sync.
+    const amt20 = round2HalfUp(hourlyRate * 2 * hrs20);
+    const amt30 = round2HalfUp(hourlyRate * 3 * hrs30);
     ot20Hours += hrs20; ot30Hours += hrs30;
-    ot20Amount += amt20; ot30Amount += amt30;
-    otAmount += amt20 + amt30;
+    ot20Amount = round2HalfUp(ot20Amount + amt20); ot30Amount = round2HalfUp(ot30Amount + amt30);
+    otAmount = round2HalfUp(otAmount + amt20 + amt30);
     otTotalHours += hrs20 + hrs30;
   });
   // 2026-09-01: guaranteed OT is a driver contract floor only (OT ×1.5 hours/month). Still
@@ -10887,8 +10900,9 @@ function computePayroll(user, start, end, periodIndex) {
   const guaranteedOT = user.guaranteedOT || 0;
   if (user.role === 'driver' && canOT && guaranteedOT > ot15Hours) {
     const extraH = guaranteedOT - ot15Hours;
-    const extraA = Math.round(hourlyRate * 1.5 * extraH);
-    ot15Hours += extraH; ot15Amount += extraA; otAmount += extraA; otTotalHours += extraH;
+    // 2026-09-24 (owner): the top-up is OT pay too -- 2 decimal places, half-up. Dual-sync.
+    const extraA = round2HalfUp(hourlyRate * 1.5 * extraH);
+    ot15Hours += extraH; ot15Amount = round2HalfUp(ot15Amount + extraA); otAmount = round2HalfUp(otAmount + extraA); otTotalHours += extraH;
   }
 
   const totalUpcountryCount = upcountryCount + holidayWorkUpcountryCount;
@@ -10901,9 +10915,10 @@ function computePayroll(user, start, end, periodIndex) {
   const abroadEligible = isAllowanceEligible(S.allowanceEligibility, user.role, 'abroad');
   const abroadDays = abroadEligible ? pDays.filter(d => d.status === 'abroad').length : 0;
   const abroadTotal = (S.allowances.abroad || 0) * abroadDays;
-  const grossIncome = base + transport + posAllowance + housingAllowance + diligenceAllowance +
+  // 2026-09-24: OT is now in satang, so the sum is rounded to 2 dp to drop float noise only.
+  const grossIncome = round2HalfUp(base + transport + posAllowance + housingAllowance + diligenceAllowance +
     allowance1 + allowance2 + allowance3val + otAmount + longDistanceTotal + personalCarTotal +
-    holidayTransportTotal + abroadTotal;
+    holidayTransportTotal + abroadTotal);
 
   // SSO — rate and caps from APP_SETTINGS (updates when law changes)
   // SECURITY/CORRECTNESS FIX 2026-08-17 (user report, dual-sync twin of server.js's copy): MD is
@@ -10917,7 +10932,8 @@ function computePayroll(user, start, end, periodIndex) {
 
   // PVD
   const pvdRate = user.role === 'md' ? 0 : (user.pvdRate !== undefined ? user.pvdRate : 5);
-  const pvd = Math.round(base * pvdRate / 100);
+  // 2026-09-24 (owner): 1 decimal place, half-up at the 2nd decimal (was whole baht). Dual-sync.
+  const pvd = round1HalfUp(base * pvdRate / 100);
 
   // Progressive income tax (Thai ม.40(1)) — estimate only; Accounting can override before Confirm.
   // 2026-08-23: annualize recurring pay only. Variable items (OT, one-off allowances, bonus,
@@ -10934,7 +10950,8 @@ function computePayroll(user, start, end, periodIndex) {
   const expenseDeduct = Math.min(annualGross * 0.5, 100000);
   const personalAllow = S.tax.personalAllowanceAnnual || 60000;
   const annualTaxable = Math.max(0, annualGross - expenseDeduct - personalAllow - ssf * 12 - pvd * 12);
-  const autoPit = Math.round(calcAnnualTax(annualTaxable) / 12);
+  // 2026-09-24 (owner): tax is kept to 2 decimal places, half-up (was whole baht). Dual-sync.
+  const autoPit = round2HalfUp(calcAnnualTax(annualTaxable) / 12);
 
   return {
     base, transport, posAllowance, housingAllowance, diligenceAllowance,
@@ -11439,7 +11456,7 @@ async function renderPayslip() {
     const hourlyRate = view.calc.hourlyRate;
     const calcLines = [];
     // 2026-08-05 (Opus audit, M2): "=" changed to "≈" for the OT lines -- each OT request is
-    // independently rounded server/app-side (Math.round(hourlyRate x mult x hrs) PER record, see
+    // independently rounded server/app-side (round2HalfUp(hourlyRate x mult x hrs) PER record, see
     // computePayroll()), so once there is more than one approved OT request in a tier, the simple
     // hourlyRate x totalHours x mult product can differ from the true summed amount by a cent or
     // two of rounding drift. The total above (ot15Amount etc.) is always the real, correct figure
@@ -11568,7 +11585,12 @@ async function renderPayslip() {
   renderPayslipApprovalCard();
 }
 
-function fmtB(n) { return '฿' + n.toLocaleString('th-TH', { minimumFractionDigits: 2 }); }
+// 2026-09-24: amounts are now in satang (OT/tax 2 dp, PVD 1 dp) -- always exactly 2 decimals.
+function fmtB(n) { return '฿' + (Number(n) || 0).toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+// Same without the ฿ sign (tables / inputs on the Finalize and 50 Tawi pages).
+function fmt2dp(n) { return round2HalfUp(Number(n) || 0).toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+// A typed money amount (PIT / 50 Tawi overrides): 2 decimals half-up, never negative or NaN.
+function parseMoney2(v) { const x = round2HalfUp(parseFloat(v)); return x > 0 ? x : 0; }
 
 // Recomputes a leave record's display time text from raw fields using the CURRENT language,
 // instead of `l.timePart` which was frozen in whatever language was active at submission time.
@@ -14449,7 +14471,7 @@ function calcOTHours() {
   const salary = currentUser?.salary || 0;
   const hourlyRate = salary > 0 ? salary / 30 / 8 : 0;
   const amount = salary > 0 ? otPayAmountFromLeave(derived, hourlyRate) : 0;
-  const amountStr = salary > 0 ? ` ≈ ฿${amount.toLocaleString()}` : '';
+  const amountStr = salary > 0 ? ` ≈ ฿${fmt2dp(amount)}` : '';
   hoursText.textContent = `${otHoursRateDetail(derived)}${amountStr}`;
   const rangeHint = document.getElementById('ot-hours-range-hint');
   if (rangeHint) rangeHint.style.display = 'none';
@@ -19236,7 +19258,7 @@ async function renderFinalize() {
     // 2026-07-31: amount is now company-wide (Settings -> Allowance Rates), not per-employee.
     const hasDiligence = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'diligence') && (APP_SETTINGS.allowances.diligence || 0) > 0;
     const manualNet = calc.fin.manualAllowances.reduce((s, ma) => s + (ma.amount || 0) - (ma.advance || 0), 0);
-    const net = calc.grossIncome + bonus + manualNet - calc.ssf - calc.pvd - pit;
+    const net = round2HalfUp(calc.grossIncome + bonus + manualNet - calc.ssf - calc.pvd - pit);
     const tr = document.createElement('tr');
     tr.id = `finalize-row-${u.id}`;
     if (confirmed) tr.classList.add('finalize-row-confirmed');
@@ -19244,10 +19266,10 @@ async function renderFinalize() {
       <td style="font-weight:600">
         <div>${escapeHtml(u.name)}</div>
         <div style="font-size:11px;color:var(--text-muted);font-weight:400">${escapeHtml(u.position || '')}</div>
-        <div class="fin-gross-mobile" style="font-size:12px;color:#059669;font-weight:700;margin-top:2px">${L('Gross','รวมรับ')}: <span id="finalize-gross-m-${u.id}">${calc.grossIncome.toLocaleString()}</span></div>
+        <div class="fin-gross-mobile" style="font-size:12px;color:#059669;font-weight:700;margin-top:2px">${L('Gross','รวมรับ')}: <span id="finalize-gross-m-${u.id}">${fmt2dp(calc.grossIncome)}</span></div>
         <button class="btn btn-outline btn-sm" onclick="toggleManualAdj(${u.id},'${key}')" style="margin-top:6px;font-size:12px;color:#0891b2;border-color:#0891b2;padding:3px 10px;display:block">💰 ${L('Manual Adj.','ปรับค่าเบี้ยฯ')}${(saved.manualAllowances||[]).length > 0 ? ` (${(saved.manualAllowances||[]).length})` : ''}</button>
       </td>
-      <td class="col-hide-mobile" style="text-align:right;color:#059669;font-weight:700" id="finalize-gross-${u.id}">${calc.grossIncome.toLocaleString()}</td>
+      <td class="col-hide-mobile" style="text-align:right;color:#059669;font-weight:700" id="finalize-gross-${u.id}">${fmt2dp(calc.grossIncome)}</td>
       <td class="col-hide-mobile" style="text-align:right">
         <input type="number" id="finalize-bonus-${u.id}" value="${bonus}" min="0"
           ${confirmed ? 'disabled' : ''}
@@ -19260,16 +19282,16 @@ async function renderFinalize() {
           ? `<div class="toggle-switch ${diligencePaid ? 'on' : ''}" id="finalize-diligence-${u.id}" onclick="${confirmed ? '' : `toggleDiligencePaid(${u.id},'${key}')`}" style="margin:0 auto;${confirmed ? 'opacity:0.5;cursor:not-allowed' : ''}" title="${diligencePaid ? L('Paid this period', 'จ่ายรอบนี้') : L('Not paid this period', 'ไม่จ่ายรอบนี้')}"></div>`
           : '<span style="color:#cbd5e1">—</span>'}
       </td>
-      <td class="col-hide-mobile" style="text-align:right;color:#dc2626">${calc.ssf.toLocaleString()}</td>
-      <td class="col-hide-mobile" style="text-align:right;color:#dc2626">${calc.pvd.toLocaleString()}</td>
+      <td class="col-hide-mobile" style="text-align:right;color:#dc2626">${fmt2dp(calc.ssf)}</td>
+      <td class="col-hide-mobile" style="text-align:right;color:#dc2626">${fmt2dp(calc.pvd)}</td>
       <td style="text-align:right">
-        <input type="number" id="finalize-pit-${u.id}" value="${pit}" min="0"
+        <input type="number" id="finalize-pit-${u.id}" value="${pit}" min="0" step="0.01"
           ${confirmed ? 'disabled' : ''}
           onchange="updateFinalizeNet(${u.id},'${key}')"
           oninput="updateFinalizeNet(${u.id},'${key}')"
           style="width:90px;text-align:right;padding:6px 10px;border:1.5px solid ${confirmed ? 'var(--border)' : '#f59e0b'};border-radius:var(--radius-sm);font-size:13px;font-family:inherit;background:${confirmed ? (_dark?'#1e293b':'#f8fafc') : (_dark?'rgba(245,158,11,.12)':'#fffbeb')};color:#b45309;font-weight:700;transition:all var(--transition)">
       </td>
-      <td style="text-align:right;font-weight:700;font-size:14px;color:var(--primary)" id="finalize-net-${u.id}">${net.toLocaleString()}</td>
+      <td style="text-align:right;font-weight:700;font-size:14px;color:var(--primary)" id="finalize-net-${u.id}">${fmt2dp(net)}</td>
       <td style="text-align:center">
         <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
           <span id="finalize-status-${u.id}" class="badge ${confirmed ? 'badge-success' : 'badge-warning'}">
@@ -19479,10 +19501,10 @@ function refreshFinalizeNetDisplay(userId, key) {
   if (!u) return;
   const { start, end } = getPeriodBounds(finalizeSelectedPeriodIndex);
   const calc = calcFinalizeEmployee(u, start, end, finalizeSelectedPeriodIndex);
-  const pit = pitInput ? (parseInt(pitInput.value) || 0) : (finalizeData[key]?.pit ?? calc.autoPit);
+  const pit = pitInput ? parseMoney2(pitInput.value) : (finalizeData[key]?.pit ?? calc.autoPit);
   const bonusInput = document.getElementById(`finalize-bonus-${userId}`);
   const bonus = bonusInput ? (parseInt(bonusInput.value) || 0) : (finalizeData[key]?.bonus || 0);
-  netEl.textContent = (calc.grossIncome + bonus + _getFinalizeManualNet(key) - calc.ssf - calc.pvd - pit).toLocaleString();
+  netEl.textContent = fmt2dp(calc.grossIncome + bonus + _getFinalizeManualNet(key) - calc.ssf - calc.pvd - pit);
 }
 
 function updateFinalizeNet(userId, key) {
@@ -19490,7 +19512,7 @@ function updateFinalizeNet(userId, key) {
   if (blockIfMdApproved(key)) return;
   const pitInput = document.getElementById(`finalize-pit-${userId}`);
   if (!pitInput) return;
-  const pit = parseInt(pitInput.value) || 0;
+  const pit = parseMoney2(pitInput.value);
   // User edited the PIT field — persist the override in memory until Confirm.
   finalizeData[key] = { ...(finalizeData[key] || {}), pit };
   refreshFinalizeNetDisplay(userId, key);
@@ -19535,9 +19557,9 @@ async function toggleDiligencePaid(userId, key) {
   if (u) {
     const calc = calcFinalizeEmployee(u, start, end, finalizeSelectedPeriodIndex);
     const grossEl = document.getElementById(`finalize-gross-${userId}`);
-    if (grossEl) grossEl.textContent = calc.grossIncome.toLocaleString();
+    if (grossEl) grossEl.textContent = fmt2dp(calc.grossIncome);
     const grossM = document.getElementById(`finalize-gross-m-${userId}`);
-    if (grossM) grossM.textContent = calc.grossIncome.toLocaleString();
+    if (grossM) grossM.textContent = fmt2dp(calc.grossIncome);
     refreshUnsavedAutoPit(userId, key);
     refreshFinalizeNetDisplay(userId, key);
   }
@@ -19586,7 +19608,7 @@ async function toggleFinalizeConfirm(userId, key) {
     if (adjFormU) adjFormU.style.display = '';
     renderManualAdjList(userId, key);
   } else {
-    const pit = parseInt(pitInput.value) || 0;
+    const pit = parseMoney2(pitInput.value);
     const bonusInput = document.getElementById(`finalize-bonus-${userId}`);
     const bonus = bonusInput ? (parseInt(bonusInput.value) || 0) : (saved.bonus || 0);
     if (bonusInput) { bonusInput.disabled = true; bonusInput.style.border = '1.5px solid var(--border)'; bonusInput.style.background = document.documentElement.getAttribute('data-theme')==='dark' ? '#1e293b' : '#f8fafc'; }

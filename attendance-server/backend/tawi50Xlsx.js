@@ -27,6 +27,13 @@ function tintAsData(ws, addr) {
   const cell = ws.getCell(addr);
   cell.font = { ...cell.font, color: DATA_FONT_COLOR };
 }
+// 2026-09-24: an amount to 2 decimal places, half-up (same rule as server.js round2HalfUp); the
+// epsilon absorbs binary noise such as 1.005 * 100 = 100.4999...
+function money2(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 0;
+  return Math.sign(x) * Math.round(Math.abs(x) * 100 + 1e-9) / 100;
+}
 
 const SEAL_IMAGE_PATH = path.join(__dirname, '..', '..', 'attendance', 'images', 'tawi50-seal-placeholder.png');
 
@@ -282,12 +289,14 @@ function writeEmployeeBlock(ws, employee, amounts, seq, year, issueDate) {
   // Row 24: item (1) เงินเดือน ค่าจ้าง... -- M24 is the Buddhist-era tax year, O24/Q24 the annual
   // gross/withheld-tax totals.
   ws.getCell('M24').value = year + 543;
-  ws.getCell('O24').value = Math.round(amounts.grossIncome || 0);
-  ws.getCell('Q24').value = Math.round(amounts.pit || 0);
+  // 2026-09-24 (owner): the real amounts paid (satang included) -- 2 dp only to drop float noise,
+  // never whole baht. The template cells are already formatted #,##0.00.
+  ws.getCell('O24').value = money2(amounts.grossIncome);
+  ws.getCell('Q24').value = money2(amounts.pit);
   ['M24', 'O24', 'Q24'].forEach(addr => tintAsData(ws, addr));
 
-  ws.getCell('P53').value = Math.round(amounts.pvd || 0);
-  ws.getCell('J54').value = Math.round(amounts.sso || 0);
+  ws.getCell('P53').value = money2(amounts.pvd);
+  ws.getCell('J54').value = money2(amounts.sso);
   tintAsData(ws, 'P53');
   tintAsData(ws, 'J54');
 
