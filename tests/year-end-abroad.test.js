@@ -33,10 +33,10 @@ const SHARED = ['normalizeAnnualLeaveTiers', 'getAnnualLeaveTiers', 'getAnnualLe
   'carryForwardForfeitMinutes', 'isVoidLeaveStatus'];
 const CLIENT_FNS = [...SHARED, 'leaveRecordMinutes', 'getApprovedHolidayWorkDays',
   'getCarryForwardKey', 'getCarryForwardCompKey', 'getCarryForwardDays', 'getCarryForwardCompDays',
-  'getOpeningUsedKey', 'getOpeningUsedDays', 'computeLeaveBalance', 'localDateStr',
+  'getOpeningUsedKey', 'getOpeningUsedDays', 'computeLeaveBalance', 'localDateStr', 'isYearEndCountedLeaveStatus', 'annualLeaveRemainingMinutes',
   'computeLateDeductMinutes', 'isSafeTimeZone', 'tzOffsetMinutesAt', 'abroadLocalTimeText', 'abroadLocalTimeHtml', 'escapeHtml'];
 const SERVER_FNS = [...SHARED, 'leaveMinutesOf', 'getApprovedHolidayWorkAnnualLeaveDays',
-  'deriveLeaveDaysCount', 'ta_localDateStr', 'isValidDateStr', 'annualLeaveRemainingMinutes',
+  'deriveLeaveDaysCount', 'ta_localDateStr', 'isValidDateStr', 'isYearEndCountedLeaveStatus', 'annualLeaveRemainingMinutes',
   'annualLateDeductMinutes', 'carryForwardAutoRunYear', 'computeYearEndCarryForward'];
 
 const TIERS = [{ afterMonths: 6, days: 3 }, { afterMonths: 12, days: 6 }, { afterMonths: 24, days: 8 }, { afterMonths: 36, days: 10 }];
@@ -113,7 +113,10 @@ test('garbage date / garbage runs are safe', () => {
   assert.strictEqual(S.carryForwardAutoRunYear('2027-01-05', 'x'), 2026);
 });
 
-console.log('T1 computed value == what the old client button wrote (computeLeaveBalance)');
+// 2026-09-24 (review M): the run now also subtracts last year's PENDING annual leave, so the
+// comparison is against the client twin annualLeaveRemainingMinutes (was computeLeaveBalance,
+// approved-only); user 5's pending 1-day request now lowers the carried value by 1.
+console.log('T1 computed value == the client twin annualLeaveRemainingMinutes (pending counted)');
 const USERS = [
   { id: 1, startDate: '2020-01-01', active: true },                      // 10 days
   { id: 2, startDate: '2026-05-15', active: true },                      // probation, 3 days from Nov
@@ -122,8 +125,7 @@ const USERS = [
   { id: 5, startDate: '2024-01-01', active: true },                      // 8 days, uses a lot
 ];
 function oldClientValue(C, u, year, maxCF) {
-  const bal = C.computeLeaveBalance(u, 'annual', C.annualLeaveEntitlementDays(u, `${year}-12-31`), year);
-  return Math.min(Math.max(0, bal.remMin / 480), maxCF);
+  return Math.min(Math.max(0, C.annualLeaveRemainingMinutes(u, year) / 480), maxCF);
 }
 function worldCF(over) {
   return {
@@ -148,11 +150,11 @@ for (const max of [5, 20, 0]) {
     }
   });
 }
-test('expected numbers: user 1 = min(15 - 5 used - 2 expired CF, 20) = 8; user 5 = 8 - 3 - 4h - 1.5 = 3.0 days', () => {
+test('expected numbers: user 1 = min(15 - 5 used - 2 expired CF, 20) = 8; user 5 = 8 - 3 - 1 pending - 4h - 1.5 = 2.0 days', () => {
   const w = worldCF({ leave: leaveSettings({ carryForwardMax: 20 }) });
   const out = makeServer(w).computeYearEndCarryForward(w.leaves, w.users, 2026, w.cf, 20);
   assert.strictEqual(out['2027_1'], 8);
-  assert.strictEqual(out['2027_5'], 8 - 3 - 0.5 - 1.5);
+  assert.strictEqual(out['2027_5'], 8 - 3 - 1 - 0.5 - 1.5);
   assert.strictEqual(out['2027_2'], 3 + 1); // quota 3 from Nov + 1 earned holiday-work day
 });
 test('missing carryForwardMax -> default 5; absurd value clamped to 60', () => {

@@ -4971,14 +4971,14 @@ function carryForwardExpiryDateStr(year) {
 function leaveWorkingDaysBetween(fromStr, toStr) {
   return deriveLeaveDaysCount(fromStr, toStr);
 }
-// Minutes of leave `l` that fall on dates <= cutoffStr (a multi-day leave straddling the cutoff
-// counts only its working days up to and including the cutoff).
+// Minutes of leave `l` that count as carry-forward usage for a cutoff (the expiry date).
+// 2026-09-24 (owner, review HIGH): a leave that STARTS on or before the expiry date may use
+// carry-forward for the WHOLE leave -- it used to count only its working days up to the cutoff,
+// which contradicted the submission gate (asOf = dateFrom sees no forfeit at all) and could push
+// later balances negative.
 function leaveMinutesOnOrBefore(l, cutoffStr) {
   if (!l || !l.dateFrom || l.dateFrom > cutoffStr) return 0;
-  const total = leaveMinutesOf(l);
-  const to = l.dateTo || l.dateFrom;
-  if (to <= cutoffStr || !((Number(l.days) || 0) > 0)) return total;
-  return Math.min(total, leaveWorkingDaysBetween(l.dateFrom, cutoffStr) * 480);
+  return leaveMinutesOf(l);
 }
 // Carry-forward minutes forfeited for `year` as seen on asOfDateStr: 0 until the expiry date has
 // passed. includePending = the submission gate (pending leave dated on/before expiry already
@@ -5855,6 +5855,15 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
     };
     leaves.push(leave);
     saveLeaves(leaves);
+    // 2026-09-24 (review M): annual leave (pending or approved) counts in the year-end pool, so a
+    // request dated in a year whose carry-forward is already snapshotted rewrites that snapshot.
+    if (type === 'annual' && targetUser) {
+      try {
+        refreshSnapshottedCarryForward(leaves, targetUser, leave.dateFrom);
+      } catch (e) {
+        console.error('[LEAVE] carry-forward refresh after create failed', e && e.message);
+      }
+    }
     // SECURITY FIX 2026-08-13 (re-audit, F-1): the raw record used to go out on this broadcast,
     // reaching the SAME unauthenticated /ws socket already fixed for user records this session
     // (toBroadcastUserProjection) -- reason/note/attachment/targetSnapshot names were streaming to
@@ -5956,7 +5965,9 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
       // approved Dec leave still carries over, and a late-approved holiday-work day is lost.
       const touchesAnnualPool = leave.type === 'annual' || leave.type === 'abroad' ||
         (leave.type === 'holiday-work' && leave.compensationMode === 'annual-leave');
-      if (newStatus === 'approved' && touchesAnnualPool && ownerUser) {
+      // 2026-09-24 (review M): a pending annual request already counts at the January run
+      // (annualLeaveRemainingMinutes), so rejecting it must give the days back to the snapshot.
+      if (((newStatus === 'approved' && touchesAnnualPool) || (newStatus === 'rejected' && leave.type === 'annual')) && ownerUser) {
         try {
           refreshSnapshottedCarryForward(leaves, ownerUser, leave.dateFrom);
         } catch (e) {
@@ -6451,6 +6462,18 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
       approver: null, approvedAt: null,
     };
     saveLeaves(leaves);
+    // 2026-09-24 (review M): pending annual leave counts in the year-end pool, so an edit of a
+    // pending annual request (hours, dates, type) rewrites the snapshot of the year(s) it touches.
+    if ((leave.type === 'annual' || newType === 'annual') && (ownerUser || live)) {
+      const years = new Set([leave.dateFrom, leaves[idx].dateFrom].filter(isValidDateStr).map(d => d.slice(0, 4)));
+      years.forEach(y => {
+        try {
+          refreshSnapshottedCarryForward(leaves, ownerUser || live, `${y}-01-01`);
+        } catch (e) {
+          console.error('[LEAVE] carry-forward refresh after edit failed', e && e.message);
+        }
+      });
+    }
     // SECURITY FIX 2026-08-13 (re-audit, F-1): same unauthenticated-broadcast leak as the other
     // 2 leave broadcasts.
     broadcast({ type: 'LEAVE_UPDATED', leave: toPublicLeaveProjection(leaves[idx]) });
@@ -6519,9 +6542,17 @@ function annualLateDeductMinutes(user, year, leaves) {
   return deductMin;
 }
 
-// Dual-sync with app.js computeLeaveBalance(u, 'annual', annualLeaveEntitlementDays(u, yearEnd),
-// year).remMin -- the pool processYearEndCarryForward() carries over. Approved-only, year-scoped,
-// hourly-aware (leaveMinutesOf), minus go-live opening used and the late-arrival deduction.
+// The pool the year-end carry-forward carries over (runYearEndCarryForward /
+// refreshSnapshottedCarryForward / earnedDayUsedError). Year-scoped, hourly-aware
+// (leaveMinutesOf), minus go-live opening used and the late-arrival deduction.
+// 2026-09-24 (owner, review M): last year's annual leave that is still PENDING counts as used
+// too (isYearEndCountedLeaveStatus) -- otherwise a December request approved after the January run
+// was carried over AND taken. A later reject / owner cancel refreshes the snapshot so the days
+// come back; approval changes nothing.
+// DUAL-SYNC: app.js annualLeaveRemainingMinutes (same function, same name).
+function isYearEndCountedLeaveStatus(s) {
+  return s === 'approved' || String(s || '').startsWith('pending');
+}
 function annualLeaveRemainingMinutes(leaves, user, year, cf) {
   const yStart = `${year}-01-01`, yEnd = `${year}-12-31`;
   const cfDays = Number(cf[`${year}_${user.id}`]) || 0;
@@ -6530,14 +6561,15 @@ function annualLeaveRemainingMinutes(leaves, user, year, cf) {
   const effectiveMax = annualLeaveEntitlementDays(user, yEnd) + cfDays + compDays;
   let usedMin = 0;
   leaves.filter(l =>
-    l.userId === user.id && l.type === 'annual' && l.status === 'approved' &&
+    l.userId === user.id && l.type === 'annual' && isYearEndCountedLeaveStatus(l.status) &&
     l.dateFrom >= yStart && l.dateFrom <= yEnd
   ).forEach(l => { usedMin += leaveMinutesOf(l); });
   const openingUsed = Number((readSettings().leaveOpeningUsed || {})[`${year}_${user.id}_annual`]) || 0;
   usedMin += openingUsed * 8 * 60;
   // 2026-09-24: the year is over by the time this snapshot matters, so expired carry-forward
-  // (FIFO forfeit) is always taken out -- app.js computeLeaveBalance does the same for a past year.
-  const forfeitMin = carryForwardForfeitMinutes(leaves, user, year, `${year + 1}-01-01`, false, undefined, cf);
+  // (FIFO forfeit) is always taken out, as seen on 1 January of the next year. Pending leave dated
+  // on/before expiry counts as carry-forward usage (includePending), matching usedMin above.
+  const forfeitMin = carryForwardForfeitMinutes(leaves, user, year, `${year + 1}-01-01`, true, undefined, cf);
   return Math.max(0, effectiveMax * 8 * 60 - usedMin - annualLateDeductMinutes(user, year, leaves) - forfeitMin);
 }
 
@@ -6771,7 +6803,9 @@ app.delete('/api/leaves/:id', withLeavesLock((req, res) => {
     saveLeaves(leaves);
     const cancelTouchesAnnualPool = ['annual', 'abroad'].includes(leave.type) ||
       (leave.type === 'holiday-work' && leave.compensationMode === 'annual-leave');
-    if (approvedLeaveCancel && cancelTouchesAnnualPool) {
+    // 2026-09-24 (review M): a PENDING annual request counts in the year-end pool too, so its
+    // hard-delete must give the days back to an already-snapshotted carry-forward.
+    if ((approvedLeaveCancel && cancelTouchesAnnualPool) || (!softCancel && leave.type === 'annual')) {
       try {
         refreshSnapshottedCarryForward(leaves, live, leave.dateFrom);
       } catch (e) {

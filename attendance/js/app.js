@@ -2893,6 +2893,29 @@ function annualGateRemainingMinutes(u, asOf) {
   ).forEach(l => { usedMin += leaveRecordMinutes(l); });
   return totalMin - usedMin - carryForwardForfeitMinutes(u, year, asOf, true);
 }
+// 2026-09-24 (review M): the year-end carry-forward pool exactly as the server computes it
+// (server.js annualLeaveRemainingMinutes): entitlement on 31 Dec + carry-forward + earned,
+// minus approved AND pending annual leave, opening used, late deduction and the carry-forward
+// forfeit as seen on 1 January of the next year. earnedDayUsedByRecord used
+// computeLeaveBalance(..).remMin instead, which applies TODAY's forfeit and ignores pending, so
+// the button could show while the server refused. DUAL-SYNC: server.js
+// isYearEndCountedLeaveStatus / annualLeaveRemainingMinutes.
+function isYearEndCountedLeaveStatus(s) {
+  return s === 'approved' || String(s || '').startsWith('pending');
+}
+function annualLeaveRemainingMinutes(u, year) {
+  const yStart = `${year}-01-01`, yEnd = `${year}-12-31`;
+  const effectiveMax = annualLeaveEntitlementDays(u, yEnd) + getCarryForwardDays(year, u.id) +
+    getApprovedHolidayWorkDays(year, u.id) + getCarryForwardCompDays(year, u.id);
+  let usedMin = 0;
+  DATA_LEAVES.filter(l =>
+    l.userId === u.id && l.type === 'annual' && isYearEndCountedLeaveStatus(l.status) &&
+    l.dateFrom >= yStart && l.dateFrom <= yEnd
+  ).forEach(l => { usedMin += leaveRecordMinutes(l); });
+  usedMin += getOpeningUsedDays(year, u.id, 'annual') * 8 * 60;
+  const forfeitMin = carryForwardForfeitMinutes(u, year, `${year + 1}-01-01`, true);
+  return Math.max(0, effectiveMax * 8 * 60 - usedMin - computeLateDeductMinutes(u.id, year).deductMin - forfeitMin);
+}
 function earnedDayUsedByRecord(l) {
   if (!l) return false;
   const owner = DATA_USERS.find(u => u.id === l.userId) || (currentUser && currentUser.id === l.userId ? currentUser : null);
@@ -2906,8 +2929,8 @@ function earnedDayUsedByRecord(l) {
     const remWith = annualGateRemainingMinutes(owner, earnedDayBalanceAsOf(year, today));
     let dropMin = 0, nextRem = 0;
     if (LEAVE_CARRY_FORWARD[getCarryForwardKey(year + 1, owner.id)] !== undefined) {
-      // computeLeaveBalance(.., year).remMin = server annualLeaveRemainingMinutes (the refresh's pool).
-      const leftoverWith = computeLeaveBalance(owner, 'annual', annualLeaveEntitlementDays(owner, `${year}-12-31`), year).remMin;
+      // 2026-09-24: same pool as server annualLeaveRemainingMinutes (the refresh's pool).
+      const leftoverWith = annualLeaveRemainingMinutes(owner, year);
       const cfNew = carryForwardAfterCreditLoss(leftoverWith, creditMin, maxCF);
       const cfOld = getCarryForwardDays(year + 1, owner.id) + getCarryForwardCompDays(year + 1, owner.id);
       dropMin = Math.max(0, cfOld - cfNew) * 480;
@@ -2981,14 +3004,14 @@ function leaveWorkingDaysBetween(fromStr, toStr) {
   }
   return n;
 }
-// Minutes of leave `l` that fall on dates <= cutoffStr (a multi-day leave straddling the cutoff
-// counts only its working days up to and including the cutoff).
+// Minutes of leave `l` that count as carry-forward usage for a cutoff (the expiry date).
+// 2026-09-24 (owner, review HIGH): a leave that STARTS on or before the expiry date may use
+// carry-forward for the WHOLE leave -- it used to count only its working days up to the cutoff,
+// which contradicted the submission gate (asOf = dateFrom sees no forfeit at all) and could push
+// later balances negative.
 function leaveMinutesOnOrBefore(l, cutoffStr) {
   if (!l || !l.dateFrom || l.dateFrom > cutoffStr) return 0;
-  const total = leaveRecordMinutes(l);
-  const to = l.dateTo || l.dateFrom;
-  if (to <= cutoffStr || !((Number(l.days) || 0) > 0)) return total;
-  return Math.min(total, leaveWorkingDaysBetween(l.dateFrom, cutoffStr) * 480);
+  return leaveRecordMinutes(l);
 }
 // Carry-forward minutes forfeited for `year` as seen on asOfDateStr: 0 until the expiry date has
 // passed. includePending = the submission gate (pending leave dated on/before expiry already

@@ -52,12 +52,12 @@ const SHARED = ['normalizeAnnualLeaveTiers', 'getAnnualLeaveTiers', 'getAnnualLe
   'carryForwardRunRefusal'];
 const CLIENT_FNS = [...SHARED, 'leaveRecordMinutes', 'getApprovedHolidayWorkDays', 'getCarryForwardKey',
   'getCarryForwardCompKey', 'getCarryForwardDays', 'getCarryForwardCompDays', 'getOpeningUsedKey', 'getOpeningUsedDays',
-  'computeLeaveBalance', 'localDateStr', 'annualGateRemainingMinutes', 'earnedDayUsedByRecord', 'approvedCancelBlockCode',
+  'computeLeaveBalance', 'localDateStr', 'annualGateRemainingMinutes', 'isYearEndCountedLeaveStatus', 'annualLeaveRemainingMinutes', 'earnedDayUsedByRecord', 'approvedCancelBlockCode',
   'isRevokeCandidate', 'revokeBlockCode', 'canRevokeLeaveApproval', 'attendanceTimesForDate', 'attKey',
   'carryForwardFirstSourceYear', 'carryForwardNextRunJanuaryYear', 'carryForwardRefusalText',
   'isSafeTimeZone', 'tzOffsetMinutesAt', 'abroadLocalTimeText'];
 const SERVER_FNS = [...SHARED, 'leaveMinutesOf', 'getApprovedHolidayWorkAnnualLeaveDays', 'deriveLeaveDaysCount',
-  'ta_localDateStr', 'isValidDateStr', 'annualLeaveRemainingMinutes', 'leaveBalanceRemainingMinutes', 'leaveBalanceError',
+  'ta_localDateStr', 'isValidDateStr', 'isYearEndCountedLeaveStatus', 'annualLeaveRemainingMinutes', 'leaveBalanceRemainingMinutes', 'leaveBalanceError',
   'earnedDayUsedError', 'carryForwardAutoRunYear', 'carryForwardFirstSourceYear'];
 
 // World = { today, user, leaves, cf, openingUsed, frozen: bool, log }
@@ -189,6 +189,22 @@ test('carried day still unused in 2027 -> allowed; carried day used in 2027 -> r
   for (const [side, X] of both(ok.w)) assert.strictEqual(refused(side, X, ok.w, ok.rec), false, side);
   const bad = snapWorld(11);
   for (const [side, X] of both(bad.w)) assert.strictEqual(refused(side, X, bad.w, bad.rec), true, side);
+});
+
+// 2026-09-24 (review fix 10): the client used computeLeaveBalance(..).remMin (approved only, today's
+// forfeit) for the refresh pool while the server uses annualLeaveRemainingMinutes (pending counted,
+// forfeit as of 1 Jan next year) -> the Revoke/Cancel button showed and the server refused.
+test('pending last-year leave: client and server agree on the carry-forward drop (both refuse)', () => {
+  const rec = hw('2026-11-07', 'annual-leave');
+  const leaves = [rec, annual('2026-03-02', '2026-03-11', 8), annual('2026-12-21', '2026-12-22', 2, 'pending-manager'),
+    annual('2027-01-04', '2027-01-18', 11)];
+  // 2026: 10 + 1 earned - 8 approved - 2 pending = 1 carried. Without the earned day the refresh
+  // carries 0, and 2027 (10 + 1 CF - 11 used) cannot absorb losing it.
+  const w = { today: '2027-01-20', user: USER, cf: { '2027_1': 1, 'comp_2027_1': 0 }, leaves };
+  const [[, C], [, S]] = both(w);
+  assert.strictEqual(C.annualLeaveRemainingMinutes(USER, 2026), S.annualLeaveRemainingMinutes(leaves, USER, 2026, w.cf));
+  assert.strictEqual(refused('client', C, w, rec), true, 'client');
+  assert.strictEqual(refused('server', S, w, rec), true, 'server');
 });
 
 console.log('T1 owner cancel of approved Holiday Work');

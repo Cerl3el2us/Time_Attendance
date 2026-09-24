@@ -34,10 +34,10 @@ const SHARED = ['normalizeAnnualLeaveTiers', 'getAnnualLeaveTiers', 'getAnnualLe
   'carryForwardForfeitMinutes', 'annualLeaveEarnedPoolDays', 'isVoidLeaveStatus'];
 const CLIENT_FNS = [...SHARED, 'leaveRecordMinutes', 'getApprovedHolidayWorkDays',
   'getCarryForwardKey', 'getCarryForwardCompKey', 'getCarryForwardDays', 'getCarryForwardCompDays',
-  'getOpeningUsedKey', 'getOpeningUsedDays', 'computeLeaveBalance', 'canUseAnnualLeave', 'localDateStr'];
+  'getOpeningUsedKey', 'getOpeningUsedDays', 'computeLeaveBalance', 'canUseAnnualLeave', 'localDateStr', 'isYearEndCountedLeaveStatus', 'annualLeaveRemainingMinutes'];
 const SERVER_FNS = [...SHARED, 'leaveMinutesOf', 'getApprovedHolidayWorkAnnualLeaveDays',
   'deriveLeaveDaysCount', 'ta_localDateStr', 'isValidDateStr', 'hourlyLeaveShapeError', 'parseHHMMToMins',
-  'leaveBalanceError', 'leaveBalanceRemainingMinutes', 'annualLeaveServiceError', 'annualLeaveRemainingMinutes'];
+  'leaveBalanceError', 'leaveBalanceRemainingMinutes', 'annualLeaveServiceError', 'isYearEndCountedLeaveStatus', 'annualLeaveRemainingMinutes'];
 
 const TIERS = [{ afterMonths: 6, days: 3 }, { afterMonths: 12, days: 6 }, { afterMonths: 24, days: 8 }, { afterMonths: 36, days: 10 }];
 function leaveSettings(over) {
@@ -118,11 +118,52 @@ test('leave used AFTER E does not count as CF usage', () => {
   const w = world({ leaves: [annual('2026-12-07', '2026-12-09', 3)] });
   assert.strictEqual(forfeitBoth(w, '2026-12-10', false), 5 * D);
 });
-test('leave straddling E counts only its working days up to E', () => {
+// 2026-09-24 (owner, review HIGH): this test used to expect the straddling leave to count only its
+// 2 working days up to E (forfeit 3). Owner rule: a leave that STARTS on/before E uses
+// carry-forward for the WHOLE leave.
+test('leave starting on/before E counts WHOLLY as carry-forward usage (owner rule)', () => {
   assert.strictEqual(new Date('2026-11-27T12:00:00').getDay(), 5); // Friday
-  // Fri 27, (Sat/Sun), Mon 30 = E, Tue 1, Wed 2 -> 4 working days, 2 of them on/before E
+  // Fri 27, (Sat/Sun), Mon 30 = E, Tue 1, Wed 2 -> 4 working days, all 4 count
   const w = world({ leaves: [annual('2026-11-27', '2026-12-02', 4)] });
-  assert.strictEqual(forfeitBoth(w, '2026-12-03', false), 3 * D);
+  assert.strictEqual(forfeitBoth(w, '2026-12-03', false), 1 * D);
+  const w2 = world({ leaves: [annual('2026-11-30', '2026-12-04', 5)] }); // starts ON E
+  assert.strictEqual(forfeitBoth(w2, '2026-12-07', false), 0);
+});
+test('review scenario: 10 December days first, then 30 Nov-4 Dec -> gate consistent, never negative', () => {
+  // CF 5 + entitlement 10 = 15. Dec requests see the forfeit (5), so 10 Dec days fit exactly.
+  const dec = annual('2026-12-07', '2026-12-18', 10, 'pending-manager');
+  const w = world({ leaves: [dec] });
+  const S = makeServer(w);
+  assert.strictEqual(S.leaveBalanceRemainingMinutes(w.leaves, U, 'annual', undefined, '2026-12-21'), 0);
+  // 30 Nov (= E) - 4 Dec: 5 working days, starts on E -> may use the whole carry-forward.
+  assert.strictEqual(S.leaveBalanceError(w.leaves, U, 'annual', 5 * D, undefined, '2026-11-30'), null);
+  const straddle = annual('2026-11-30', '2026-12-04', 5, 'pending-manager');
+  w.leaves.push(straddle);
+  // Every later gate / date sees exactly 0 left -- the old per-day split made this -3 days.
+  for (const asOf of ['2026-11-30', '2026-12-01', '2026-12-21', '2026-12-31']) {
+    assert.strictEqual(S.leaveBalanceRemainingMinutes(w.leaves, U, 'annual', undefined, asOf), 0, asOf);
+  }
+  assert.ok(S.leaveBalanceError(w.leaves, U, 'annual', 60, undefined, '2026-12-28'));
+  // Editing the straddling request (exceptId) still sees its own 5 days as available.
+  assert.strictEqual(S.leaveBalanceError(w.leaves, U, 'annual', 5 * D, straddle.id, '2026-11-30'), null);
+  // Year-end pool (both sides): 15 - 15 used - 0 forfeit = 0.
+  assert.strictEqual(S.annualLeaveRemainingMinutes(w.leaves, U, 2026, w.cf), 0);
+  assert.strictEqual(makeClient({ ...w, today: '2027-01-05' }).annualLeaveRemainingMinutes(U, 2026), 0);
+});
+test('year-end pool counts PENDING last-year annual leave (both sides); rejected / cancelled do not', () => {
+  const w = world({ today: '2027-01-05', leaves: [annual('2026-03-02', '2026-03-06', 5),
+    annual('2026-12-21', '2026-12-22', 2, 'pending-manager'), annual('2026-12-23', '2026-12-23', 1, 'pending-md'),
+    annual('2026-12-28', '2026-12-28', 1, 'rejected'), annual('2026-12-29', '2026-12-29', 1, 'cancelled')] });
+  const s = makeServer(w).annualLeaveRemainingMinutes(w.leaves, U, 2026, w.cf);
+  const c = makeClient(w).annualLeaveRemainingMinutes(U, 2026);
+  assert.strictEqual(s, c);
+  assert.strictEqual(s, (15 - 5 - 3) * D);
+});
+test('year-end pool: a pending leave dated on/before E counts as carry-forward usage', () => {
+  const w = world({ today: '2027-01-05', leaves: [annual('2026-11-02', '2026-11-06', 5, 'pending-manager')] });
+  // 15 - 5 pending - 0 forfeit (CF covered by the pending leave) = 10
+  assert.strictEqual(makeServer(w).annualLeaveRemainingMinutes(w.leaves, U, 2026, w.cf), 10 * D);
+  assert.strictEqual(makeClient(w).annualLeaveRemainingMinutes(U, 2026), 10 * D);
 });
 test('hourly leave before E counts its (lunch-excluded) minutes', () => {
   const l = { id: 99, userId: 1, type: 'annual', status: 'approved', dateFrom: '2026-05-05', days: 0, hourlyStart: '10:00', hourlyEnd: '15:00' };
