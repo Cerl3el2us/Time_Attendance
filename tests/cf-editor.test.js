@@ -99,6 +99,52 @@ test('one Save button, and carry-forward is written BEFORE opening balances', ()
   assert.deepStrictEqual(buttons, ['onclick="saveOpeningPanel('], 'exactly one save button');
 });
 
+test('a manual override survives the snapshot refresher (Opus review HIGH)', () => {
+  const fn = SERVER_SRC.slice(SERVER_SRC.indexOf('function refreshSnapshottedCarryForward'));
+  const body = fn.slice(0, fn.indexOf('\n}') + 2);
+  assert.ok(/leaveCarryForwardEdits/.test(body),
+    'refreshSnapshottedCarryForward fires on every annual-leave create/edit/approve/cancel; without ' +
+    'this guard it recomputed a figure a human had just corrected, while the audit still named them');
+  // Match the statements exactly: `cf[nextKey] =` also matches the `cf[nextKey] === undefined`
+  // precondition several lines ABOVE the guard, which made this assertion fail on correct code.
+  const guardAt = body.indexOf('if (plainObj(settings.leaveCarryForwardEdits)[nextKey]) return;');
+  const writeAt = body.indexOf('cf[nextKey] = Math.min(');
+  assert.ok(guardAt > -1, 'guard statement not found');
+  assert.ok(writeAt > -1, 'write statement not found');
+  assert.ok(guardAt < writeAt, 'the guard must return before the write');
+  // The once-a-year run is deliberately NOT guarded: it is the authoritative recomputation and its
+  // confirm dialog already says existing values are overwritten.
+  const run = SERVER_SRC.slice(SERVER_SRC.indexOf('function runYearEndCarryForward'));
+  assert.ok(!/leaveCarryForwardEdits/.test(run.slice(0, run.indexOf('\n}') + 2)),
+    'the year-end run must keep overwriting -- only the per-leave refresher is guarded');
+});
+
+test('carry-forward cannot be edited after it has expired (owner: block)', () => {
+  assert.ok(/cf-after-expiry/.test(route), 'server must refuse it');
+  assert.ok(/carryForwardExpiryEnabled\(\) && bangkokDateStr\(\) > expiryStr/.test(route),
+    'refusal must be keyed on the configured expiry date, not a hardcoded month');
+  const section = APP_SRC.slice(APP_SRC.indexOf('function openingLeaveBalancesSectionHtml'),
+                                APP_SRC.indexOf('async function saveCarryForwardFromUI'));
+  assert.ok(/const cfLocked =/.test(section) && /cfLocked \? ' disabled' : ''/.test(section),
+    'the inputs must render disabled once expired');
+  const save = APP_SRC.slice(APP_SRC.indexOf('async function saveCarryForwardFromUI'));
+  assert.ok(/businessDateStr\(\) > carryForwardExpiryDateStr\(year\)/.test(save.slice(0, 2000)),
+    'the stale-tab case must be refused client-side too');
+});
+
+test('the editable box binds to carry-forward only, never carry-forward + comp (Opus review HIGH)', () => {
+  const section = APP_SRC.slice(APP_SRC.indexOf('function openingLeaveBalancesSectionHtml'),
+                                APP_SRC.indexOf('async function saveCarryForwardFromUI'));
+  assert.ok(/const aCfEditable = getCarryForwardDays\(year, u\.id\);/.test(section),
+    'the box needs its own value without the comp days');
+  assert.ok(/data-cf-initial="\$\{escapeHtml\(String\(aCfEditable\)\)\}"/.test(section)
+         && /value="\$\{escapeHtml\(String\(aCfEditable\)\)\}"/.test(section),
+    'both the value and the change-detection baseline must use it');
+  // aCf (cf + comp) is still right for the pool column -- it must not leak back into the input.
+  assert.ok(!/data-cf-initial="\$\{escapeHtml\(String\(aCf\)\)\}"/.test(section),
+    'pre-filling with cf + comp made every save fold the comp days into carry-forward');
+});
+
 test('opening balances stay locked to the go-live year', () => {
   assert.ok(/opening-go-live-year-only/.test(SERVER_SRC), 'server must enforce it, not just the UI');
   assert.ok(/function openingBalancesEditableYear/.test(APP_SRC));

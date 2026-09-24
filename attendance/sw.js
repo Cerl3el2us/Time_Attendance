@@ -1,12 +1,131 @@
 'use strict';
 
-const CACHE = 'ta-v2';
+// 2026-09-25 (owner: "ต้องใช้งานได้ตลอด"): until now this worker only handled push notifications --
+// `CACHE` was declared and never used and there was no fetch handler at all, so the installed app
+// was a plain web page: no network, no app. It can now be opened and read offline.
+//
+// Deliberately READ-ONLY offline (owner chose option A): the shell and the last GET /api responses
+// are served from cache, but anything that WRITES (check-in, leave request, approval) is never
+// queued or replayed -- a time record invented from a phone's clock hours after the fact is worse
+// than an error message. Non-GET requests simply fail while offline and the UI says so.
+const SHELL_CACHE = 'ta-shell-v5';   // app shell: html/js/css/images, cache-first
+const DATA_CACHE  = 'ta-data-v5';    // GET /api responses, network-first
 
-self.addEventListener('install', () => self.skipWaiting());
+// Query strings are part of the key, so a `?v=` bump is a cache miss and fetches the new file --
+// the existing cache-buster keeps working unchanged. Old entries are dropped on activate.
+const SHELL_URLS = [
+  './',
+  './index.html',
+  './manifest.json',
+  './images/logo-short.jpg',
+  './images/logo-long.jpg',
+  './images/logo-long.png',
+  './images/icon-192.png',
+  './images/icon-512.png',
+];
+
+self.addEventListener('install', e => {
+  // addAll() is atomic: one 404 and nothing is cached. The versioned js/css are left to the
+  // runtime handler instead, so a stale URL list here can never block the install.
+  e.waitUntil(
+    caches.open(SHELL_CACHE)
+      .then(c => c.addAll(SHELL_URLS))
+      .catch(err => console.warn('[SW] shell precache incomplete:', err && err.message))
+      .then(() => self.skipWaiting())
+  );
+});
 
 self.addEventListener('activate', e =>
-  e.waitUntil(clients.claim())
+  e.waitUntil(
+    caches.keys()
+      .then(keys => Promise.all(
+        keys.filter(k => k !== SHELL_CACHE && k !== DATA_CACHE).map(k => caches.delete(k))
+      ))
+      .then(() => clients.claim())
+  )
 );
+
+// Only same-origin GETs are touched. Anything else -- POST/PUT/DELETE, and every cross-origin
+// request (jsDelivr, Google Fonts, map tiles) -- goes straight to the network untouched, so a bug
+// here cannot break a write path or a third-party asset.
+self.addEventListener('fetch', e => {
+  const req = e.request;
+  if (req.method !== 'GET') return;
+  let url;
+  try { url = new URL(req.url); } catch (_) { return; }
+  if (url.origin !== self.location.origin) return;
+
+  const isApi = url.pathname.startsWith('/api/');
+
+  // Never cache auth or streaming endpoints: a cached login/session answer served offline would
+  // present a signed-out user as signed in.
+  if (isApi && /\/api\/(login|logout|now|health|events\/stream)/.test(url.pathname)) return;
+
+  if (isApi) {
+    // Network-first: online behaviour is unchanged (always fresh). The cached copy is a fallback
+    // for reading while offline, and the UI labels it as such -- see OFFLINE_SINCE in app.js.
+    e.respondWith(
+      fetch(req)
+        .then(res => {
+          if (res && res.ok) {
+            const copy = res.clone();
+            caches.open(DATA_CACHE).then(c => c.put(req, copy)).catch(() => {});
+          }
+          return res;
+        })
+        .catch(() => caches.match(req).then(async hit => {
+          if (!hit) {
+            return new Response(
+              JSON.stringify({ success: false, offline: true, message: 'Offline -- no cached copy of this request' }),
+              { status: 503, headers: { 'Content-Type': 'application/json' } });
+          }
+          // A cache hit replays the ORIGINAL 200, so the page cannot tell it apart from a live
+          // answer -- the offline banner hid itself the moment any read succeeded from cache, and
+          // the user was left reading yesterday's numbers with nothing saying so. Stamp it.
+          const headers = new Headers(hit.headers);
+          headers.set('X-TA-From-Cache', '1');
+          return new Response(await hit.blob(), { status: hit.status, statusText: hit.statusText, headers });
+        }))
+    );
+    return;
+  }
+
+  // index.html / navigations: NETWORK-FIRST. This document carries the `?v=` cache-busters that
+  // point at the current js and css, so serving a cached copy first would pin the whole app to the
+  // previous deploy until a second reload -- worse than having no offline at all. Online it is
+  // always fresh; offline it falls back to the cached copy.
+  const isDoc = req.mode === 'navigate' || /\.html?$/.test(url.pathname) || url.pathname.endsWith('/');
+  if (isDoc) {
+    e.respondWith(
+      fetch(req)
+        .then(res => {
+          if (res && res.ok) {
+            const copy = res.clone();
+            caches.open(SHELL_CACHE).then(c => c.put(req, copy)).catch(() => {});
+          }
+          return res;
+        })
+        .catch(() => caches.match(req).then(hit => hit || caches.match('./index.html')))
+    );
+    return;
+  }
+
+  // Everything else (js, css, images) is versioned or immutable in practice, so cache-first is safe
+  // and fast: a `?v=` bump is a different key and misses the cache. The background refresh keeps an
+  // unversioned asset (an image) current without blocking the render.
+  e.respondWith(
+    caches.match(req).then(hit => {
+      const net = fetch(req).then(res => {
+        if (res && res.ok) {
+          const copy = res.clone();
+          caches.open(SHELL_CACHE).then(c => c.put(req, copy)).catch(() => {});
+        }
+        return res;
+      }).catch(() => hit);
+      return hit || net;
+    })
+  );
+});
 
 // Server-push handler (VAPID — future use)
 self.addEventListener('push', e => {

@@ -1181,10 +1181,66 @@ let _sessionExpiredShown = false;
 // now stash their handle here; login() clears it before it can fire.
 let _pendingLogoutTimer = null;
 
+// 2026-09-25 (owner): the app works offline for READING only, so the one thing it must never do is
+// let a stale number pass for a live one. This banner says both that the connection is gone and
+// when the data on screen was last fetched. Writes are not queued -- see sw.js.
+let OFFLINE_SINCE = null;
+let LAST_ONLINE_AT = null;
+function setOfflineState(off) {
+  if (off && !OFFLINE_SINCE) OFFLINE_SINCE = new Date();
+  if (!off) { OFFLINE_SINCE = null; LAST_ONLINE_AT = new Date(); }
+  renderOfflineBanner();
+}
+function renderOfflineBanner() {
+  const el = document.getElementById('offline-banner');
+  if (!el) return;
+  // The banner is position:fixed at top:0, so without this it sits ON TOP of the topbar and hides
+  // the bell and the user menu. Push the whole document down by exactly the banner's height
+  // instead -- measured after it is shown, because the text wraps to two lines on a phone.
+  const setShift = px => { document.body.style.paddingTop = px ? `${px}px` : ''; };
+  if (!OFFLINE_SINCE) { el.style.display = 'none'; setShift(0); return; }
+  const since = LAST_ONLINE_AT
+    ? (currentLang === 'ja' ? `（最終更新 ${_fmtDtStr(LAST_ONLINE_AT.toISOString())}）`
+       : L(` (data as of ${_fmtDtStr(LAST_ONLINE_AT.toISOString())})`,
+           ` (ข้อมูล ณ ${_fmtDtStr(LAST_ONLINE_AT.toISOString())})`))
+    : '';
+  el.textContent = (currentLang === 'ja'
+    ? `⚠️ オフライン — 閲覧のみ。打刻・申請はできません${since}`
+    : L(`⚠️ Offline — viewing only. You cannot check in or submit requests${since}`,
+        `⚠️ ออฟไลน์ — ดูได้อย่างเดียว ลงเวลาหรือยื่นคำขอไม่ได้${since}`));
+  el.style.display = 'block';
+  setShift(el.offsetHeight);
+}
+window.addEventListener('offline', () => setOfflineState(true));
+window.addEventListener('online', () => {
+  setOfflineState(false);
+  showToast(currentLang === 'ja' ? '✅ オンラインに復帰しました'
+    : L('✅ Back online', '✅ กลับมาออนไลน์แล้ว'), 'success');
+});
+
 async function apiFetch(path, opts = {}) {
   const headers = { ...(opts.headers || {}) };
   if (AUTH_TOKEN) headers['Authorization'] = `Bearer ${AUTH_TOKEN}`;
-  const res = await fetch(`${NAS_BACKEND}${path}`, { ...opts, headers });
+  let res;
+  try {
+    res = await fetch(`${NAS_BACKEND}${path}`, { ...opts, headers });
+  } catch (e) {
+    // 2026-09-25: a thrown fetch means the network is gone (navigator.onLine can still read true
+    // on a captive/half-up connection, so the failure itself is the more reliable signal).
+    setOfflineState(true);
+    throw e;
+  }
+  // A cached reply from the service worker replays the original 200, so res.ok alone would read as
+  // "we are back online" and hide the banner while the page is showing stale numbers. The worker
+  // stamps those, and an uncached offline read comes back as 503 {offline:true}.
+  if (res.headers.get('X-TA-From-Cache') === '1') {
+    setOfflineState(true);
+  } else if (res.status === 503) {
+    const peek = res.clone();
+    peek.json().then(d => { if (d && d.offline) setOfflineState(true); }).catch(() => {});
+  } else if (res.ok) {
+    setOfflineState(false);
+  }
   if (res.status === 401 && !_sessionExpiredShown) {
     _sessionExpiredShown = true;
     showToast(L('⏰ Session expired — please log in again', '⏰ หมดเวลาล็อกอิน — กรุณาเข้าสู่ระบบใหม่'), 'warning');
@@ -1270,6 +1326,9 @@ let LEAVE_CARRY_FORWARD_RUNS = {};
 // 2026-09-24: { '<year>_<userId>': { at, by, byId, days, prevDays } } -- audit of manual
 // per-employee carry-forward overrides (PUT /api/leave-carry-forward). md/accounting only.
 let LEAVE_CARRY_FORWARD_EDITS = {};
+// Server refusal messages from the last carry-forward save, so the combined Save can name the real
+// reason ("days must be a number between 0 and 20") instead of a generic failure.
+let CF_LAST_SAVE_ERRORS = [];
 // 2026-09-24 (round 7): notification inbox state (declared up here, before any caller -- TDZ).
 let NOTIFICATIONS = [];
 let NOTIFICATIONS_UNREAD = 0;
@@ -2853,6 +2912,12 @@ function openingBalancesEditableYear() { return APP_FIRST_PERIOD_START.getFullYe
 function openingLeaveBalancesSectionHtml() {
   const year = bangkokYear();
   const locked = year !== openingBalancesEditableYear();
+  // 2026-09-24 (owner chose "block"): once the carry-forward for this year has expired, editing it
+  // moves nobody's balance -- carryForwardForfeitMinutes() takes the whole unconsumed amount back
+  // out. The server refuses it (409 cf-after-expiry); these two mirror that in the UI.
+  const cfExpiry = carryForwardExpiryDateStr(year);
+  const cfLocked = carryForwardExpiryEnabled() && businessDateStr() > cfExpiry;
+  const cfMaxDays = Math.max(0, Math.min(60, Number(APP_SETTINGS.leave?.carryForwardMax ?? 5)));
   const employees = leaveSummaryEmployees();
   const headCell = (label) => `<th style="padding:7px 8px;text-align:center;font-size:11px;color:#64748b;font-weight:600;border-bottom:2px solid #e2e8f0;white-space:nowrap">${label}</th>`;
   const unitLbl = (th, en) => `<span style="display:block;font-size:9px;color:#94a3b8;margin-top:2px">${L(en, th)}</span>`;
@@ -2864,6 +2929,11 @@ function openingLeaveBalancesSectionHtml() {
     const fmtDays = (n) => String(Math.round((Number(n) || 0) * 100) / 100);
     const aBase = openingLeaveEntitlementDays(u, 'annual', year);
     const aCf = getCarryForwardDays(year, u.id) + getCarryForwardCompDays(year, u.id);
+    // 2026-09-24 (Opus review, HIGH): the editable box must bind to the carry-forward key ALONE.
+    // `aCf` above bundles the separate `comp_<year>_<id>` days for the pool column, but the PUT
+    // writes `<year>_<id>` only -- pre-filling the box with the sum meant every save folded the
+    // comp days into carry-forward and the balance grew by that amount on each edit.
+    const aCfEditable = getCarryForwardDays(year, u.id);
     const aHw = getApprovedHolidayWorkDays(year, u.id);
     const aCredit = openingCreditDays('annual');
     const aPool = aBase + aCf + aHw + aCredit;
@@ -2911,10 +2981,10 @@ function openingLeaveBalancesSectionHtml() {
             `แก้ล่าสุดโดย ${audit.by} เมื่อ ${String(audit.at).slice(0, 10)}`)
         : L('Carried forward from last year', 'ยกยอดมาจากปีที่แล้ว');
       return `<div style="display:flex;flex-direction:column;align-items:center;gap:2px">
-        <input type="number" min="0" step="0.001" inputmode="decimal"
-          data-cf-user="${u.id}" data-cf-initial="${escapeHtml(String(aCf))}"
-          value="${escapeHtml(String(aCf))}" title="${escapeHtml(tip)}"
-          style="width:72px;padding:5px 4px;border:1px solid ${audit ? '#f59e0b' : '#e2e8f0'};border-radius:6px;font-size:12px;text-align:center;box-sizing:border-box">
+        <input type="number" min="0" max="${cfMaxDays}" step="0.001" inputmode="decimal"${cfLocked ? ' disabled' : ''}
+          data-cf-user="${u.id}" data-cf-initial="${escapeHtml(String(aCfEditable))}"
+          value="${escapeHtml(String(aCfEditable))}" title="${escapeHtml(tip)}"
+          style="width:72px;padding:5px 4px;border:1px solid ${audit ? '#f59e0b' : '#e2e8f0'};border-radius:6px;font-size:12px;text-align:center;box-sizing:border-box${cfLocked ? ';background:#f1f5f9;color:#94a3b8;cursor:not-allowed' : ''}">
         ${audit ? `<span style="font-size:9px;color:#d97706;white-space:nowrap">✎ ${escapeHtml(String(audit.by).split(' ')[0])}</span>` : unitLbl('วัน', 'days')}
       </div>`;
     })();
@@ -2947,7 +3017,7 @@ function openingLeaveBalancesSectionHtml() {
            'กรอกวันลาคงเหลือจริงตอนเปิดระบบเป็น วัน ชั่วโมง และนาที (1 วัน = 8 ชั่วโมง) พักร้อน = โควตาปีนี้ + ยกยอดจากปีก่อน (เกิน 10 ได้) ระบบบันทึกเป็นเวลาที่ใช้ไปก่อนเปิดระบบ — ไม่สร้างใบลาจำลอง')}
       </p>
       <div style="overflow-x:auto">
-        <table style="width:100%;border-collapse:collapse;font-size:12px;min-width:760px">
+        <table style="width:100%;border-collapse:collapse;font-size:12px;min-width:860px">
           <thead><tr style="background:#f8fafc">
             <th style="padding:7px 8px;text-align:left;font-size:11px;color:#64748b;font-weight:600;border-bottom:2px solid #e2e8f0">${L('Employee','พนักงาน')}</th>
             ${headCell(currentLang === 'ja' ? `${year - 1}年からの繰越` : L(`Carried from ${year - 1}`, `ยกยอดจากปี ${year - 1}`))}
@@ -2982,6 +3052,21 @@ async function saveCarryForwardFromUI(year, opts) {
   const combined = !!(opts && opts.combined);
   if (blockIfObserver()) return 'cancelled';
   year = year || bangkokYear();
+  // Mirrors the server's 409 cf-after-expiry. The inputs render disabled once the date has passed,
+  // so this only catches the stale-tab case (opened before the expiry date, clicked after it).
+  if (carryForwardExpiryEnabled() && businessDateStr() > carryForwardExpiryDateStr(year)) {
+    const inputsNow = [...document.querySelectorAll('[data-cf-user]')];
+    const touched = inputsNow.some(el =>
+      Math.round((Number(el.value) || 0) * 1000) !== Math.round((Number(el.getAttribute('data-cf-initial')) || 0) * 1000));
+    if (touched) {
+      showToast(currentLang === 'ja'
+        ? `${year}年の繰越は${fmtDate(carryForwardExpiryDateStr(year))}に失効したため編集できません`
+        : L(`Carry-forward for ${year} expired on ${fmtDate(carryForwardExpiryDateStr(year))} and can no longer be edited`,
+            `วันยกยอดปี ${year} หมดอายุไปแล้วเมื่อ ${fmtDate(carryForwardExpiryDateStr(year))} แก้ไขไม่ได้`), 'warning');
+      return 'invalid';
+    }
+    return 'none';
+  }
   const inputs = [...document.querySelectorAll('[data-cf-user]')];
   const changed = [];
   for (const el of inputs) {
@@ -2989,7 +3074,8 @@ async function saveCarryForwardFromUI(year, opts) {
     const raw = (el.value || '').trim();
     const after = Number(raw);
     if (raw === '' || !Number.isFinite(after) || after < 0) {
-      showToast(L('Carry-forward must be 0 or more', 'ยกยอดต้องเป็น 0 หรือมากกว่า'), 'warning');
+      showToast(currentLang === 'ja' ? '繰越日数は0以上で入力してください'
+        : L('Carry-forward must be 0 or more', 'ยกยอดต้องเป็น 0 หรือมากกว่า'), 'warning');
       el.focus();
       return 'invalid';
     }
@@ -3000,7 +3086,8 @@ async function saveCarryForwardFromUI(year, opts) {
     }
   }
   if (!changed.length) {
-    if (!combined) showToast(L('Nothing changed', 'ไม่มีการเปลี่ยนแปลง'), 'info');
+    if (!combined) showToast(currentLang === 'ja' ? '変更はありません'
+      : L('Nothing changed', 'ไม่มีการเปลี่ยนแปลง'), 'info');
     return 'none';
   }
   // Local formatter on purpose: the table's own fmtDays is a const inside its row .map(), not a
@@ -3037,7 +3124,14 @@ async function saveCarryForwardFromUI(year, opts) {
       failed.push(`${c.userId}: ${e.message}`);
     }
   }
-  if (combined) return failed.length ? 'error' : 'saved';
+  // 2026-09-24 (Opus review): the real server reason used to be collected here and then dropped on
+  // the combined path, so a refused row ("days must be a number between 0 and 20") surfaced as a
+  // generic failure. Hand it back to the caller instead.
+  if (combined) {
+    if (failed.length) { CF_LAST_SAVE_ERRORS = failed; return changed.length > failed.length ? 'partial' : 'error'; }
+    CF_LAST_SAVE_ERRORS = [];
+    return 'saved';
+  }
   // No argument: renderSettingsPage() re-fetches settings itself before rendering, so the boxes and
   // the ✎ audit marks below them show what the SERVER stored (rounded to 3 dp), not what was typed.
   if (currentPage === 'settings') renderSettingsPage();
@@ -3072,14 +3166,22 @@ async function saveOpeningPanel(year) {
     return;
   }
   if (currentPage === 'settings') renderSettingsPage();
+  // 2026-09-24 (Opus review): a failed carry-forward row used to hide the fact that the opening
+  // balances HAD been written -- the admin read "nothing saved" and retyped work that was already
+  // stored. Name what actually landed, and quote the server's own refusal.
   const bits = [];
-  if (cf === 'saved') bits.push(L('carry-forward', 'ยกยอด'));
-  if (opening === 'saved') bits.push(L('opening balances', 'ยอดเปิดระบบ'));
-  if (cf === 'error' || opening === 'error') {
-    showToast(L('❌ Some rows failed to save — check the values and try again',
-                '❌ บางรายการบันทึกไม่สำเร็จ — ตรวจค่าแล้วลองใหม่'), 'danger');
+  if (cf === 'saved' || cf === 'partial') bits.push(currentLang === 'ja' ? '繰越' : L('carry-forward', 'ยกยอด'));
+  if (opening === 'saved') bits.push(currentLang === 'ja' ? '開通残高' : L('opening balances', 'ยอดเปิดระบบ'));
+  const failedNote = CF_LAST_SAVE_ERRORS.length ? ` (${CF_LAST_SAVE_ERRORS.join('; ')})` : '';
+  if (cf === 'error' || cf === 'partial' || opening === 'error') {
+    const savedPart = bits.length
+      ? (currentLang === 'ja' ? `保存済み: ${bits.join(' + ')}。` : L(`Saved: ${bits.join(' + ')}. `, `บันทึกแล้ว: ${bits.join(' + ')} `))
+      : '';
+    showToast(currentLang === 'ja'
+      ? `⚠️ ${savedPart}一部の行は保存できませんでした${failedNote}`
+      : L(`⚠️ ${savedPart}Some rows failed${failedNote}`, `⚠️ ${savedPart}บางรายการไม่สำเร็จ${failedNote}`), 'danger');
   } else {
-    showToast(currentLang === 'ja' ? '✅ 保存しました' : L(`✅ Saved: ${bits.join(' + ')}`, `✅ บันทึกแล้ว: ${bits.join(' + ')}`), 'success');
+    showToast(currentLang === 'ja' ? `✅ 保存しました: ${bits.join(' + ')}` : L(`✅ Saved: ${bits.join(' + ')}`, `✅ บันทึกแล้ว: ${bits.join(' + ')}`), 'success');
   }
 }
 
@@ -3087,11 +3189,13 @@ async function saveOpeningLeaveBalancesFromUI(year, opts) {
   const combined = !!(opts && opts.combined);
   if (blockIfObserver()) return 'cancelled';
   year = year || bangkokYear();
-  // The button is not rendered outside the go-live year; this guards the stale-page case (the tab
-  // was opened on 31 Dec and the button clicked after midnight) so it cannot write next year's keys.
+  // The Save button is always rendered (it is shared with the carry-forward column); it is the
+  // opening INPUTS that render disabled outside the go-live year. This guards the stale-page case
+  // (tab opened on 31 Dec, clicked after midnight) so it cannot write next year's keys.
   if (year !== openingBalancesEditableYear()) {
-    showToast(L(`Opening balances can only be edited in ${openingBalancesEditableYear()}`,
-                `แก้ยอดเปิดระบบได้เฉพาะปี ${openingBalancesEditableYear()} เท่านั้น`), 'warning');
+    showToast(currentLang === 'ja' ? `開通残高は${openingBalancesEditableYear()}年のみ編集できます`
+      : L(`Opening balances can only be edited in ${openingBalancesEditableYear()}`,
+          `แก้ยอดเปิดระบบได้เฉพาะปี ${openingBalancesEditableYear()} เท่านั้น`), 'warning');
     return 'locked';
   }
   const inputs = document.querySelectorAll('[data-ou-user][data-ou-type][data-ou-unit]');
@@ -9775,14 +9879,17 @@ function renderLeaveBalanceCard(type, emoji, label, u, maxDays) {
     return `<div class="leave-card ${type}" style="opacity:0.85">
       <div class="emoji">${emoji}</div>
       <div class="type">${label}</div>
-      <div class="amount">${canSeeDays ? bal.remDays : '🔒'}</div>
+      <div class="amount">${canSeeDays ? leaveAmountHtml(bal.remMin) : '🔒'}</div>
       <div class="detail">${lockDetail}${canSeeDays ? ` · / ${bal.effectiveMax} ${L('days', 'วัน')}` : ''}</div>
       <div class="leave-bar"><div class="leave-bar-fill" style="width:0%"></div></div>
     </div>`;
   }
   const bal = computeLeaveBalance(u, type, maxDays);
-  const total = bal.effectiveMax;
-  const remaining = bal.remDays;
+  // 2026-09-24 (Opus review): was bal.remDays (whole days, floored), so this card read "11" while
+  // the "Annual Leave Balance" field further down the SAME profile page read "11 วัน 3 ชม.".
+  // Same figure, same helper as the leave-page cards now. The dashboard card is a different
+  // renderer and keeps plain days, per the owner's earlier decision.
+  const remaining = leaveAmountHtml(bal.remMin);
   const usedDays = Math.round((bal.usedMin / 480) * 10) / 10;
   const pct = bal.totalMin > 0 ? Math.round((bal.remMin / bal.totalMin) * 100) : 0;
   // The headline number stays approved-only (days come off the balance on approval, not on
@@ -9794,15 +9901,175 @@ function renderLeaveBalanceCard(type, emoji, label, u, maxDays) {
         ? `⏳ 承認待ち ${minToStr(pendingMin)}（この残数から確保済み）`
         : L(`⏳ ${minToStr(pendingMin)} awaiting approval (already held)`, `⏳ รออนุมัติ ${minToStr(pendingMin)} (กันไว้จากยอดนี้แล้ว)`)}</div>`
     : '';
+  // 2026-09-25 (owner): mirrors the leave page's card -- "คงเหลือ" under the number, then the
+  // quota breakdown, instead of the old "/ 11.375 วัน คงเหลือ" line that stated a bare total with
+  // no explanation of where it came from.
   return `<div class="leave-card ${type}">
     <div class="emoji">${emoji}</div>
     <div class="type">${label}</div>
     <div class="amount">${remaining}</div>
-    <div class="detail">/ ${total} ${L('days', 'วัน')} ${usedDays > 0 ? `<span style="color:#dc2626">${currentLang === 'ja' ? `(使用済み ${usedDays})` : L(`(used ${usedDays})`, `(ใช้ไป ${usedDays})`)}</span>` : L('remaining', 'คงเหลือ')}</div>
+    <div class="detail" style="font-size:12px;margin-top:2px">${L('Remaining', 'คงเหลือ')}</div>
+    ${leaveEntitlementBreakdownHtml(type, maxDays, bal, bangkokYear())}
     ${pendingNote}
     ${type === 'annual' ? annualLeaveCardNotesHtml(u, bal) : ''}
+    <div class="detail" style="margin-top:5px;font-size:11px;color:${usedDays > 0 ? '#dc2626' : '#10b981'}">${usedDays > 0
+      ? (currentLang === 'ja' ? `<strong>${minToStr(bal.usedMin)}</strong> 使用済み` : L(`Used <strong>${minToStr(bal.usedMin)}</strong>`, `ใช้ไปแล้ว <strong>${minToStr(bal.usedMin)}</strong>`))
+      : (currentLang === 'ja' ? '未使用' : L('Not used yet', 'ยังไม่ได้ใช้สิทธิ์'))}</div>
+    <div class="leave-card-spacer"></div>
     <div class="leave-bar"><div class="leave-bar-fill" style="width:${pct}%"></div></div>
   </div>`;
+}
+
+// 2026-09-25 (owner): employee photo, changed from inside the app. Two mount points share these
+// helpers -- `prefix` is 'my' (an employee editing their own) or 'emp' (MD/Accounting editing
+// someone's from the employee modal). Nothing here talks to the door scanner: the endpoint writes
+// a file and users[].facePhoto and stops there, so the enrolled face stays as it is.
+const PHOTO_PLACEHOLDER = 'images/logo-short.jpg';
+function setPhotoPreview(prefix, facePhoto) {
+  const img = document.getElementById(`${prefix}-photo-preview`);
+  if (!img) return;
+  // Cache-buster: the file name changes on every upload, but a removal puts the placeholder back
+  // and browsers happily reuse the previous bytes for an unchanged URL.
+  img.src = facePhoto ? `${facePhoto}${facePhoto.includes('?') ? '&' : '?'}t=${Date.now()}` : PHOTO_PLACEHOLDER;
+  img.style.opacity = facePhoto ? '1' : '.35';
+  const st = document.getElementById(`${prefix}-photo-status`);
+  if (st) { st.textContent = ''; st.style.color = ''; }
+}
+function _photoStatus(prefix, msg, color) {
+  const st = document.getElementById(`${prefix}-photo-status`);
+  if (st) { st.textContent = msg; st.style.color = color || '#94a3b8'; }
+}
+const PHOTO_LIMIT_BYTES = 2 * 1024 * 1024;
+const PHOTO_MAX_EDGE = 1024;   // an avatar is rendered at 72px; 1024 is already generous
+// 2026-09-25 (owner): "หากไฟล์รูปที่ใส่ไปขนาดเกิน ให้ทำการบีบอัดรูปให้ด้วย" -- a photo straight off a
+// phone is routinely 4-8 MB and would simply be rejected. Shrink it in the browser instead, so the
+// upload is small too. A file that is already small AND not huge in pixels is sent untouched: no
+// point re-encoding (and losing) something that was fine.
+// createImageBitmap(..., {imageOrientation:'from-image'}) applies the EXIF rotation that phone
+// cameras record -- without it a portrait photo uploads on its side.
+async function compressImageIfNeeded(file) {
+  let bitmap = null;
+  try {
+    bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  } catch (_) {
+    try { bitmap = await createImageBitmap(file); } catch (_e) { bitmap = null; }
+  }
+  if (!bitmap) return file;   // cannot decode here -- let the server judge it
+  const tooBig = file.size > PHOTO_LIMIT_BYTES;
+  const tooWide = Math.max(bitmap.width, bitmap.height) > PHOTO_MAX_EDGE;
+  if (!tooBig && !tooWide) { bitmap.close && bitmap.close(); return file; }
+
+  const scale = Math.min(1, PHOTO_MAX_EDGE / Math.max(bitmap.width, bitmap.height));
+  const w = Math.max(1, Math.round(bitmap.width * scale));
+  const h = Math.max(1, Math.round(bitmap.height * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  // JPEG has no alpha; without this a transparent PNG turns black where it was see-through.
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(bitmap, 0, 0, w, h);
+  bitmap.close && bitmap.close();
+
+  const toBlob = q => new Promise(r => canvas.toBlob(r, 'image/jpeg', q));
+  let blob = null;
+  for (const q of [0.85, 0.7, 0.55, 0.4]) {
+    blob = await toBlob(q);
+    if (blob && blob.size <= PHOTO_LIMIT_BYTES) break;
+  }
+  if (!blob) return file;
+  // Still over after the lowest quality (a photo of pure noise, essentially): send it and let the
+  // server refuse with its own message rather than silently uploading something that cannot pass.
+  return new File([blob], (file.name || 'photo').replace(/\.[^.]+$/, '') + '.jpg', { type: 'image/jpeg' });
+}
+
+async function uploadEmployeePhoto(input, userId, prefix) {
+  prefix = prefix || 'emp';
+  const id = Number(userId != null ? userId : editingEmployeeId);
+  const original = input && input.files && input.files[0];
+  if (!original) return;
+  input.value = '';   // so picking the same file twice still fires change
+  if (!Number.isFinite(id)) {
+    _photoStatus(prefix, L('Save the employee first', 'บันทึกพนักงานก่อน'), '#dc2626');
+    return;
+  }
+  let file = original;
+  if (original.size > PHOTO_LIMIT_BYTES) {
+    _photoStatus(prefix, currentLang === 'ja' ? '画像を圧縮しています…'
+      : L('Compressing image…', 'กำลังบีบอัดรูป…'), '#2563eb');
+  }
+  try {
+    file = await compressImageIfNeeded(original);
+  } catch (_) { file = original; }
+  if (file.size > PHOTO_LIMIT_BYTES) {
+    _photoStatus(prefix, currentLang === 'ja' ? '圧縮しても2MBを超えています'
+      : L('Still over 2 MB after compression — try a different image',
+          'บีบอัดแล้วยังเกิน 2 MB — ลองรูปอื่น'), '#dc2626');
+    return;
+  }
+  const shrunk = file !== original;
+  _photoStatus(prefix, currentLang === 'ja' ? 'アップロード中…' : L('Uploading…', 'กำลังอัปโหลด…'), '#2563eb');
+  try {
+    const res = await apiFetch(`/api/users/id/${id}/photo`, {
+      method: 'POST',
+      headers: { 'X-Filename': encodeURIComponent(file.name), 'Content-Type': file.type || 'application/octet-stream' },
+      body: file,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.success === false) throw new Error(data.message || `HTTP ${res.status}`);
+    setPhotoPreview(prefix, data.facePhoto);
+    const kb = n => `${Math.round(n / 1024)} KB`;
+    const note = shrunk
+      ? (currentLang === 'ja' ? `（${kb(original.size)} → ${kb(file.size)} に圧縮）`
+         : L(` (compressed ${kb(original.size)} → ${kb(file.size)})`,
+             ` (บีบอัด ${kb(original.size)} → ${kb(file.size)})`))
+      : '';
+    _photoStatus(prefix, (currentLang === 'ja' ? '✅ 更新しました' : L('✅ Updated', '✅ เปลี่ยนรูปแล้ว')) + note, '#059669');
+    await _afterPhotoChange(id, data.facePhoto);
+  } catch (e) {
+    _photoStatus(prefix, `❌ ${e.message}`, '#dc2626');
+  }
+}
+async function removeEmployeePhoto(userId, prefix) {
+  prefix = prefix || 'emp';
+  const id = Number(userId != null ? userId : editingEmployeeId);
+  if (!Number.isFinite(id)) return;
+  if (!confirm(currentLang === 'ja' ? '写真を削除しますか？'
+    : L('Remove this photo?', 'ลบรูปนี้ใช่ไหม?'))) return;
+  try {
+    const res = await apiFetch(`/api/users/id/${id}/photo`, { method: 'DELETE' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.success === false) throw new Error(data.message || `HTTP ${res.status}`);
+    setPhotoPreview(prefix, '');
+    _photoStatus(prefix, currentLang === 'ja' ? '✅ 削除しました' : L('✅ Removed', '✅ ลบรูปแล้ว'), '#059669');
+    await _afterPhotoChange(id, '');
+  } catch (e) {
+    _photoStatus(prefix, `❌ ${e.message}`, '#dc2626');
+  }
+}
+// Keep the in-memory copies in step so the sidebar avatar and the employee list update without a
+// reload; currentUser is also persisted, or the old photo returns on the next page load.
+async function _afterPhotoChange(id, facePhoto) {
+  const u = (DATA_USERS || []).find(x => x && x.id === id);
+  if (u) u.facePhoto = facePhoto;
+  if (currentUser && currentUser.id === id) {
+    currentUser.facePhoto = facePhoto;
+    try { localStorage.setItem('ta_user', JSON.stringify(currentUser)); } catch (_) {}
+    // Same element and same shape as the login-time render further up this file (#user-avatar,
+    // falling back to the first letter of the name when there is no photo).
+    const avatar = document.getElementById('user-avatar');
+    if (avatar) {
+      if (facePhoto) {
+        avatar.style.backgroundImage = `url(${facePhoto}?t=${Date.now()})`;
+        avatar.style.backgroundSize = 'cover';
+        avatar.style.backgroundPosition = 'center';
+        avatar.textContent = '';
+      } else {
+        avatar.style.backgroundImage = '';
+        avatar.textContent = String(currentUser.name || '?').charAt(0).toUpperCase();
+      }
+    }
+  }
 }
 
 function profileRow(label, value) {
@@ -9933,6 +10200,7 @@ function openEditMyProfile() {
   }
   // User: เปิด modal จำกัดเฉพาะข้อมูลส่วนตัว
   const u = currentUser;
+  setPhotoPreview('my', u.facePhoto);
   document.getElementById('my-profile-phone').value    = u.phone    || '';
   document.getElementById('my-profile-email').value    = u.email    || '';
   document.getElementById('my-profile-address').value  = u.address  || '';
@@ -10188,6 +10456,9 @@ function onEmpIdTypeChange() {
 function openAddEmployeeModal() {
   editingEmployeeId = null;
   document.getElementById('emp-modal-title').textContent = L('➕ Add New Employee', '➕ เพิ่มพนักงานใหม่');
+  // No id to upload against yet -- the photo is set after the employee has been saved once.
+  const addPhotoRow = document.getElementById('emp-photo-row');
+  if (addPhotoRow) addPhotoRow.style.display = 'none';
   document.getElementById('emp-form').reset();
   document.getElementById('emp-id-field').style.display = 'none';
   document.getElementById('emp-password-row').style.display = '';
@@ -10213,6 +10484,10 @@ function openEditEmployee(id) {
   const u = DATA_USERS.find(x => x.id === id);
   if (!u) { showToast('ไม่พบข้อมูลพนักงาน (id=' + id + ')', 'danger'); return; }
   editingEmployeeId = id;
+  // The photo row needs a saved employee id to upload against, so it only exists while editing.
+  const photoRow = document.getElementById('emp-photo-row');
+  if (photoRow) photoRow.style.display = 'flex';
+  setPhotoPreview('emp', u.facePhoto);
   document.getElementById('emp-modal-title').textContent = currentLang === 'ja' ? `✏️ 情報編集 — ${u.name}` : L(`✏️ Edit Info — ${u.name}`, `✏️ แก้ไขข้อมูล — ${u.name}`);
   document.getElementById('emp-id-field').style.display = '';
   document.getElementById('emp-password-row').style.display = '';
@@ -11411,7 +11686,11 @@ function showReportDetail(userId) {
   const sick      = days.filter(d => d.status==='leave-sick').length;
   const upcountry   = canUpcountryRpt ? days.filter(d => d.upcountry && d.status !== 'company-trip').length : 0;
   const _rdSA=APP_SETTINGS.allowances; let earlyCount=0; if (canEarlyLateRpt) { const hwDates=new Set(DATA_LEAVES.filter(l=>l.userId===u.id&&l.type==='holiday-work'&&l.status==='approved').map(l=>l.dateFrom)); days.filter(d=>deviceScanQualifiesForEarlyMorning(d,hwDates)).forEach(d=>{const[h,m]=d.checkIn.split(':').map(Number);const mins=h*60+m;const p=mins<=(_rdSA.earlyThreshold2Min||390)?2:mins<=(_rdSA.earlyThreshold1Min||450)?1:0;earlyCount+=p;}); }
-  const _cardLn2=APP_SETTINGS.allowances.lateNightThreshold2Hour||APP_SETTINGS.allowances.lateNightThresholdHour||20;
+  // 2026-09-24 (Opus review): the one site the lateNightThresholdHourOf() migration missed. With
+  // `||` a configured 00:00 fell through to 20:00, so this detail modal counted ×2 Late Night from
+  // 20:00 while the Reports table beside it (already migrated) counted from midnight -- two
+  // different Late Night totals for the same employee and period on the same screen.
+  const _cardLn2=lateNightThresholdHourOf(APP_SETTINGS.allowances,2);
   let lateNightCount=0; if (canEarlyLateRpt) { const hwDates=new Set(DATA_LEAVES.filter(l=>l.userId===u.id&&l.type==='holiday-work'&&l.status==='approved').map(l=>l.dateFrom)); days.filter(d=>deviceScanQualifiesForLateNight(d,hwDates)).forEach(d=>{lateNightCount+=lateNightPoints(d.lateOut,_cardLn2);}); }
   const pad2=(n)=>String(n).padStart(2,'0');
   const startStr=`${start.getFullYear()}-${pad2(start.getMonth()+1)}-${pad2(start.getDate())}`;
@@ -13033,7 +13312,9 @@ function renderApprovals() {
       // Light-mode mint-green banner (#f0fdf4/#bbf7d0/#166534) was hardcoded and stayed a bright
       // pastel-green box floating in the middle of an otherwise dark page — matches the
       // dark-tinted "success" pattern already used elsewhere in this file (e.g. setLeaveType()).
-      toolbar.style.cssText = `display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;padding:10px 14px;background:${_isDarkToolbar ? 'rgba(16,185,129,0.15)' : '#f0fdf4'};border:1px solid ${_isDarkToolbar ? 'rgba(16,185,129,0.3)' : '#bbf7d0'};border-radius:10px`;
+      // align-self:stretch — see the note on settingsBtn below; this banner's `flex:1` spacer span
+      // needs the banner itself to span the page, or it collapses to the width of its buttons.
+      toolbar.style.cssText = `display:flex;gap:8px;flex-wrap:wrap;align-items:center;align-self:stretch;margin-bottom:12px;padding:10px 14px;background:${_isDarkToolbar ? 'rgba(16,185,129,0.15)' : '#f0fdf4'};border:1px solid ${_isDarkToolbar ? 'rgba(16,185,129,0.3)' : '#bbf7d0'};border-radius:10px`;
       toolbar.innerHTML = `
         <span style="font-size:13px;font-weight:600;color:${_isDarkToolbar ? '#6ee7b7' : '#166534'};flex:1">⚡ ${currentLang === 'ja' ? `このタブで保留中 ${pendingFiltered.length}件` : L(`${pendingFiltered.length} pending in this tab`, `รออนุมัติ ${pendingFiltered.length} รายการในแท็บนี้`)}</span>
         <button onclick="toggleQuickMode()" style="padding:6px 14px;border-radius:8px;border:2px solid ${_approvalQuickMode ? '#3b82f6' : 'var(--border)'};background:${_approvalQuickMode ? (_isDarkToolbar ? 'rgba(59,130,246,0.25)' : '#eff6ff') : 'var(--bg-card)'};color:${_approvalQuickMode ? (_isDarkToolbar ? '#93c5fd' : '#1d4ed8') : 'var(--text-muted)'};font-size:12px;font-weight:700;cursor:pointer">
@@ -13071,7 +13352,11 @@ function renderApprovals() {
     // to toggle Accounting stand-in for whichever request types Manager's own route covers.
     if (canQuickApprove && pendingFiltered.length === 0) {
       const settingsBtn = document.createElement('div');
-      settingsBtn.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-bottom:8px';
+      // align-self:stretch — the parent #approval-summary-bar is a column flex with
+      // align-items:flex-start (deliberate: it keeps the tall check-out review box at its own
+      // width, which the owner asked for). Without this override every child shrinks to content
+      // width too, and justify-content:flex-end then has no room to push these buttons right.
+      settingsBtn.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-bottom:8px;align-self:stretch';
       settingsBtn.innerHTML = `
         <button onclick="openApprovalFlowChart()" style="padding:6px 14px;border-radius:8px;background:var(--bg-card);border:1px solid var(--border);color:var(--text-muted);font-size:12px;font-weight:700;cursor:pointer">${L('📊 Flow Chart', '📊 ผังการอนุมัติ')}</button>
         <button onclick="openClearAttachmentsModal()" style="padding:6px 14px;border-radius:8px;background:var(--bg-card);border:1px solid var(--border);color:var(--text-muted);font-size:12px;font-weight:700;cursor:pointer">🗑️ ${L('Clear Old Attachments', 'ล้างไฟล์แนบเก่า')}</button>
@@ -16843,6 +17128,35 @@ async function submitTimeCorrection() {
 }
 
 // ===== LEAVE BALANCE SUMMARY =====
+// 2026-09-25 (owner): the quota breakdown under a leave card -- the year's entitlement, what was
+// carried in, days earned through holiday work, and their total. Extracted from the leave page's
+// own card so the PROFILE card can show the identical block: the owner saw the two side by side
+// and the profile one explained nothing about where its number came from.
+// Carry-forward and earned days are annual-leave concepts, so sick/business show the quota alone.
+function leaveEntitlementBreakdownHtml(type, quotaDays, bal, year) {
+  const entRow = (label, value, strong) => `
+    <div style="display:flex;justify-content:space-between;gap:10px;font-size:11.5px;margin-top:3px;${strong ? 'font-weight:700;color:var(--text)' : 'color:var(--text-muted)'}">
+      <span>${label}</span><span style="font-variant-numeric:tabular-nums;white-space:nowrap">${value}</span>
+    </div>`;
+  const labels = currentLang === 'ja'
+    ? { year: `${year}年の付与`, cf: `${year - 1}年からの繰越`, earned: '獲得日数', total: `${year}年 合計` }
+    : {
+        year:   L(`${year} entitlement`,      `สิทธิ์ปี ${year}`),
+        cf:     L(`Carried from ${year - 1}`, `ยกยอดจากปี ${year - 1}`),
+        earned: L('Earned days',              'วันที่ได้เพิ่ม'),
+        total:  L(`Total for ${year}`,        `รวมสิทธิ์ปี ${year}`),
+      };
+  const wrap = inner => `<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border);text-align:left">${inner}</div>`;
+  if (type !== 'annual') return wrap(entRow(labels.year, daysToStr(quotaDays)));
+  return wrap(`
+    ${entRow(labels.year, daysToStr(quotaDays))}
+    ${entRow(labels.cf, daysToStr(bal.cfDays))}
+    ${bal.compDays > 0 ? entRow(labels.earned, daysToStr(bal.compDays)) : ''}
+    <div style="border-top:1px solid var(--border);margin-top:6px;padding-top:4px">
+      ${entRow(labels.total, daysToStr(bal.effectiveMax), true)}
+    </div>`);
+}
+
 function renderLeaveBalanceSummary() {
   const el = document.getElementById('leave-balance-cards');
   if (!el || !currentUser) return;
@@ -16886,30 +17200,7 @@ function renderLeaveBalanceSummary() {
     // carry-forward and their total now sit in one right-aligned column under the balance, so the
     // arithmetic is visible instead of implied. Carry-forward is an annual-leave concept only, so
     // sick/business cards show the year's quota alone. Replaces the old cf/comp badges.
-    const entRow = (label, value, strong) => `
-      <div style="display:flex;justify-content:space-between;gap:10px;font-size:11.5px;margin-top:3px;${strong ? 'font-weight:700;color:var(--text)' : 'color:var(--text-muted)'}">
-        <span>${label}</span><span style="font-variant-numeric:tabular-nums;white-space:nowrap">${value}</span>
-      </div>`;
-    const entLabels = currentLang === 'ja'
-      ? { year: `${thisYear}年の付与`, cf: `${thisYear - 1}年からの繰越`, earned: '獲得日数', total: `${thisYear}年 合計` }
-      : {
-          year:   L(`${thisYear} entitlement`,        `สิทธิ์ปี ${thisYear}`),
-          cf:     L(`Carried from ${thisYear - 1}`,   `ยกยอดจากปี ${thisYear - 1}`),
-          earned: L('Earned days',                    'วันที่ได้เพิ่ม'),
-          total:  L(`Total for ${thisYear}`,          `รวมสิทธิ์ปี ${thisYear}`),
-        };
-    const entitlementHtml = cfg.type === 'annual'
-      ? `<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border);text-align:left">
-           ${entRow(entLabels.year, daysToStr(cfg.max))}
-           ${entRow(entLabels.cf, daysToStr(cfDays))}
-           ${compDays > 0 ? entRow(entLabels.earned, daysToStr(compDays)) : ''}
-           <div style="border-top:1px solid var(--border);margin-top:6px;padding-top:4px">
-             ${entRow(entLabels.total, daysToStr(effectiveMax), true)}
-           </div>
-         </div>`
-      : `<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border);text-align:left">
-           ${entRow(entLabels.year, daysToStr(cfg.max))}
-         </div>`;
+    const entitlementHtml = leaveEntitlementBreakdownHtml(cfg.type, cfg.max, bal, thisYear);
     // 2026-09-24 (owner): "รวมยอดก่อนเปิดระบบ" read like spare days the employee had gained. It is
     // the opposite -- leave already SPENT before the system went live, counted inside the used
     // figure below it -- so every language now says "used" explicitly.
@@ -18193,7 +18484,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   applyDarkMode(localStorage.getItem('ta_dark') === '1');
   fixStaticText(); // Also re-attaches password Enter listener inside
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js', { scope: '/' })
+    // 2026-09-25: was the absolute '/sw.js' with scope '/', which only resolves on the Cloudflare
+    // domain where the app IS the site root. On the LAN fallback
+    // (http://192.168.100.100/Time_Attendance/attendance/) it 404s and registration silently fails
+    // -- no push, and now no offline either. Relative registration resolves correctly on both, and
+    // on the production domain it still yields exactly the same scope '/' as before.
+    navigator.serviceWorker.register('sw.js', { scope: './' })
       .then(reg => { window._swReg = reg; })
       .catch(e => console.warn('[SW]', e));
   }

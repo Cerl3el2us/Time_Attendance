@@ -16,7 +16,7 @@
   <meta name="theme-color" content="#2563eb">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/style.css?v=20260924h">
+  <link rel="stylesheet" href="css/style.css?v=20260925a">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css" integrity="sha384-MinO0mNliZ3vwppuPOUnGa+iq619pfMhLVUXfC4LHwSCvF9H+6P/KO4Q7qBOYV5V" crossorigin="anonymous"/>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css" integrity="sha384-RkASv+6KfBMW9eknReJIJ6b3UnjKOKC5bOUaNgIY778NFbQ8MtWq9Lr/khUgqtTt" crossorigin="anonymous">
 </head>
@@ -1942,6 +1942,10 @@
 </div>
 
 <!-- Toast Container -->
+<!-- 2026-09-25: offline banner. Hidden by default; app.js shows it on the browser's offline event
+     and on any failed API call. Sits above everything (z-index over the toasts) because what it
+     says changes how every number on the page should be read. -->
+<div id="offline-banner" role="status" aria-live="polite" style="display:none;position:fixed;top:0;left:0;right:0;z-index:10000;background:#b45309;color:#fff;padding:8px 14px;font-size:13px;font-weight:600;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.2)"></div>
 <div id="toast-container" style="position:fixed;bottom:24px;right:24px;z-index:9999;display:flex;flex-direction:column;gap:10px;"></div>
 
 <!-- ===== EMPLOYEE PROFILE MODAL (view) ===== -->
@@ -1964,6 +1968,21 @@
         <!-- ข้อมูลส่วนตัว -->
         <div class="emp-form-section">
           <h4 data-en="👤 Personal Information">👤 ข้อมูลส่วนตัว (Personal Information)</h4>
+          <!-- 2026-09-25: employee photo. Only shown while EDITING an existing employee (it needs
+               an id to upload against); hidden on the "add new" form, where renderEmployeeModal
+               leaves #emp-photo-row display:none. Uploading here never reaches the face scanner. -->
+          <div id="emp-photo-row" style="display:none;align-items:center;gap:14px;margin-bottom:14px">
+            <img id="emp-photo-preview" alt="" style="width:72px;height:72px;border-radius:50%;object-fit:cover;border:2px solid #e2e8f0;background:#f1f5f9">
+            <div style="display:flex;flex-direction:column;gap:6px">
+              <div style="display:flex;gap:8px;flex-wrap:wrap">
+                <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('emp-photo-file').click()">📷 <span data-en="Change photo">เปลี่ยนรูป</span></button>
+                <button type="button" id="emp-photo-remove" class="btn btn-secondary btn-sm" onclick="removeEmployeePhoto()">🗑️ <span data-en="Remove">ลบรูป</span></button>
+              </div>
+              <span style="font-size:11px;color:#94a3b8" data-en="JPG, PNG or WebP — large photos are resized automatically. Used in this app only; the face scanner keeps its own enrolled photo.">JPG, PNG หรือ WebP · รูปใหญ่ระบบย่อให้อัตโนมัติ · ใช้แสดงในแอปเท่านั้น รูปที่ใช้สแกนหน้าเปิดประตูไม่เปลี่ยน</span>
+              <span id="emp-photo-status" style="font-size:11px"></span>
+            </div>
+            <input type="file" id="emp-photo-file" accept="image/jpeg,image/png,image/webp" style="display:none" onchange="uploadEmployeePhoto(this)">
+          </div>
           <div class="form-row form-row-3">
             <div class="form-field" style="margin-bottom:0">
               <label data-en="Name Prefix (English)">คำนำหน้า (อังกฤษ)</label>
@@ -2231,6 +2250,12 @@
                   <input type="checkbox" id="emp-personalcar-eligible" style="width:16px;height:16px;cursor:pointer">
                   <span data-en="Eligible for Personal Car Allowance">มีสิทธิ์รับค่าใช้รถส่วนตัว</span>
                 </label>
+                <!-- 2026-09-25 (owner): this box and Settings looked like the same setting twice.
+                     They are two gates ANDed together -- Settings says which ROLES may have the
+                     allowance at all (which is why this row is hidden for a role that may not),
+                     this box says whether THIS employee actually gets it. Spelled out here because
+                     the owner, who set it up, still had to ask. -->
+                <div style="font-size:11px;color:#64748b;margin-top:4px;line-height:1.5" data-en="This role may receive it (set in Settings). Tick the box to give it to this employee specifically — not everyone in the role gets it.">ตำแหน่งนี้มีสิทธิ์ได้ (กำหนดที่หน้า Settings) — ติ๊กเพื่อให้พนักงานคนนี้ได้จริง ไม่ใช่ทุกคนในตำแหน่งจะได้</div>
                 <div id="emp-personalcar-rate-display" style="font-size:11px;color:#94a3b8;margin-top:4px">–</div>
               </div>
             </div>
@@ -2245,6 +2270,7 @@
                   <input type="checkbox" id="emp-phone-eligible" style="width:16px;height:16px;cursor:pointer">
                   <span data-en="Eligible for Phone Allowance">มีสิทธิ์รับค่าเบี้ยเลี้ยงโทรศัพท์</span>
                 </label>
+                <div style="font-size:11px;color:#64748b;margin-top:4px;line-height:1.5" data-en="This role may receive it (set in Settings). Tick the box to give it to this employee specifically — not everyone in the role gets it.">ตำแหน่งนี้มีสิทธิ์ได้ (กำหนดที่หน้า Settings) — ติ๊กเพื่อให้พนักงานคนนี้ได้จริง ไม่ใช่ทุกคนในตำแหน่งจะได้</div>
                 <div id="emp-phone-rate-display" style="font-size:11px;color:#94a3b8;margin-top:4px">–</div>
               </div>
             </div>
@@ -2300,6 +2326,21 @@
       <button class="btn btn-ghost btn-sm" onclick="closeMyProfileModal()">✕</button>
     </div>
     <div class="modal-body">
+      <!-- 2026-09-25 (owner): an employee changes their own photo here, without going through
+           Accounting. It is used inside this app only -- the door scanner keeps the face it was
+           enrolled with, so a new avatar can never affect getting through the door. -->
+      <div id="my-photo-row" style="display:flex;align-items:center;gap:14px;margin-bottom:16px">
+        <img id="my-photo-preview" alt="" style="width:72px;height:72px;border-radius:50%;object-fit:cover;border:2px solid #e2e8f0;background:#f1f5f9">
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('my-photo-file').click()">📷 <span data-en="Change photo">เปลี่ยนรูป</span></button>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="removeEmployeePhoto(currentUser.id, 'my')">🗑️ <span data-en="Remove">ลบรูป</span></button>
+          </div>
+          <span style="font-size:11px;color:#94a3b8" data-en="JPG, PNG or WebP — large photos are resized automatically. Shown in this app only; the door scanner keeps its own photo.">JPG, PNG หรือ WebP · รูปใหญ่ระบบย่อให้อัตโนมัติ · แสดงในแอปเท่านั้น รูปสแกนหน้าเปิดประตูไม่เปลี่ยน</span>
+          <span id="my-photo-status" style="font-size:11px"></span>
+        </div>
+        <input type="file" id="my-photo-file" accept="image/jpeg,image/png,image/webp" style="display:none" onchange="uploadEmployeePhoto(this, currentUser.id, 'my')">
+      </div>
       <div class="form-field">
         <label data-en="📞 Phone">📞 โทรศัพท์</label>
         <input type="tel" id="my-profile-phone" placeholder="08X-XXX-XXXX">
@@ -2613,10 +2654,10 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js" integrity="sha384-SYKAG6cglRMN0RVvhNeBY0r3FYKNOJtznwA0v7B5Vp9tr31xAHsZC0DqkQ/pZDmj" crossorigin="anonymous"></script>
-<script src="lang/ja.js?v=20260924b"></script>  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js" integrity="sha384-5JqMv4L/Xa0hfvtF06qboNdhvuYXUku9ZrhZh3bSk8VXF0A/RuSLHpLsSV9Zqhl6" crossorigin="anonymous"></script>
+<script src="lang/ja.js?v=20260925a"></script>  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js" integrity="sha384-5JqMv4L/Xa0hfvtF06qboNdhvuYXUku9ZrhZh3bSk8VXF0A/RuSLHpLsSV9Zqhl6" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ja.js" integrity="sha384-mKor8U8jwukUkfxaFPCsxKF9S62PXq4gG7zcZ5yQ2x3KL1msprJZeFlKFEDeeb5V" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/th.js" integrity="sha384-E6OVFg1zUc/pckGxry0YZ6VeZ1E17l7Jl8ZQx58jbEfxxkz9LqknQhiIrA9zg/8b" crossorigin="anonymous"></script>
 
-<script src="js/app.js?v=20260924m"></script>
+<script src="js/app.js?v=20260925g"></script>
 </body>
 </html>

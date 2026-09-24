@@ -2608,6 +2608,142 @@ app.put('/api/users/:empNo', withUsersLock((req, res) => {
 // of employeeNo -- door-push is already correctly skipped for a falsy employeeNo by the existing
 // `!empNo` check inside handleUserUpdate() above, so this is a pure persistence fix, not a new
 // door-access code path.
+// 2026-09-25 (owner): replace an employee's photo from inside the app. Until now the ONLY source
+// of a face photo was the Hikvision enrolment pull, and only for a brand-new hire -- so an employee
+// already in users.json was stuck with whatever the scanner had, or with no photo at all.
+//
+// Deliberately one-way: this writes a file and sets users[].facePhoto, and NEVER touches the door
+// controller (no hikModifyUser / no photo PUT). The owner asked for exactly that -- the scanner
+// keeps the face it was enrolled with, because that image is what the door matches against and
+// re-enrolling from an arbitrary upload could lock someone out of the building.
+// 2026-09-25 (owner): the employee changes their OWN photo -- they should not have to ask
+// Accounting for an avatar. MD/Accounting may still set anyone's (a new hire who never enrolled,
+// or a photo that has to come down). Anyone else editing someone else's is refused.
+const PHOTO_EXT = { jpg: 'jpg', jpeg: 'jpg', png: 'png', webp: 'webp' };
+const PHOTO_MAX_BYTES = 2 * 1024 * 1024;
+// Content sniffing, not just the filename: the extension comes from a client header and this path
+// writes into the web root, where a mislabelled file would be served back to browsers.
+function sniffImageExt(buf) {
+  if (!buf || buf.length < 12) return null;
+  if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return 'jpg';
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) return 'png';
+  if (buf.slice(0, 4).toString('latin1') === 'RIFF' && buf.slice(8, 12).toString('latin1') === 'WEBP') return 'webp';
+  return null;
+}
+// Its own limiter rather than the shared `uploadLimiter`: that one is a `const` declared ~5500
+// lines below this route, and route registration runs top-to-bottom at module load, so referencing
+// it here throws a TDZ ReferenceError and the server never finishes booting. `node --check` and
+// ESLint both pass on that -- it only shows up when the process starts.
+const photoUploadLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many photo uploads -- try again in a minute' }
+});
+app.post('/api/users/id/:id/photo', photoUploadLimiter, withUsersLock((req, res) => {
+  if (!req.user) return res.status(401).json({ success: false, message: 'Unauthorized' });
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) return res.status(400).json({ success: false, message: 'Invalid id' });
+  const users = readUsers();
+  if (users === null) return res.status(503).json({ success: false, message: 'Service temporarily unavailable' });
+  const idx = users.findIndex(u => u && u.id === id);
+  if (idx < 0) return res.status(404).json({ success: false, message: 'User not found' });
+  if (users[idx].isSystemAccount) return res.status(403).json({ success: false, message: 'Forbidden' });
+  // Own photo, or an admin setting someone else's. The role is read from the LIVE user record, not
+  // from the token, so a role removed after the token was issued takes effect immediately -- the
+  // same reasoning as requireRole().
+  const actor = users.find(u => u && u.id === req.user.sub);
+  const isSelf = !!actor && actor.id === id;
+  const isAdmin = !!actor && (actor.role === 'md' || actor.role === 'accounting');
+  if (!isSelf && !isAdmin) {
+    return res.status(403).json({ success: false, message: 'Forbidden: you can only change your own photo' });
+  }
+  if (actor && actor.active === false) {
+    return res.status(403).json({ success: false, message: 'Forbidden' });
+  }
+
+  const buf = req.body;
+  if (!Buffer.isBuffer(buf) || buf.length === 0) {
+    return res.status(400).json({ success: false, message: 'Empty upload' });
+  }
+  if (buf.length > PHOTO_MAX_BYTES) {
+    return res.status(413).json({ success: false, code: 'photo-too-large',
+      message: `Image must be ${Math.round(PHOTO_MAX_BYTES / 1024 / 1024)} MB or smaller` });
+  }
+  const sniffed = sniffImageExt(buf);
+  if (!sniffed) {
+    return res.status(400).json({ success: false, code: 'photo-bad-type',
+      message: 'Only JPG, PNG or WebP images are accepted' });
+  }
+  const headerExt = String(req.headers['x-filename'] || '').split('.').pop().toLowerCase();
+  if (headerExt && PHOTO_EXT[headerExt] && PHOTO_EXT[headerExt] !== sniffed) {
+    // Not fatal on its own, but a .png that is really a JPEG usually means something is wrong on
+    // the client side; the sniffed type wins so the file on disk is always labelled honestly.
+    console.warn(`[PHOTO] extension "${headerExt}" disagrees with content (${sniffed}) for user ${id}`);
+  }
+
+  try {
+    if (!fs.existsSync(PHOTOS_DIR)) fs.mkdirSync(PHOTOS_DIR, { recursive: true });
+    // A fresh filename every time, so browsers and the PWA cache cannot serve the previous image;
+    // the old uploads for this employee are removed straight after so the folder cannot grow
+    // without bound. The scanner-pulled `emp_<no>.jpg` is a different name and is never deleted.
+    const stamp = `${Date.now()}_${randomBytes(3).toString('hex')}`;
+    const filename = `emp_${id}_up_${stamp}.${sniffed}`;
+    const dest = path.join(PHOTOS_DIR, path.basename(filename));
+    if (!dest.startsWith(PHOTOS_DIR + path.sep)) {
+      return res.status(400).json({ success: false, message: 'Invalid path' });
+    }
+    fs.writeFileSync(dest, buf);
+    const rel = `images/employees/${filename}`;
+    users[idx].facePhoto = rel;
+    writeJSON('users.json', users);
+
+    for (const f of fs.readdirSync(PHOTOS_DIR)) {
+      if (f.startsWith(`emp_${id}_up_`) && f !== filename) {
+        try { fs.unlinkSync(path.join(PHOTOS_DIR, f)); } catch (_) {}
+      }
+    }
+    console.log(`[PHOTO] user ${id} photo replaced by ${req.user.sub} -> ${rel} (${buf.length} bytes)`);
+    res.json({ success: true, facePhoto: rel });
+  } catch (e) {
+    console.error('[PHOTO] write failed:', e.message);
+    res.status(500).json({ success: false, message: 'Could not save the image' });
+  }
+}));
+
+// Removing a photo is the same permission question as replacing one, so it shares the rules above.
+// It clears users[].facePhoto and deletes only files this feature wrote (`emp_<id>_up_*`) -- a
+// photo pulled from the door controller (`emp_<no>.jpg`) is left on disk untouched, because that
+// is the scanner's enrolment image and not ours to delete.
+app.delete('/api/users/id/:id/photo', photoUploadLimiter, withUsersLock((req, res) => {
+  if (!req.user) return res.status(401).json({ success: false, message: 'Unauthorized' });
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) return res.status(400).json({ success: false, message: 'Invalid id' });
+  const users = readUsers();
+  if (users === null) return res.status(503).json({ success: false, message: 'Service temporarily unavailable' });
+  const idx = users.findIndex(u => u && u.id === id);
+  if (idx < 0) return res.status(404).json({ success: false, message: 'User not found' });
+  if (users[idx].isSystemAccount) return res.status(403).json({ success: false, message: 'Forbidden' });
+  const actor = users.find(u => u && u.id === req.user.sub);
+  const isSelf = !!actor && actor.id === id;
+  const isAdmin = !!actor && (actor.role === 'md' || actor.role === 'accounting');
+  if (!isSelf && !isAdmin) {
+    return res.status(403).json({ success: false, message: 'Forbidden: you can only change your own photo' });
+  }
+  users[idx].facePhoto = '';
+  writeJSON('users.json', users);
+  try {
+    for (const f of fs.readdirSync(PHOTOS_DIR)) {
+      if (f.startsWith(`emp_${id}_up_`)) {
+        try { fs.unlinkSync(path.join(PHOTOS_DIR, f)); } catch (_) {}
+      }
+    }
+  } catch (_) {}
+  console.log(`[PHOTO] user ${id} photo cleared by ${req.user.sub}`);
+  res.json({ success: true, facePhoto: '' });
+}));
+
 app.put('/api/users/id/:id', withUsersLock((req, res) => {
   const updates = parseBody(req);
   if (!updates || typeof updates !== 'object' || Array.isArray(updates)) {
@@ -3003,9 +3139,21 @@ app.post('/api/sync-name', requireRole('md', 'accounting', 'manager'), (req, res
 });
 
 // ===== REST API =====
-app.get('/api/health', (req, res) => {
-  const users = readUsers() || [];
-  res.json({ status:'ok', time:new Date().toISOString(), wsClients:clients.size, totalEvents:(readEvents() || []).length, totalUsers: employeeRecords(users).length });
+// 2026-09-25: this route is in PUBLIC_PATHS (no auth) and used to answer with wsClients /
+// totalEvents / totalUsers -- which meant every anonymous hit did a full readUsers() AND a full
+// readEvents() parse of the entire scan history, and leaked headcount to anyone who asked.
+// Nothing ever read those fields: the only caller in the codebase is deploy_backend.py's
+// `curl -s -o /dev/null -w "%{http_code}"`, which discards the body and checks the status alone.
+// Now a constant-cost liveness probe, rate-limited so it cannot be used to spin the server.
+const healthLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { status: 'rate-limited' }
+});
+app.get('/api/health', healthLimiter, (req, res) => {
+  res.json({ status:'ok', time:new Date().toISOString() });
 });
 
 // Instant is always NAS Date.now().
@@ -6960,6 +7108,12 @@ function refreshSnapshottedCarryForward(leaves, user, dateFrom) {
   const settings = readSettings();
   const cf = settings.leaveCarryForward;
   if (!cf || typeof cf !== 'object' || Array.isArray(cf) || cf[nextKey] === undefined) return;
+  // 2026-09-24 (Opus review, HIGH): a figure a human set through PUT /api/leave-carry-forward is
+  // never recomputed away. This function fires on every annual-leave create/edit/approve/cancel,
+  // so without this guard the sequence "January run writes 2 -> MD corrects it to 5 -> anyone
+  // files a leave dated last year" silently restored 2, while leaveCarryForwardEdits still said
+  // 5 by MD -- the audit page would state a number the system no longer held.
+  if (plainObj(settings.leaveCarryForwardEdits)[nextKey]) return;
   // `??` not `||`: a configured 0 means "no carry-forward", not "use the default 5".
   const rawMax = Number(getAppSettings().leave?.carryForwardMax ?? 5);
   const maxCF = Math.max(0, Math.min(60, Number.isFinite(rawMax) ? rawMax : 5));
@@ -7350,6 +7504,15 @@ app.put('/api/leave-carry-forward', requireRole('md', 'accounting'), withLeavesL
   if (!Number.isInteger(year) || year < firstYear || year > thisYear + 1) {
     return res.status(400).json({ success: false, code: 'cf-bad-year',
       message: `year must be between ${firstYear} and ${thisYear + 1}` });
+  }
+  // 2026-09-24 (Opus review MEDIUM, owner chose "block"): past the expiry date the whole
+  // unconsumed carry-forward for that year is forfeited by carryForwardForfeitMinutes(), so an
+  // edit here changed a stored number and moved the employee's balance by exactly nothing --
+  // while the caller got {success:true} and a green toast. Refused outright instead.
+  const expiryStr = carryForwardExpiryDateStr(year);
+  if (carryForwardExpiryEnabled() && bangkokDateStr() > expiryStr) {
+    return res.status(409).json({ success: false, code: 'cf-after-expiry',
+      message: `Carry-forward for ${year} expired on ${expiryStr} and can no longer be edited` });
   }
   const users = readUsers();
   if (users === null) return res.status(503).json({ success: false, message: 'Service temporarily unavailable' });

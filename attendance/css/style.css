@@ -2061,6 +2061,15 @@ table tbody tr:last-child td { border-bottom: none; }
   align-items: center;
   gap: 5px;
   font-size: 12px;
+  /* 2026-09-25 (Opus review): the GPS link inside carries display:block to sit on its own line, as
+     it does in the desktop <td>, but a flex parent turns every child into a flex item and block
+     has no effect there -- it stayed inline and squeezed the time chips. Wrapping lets it drop to
+     the next line; flex-basis:100% on the link itself forces that break rather than leaving it to
+     whatever space happens to remain. */
+  flex-wrap: wrap;
+}
+.att-card-time-item .gps-map-link {
+  flex-basis: 100%;
 }
 .att-card-time-label {
   color: #94a3b8;

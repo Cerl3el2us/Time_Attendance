@@ -1424,4 +1424,15 @@ window.LANG_JA = {
   "🔄 Holiday Work": "🔄 休日出勤",
   "🌅 Early Morning": "🌅 早朝出勤",
   "🚙 Personal Car": "🚙 自家用車",
+  // 2026-09-25: the per-employee allowance checkboxes read as a duplicate of the central Settings
+  // list. They are two gates ANDed together; this line says so next to the box.
+  "This role may receive it (set in Settings). Tick the box to give it to this employee specifically — not everyone in the role gets it.":
+    "この役職は対象になり得ます（設定ページで指定）。実際に支給するには、この社員のチェックを入れてください — 役職全員が対象とは限りません。",
+  // 2026-09-25: employee photo upload (owner-requested), shown under the photo buttons.
+  "Change photo": "写真を変更",
+  "Remove": "削除",
+  "JPG, PNG or WebP — large photos are resized automatically. Used in this app only; the face scanner keeps its own enrolled photo.":
+    "JPG・PNG・WebP — 大きな画像は自動で縮小されます。このアプリ内の表示専用で、顔認証端末に登録された写真は変更されません。",
+  "JPG, PNG or WebP — large photos are resized automatically. Shown in this app only; the door scanner keeps its own photo.":
+    "JPG・PNG・WebP — 大きな画像は自動で縮小されます。このアプリ内の表示専用で、入退室端末の写真は変更されません。",
 };
