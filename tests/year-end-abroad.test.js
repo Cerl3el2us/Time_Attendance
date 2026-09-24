@@ -34,7 +34,7 @@ const SHARED = ['normalizeAnnualLeaveTiers', 'getAnnualLeaveTiers', 'getAnnualLe
 const CLIENT_FNS = [...SHARED, 'leaveRecordMinutes', 'getApprovedHolidayWorkDays',
   'getCarryForwardKey', 'getCarryForwardCompKey', 'getCarryForwardDays', 'getCarryForwardCompDays',
   'getOpeningUsedKey', 'getOpeningUsedDays', 'computeLeaveBalance', 'localDateStr',
-  'computeLateDeductMinutes', 'isSafeTimeZone', 'abroadLocalTimeText', 'abroadLocalTimeHtml', 'escapeHtml'];
+  'computeLateDeductMinutes', 'isSafeTimeZone', 'tzOffsetMinutesAt', 'abroadLocalTimeText', 'abroadLocalTimeHtml', 'escapeHtml'];
 const SERVER_FNS = [...SHARED, 'leaveMinutesOf', 'getApprovedHolidayWorkAnnualLeaveDays',
   'deriveLeaveDaysCount', 'ta_localDateStr', 'isValidDateStr', 'annualLeaveRemainingMinutes',
   'annualLateDeductMinutes', 'carryForwardAutoRunYear', 'computeYearEndCarryForward'];

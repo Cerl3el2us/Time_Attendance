@@ -37,7 +37,7 @@ const CLIENT_FNS = [...SHARED, 'leaveRecordMinutes', 'getApprovedHolidayWorkDays
   'getOpeningUsedKey', 'getOpeningUsedDays', 'computeLeaveBalance', 'canUseAnnualLeave', 'localDateStr'];
 const SERVER_FNS = [...SHARED, 'leaveMinutesOf', 'getApprovedHolidayWorkAnnualLeaveDays',
   'deriveLeaveDaysCount', 'ta_localDateStr', 'isValidDateStr', 'hourlyLeaveShapeError', 'parseHHMMToMins',
-  'leaveBalanceError', 'annualLeaveServiceError', 'annualLeaveRemainingMinutes'];
+  'leaveBalanceError', 'leaveBalanceRemainingMinutes', 'annualLeaveServiceError', 'annualLeaveRemainingMinutes'];
 
 const TIERS = [{ afterMonths: 6, days: 3 }, { afterMonths: 12, days: 6 }, { afterMonths: 24, days: 8 }, { afterMonths: 36, days: 10 }];
 function leaveSettings(over) {

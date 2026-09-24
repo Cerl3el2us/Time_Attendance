@@ -1709,17 +1709,32 @@ function withdrawnRowStyle(l) {
   return l && isWithdrawnLeaveStatus(l.status) ? 'opacity:.6;text-decoration:line-through;' : '';
 }
 // Dual-sync with server.js isRevocableLeaveType (the money-bearing request types).
+// 2026-09-24 (owner): + time-correction -- once revoked the day falls back to the real scans
+// (every log builder only applies APPROVED corrections).
 function isRevocableLeaveType(type) {
   return ['holiday-work', 'ot', 'early-morning', 'late-out', 'upcountry', 'long-distance',
-    'personal-car', 'abroad'].includes(type);
+    'personal-car', 'abroad', 'time-correction'].includes(type);
 }
-// Client gate for the "Revoke approval" button -- the server re-checks everything.
-function canRevokeLeaveApproval(l) {
+// Types applyApprovalToLog() writes into the approving session's attendanceLog -- a cancel/revoke of
+// one of these needs loadAttendanceFromBackend() to fall back to the real scans in that session.
+const APPROVAL_LOG_TYPES = new Set(['time-correction', 'upcountry', 'long-distance', 'late-out']);
+// Who may see a Revoke action for `l` at all (role, type, status, not own record).
+function isRevokeCandidate(l) {
   if (!l || !currentUser || l.status !== 'approved' || !isRevocableLeaveType(l.type)) return false;
   if (!actingRoles().some(r => r === 'md' || r === 'accounting')) return false;
   if (l.userId === currentUser.id) return false;
-  if (currentUser.isObserver) return false;
-  return !payPeriodBlockedForRange(l.dateFrom, l.dateTo || l.dateFrom, l.userId).blocked;
+  return !currentUser.isObserver;
+}
+// 2026-09-24: why a candidate cannot be revoked right now -- a period code
+// ('period-frozen' / 'period-locked' / 'period-confirmed'), 'earned-day-used', or '' (allowed).
+function revokeBlockCode(l) {
+  const pp = payPeriodBlockedForRange(l.dateFrom, l.dateTo || l.dateFrom, l.userId);
+  if (pp.blocked) return pp.reason;
+  return earnedDayUsedByRecord(l) ? 'earned-day-used' : '';
+}
+// Client gate for the "Revoke approval" button -- the server re-checks everything.
+function canRevokeLeaveApproval(l) {
+  return isRevokeCandidate(l) && !revokeBlockCode(l);
 }
 function otEndCrossesMidnight(hhmm) {
   const m = lateNightCheckoutMins(hhmm);
@@ -2473,6 +2488,11 @@ function isLegacyAutoApprovedPersonalCar(l) {
 // Dual-sync with server.js: isCancellableApprovedLeave
 function isCancellableApprovedLeave(l, asOfYmd) {
   if (!l || l.status !== 'approved') return false;
+  // 2026-09-24 (owner): dual-sync with server.js -- the owner may cancel an APPROVED Holiday Work
+  // (either mode, any date) to re-file it with the other mode. The deadline is MD approval of the
+  // period's payroll (plus locked / Accounting-confirmed), and an earned annual-leave day already
+  // used cannot be taken back -- see approvedCancelBlockCode().
+  if (l.type === 'holiday-work') return !!l.dateFrom && /^\d{4}-\d{2}-\d{2}$/.test(l.dateFrom);
   // 2026-09-21: dual-sync with server.js -- 'abroad' is owner-cancellable before the trip starts.
   if (!['annual', 'sick', 'business', 'abroad'].includes(l.type)) return false;
   if (!l.dateFrom || !/^\d{4}-\d{2}-\d{2}$/.test(l.dateFrom)) return false;
@@ -2818,6 +2838,104 @@ function getApprovedHolidayWorkDays(year, userId) {
   return hwDays + abroadTravelCreditDays(abroad, yStart, yEnd);
 }
 
+// ===== 2026-09-24 (owner): never take back an earned annual-leave day that is already used =====
+// Cancelling (owner) or revoking (MD/Accounting) an approved Holiday Work taken as annual leave,
+// or revoking an approved Abroad trip whose travel-day credit has arrived, removes earned days.
+// The server refuses with code 'earned-day-used' when the owner's annual balance for that year --
+// the submission-gate figure (pending requests count as used) -- would drop below zero without the
+// record, or when next year's already-snapshotted carry-forward would lose more than next year's
+// balance can cover. The client only hides the action and says why; the server decides.
+// DUAL-SYNC (identical in server.js): earnedCreditMinutesOf, earnedCreditYearsOf,
+// earnedDayBalanceAsOf, carryForwardAfterCreditLoss, isEarnedDayUsed.
+// Per-side wrapper: earnedDayUsedByRecord here, earnedDayUsedError in server.js.
+function earnedCreditMinutesOf(l, year) {
+  if (!l || l.status !== 'approved') return 0;
+  const yStart = `${year}-01-01`, yEnd = `${year}-12-31`;
+  if (l.type === 'holiday-work') {
+    if (l.compensationMode !== 'annual-leave' || !(l.dateFrom >= yStart && l.dateFrom <= yEnd) || isCompanyTripDay(l.dateFrom)) return 0;
+    return (l.days || 1) * 480;
+  }
+  if (l.type === 'abroad') return abroadTravelCreditDays([l], yStart, yEnd) * 480;
+  return 0;
+}
+function earnedCreditYearsOf(l) {
+  if (!l || typeof l.dateFrom !== 'string') return [];
+  const ys = new Set([Number(l.dateFrom.slice(0, 4)), Number(String(l.dateTo || l.dateFrom).slice(0, 4))]);
+  return [...ys].filter(Number.isInteger).sort((a, b) => a - b);
+}
+// The balance date for `year`: today inside that year, else the nearer end of it.
+function earnedDayBalanceAsOf(year, todayStr) {
+  const yStart = `${year}-01-01`, yEnd = `${year}-12-31`;
+  return todayStr < yStart ? yStart : (todayStr > yEnd ? yEnd : todayStr);
+}
+// Next year's carry-forward (days) once the refresh recomputes it without `creditMin`.
+function carryForwardAfterCreditLoss(leftoverWithMin, creditMin, maxCF) {
+  return Math.min(Math.max(0, leftoverWithMin - creditMin) / 480, maxCF);
+}
+function isEarnedDayUsed(creditMin, remainingWithMin, nextCfDropMin, nextRemainingWithMin) {
+  if (!(creditMin > 0)) return false;
+  if (remainingWithMin - creditMin < 0) return true;
+  return nextCfDropMin > 0 && nextRemainingWithMin - nextCfDropMin < 0;
+}
+// Annual remaining as the server's submission gate computes it (server.js
+// leaveBalanceRemainingMinutes, annual): entitlement on asOf + carry-forward + earned, minus
+// approved AND pending annual leave, go-live opening used and expired carry-forward. Unclamped.
+// Deliberately no late-arrival deduction -- the server gate has none (DUAL-SYNC).
+function annualGateRemainingMinutes(u, asOf) {
+  const year = Number(asOf.slice(0, 4));
+  const yStart = `${year}-01-01`, yEnd = `${year}-12-31`;
+  const totalMin = ((annualLeaveEntitlementDays(u, asOf) || 0) + getCarryForwardDays(year, u.id) +
+    getCarryForwardCompDays(year, u.id) + getApprovedHolidayWorkDays(year, u.id)) * 480;
+  let usedMin = getOpeningUsedDays(year, u.id, 'annual') * 480;
+  DATA_LEAVES.filter(l =>
+    l.userId === u.id && l.type === 'annual' && !isVoidLeaveStatus(l.status) &&
+    l.dateFrom >= yStart && l.dateFrom <= yEnd
+  ).forEach(l => { usedMin += leaveRecordMinutes(l); });
+  return totalMin - usedMin - carryForwardForfeitMinutes(u, year, asOf, true);
+}
+function earnedDayUsedByRecord(l) {
+  if (!l) return false;
+  const owner = DATA_USERS.find(u => u.id === l.userId) || (currentUser && currentUser.id === l.userId ? currentUser : null);
+  if (!owner) return false;
+  const rawMax = Number(APP_SETTINGS.leave?.carryForwardMax ?? 5);
+  const maxCF = Math.max(0, Math.min(60, Number.isFinite(rawMax) ? rawMax : 5));
+  const today = bangkokDateStr();
+  return earnedCreditYearsOf(l).some(year => {
+    const creditMin = earnedCreditMinutesOf(l, year);
+    if (creditMin <= 0) return false;
+    const remWith = annualGateRemainingMinutes(owner, earnedDayBalanceAsOf(year, today));
+    let dropMin = 0, nextRem = 0;
+    if (LEAVE_CARRY_FORWARD[getCarryForwardKey(year + 1, owner.id)] !== undefined) {
+      // computeLeaveBalance(.., year).remMin = server annualLeaveRemainingMinutes (the refresh's pool).
+      const leftoverWith = computeLeaveBalance(owner, 'annual', annualLeaveEntitlementDays(owner, `${year}-12-31`), year).remMin;
+      const cfNew = carryForwardAfterCreditLoss(leftoverWith, creditMin, maxCF);
+      const cfOld = getCarryForwardDays(year + 1, owner.id) + getCarryForwardCompDays(year + 1, owner.id);
+      dropMin = Math.max(0, cfOld - cfNew) * 480;
+      if (dropMin > 0) nextRem = annualGateRemainingMinutes(owner, earnedDayBalanceAsOf(year + 1, today));
+    }
+    return isEarnedDayUsed(creditMin, remWith, dropMin, nextRem);
+  });
+}
+function earnedDayUsedMessage() {
+  return L('The annual-leave day earned from this record has already been used, so it cannot be cancelled or revoked',
+    'วันลาพักร้อนที่ได้จากรายการนี้ถูกใช้ไปแล้ว จึงยกเลิกหรือเพิกถอนไม่ได้');
+}
+// Why the owner cannot cancel an approved record right now (same guards as DELETE /api/leaves/:id):
+// a period code, 'earned-day-used', or '' when the Cancel action is allowed.
+function approvedCancelBlockCode(l) {
+  const pp = payPeriodBlockedForRange(l.dateFrom, l.dateTo || l.dateFrom, l.userId);
+  if (pp.blocked) return pp.reason;
+  return earnedDayUsedByRecord(l) ? 'earned-day-used' : '';
+}
+function cancelBlockMessage(code) {
+  if (code === 'earned-day-used') return earnedDayUsedMessage();
+  return payPeriodBlockedMessage({ reason: code });
+}
+// Small grey note shown where the Cancel / Revoke button would be.
+function actionBlockedNoteHtml(text) {
+  return `<div style="font-size:11.5px;color:#94a3b8;max-width:260px;text-align:right;line-height:1.4">🔒 ${escapeHtml(text)}</div>`;
+}
+
 // DUAL-SYNC with server.js hourlyLeaveChargedMinutes.
 // 2026-09-24 (owner): hourly leave is charged the requested span MINUS its overlap with the
 // 12:00-13:00 lunch break (10:00-15:00 = 4h, 12:30-14:00 = 1h). 12:00-13:00 charges 0 and is
@@ -2983,6 +3101,8 @@ function carryForwardAlreadyDoneText(year, run) {
 function carryForwardStatusHtml(year) {
   const run = LEAVE_CARRY_FORWARD_RUNS[String(year)];
   if (run) return `✅ ${escapeHtml(carryForwardAlreadyDoneText(year, run))}`;
+  // 2026-09-24: a year before the system started is never carried forward.
+  if (year < carryForwardFirstSourceYear()) return `ℹ️ ${escapeHtml(carryForwardRefusalText('cf-before-system-start', bangkokDateStr()))}`;
   // Not recorded. In January the server job is about to run (at start-up and hourly); later in
   // the year it will not run for this year any more -- say so, and when the next automatic run is.
   if (bangkokDateStr().slice(5, 7) === '01') {
@@ -2996,9 +3116,43 @@ function carryForwardStatusHtml(year) {
     : L(`ℹ️ No carry-forward of ${year} is on record (runs before this version were not logged). The automatic run happens only in January — next: January ${year + 2} (for ${year + 1}).`,
         `ℹ️ ไม่มีบันทึกการยกยอดของปี ${year} (การยกยอดก่อนเวอร์ชันนี้ไม่ได้บันทึกไว้) ระบบยกยอดอัตโนมัติเฉพาะเดือนมกราคม — ครั้งถัดไป: มกราคม ${year + 2} (ของปี ${year + 1})`);
 }
+// 2026-09-24 (owner): the button works only in January (Bangkok), only for the year that has just
+// ended, and never for a year before the system started (the year of APP_FIRST_PERIOD_START).
+// Returns the refusal code or null. DUAL-SYNC: server.js carryForwardRunRefusal (same codes).
+function carryForwardRunRefusal(todayStr, fromYear, firstSourceYear) {
+  if (typeof todayStr !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(todayStr) || todayStr.slice(5, 7) !== '01') return 'cf-not-january';
+  if (!Number.isInteger(fromYear) || fromYear !== Number(todayStr.slice(0, 4)) - 1) return 'cf-bad-year';
+  if (Number.isInteger(firstSourceYear) && fromYear < firstSourceYear) return 'cf-before-system-start';
+  return null;
+}
+function carryForwardFirstSourceYear() {
+  return APP_FIRST_PERIOD_START.getFullYear();
+}
+// The January the next (automatic) run can happen in: this January, or next year's.
+function carryForwardNextRunJanuaryYear(todayStr) {
+  const y = Number(todayStr.slice(0, 4));
+  const first = carryForwardFirstSourceYear() + 1;
+  return Math.max(todayStr.slice(5, 7) === '01' ? y : y + 1, first);
+}
+function carryForwardRefusalText(code, todayStr) {
+  const janYear = carryForwardNextRunJanuaryYear(todayStr);
+  if (code === 'cf-before-system-start') {
+    const first = carryForwardFirstSourceYear();
+    return currentLang === 'ja'
+      ? `システム開始（${first}年）より前の年は繰り越せません。最初の繰越は${first + 1}年1月（${first}年分）です`
+      : L(`Years before the system started (${first}) cannot be carried forward — the first carry-forward is in January ${first + 1} (for ${first})`,
+          `ยกยอดปีก่อนเริ่มใช้ระบบ (${first}) ไม่ได้ — การยกยอดครั้งแรกคือเดือนมกราคม ${first + 1} (ของปี ${first})`);
+  }
+  if (code === 'cf-bad-year') return L('Only last year can be carried forward', 'ยกยอดได้เฉพาะปีที่แล้วเท่านั้น');
+  return currentLang === 'ja'
+    ? `繰越は${janYear}年1月に自動で実行されます`
+    : L(`Carry-forward runs automatically in January ${janYear}`, `ระบบจะยกยอดให้อัตโนมัติในเดือนมกราคม ${janYear}`);
+}
 async function processYearEndCarryForward(forYear) {
   if (blockIfObserver()) return;
   const thisYear = forYear || (bangkokYear() - 1);
+  const refusal = carryForwardRunRefusal(bangkokDateStr(), thisYear, carryForwardFirstSourceYear());
+  if (refusal) { showToast(`⚠️ ${carryForwardRefusalText(refusal, bangkokDateStr())}`, 'warning'); return; }
   const done = LEAVE_CARRY_FORWARD_RUNS[String(thisYear)];
   if (done) { showToast(`⚠️ ${carryForwardAlreadyDoneText(thisYear, done)}`, 'warning'); return; }
   // `??` not `||`: a configured 0 means "no carry-forward" (server uses the same rule).
@@ -3025,8 +3179,8 @@ async function processYearEndCarryForward(forYear) {
         renderSettingsPage();
         return;
       }
-      if (data.code === 'cf-bad-year') {
-        throw new Error(currentLang === 'ja' ? '繰り越せるのは前年のみです' : L('Only last year can be carried forward', 'ยกยอดได้เฉพาะปีที่แล้วเท่านั้น'));
+      if (['cf-bad-year', 'cf-not-january', 'cf-before-system-start'].includes(data.code)) {
+        throw new Error(carryForwardRefusalText(data.code, bangkokDateStr()));
       }
       throw new Error(data.message || ('HTTP ' + res.status));
     }
@@ -3717,10 +3871,17 @@ function renderSettingsPage(_skipRefresh) {
         ${L('Runs automatically in January: each employee’s remaining annual leave for last year (up to max, expired carry-forward excluded) is carried into this year. Use the button only if it has not run (e.g. the server was off all January).','ระบบทำให้อัตโนมัติในเดือนมกราคม: ยอดวันลาพักร้อนคงเหลือของปีที่แล้ว (ไม่เกินสูงสุด ไม่รวมวันยกยอดที่หมดอายุ) ของพนักงานทุกคนจะถูกยกมาปีนี้ ใช้ปุ่มนี้เฉพาะเมื่อระบบยังไม่ได้ทำ (เช่น เซิร์ฟเวอร์ปิดตลอดเดือนมกราคม)')}
       </p>
       <div style="font-size:13px;margin-bottom:12px">${carryForwardStatusHtml(bangkokYear() - 1)}</div>
-      <div style="display:flex;gap:10px;flex-wrap:wrap">
-        <button class="btn btn-primary btn-sm" onclick="processYearEndCarryForward(${bangkokYear() - 1})">
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+        ${(() => {
+          // 2026-09-24 (owner): January only, never before the system started (server refuses too).
+          const cfRefusal = carryForwardRunRefusal(bangkokDateStr(), bangkokYear() - 1, carryForwardFirstSourceYear());
+          if (cfRefusal) {
+            return `<button class="btn btn-primary btn-sm" disabled style="opacity:.55;cursor:not-allowed">↩️ ${escapeHtml(carryForwardRefusalText(cfRefusal, bangkokDateStr()))}</button>`;
+          }
+          return `<button class="btn btn-primary btn-sm" onclick="processYearEndCarryForward(${bangkokYear() - 1})">
           ↩️ ${currentLang === 'ja' ? `${bangkokYear()-1}年 → ${bangkokYear()}年 繰越処理` : L(`Process ${bangkokYear()-1} → ${bangkokYear()}`, `ประมวลผล ${bangkokYear()-1} → ${bangkokYear()}`)}
-        </button>
+        </button>`;
+        })()}
       </div>
     `)}
 
@@ -13110,8 +13271,12 @@ function showApprovalDetail(id) {
     : '';
   // 2026-09-24 (owner): MD / Accounting can take back an approval on a money-bearing request until
   // payroll for its period is MD-approved (hidden when the server would refuse).
+  // 2026-09-24: when revoking is not possible (period closed, earned day already used) say why.
+  const revokeBlock = isRevokeCandidate(l) ? revokeBlockCode(l) : '';
   const revokeButton = canRevokeLeaveApproval(l)
     ? `<button onclick="closeApprovalDetail();revokeLeaveApproval(${l.id});" style="width:100%;padding:11px;border-radius:8px;background:var(--bg-card);color:#b91c1c;border:1.5px solid #fca5a5;font-size:14px;font-weight:700;cursor:pointer">↩️ ${L('Revoke approval', 'เพิกถอนการอนุมัติ')}</button>`
+    : revokeBlock
+    ? `<div style="font-size:12px;color:#94a3b8;text-align:center;line-height:1.5">🔒 ${escapeHtml(revokeErrorMessage(revokeBlock))}</div>`
     : '';
 
   document.getElementById('adetail-title').textContent = `${icon} ${label.replace(/^[^\s]+ /,'')}`;
@@ -15777,7 +15942,7 @@ function renderLeaveHistory() {
          </div>`
       : `<div style="display:flex;gap:6px;justify-content:flex-end">
            <button class="btn btn-ghost btn-sm" onclick="showLeaveDetail(${l.id})">${L('Details', 'รายละเอียด')}</button>
-           ${isCancellableApprovedLeave(l) ? `<button class="btn btn-danger btn-sm" onclick="cancelLeave(${l.id})">${L('Cancel', 'ยกเลิก')}</button>` : ''}
+           ${isCancellableApprovedLeave(l) ? (approvedCancelBlockCode(l) ? actionBlockedNoteHtml(cancelBlockMessage(approvedCancelBlockCode(l))) : `<button class="btn btn-danger btn-sm" onclick="cancelLeave(${l.id})">${L('Cancel', 'ยกเลิก')}</button>`) : ''}
          </div>`;
 
     return `<tr style="${isWithdrawnLeaveStatus(l.status) ? 'opacity:.6' : ''}">
@@ -15853,8 +16018,11 @@ function showLeaveDetail(id) {
   // sends every non-pending record to Details rather than a card with its own Cancel button) --
   // mirrors cancelLeave()'s exact predicate now.
   const cancelBtn = document.getElementById('leave-detail-cancel-btn');
+  // 2026-09-24: an approved record whose cancel the server would refuse (period closed, earned
+  // day already used) gets no button here; the list rows say why.
   const canCancelFromDetail = currentUser && l.userId === currentUser.id && (
-    l.status.startsWith('pending') || isLegacyAutoApprovedPersonalCar(l) || isCancellableApprovedLeave(l)
+    l.status.startsWith('pending') || isLegacyAutoApprovedPersonalCar(l) ||
+    (isCancellableApprovedLeave(l) && !approvedCancelBlockCode(l))
   );
   cancelBtn.style.display = canCancelFromDetail ? '' : 'none';
 
@@ -15901,9 +16069,22 @@ async function cancelLeave(id) {
     showToast(payPeriodBlockedMessage(ppCancel), 'warning');
     return false;
   }
+  // 2026-09-24 (owner): an earned annual-leave day that is already used cannot be cancelled away.
+  if (approvedLeaveCancel && earnedDayUsedByRecord(l)) {
+    showToast(earnedDayUsedMessage(), 'warning');
+    return false;
+  }
   // 2026-09-21: abroad is cancellable too, but it consumes no leave quota — the generic
   // "days returned to your balance" wording would be a lie for it, so it gets its own line.
-  const confirmMsg = approvedLeaveCancel
+  // 2026-09-24 (owner): approved Holiday Work -- cancelled so it can be re-filed with the other
+  // compensation mode; the new request goes through approval again.
+  const confirmMsg = approvedLeaveCancel && l.type === 'holiday-work'
+    ? (l.compensationMode === 'annual-leave'
+      ? L('Cancel this approved Holiday Work? The annual-leave day it earned is removed. You can then file a new Holiday Work request for the same day (e.g. as paid instead) — it needs approval again. The record stays in your history as cancelled.',
+          'ยกเลิกคำขอทำงานวันหยุดที่อนุมัติแล้ว? วันลาพักร้อนที่ได้จากคำขอนี้จะถูกหักออก จากนั้นยื่นคำขอทำงานวันหยุดของวันเดียวกันใหม่ได้ (เช่น เปลี่ยนเป็นรับเงินแทน) ซึ่งต้องรออนุมัติใหม่ รายการเดิมจะยังอยู่ในประวัติเป็น "ยกเลิกแล้ว"')
+      : L('Cancel this approved Holiday Work? Its pay is removed from this period. You can then file a new Holiday Work request for the same day (e.g. as an annual-leave day instead) — it needs approval again. The record stays in your history as cancelled.',
+          'ยกเลิกคำขอทำงานวันหยุดที่อนุมัติแล้ว? เงินของคำขอนี้จะถูกหักออกจากรอบนี้ จากนั้นยื่นคำขอทำงานวันหยุดของวันเดียวกันใหม่ได้ (เช่น เปลี่ยนเป็นรับวันลาพักร้อนแทน) ซึ่งต้องรออนุมัติใหม่ รายการเดิมจะยังอยู่ในประวัติเป็น "ยกเลิกแล้ว"'))
+    : approvedLeaveCancel
     ? (l.type === 'abroad'
       ? (currentLang === 'ja'
         ? '承認済みの海外勤務を取り消しますか？該当日は欠勤に戻り、手当も付きません。記録は「取消済み」として履歴に残ります。'
@@ -15920,7 +16101,8 @@ async function cancelLeave(id) {
   try {
     const res = await apiFetch(`/api/leaves/${id}`, { method: 'DELETE' });
     cancelData = await res.json();
-    if (!cancelData.success) throw new Error(cancelData.message || 'Cancel failed');
+    // 2026-09-24: server codes (period guards, earned-day-used) worded client-side.
+    if (!cancelData.success) throw new Error(cancelData.code ? cancelBlockMessage(cancelData.code) : (cancelData.message || 'Cancel failed'));
   } catch(e) {
     showToast(L('❌ Could not cancel: ', '❌ ยกเลิกไม่สำเร็จ: ') + e.message, 'danger');
     return false;
@@ -15933,7 +16115,7 @@ async function cancelLeave(id) {
   } else {
     DATA_LEAVES = DATA_LEAVES.filter(x => x.id !== id);
   }
-  if (approvedLeaveCancel && ['annual', 'abroad'].includes(l.type)) {
+  if (approvedLeaveCancel && (['annual', 'abroad'].includes(l.type) || (l.type === 'holiday-work' && l.compensationMode === 'annual-leave'))) {
     await loadSettingsFromBackend();
   }
   updateMyRequestsBadge();
@@ -15963,6 +16145,7 @@ function revokeErrorMessage(code, fallback) {
   }
   if (code === 'revoke-not-approved') return L('Only approved requests can be revoked', 'เพิกถอนได้เฉพาะคำขอที่อนุมัติแล้ว');
   if (code === 'revoke-type') return L('This request type has no pay to revoke', 'คำขอประเภทนี้ไม่มีเงินที่ต้องเพิกถอน');
+  if (code === 'earned-day-used') return earnedDayUsedMessage();
   return fallback || L('Could not revoke the approval', 'เพิกถอนการอนุมัติไม่สำเร็จ');
 }
 async function revokeLeaveApproval(id) {
@@ -15970,13 +16153,19 @@ async function revokeLeaveApproval(id) {
   const l = DATA_LEAVES.find(x => x.id === id);
   if (!l) return false;
   if (!canRevokeLeaveApproval(l)) {
-    const pp = payPeriodBlockedForRange(l.dateFrom, l.dateTo || l.dateFrom, l.userId);
-    showToast(pp.blocked ? revokeErrorMessage(pp.reason) : revokeErrorMessage(''), 'warning');
+    showToast(revokeErrorMessage(isRevokeCandidate(l) ? revokeBlockCode(l) : ''), 'warning');
     return false;
   }
   const emp = DATA_USERS.find(u => u.id === l.userId);
   const empName = emp ? emp.name : `#${l.userId}`;
-  const confirmMsg = currentLang === 'ja'
+  // 2026-09-24 (owner): a revoked time correction has no pay of its own -- the day's times go
+  // back to the real scans.
+  const confirmMsg = l.type === 'time-correction'
+    ? (currentLang === 'ja'
+      ? `${empName} のこの時刻修正の承認を取り消しますか？この日の時刻は実際の打刻に戻ります。記録は履歴に残ります。`
+      : L(`Revoke the approval of this time correction by ${empName}? That day goes back to the real scan times. The record stays in history.`,
+        `เพิกถอนการอนุมัติการแก้ไขเวลานี้ของ ${empName}? เวลาของวันนั้นจะกลับไปเป็นเวลาสแกนจริง รายการจะยังอยู่ในประวัติ`))
+    : currentLang === 'ja'
     ? `${empName} のこの申請の承認を取り消しますか？関連する手当・OT・付与された有給は支払われなくなります。記録は履歴に残ります。`
     : L(`Revoke the approval of this request by ${empName}? Its pay, allowance or earned leave day will no longer be given. The record stays in history.`,
       `เพิกถอนการอนุมัติคำขอนี้ของ ${empName}? เงิน/เบี้ยเลี้ยง/วันลาที่ได้จากคำขอนี้จะไม่ได้รับอีก รายการจะยังอยู่ในประวัติ`);
@@ -16000,6 +16189,10 @@ async function revokeLeaveApproval(id) {
     return false;
   }
   if (l.type === 'abroad' || l.type === 'holiday-work') await loadSettingsFromBackend();
+  // 2026-09-24: applyApprovalToLog() wrote this record into this session's attendanceLog when it
+  // was approved here (corrected time, upcountry/long-distance/late-out flags) -- rebuild it from
+  // the real scans so the day stops showing it.
+  if (APPROVAL_LOG_TYPES.has(l.type)) await loadAttendanceFromBackend();
   updateMyRequestsBadge();
   updateApprovalBadge();
   if (currentPage === 'approval') renderApprovals();
@@ -16431,6 +16624,20 @@ function stampAbroadScan(rec, side, eventTimeIso, gpsTz) {
   if (side === 'in') { rec.checkInAt = at; rec.checkInGpsTz = tz; }
   else { rec.checkOutAt = at; rec.checkOutGpsTz = tz; }
 }
+// UTC offset (minutes) of IANA zone `tz` at instant `ms`, via Intl; null when it cannot be read.
+function tzOffsetMinutesAt(ms, tz) {
+  try {
+    const parts = {};
+    new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit' }).formatToParts(ms).forEach(p => { parts[p.type] = p.value; });
+    const asUtc = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day),
+      Number(parts.hour) % 24, Number(parts.minute), Number(parts.second));
+    const off = Math.round((asUtc - Math.floor(ms / 1000) * 1000) / 60000);
+    return Number.isFinite(off) ? off : null;
+  } catch (e) {
+    return null;
+  }
+}
 // "11:00 Tokyo time" for a scan instant in `gpsTz`; '' when there is nothing useful to show
 // (no zone, Bangkok itself, or the row now shows a different, time-corrected value).
 function abroadLocalTimeText(eventTimeIso, gpsTz, shownTime) {
@@ -16438,6 +16645,10 @@ function abroadLocalTimeText(eventTimeIso, gpsTz, shownTime) {
   if (shownTime && String(eventTimeIso).substring(11, 16) !== shownTime) return '';
   const ms = Date.parse(eventTimeIso);
   if (!Number.isFinite(ms)) return '';
+  // 2026-09-24 (owner): same clock as Bangkok at that instant (Vientiane, Ho Chi Minh City, Phnom
+  // Penh, Jakarta...) -- the note would only repeat the Bangkok time, so hide it.
+  const tzOff = tzOffsetMinutesAt(ms, gpsTz);
+  if (tzOff === null || tzOff === tzOffsetMinutesAt(ms, DEFAULT_TZ)) return '';
   let hhmm;
   try {
     hhmm = new Intl.DateTimeFormat('en-GB', { timeZone: gpsTz, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(ms);
@@ -17028,7 +17239,12 @@ function renderMyRequests() {
     // time-correction and clear-attachments have no edit-modal support (time-correction is an
     // MD/Accounting-driven fix, not a self-service form; clear-attachments is a batch admin
     // action) — Cancel still applies to both, Edit only to the 5 self-submitted request types.
-    const actionRow = isLegacyAutoApprovedPersonalCar(l) || isCancellableApprovedLeave(l)
+    // 2026-09-24 (owner): approved Holiday Work is owner-cancellable too (to re-file with the other
+    // mode); when the server would refuse, the reason is shown instead of the button.
+    const approvedCancelBlock = isCancellableApprovedLeave(l) ? approvedCancelBlockCode(l) : '';
+    const actionRow = approvedCancelBlock
+      ? actionBlockedNoteHtml(cancelBlockMessage(approvedCancelBlock))
+      : isLegacyAutoApprovedPersonalCar(l) || isCancellableApprovedLeave(l)
       ? `<div style="display:flex;gap:6px;flex-shrink:0">
            <button class="btn btn-danger btn-sm" onclick="cancelLeave(${l.id})">${L('Cancel', 'ยกเลิก')}</button>
          </div>`
@@ -17821,7 +18037,9 @@ function initHikvisionLive() {
         // everywhere, and the who/when/reason fields are not in the public broadcast -- refetch
         // (authenticated) and re-render every page LEAVE_DELETED re-renders.
         if (isWithdrawnLeaveStatus(data.leave?.status)) {
-          loadLeavesFromBackend().then(() => {
+          // 2026-09-24: a session that approved it may hold it in attendanceLog (applyApprovalToLog).
+          const reloadLog = APPROVAL_LOG_TYPES.has(data.leave?.type);
+          loadLeavesFromBackend().then(() => (reloadLog ? loadAttendanceFromBackend() : null)).then(() => {
             updateMyRequestsBadge(); updateApprovalBadge();
             renderDashboard();
             if (currentPage === 'leave') renderLeaveHistory();

@@ -1405,4 +1405,11 @@ window.LANG_JA = {
   "Only last year can be carried forward": "繰り越せるのは前年のみです",
   "This employee already has a 🌙 Late Night request for this day. Undo the allowed check-out anyway? The 🌙 will not be paid until the check-out is allowed again.":
     "この社員はこの日の🌙深夜残業申請をすでに提出しています。それでも退勤の許可を取り消しますか？再び許可されるまで🌙は支払われません。",
+  // 2026-09-24: owner cancel of approved Holiday Work, earned day already used
+  "The annual-leave day earned from this record has already been used, so it cannot be cancelled or revoked":
+    "この記録で付与された有給休暇はすでに使用済みのため、取り消しできません",
+  "Cancel this approved Holiday Work? The annual-leave day it earned is removed. You can then file a new Holiday Work request for the same day (e.g. as paid instead) — it needs approval again. The record stays in your history as cancelled.":
+    "承認済みの休日出勤を取り消しますか？この申請で付与された有給休暇1日分は差し引かれます。その後、同じ日の休日出勤を改めて申請できます（例：手当での支給に変更）。新しい申請は再度承認が必要です。記録は「取消済み」として履歴に残ります。",
+  "Cancel this approved Holiday Work? Its pay is removed from this period. You can then file a new Holiday Work request for the same day (e.g. as an annual-leave day instead) — it needs approval again. The record stays in your history as cancelled.":
+    "承認済みの休日出勤を取り消しますか？この申請の支給は今期の給与から差し引かれます。その後、同じ日の休日出勤を改めて申請できます（例：有給休暇の付与に変更）。新しい申請は再度承認が必要です。記録は「取消済み」として履歴に残ります。",
 };

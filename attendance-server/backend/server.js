@@ -445,12 +445,22 @@ async function sendResultEmail(leave, overrideTo, overrideLang) {
   const t = EMAIL_I18N[lang];
   const C = EMAIL_COLORS;
   const approved = leave.status === 'approved';
-  const statusColor = approved ? C.success : C.danger;
-  const statusBg = approved ? C.successBg : C.dangerBg;
+  // 2026-09-24 (owner): MD/Accounting took an approval back (POST /api/leaves/:id/revoke) -- same
+  // opt-in and language, amber "Approval revoked" with who revoked it and why (escaped below).
+  const revoked = leave.status === 'revoked';
+  const statusColor = approved ? C.success : (revoked ? C.amber : C.danger);
+  const statusBg = approved ? C.successBg : (revoked ? C.amberBg : C.dangerBg);
+  const statusIcon = approved ? '✅' : (revoked ? '↩️' : '❌');
+  const statusText = approved ? t.resultApproved : (revoked ? t.resultRevoked : t.resultRejected);
+  const subject = revoked ? t.resultSubjectRevoked : t.resultSubject(approved);
   const dateRange = leave.dateFrom === leave.dateTo
     ? fmtEmailDateLong(new Date(leave.dateFrom + 'T12:00:00').getTime(), lang)
     : `${fmtEmailDateLong(new Date(leave.dateFrom + 'T12:00:00').getTime(), lang)} \u2013 ${fmtEmailDateLong(new Date(leave.dateTo + 'T12:00:00').getTime(), lang)}`;
   const detailRows = [[t.lblDate, dateRange], ...buildResultDetailRows(leave, lang)];
+  if (revoked) {
+    detailRows.push([t.lblRevokedBy, String(leave.revokedBy || '—')]);
+    if (leave.revokeReason) detailRows.push([t.lblRevokeReason, String(leave.revokeReason)]);
+  }
   const detailHtml = detailRows.map(([label, value], i) => `<tr>
     <td style="padding:9px 0;${i < detailRows.length - 1 ? `border-bottom:1px solid ${C.border};` : ''}font-size:12px;color:${C.textFaint};width:38%;vertical-align:top">${label}</td>
     <td style="padding:9px 0;${i < detailRows.length - 1 ? `border-bottom:1px solid ${C.border};` : ''}font-size:13px;font-weight:600;color:${C.text}">${escapeHtml(value)}</td>
@@ -463,16 +473,16 @@ async function sendResultEmail(leave, overrideTo, overrideLang) {
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:18px">${detailHtml}</table>
     <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
       <td style="background:${statusBg};border-radius:10px;padding:12px 16px">
-        <span style="font-size:13px;font-weight:600;color:${statusColor}">${approved ? '✅' : '❌'} ${approved ? t.resultApproved : t.resultRejected}</span>
+        <span style="font-size:13px;font-weight:600;color:${statusColor}">${statusIcon} ${statusText}</span>
       </td>
     </tr></table>`;
   const html = emailShell({
     headerBg: `${statusColor}`,
-    headerIcon: approved ? '✅' : '❌',
+    headerIcon: statusIcon,
     // FIX 2026-08-13: resultSubject() already bakes the same emoji in as a prefix (it doubles as
     // the mail subject line, where that's wanted) -- emailShell renders headerIcon in its own
     // <td> right next to headerTitle, so passing the raw string showed the icon twice.
-    headerTitle: t.resultSubject(approved).replace(/^[✅❌]\s*/, ''),
+    headerTitle: revoked ? t.resultRevoked : t.resultSubject(approved).replace(/^[✅❌]\s*/, ''),
     headerSubtitle: null,
     bodyHtml,
     footerText: t.footer
@@ -480,7 +490,7 @@ async function sendResultEmail(leave, overrideTo, overrideLang) {
   await transport.sendMail({
     from: `"${cfg.fromName || 'Time Attendance Application'}" <${cfg.user}>`,
     to: overrideTo || emp.email,
-    subject: t.resultSubject(approved),
+    subject,
     html
   });
   // SECURITY/CORRECTNESS FIX 2026-08-13 (Opus audit, F-4): was `emp.email` unconditionally -- when
@@ -3297,7 +3307,8 @@ const SETTINGS_KEY_ROLES = {
   appSettings: ['md', 'accounting'],
   appSettingsUpdatedAt: ['md', 'accounting'],
   payslipEmailEnabled: ['md', 'accounting'],
-  leaveCarryForward: ['md', 'accounting'],
+  // 2026-09-24 (owner): leaveCarryForward is server-owned now (runYearEndCarryForward /
+  // refreshSnapshottedCarryForward only) -- refused explicitly in the handler below.
   leaveOpeningUsed: ['md', 'accounting'],
   tawi50Overrides: ['md', 'accounting'],
   companyTripDates: ['md', 'accounting'],
@@ -3329,6 +3340,12 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
   // body) keeps the stored value because a client can never send the key. Explicit for clarity.
   if (Object.prototype.hasOwnProperty.call(body, 'leaveCarryForwardRuns')) {
     return res.status(403).json({ success: false, message: 'leaveCarryForwardRuns is set by the server only' });
+  }
+  // 2026-09-24 (owner): same for the carry-forward values themselves. No client path sends the key
+  // any more (saveLeaveCarryForward was removed with the server-side year-end run); a PUT that
+  // still does is refused whole rather than silently dropping part of it.
+  if (Object.prototype.hasOwnProperty.call(body, 'leaveCarryForward')) {
+    return res.status(403).json({ success: false, code: 'cf-server-only', message: 'leaveCarryForward is set by the server only' });
   }
   for (const key of Object.keys(body)) {
     // 2026-08-12 (3rd audit, F6c): `SETTINGS_KEY_ROLES[key]` is a plain-property lookup, so an
@@ -3487,35 +3504,9 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
     }
   }
 
-  // SECURITY/CORRECTNESS FIX 2026-08-12 (Opus comprehensive audit): leaveCarryForward had zero
-  // validation -- a manager (now blocked by role, see SETTINGS_KEY_ROLES) or a stray non-number
-  // value could forge extra leave-day entitlement or reach an unescaped innerHTML render in
-  // app.js's leave-balance display. Key format matches how app.js actually builds/reads it
-  // (`${year}_${userId}` or `comp_${year}_${userId}`).
-  const LEAVE_CF_KEY_RE = /^(comp_)?\d{4}_\d+$/;
-  if (body.leaveCarryForward !== undefined) {
-    const cf = body.leaveCarryForward;
-    if (!cf || typeof cf !== 'object' || Array.isArray(cf) || Object.keys(cf).length > 500) {
-      return res.status(400).json({ success: false, message: 'leaveCarryForward must be an object of 500 or fewer entries' });
-    }
-    for (const [k, v] of Object.entries(cf)) {
-      if (!LEAVE_CF_KEY_RE.test(k)) {
-        return res.status(400).json({ success: false, message: `invalid leaveCarryForward key "${k}"` });
-      }
-      if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 60) {
-        return res.status(400).json({ success: false, message: `leaveCarryForward["${k}"] must be a number between 0 and 60` });
-      }
-    }
-  }
-  if (body.leaveCarryForward && current.leaveCarryForward && typeof current.leaveCarryForward === 'object' && !Array.isArray(current.leaveCarryForward)) {
-    // SECURITY FIX 2026-08-12 (2nd comprehensive audit, F5): filter stale disk entries through
-    // the same validity check, same reasoning as periodLocks above.
-    const cleanCF = {};
-    for (const [k, v] of Object.entries(current.leaveCarryForward)) {
-      if (LEAVE_CF_KEY_RE.test(k) && typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 60) cleanCF[k] = v;
-    }
-    body.leaveCarryForward = { ...cleanCF, ...body.leaveCarryForward };
-  }
+  // 2026-09-24: the leaveCarryForward validation + stale-entry merge that lived here is gone --
+  // the key is refused above (server-owned). Its checks (key format, 0-60 numbers) are what
+  // runYearEndCarryForward/refreshSnapshottedCarryForward produce by construction.
 
   // Opening leave balances (go-live prior-used days) — key `${year}_${userId}_${type}`.
   // Stored as days already used before the system went live; not leave history rows.
@@ -4518,6 +4509,70 @@ function getApprovedHolidayWorkAnnualLeaveDays(leaves, userId, year, exceptId) {
     l.userId === userId && l.type === 'abroad' && l.status === 'approved' && l.id !== exceptId);
   return hwDays + abroadTravelCreditDays(abroad, yStart, yEnd);
 }
+// ===== 2026-09-24 (owner): never take back an earned annual-leave day that is already used =====
+// Cancelling (owner) or revoking (MD/Accounting) an approved Holiday Work taken as annual leave,
+// or revoking an approved Abroad trip whose travel-day credit has arrived, removes earned days.
+// Refused with code 'earned-day-used' when the owner's annual balance for that year -- the SAME
+// figure the submission gate uses (pending requests count as used) -- would drop below zero
+// without the record. If next year's carry-forward was already snapshotted from that year, the
+// carry-forward the refresh would take away must also still be covered by next year's balance.
+// DUAL-SYNC (identical in app.js): earnedCreditMinutesOf, earnedCreditYearsOf,
+// earnedDayBalanceAsOf, carryForwardAfterCreditLoss, isEarnedDayUsed. Per-side wrapper:
+// earnedDayUsedError here, earnedDayUsedByRecord in app.js.
+function earnedCreditMinutesOf(l, year) {
+  if (!l || l.status !== 'approved') return 0;
+  const yStart = `${year}-01-01`, yEnd = `${year}-12-31`;
+  if (l.type === 'holiday-work') {
+    if (l.compensationMode !== 'annual-leave' || !(l.dateFrom >= yStart && l.dateFrom <= yEnd) || isCompanyTripDay(l.dateFrom)) return 0;
+    return (l.days || 1) * 480;
+  }
+  if (l.type === 'abroad') return abroadTravelCreditDays([l], yStart, yEnd) * 480;
+  return 0;
+}
+function earnedCreditYearsOf(l) {
+  if (!l || typeof l.dateFrom !== 'string') return [];
+  const ys = new Set([Number(l.dateFrom.slice(0, 4)), Number(String(l.dateTo || l.dateFrom).slice(0, 4))]);
+  return [...ys].filter(Number.isInteger).sort((a, b) => a - b);
+}
+// The balance date for `year`: today inside that year, else the nearer end of it.
+function earnedDayBalanceAsOf(year, todayStr) {
+  const yStart = `${year}-01-01`, yEnd = `${year}-12-31`;
+  return todayStr < yStart ? yStart : (todayStr > yEnd ? yEnd : todayStr);
+}
+// Next year's carry-forward (days) once the refresh recomputes it without `creditMin`.
+function carryForwardAfterCreditLoss(leftoverWithMin, creditMin, maxCF) {
+  return Math.min(Math.max(0, leftoverWithMin - creditMin) / 480, maxCF);
+}
+function isEarnedDayUsed(creditMin, remainingWithMin, nextCfDropMin, nextRemainingWithMin) {
+  if (!(creditMin > 0)) return false;
+  if (remainingWithMin - creditMin < 0) return true;
+  return nextCfDropMin > 0 && nextRemainingWithMin - nextCfDropMin < 0;
+}
+function earnedDayUsedError(leaves, owner, leave) {
+  if (!owner || !leave) return null;
+  const cf = readSettings().leaveCarryForward || {};
+  // `??` not `||`: a configured 0 means "no carry-forward" (same as refreshSnapshottedCarryForward).
+  const rawMax = Number(getAppSettings().leave?.carryForwardMax ?? 5);
+  const maxCF = Math.max(0, Math.min(60, Number.isFinite(rawMax) ? rawMax : 5));
+  const today = bangkokDateStr();
+  for (const year of earnedCreditYearsOf(leave)) {
+    const creditMin = earnedCreditMinutesOf(leave, year);
+    if (creditMin <= 0) continue;
+    const remWith = leaveBalanceRemainingMinutes(leaves, owner, 'annual', undefined, earnedDayBalanceAsOf(year, today));
+    let dropMin = 0, nextRem = 0;
+    const nextKey = `${year + 1}_${owner.id}`;
+    if (cf[nextKey] !== undefined) {
+      const cfNew = carryForwardAfterCreditLoss(annualLeaveRemainingMinutes(leaves, owner, year, cf), creditMin, maxCF);
+      const cfOld = (Number(cf[nextKey]) || 0) + (Number(cf[`comp_${year + 1}_${owner.id}`]) || 0);
+      dropMin = Math.max(0, cfOld - cfNew) * 480;
+      if (dropMin > 0) nextRem = leaveBalanceRemainingMinutes(leaves, owner, 'annual', undefined, earnedDayBalanceAsOf(year + 1, today));
+    }
+    if (isEarnedDayUsed(creditMin, remWith, dropMin, nextRem)) {
+      return { code: 'earned-day-used', message: 'The annual-leave day earned from this record has already been used, so it cannot be cancelled or revoked' };
+    }
+  }
+  return null;
+}
 function ta_localDateStr(d) {
   const p2 = n => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
@@ -4948,6 +5003,13 @@ function carryForwardForfeitMinutes(leaves, user, year, asOfDateStr, includePend
 function leaveBalanceError(leaves, user, type, reqMin, exceptId, dateFrom) {
   if (type !== 'annual' && type !== 'business') return null;
   if (!user) return 'Insufficient leave balance';
+  if (reqMin > Math.max(0, leaveBalanceRemainingMinutes(leaves, user, type, exceptId, dateFrom))) return 'Insufficient leave balance';
+  return null;
+}
+// 2026-09-24: the submission gate's remaining minutes (pending + approved use, unclamped -- can be
+// negative), split out of leaveBalanceError so earnedDayUsedError uses the exact same number.
+// DUAL-SYNC: app.js annualGateRemainingMinutes (annual only).
+function leaveBalanceRemainingMinutes(leaves, user, type, exceptId, dateFrom) {
   const asOf = isValidDateStr(dateFrom) ? dateFrom : bangkokDateStr();
   const year = Number(asOf.slice(0, 4));
   const yStart = `${year}-01-01`, yEnd = `${year}-12-31`;
@@ -4970,8 +5032,7 @@ function leaveBalanceError(leaves, user, type, reqMin, exceptId, dateFrom) {
   // pending + approved leave dated on/before expiry counts as carry-forward usage (FIFO).
   // Dual-sync with app.js submitLeave() balance gate.
   const forfeitMin = type === 'annual' ? carryForwardForfeitMinutes(leaves, user, year, asOf, true, exceptId, cf) : 0;
-  if (reqMin > Math.max(0, totalMin - usedMin - forfeitMin)) return 'Insufficient leave balance';
-  return null;
+  return totalMin - usedMin - forfeitMin;
 }
 // Dual-sync with app.js: DEFAULT_ANNUAL_LEAVE_TIERS, normalizeAnnualLeaveTiers,
 // getAnnualLeaveTiers, getAnnualLeaveMinMonths, annualLeaveUnlockDateStr,
@@ -6403,6 +6464,11 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
 // Dual-sync with app.js: isCancellableApprovedLeave
 function isCancellableApprovedLeave(leave, asOfYmd) {
   if (!leave || leave.status !== 'approved') return false;
+  // 2026-09-24 (owner): the owner may cancel an APPROVED Holiday Work (either mode) to re-file it
+  // with the other mode. Holiday Work is always a past date, so there is no date rule: DELETE's
+  // guards decide -- MD-approved payroll ("closing"), locked, Accounting-confirmed -- plus
+  // earnedDayUsedError for the annual-leave mode.
+  if (leave.type === 'holiday-work') return isValidDateStr(leave.dateFrom);
   // 2026-09-21: 'abroad' joins the owner-cancellable set. A trip that gets called off must be
   // removable -- unlike a one-day claim it spans many days, pays per day and hides absences, so
   // leaving it permanent was the worst case of the approved-record lock. Same before-start-date
@@ -6515,12 +6581,30 @@ function refreshSnapshottedCarryForward(leaves, user, dateFrom) {
 // button covers that. DUAL-SYNC: key formats = app.js getCarryForwardKey/getCarryForwardCompKey.
 
 // Source year to auto-run for `todayStr` (Bangkok YYYY-MM-DD), or null. Pure.
-function carryForwardAutoRunYear(todayStr, runs) {
+// 2026-09-24 (owner): never for a year before the system started (firstSourceYear, see
+// carryForwardFirstSourceYear); omitted = no floor.
+function carryForwardAutoRunYear(todayStr, runs, firstSourceYear) {
   if (typeof todayStr !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(todayStr)) return null;
   if (todayStr.slice(5, 7) !== '01') return null;
   const fromYear = Number(todayStr.slice(0, 4)) - 1;
+  if (Number.isInteger(firstSourceYear) && fromYear < firstSourceYear) return null;
   const r = (runs && typeof runs === 'object' && !Array.isArray(runs)) ? runs : {};
   return r[String(fromYear)] ? null : fromYear;
+}
+// 2026-09-24 (owner): the manual run (Settings button / POST /api/leave-carry-forward/run) is
+// allowed only in January (Bangkok), only for the year that has just ended, and never for a year
+// before the system started. Returns the refusal code or null. DUAL-SYNC: app.js carryForwardRunRefusal.
+function carryForwardRunRefusal(todayStr, fromYear, firstSourceYear) {
+  if (typeof todayStr !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(todayStr) || todayStr.slice(5, 7) !== '01') return 'cf-not-january';
+  if (!Number.isInteger(fromYear) || fromYear !== Number(todayStr.slice(0, 4)) - 1) return 'cf-bad-year';
+  if (Number.isInteger(firstSourceYear) && fromYear < firstSourceYear) return 'cf-before-system-start';
+  return null;
+}
+// First year whose leave can be carried forward = the year of the first real pay period
+// (APP_FIRST_PERIOD_START, the server twin of app.js's constant). Called at run time only (the
+// constant is declared further down this file).
+function carryForwardFirstSourceYear() {
+  return APP_FIRST_PERIOD_START.getFullYear();
 }
 // The carry-forward entries a run writes for fromYear -> fromYear + 1. Same user filter as the old
 // client function (isEmployeeRecord(u) && u.active). `??` not `||`: a configured 0 means "no
@@ -6566,7 +6650,7 @@ function autoYearEndCarryForward() {
   try {
     const settings = readJSON('settings.json', {});
     if (settings === null) return;
-    const fromYear = carryForwardAutoRunYear(bangkokDateStr(), settings.leaveCarryForwardRuns);
+    const fromYear = carryForwardAutoRunYear(bangkokDateStr(), settings.leaveCarryForwardRuns, carryForwardFirstSourceYear());
     if (fromYear === null) return;
     const r = runYearEndCarryForward(fromYear, null);
     if (r.ok) console.log(`[CF] automatic carry-forward ${fromYear} -> ${fromYear + 1} done for ${r.count} employees`);
@@ -6581,8 +6665,14 @@ function autoYearEndCarryForward() {
 app.post('/api/leave-carry-forward/run', requireRole('md', 'accounting'), withLeavesLock((req, res) => {
   const body = parseBody(req) || {};
   const year = Number(body.year);
-  if (!Number.isInteger(year) || year !== bangkokYmd().y - 1) {
-    return res.status(400).json({ success: false, code: 'cf-bad-year', message: 'Only last year can be carried forward' });
+  const refusal = carryForwardRunRefusal(bangkokDateStr(), year, carryForwardFirstSourceYear());
+  if (refusal) {
+    const msg = {
+      'cf-not-january': 'Carry-forward can only be run in January',
+      'cf-bad-year': 'Only last year can be carried forward',
+      'cf-before-system-start': 'That year is before the system started',
+    }[refusal];
+    return res.status(400).json({ success: false, code: refusal, message: msg });
   }
   const live = (readUsers() || []).find(u => u.id === req.user.sub);
   if (!live) return res.status(403).json({ success: false, message: 'Forbidden' });
@@ -6630,18 +6720,25 @@ app.delete('/api/leaves/:id', withLeavesLock((req, res) => {
     // pending rows from the approval queue. MD-freeze applies to money-bearing personal-car
     // cancels and to approved leave cancels (days already in payroll), matching the previous
     // personal-car-only branch.
+    // 2026-09-24: codes added (same ones as the revoke route) so the client can word them.
     if (lockedPeriodInRange(leave.dateFrom, leave.dateTo)) {
-      return res.status(400).json({ success:false, message:'This pay period is locked' });
+      return res.status(400).json({ success:false, code:'period-locked', message:'This pay period is locked' });
     }
     if (accountingConfirmedInRange(leave.dateFrom, leave.dateTo, leave.userId)) {
-      return res.status(409).json({ success:false, message:'Accounting has already confirmed tax for this period — unconfirm before making changes' });
+      return res.status(409).json({ success:false, code:'period-confirmed', message:'Accounting has already confirmed tax for this period — unconfirm before making changes' });
     }
     if (isCancellablePersonalCar || approvedLeaveCancel) {
       const finGuard = readJSON('finalize.json', {});
       if (finGuard === null) return res.status(503).json({ success:false, message:'Service temporarily unavailable' });
       if (mdApprovedPeriodInRange(leave.dateFrom, leave.dateTo, leave.userId)) {
-        return res.status(409).json({ success:false, message:'Payroll for this period has already been approved by the Managing Director -- ask them to revoke approval first' });
+        return res.status(409).json({ success:false, code:'period-frozen', message:'Payroll for this period has already been approved by the Managing Director -- ask them to revoke approval first' });
       }
+    }
+    // 2026-09-24 (owner): an earned annual-leave day (Holiday Work taken as leave) that is already
+    // used cannot be cancelled away. No-op for records that earn nothing.
+    if (approvedLeaveCancel) {
+      const earnedErr = earnedDayUsedError(leaves, live, leave);
+      if (earnedErr) return res.status(409).json({ success:false, code: earnedErr.code, message: earnedErr.message });
     }
     // HYGIENE FIX 2026-08-13 (LOW-3, Opus retrospective audit): a cancelled personal-car record
     // (see the F-B fix above) is the first case in this handler where a hard-delete removes a
@@ -6672,7 +6769,9 @@ app.delete('/api/leaves/:id', withLeavesLock((req, res) => {
       leaves.splice(idx, 1);
     }
     saveLeaves(leaves);
-    if (approvedLeaveCancel && ['annual', 'abroad'].includes(leave.type)) {
+    const cancelTouchesAnnualPool = ['annual', 'abroad'].includes(leave.type) ||
+      (leave.type === 'holiday-work' && leave.compensationMode === 'annual-leave');
+    if (approvedLeaveCancel && cancelTouchesAnnualPool) {
       try {
         refreshSnapshottedCarryForward(leaves, live, leave.dateFrom);
       } catch (e) {
@@ -6698,10 +6797,14 @@ app.delete('/api/leaves/:id', withLeavesLock((req, res) => {
 // driver OT), early-morning, late-out (Late Night allowance), upcountry, long-distance,
 // personal-car, abroad (daily allowance + travel-day annual credit). Leave types
 // (annual/sick/business) are not revocable here -- the owner cancel covers them.
+// 2026-09-24 (owner): time-correction too -- once revoked, the day falls back to the real scans
+// (every log builder applies APPROVED corrections only: server buildAttendanceLog /
+// annualLateDeductMinutes, app.js attendanceTimesForDate / generatePeriodDays /
+// computeLateDeductMinutes; approval never writes events.json).
 // Dual-sync with app.js isRevocableLeaveType.
 function isRevocableLeaveType(type) {
   return ['holiday-work', 'ot', 'early-morning', 'late-out', 'upcountry', 'long-distance',
-    'personal-car', 'abroad'].includes(type);
+    'personal-car', 'abroad', 'time-correction'].includes(type);
 }
 const REVOKE_REASON_MAX = 500;
 app.post('/api/leaves/:id/revoke', requireRole('md', 'accounting'), withLeavesLock((req, res) => {
@@ -6745,6 +6848,11 @@ app.post('/api/leaves/:id/revoke', requireRole('md', 'accounting'), withLeavesLo
     if (accountingConfirmedInRange(leave.dateFrom, dateTo, leave.userId)) {
       return res.status(409).json({ success:false, code:'period-confirmed', message:'Accounting has already confirmed tax for this period — unconfirm before making changes' });
     }
+    const ownerUser = users.find(u => u.id === leave.userId);
+    // 2026-09-24 (owner): an earned annual-leave day already used cannot be revoked away
+    // (annual-mode Holiday Work, an Abroad trip whose travel-day credit has arrived).
+    const earnedErr = earnedDayUsedError(leaves, ownerUser, leave);
+    if (earnedErr) return res.status(409).json({ success:false, code: earnedErr.code, message: earnedErr.message });
     leaves[idx] = {
       ...leave, status: 'revoked', revokedAt: new Date().toISOString(),
       revokedById: live.id, revokedBy: live.name, revokeReason: reason,
@@ -6753,7 +6861,6 @@ app.post('/api/leaves/:id/revoke', requireRole('md', 'accounting'), withLeavesLo
     console.log('[LEAVE] approval revoked', JSON.stringify({ id, userId: leave.userId, type: leave.type, dateFrom: leave.dateFrom, dateTo: leave.dateTo, by: live.id }));
     // Earned annual-leave credit goes away with the approval (holiday work taken as a leave day,
     // abroad travel days) -- rewrite next year's carry-forward snapshot like approve/cancel do.
-    const ownerUser = users.find(u => u.id === leave.userId);
     const touchesAnnualPool = leave.type === 'abroad' ||
       (leave.type === 'holiday-work' && leave.compensationMode === 'annual-leave');
     if (touchesAnnualPool && ownerUser) {
@@ -6773,6 +6880,9 @@ app.post('/api/leaves/:id/revoke', requireRole('md', 'accounting'), withLeavesLo
       url: '/',
       badge: badgeCountForUser(ownerUser),
     })).catch(e => console.error('[PUSH] revoke notify error:', e && e.message));
+    // 2026-09-24 (owner): the result email follows the employee's own opt-in
+    // (emailNotifyOnResult) and language (notifyLangEmail), same template as approve/reject.
+    sendResultEmail(leaves[idx]).catch(e => console.error('[EMAIL] revoke notify error:', e && e.message));
     res.json({ success:true, leave: leaves[idx] });
   } catch(e) {
     res.status(500).json({ success:false, error:e.message });
@@ -9156,6 +9266,8 @@ const EMAIL_I18N = {
     resultSubject: approved => approved ? '✅ คำขอของคุณได้รับการอนุมัติ' : '❌ คำขอของคุณไม่ได้รับการอนุมัติ',
     resultApproved: 'คำขอนี้ได้รับการอนุมัติแล้ว',
     resultRejected: 'คำขอนี้ไม่ได้รับการอนุมัติ',
+    resultSubjectRevoked: '↩️ คำขอของคุณถูกเพิกถอนการอนุมัติ', resultRevoked: 'ถูกเพิกถอนการอนุมัติ',
+    lblRevokedBy: 'เพิกถอนโดย', lblRevokeReason: 'เหตุผลที่เพิกถอน',
     lblDate: 'วันที่', lblReturnTime: 'เวลาที่กลับ', lblLocation: 'สถานที่ / ลูกค้า',
     lblMileage: 'เลขไมล์', lblDistance: 'ระยะทาง', lblWorkedDate: 'วันที่ไปทำงาน',
     lblCorrectedTime: 'เวลาที่แก้ไข', lblOtHours: 'ชั่วโมง OT', lblRate: 'อัตรา', lblReason: 'เหตุผล', lblRequestedBy: 'ผู้ขอ',
@@ -9177,6 +9289,8 @@ const EMAIL_I18N = {
     resultSubject: approved => approved ? '✅ Your request has been approved' : '❌ Your request was not approved',
     resultApproved: 'This request has been approved.',
     resultRejected: 'This request was not approved.',
+    resultSubjectRevoked: '↩️ The approval of your request was revoked', resultRevoked: 'Approval revoked',
+    lblRevokedBy: 'Revoked by', lblRevokeReason: 'Reason for revoking',
     lblDate: 'Date', lblReturnTime: 'Return time', lblLocation: 'Location / Client',
     lblMileage: 'Mileage', lblDistance: 'Distance', lblWorkedDate: 'Worked on',
     lblCorrectedTime: 'Corrected time', lblOtHours: 'OT hours', lblRate: 'Rate', lblReason: 'Reason', lblRequestedBy: 'Requested by',
@@ -9198,6 +9312,8 @@ const EMAIL_I18N = {
     resultSubject: approved => approved ? '✅ 申請が承認されました' : '❌ 申請は承認されませんでした',
     resultApproved: 'この申請は承認されました。',
     resultRejected: 'この申請は承認されませんでした。',
+    resultSubjectRevoked: '↩️ 申請の承認が取り消されました', resultRevoked: '承認取り消し',
+    lblRevokedBy: '取り消した人', lblRevokeReason: '取り消しの理由',
     lblDate: '日付', lblReturnTime: '帰宅時間', lblLocation: '場所 / 訪問先',
     lblMileage: '走行距離', lblDistance: '距離', lblWorkedDate: '出勤日',
     lblCorrectedTime: '修正後の時刻', lblOtHours: '残業時間', lblRate: 'レート', lblReason: '理由', lblRequestedBy: '申請者',

@@ -67,7 +67,7 @@ const CLIENT_FNS = [...SHARED, 'getApprovedHolidayWorkDays', 'canSubmitHolidayWo
   'isWithdrawnLeaveStatus'];
 const SERVER_FNS = [...SHARED, 'getApprovedHolidayWorkAnnualLeaveDays', 'findOverlappingLeave', 'hasActiveHolidayWork',
   'hasActiveOfficeOt', 'findOtDuplicate', 'leaveMinutesOf', 'deriveLeaveDaysCount', 'ta_localDateStr', 'isValidDateStr',
-  'leaveBalanceError', 'annualLeaveRemainingMinutes', 'isCancellableApprovedLeave'];
+  'leaveBalanceError', 'leaveBalanceRemainingMinutes', 'annualLeaveRemainingMinutes', 'isCancellableApprovedLeave'];
 
 const TODAY = '2026-12-31';
 function makeClient(w) {
