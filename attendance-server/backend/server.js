@@ -4164,10 +4164,26 @@ function parseHHMMToMins(hhmm) {
   const [h, m] = hhmm.split(':').map(Number);
   return h * 60 + m;
 }
-function splitHolidayWorkOtMinutes(workStartTime, workEndTime, S) {
+// 2026-09-24 (owner): Holiday Work may run past midnight, same convention as office OT -- an end
+// time that is not after the start and is before 05:00 is after midnight of the SAME work day
+// (lateNightCheckoutMins). Returns the end in minutes from the work day's 00:00 (up to 28:59), or
+// NaN when the end is not after the start. A start before 05:00 with a later end the same morning
+// stays a same-day range. Dual-sync with app.js.
+function holidayWorkEndMins(workStartTime, workEndTime) {
   const startMin = parseHHMMToMins(workStartTime);
   const endMin = parseHHMMToMins(workEndTime);
-  if (!Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) {
+  if (!Number.isFinite(startMin) || !Number.isFinite(endMin)) return NaN;
+  if (endMin > startMin) return endMin;
+  const nextDay = lateNightCheckoutMins(workEndTime);
+  return nextDay > startMin ? nextDay : NaN;
+}
+// The whole shift is paid at the START day's Holiday Work rate (x2 inside 08:30-17:30, x3 outside
+// it, so every hour after midnight is x3); lunch 12:00-13:00 is removed only where the x2 window
+// covers it, i.e. on the start day. Nothing here looks at the next calendar day.
+function splitHolidayWorkOtMinutes(workStartTime, workEndTime, S) {
+  const startMin = parseHHMMToMins(workStartTime);
+  const endMin = holidayWorkEndMins(workStartTime, workEndTime);
+  if (!Number.isFinite(startMin) || !Number.isFinite(endMin)) {
     return { otMins20: 0, otMins30: 0, otHours20: 0, otHours30: 0 };
   }
   const ws = S.workSchedule || {};
@@ -4352,9 +4368,8 @@ function scanWindowError(user, dateStr, startHHMM, endHHMM) {
     const rawDay = day.checkOut ? null : (buildAttendanceLogForUser(user)[dateStr] || {});
     const endLimit = day.checkOut || (rawDay && rawDay.lastScan);
     if (!endLimit) return 'A check-out is required for this date — submit a time correction first';
-    // 2026-09-24: the typed end follows the same after-midnight rule as the check-out (an OT end
-    // before 05:00 is after midnight). Holiday Work never gets here with such an end -- its
-    // end-after-start check runs first and refuses it.
+    // 2026-09-24: the typed end follows the same after-midnight rule as the check-out (an OT or
+    // Holiday Work end before 05:00 is after midnight; see holidayWorkEndMins).
     const outMin = lateNightCheckoutMins(endLimit);
     if (lateNightCheckoutMins(endHHMM) > outMin) {
       return `End time cannot be later than your check-out (${endLimit})`;
@@ -5397,8 +5412,9 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
           !body.workEndTime || !HHMM_RE.test(body.workEndTime)) {
         return res.status(400).json({ success:false, message:'workStartTime and workEndTime are required and must be in HH:MM format for holiday-work requests' });
       }
-      if (parseHHMMToMins(body.workEndTime) <= parseHHMMToMins(body.workStartTime)) {
-        return res.status(400).json({ success:false, message:'workEndTime must be after workStartTime' });
+      // 2026-09-24 (owner): an end before 05:00 is after midnight of the same work day.
+      if (!Number.isFinite(holidayWorkEndMins(body.workStartTime, body.workEndTime))) {
+        return res.status(400).json({ success:false, message:'workEndTime must be after workStartTime (an end before 05:00 counts as after midnight)' });
       }
       const hwLocErr = validateHolidayWorkLocation(body.locations);
       if (hwLocErr) return res.status(400).json({ success:false, message:hwLocErr });
@@ -6042,8 +6058,8 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
           !resolvedWorkEnd || !HHMM_RE.test(resolvedWorkEnd)) {
         return res.status(400).json({ success:false, message:'workStartTime and workEndTime are required and must be in HH:MM format for holiday-work requests' });
       }
-      if (parseHHMMToMins(resolvedWorkEnd) <= parseHHMMToMins(resolvedWorkStart)) {
-        return res.status(400).json({ success:false, message:'workEndTime must be after workStartTime' });
+      if (!Number.isFinite(holidayWorkEndMins(resolvedWorkStart, resolvedWorkEnd))) {
+        return res.status(400).json({ success:false, message:'workEndTime must be after workStartTime (an end before 05:00 counts as after midnight)' });
       }
       const hwLocErrPut = validateHolidayWorkLocation(resolvedLocations);
       if (hwLocErrPut) return res.status(400).json({ success:false, message:hwLocErrPut });

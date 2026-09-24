@@ -1589,9 +1589,8 @@ function scanWindowError(dateStr, startHHMM, endHHMM, userId) {
       return L('⚠️ A check-out is required for this date — submit a time correction first',
         '⚠️ วันที่เลือกยังไม่มีเวลาสแกนออกงาน — กรุณายื่นขอแก้ไขเวลาก่อน');
     }
-    // 2026-09-24: the typed end follows the same after-midnight rule as the check-out (an OT end
-    // before 05:00 is after midnight). Holiday Work never gets here with such an end -- its
-    // end-after-start check runs first and refuses it.
+    // 2026-09-24: the typed end follows the same after-midnight rule as the check-out (an OT or
+    // Holiday Work end before 05:00 is after midnight; see holidayWorkEndMins).
     const outMin = lateNightCheckoutMins(endLimit);
     if (lateNightCheckoutMins(endHHMM) > outMin) {
       return L('⚠️ End time cannot be later than your check-out', '⚠️ เวลาเลิกต้องไม่หลังเวลาสแกนออกงาน') + ` (${endLimit})`;
@@ -1599,10 +1598,26 @@ function scanWindowError(dateStr, startHHMM, endHHMM, userId) {
   }
   return null;
 }
-function splitHolidayWorkOtMinutes(workStartTime, workEndTime, S) {
+// 2026-09-24 (owner): Holiday Work may run past midnight, same convention as office OT -- an end
+// time that is not after the start and is before 05:00 is after midnight of the SAME work day
+// (lateNightCheckoutMins). Returns the end in minutes from the work day's 00:00 (up to 28:59), or
+// NaN when the end is not after the start. A start before 05:00 with a later end the same morning
+// stays a same-day range. Dual-sync with server.js.
+function holidayWorkEndMins(workStartTime, workEndTime) {
   const startMin = parseHHMMToMins(workStartTime);
   const endMin = parseHHMMToMins(workEndTime);
-  if (!Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) {
+  if (!Number.isFinite(startMin) || !Number.isFinite(endMin)) return NaN;
+  if (endMin > startMin) return endMin;
+  const nextDay = lateNightCheckoutMins(workEndTime);
+  return nextDay > startMin ? nextDay : NaN;
+}
+// The whole shift is paid at the START day's Holiday Work rate (x2 inside 08:30-17:30, x3 outside
+// it, so every hour after midnight is x3); lunch 12:00-13:00 is removed only where the x2 window
+// covers it, i.e. on the start day. Nothing here looks at the next calendar day.
+function splitHolidayWorkOtMinutes(workStartTime, workEndTime, S) {
+  const startMin = parseHHMMToMins(workStartTime);
+  const endMin = holidayWorkEndMins(workStartTime, workEndTime);
+  if (!Number.isFinite(startMin) || !Number.isFinite(endMin)) {
     return { otMins20: 0, otMins30: 0, otHours20: 0, otHours30: 0 };
   }
   const ws = S.workSchedule || {};
@@ -1706,6 +1721,13 @@ function canRevokeLeaveApproval(l) {
 function otEndCrossesMidnight(hhmm) {
   const m = lateNightCheckoutMins(hhmm);
   return Number.isFinite(m) && m >= 24 * 60;
+}
+// HTML-escaped "start–end" of a Holiday Work record, the end marked "next day" when the shift
+// runs past midnight (2026-09-24).
+function holidayWorkTimesLabel(l) {
+  if (!l || !l.workStartTime || !l.workEndTime) return '';
+  const nextDay = holidayWorkEndMins(l.workStartTime, l.workEndTime) >= 24 * 60;
+  return `${escapeHtml(l.workStartTime)}–${escapeHtml(l.workEndTime)}${nextDay ? ` (${L('next day', 'วันถัดไป')})` : ''}`;
 }
 // HTML-escaped OT end time, marked "next day" when it is after midnight.
 function otEndTimeLabel(hhmm) {
@@ -10395,7 +10417,7 @@ function showOTDetail(userId) {
     totalHrs += hrs;
     const mult = reportOtRateLabel(l);
     const endCell = l.type === 'holiday-work'
-      ? (l.workEndTime ? `${escapeHtml(l.workStartTime || '')}–${escapeHtml(l.workEndTime)}` : '—')
+      ? (l.workEndTime ? holidayWorkTimesLabel(l) : '—')
       : (otEndTimeLabel(l.otEndTime) || '—');
     return `<tr style="border-bottom:1px solid #f1f5f9">
       <td style="padding:10px 14px;font-weight:600">${fmtDate(new Date(l.dateFrom+'T12:00:00'))}</td>
@@ -12933,7 +12955,7 @@ function showApprovalDetail(id) {
       ? L('Paid compensation (OT + transport)', 'ชดเชยเป็นเงิน (OT + ค่าเดินทาง)')
       : L('➕ Add 1 annual leave day', '➕ เพิ่ม 1 วันลาพักร้อน');
     const loc = (Array.isArray(l.locations) && l.locations[0] && l.locations[0].name) ? escapeHtml(l.locations[0].name) : '—';
-    const times = (l.workStartTime && l.workEndTime) ? `${escapeHtml(l.workStartTime)} – ${escapeHtml(l.workEndTime)}` : '—';
+    const times = (l.workStartTime && l.workEndTime) ? holidayWorkTimesLabel(l) : '—';
     detailHtml = row(L('Worked Time', 'เวลาทำงาน'), `⏱️ ${times}`)
       + row(L('Location', 'สถานที่'), loc)
       + row(L('Compensation', 'การชดเชย'), mode);
@@ -15078,8 +15100,9 @@ async function submitHolidayWork() {
     showToast(L('⚠️ Work start and end times are required (HH:MM)', '⚠️ กรุณาระบุเวลาเริ่มและเลิกงาน (HH:MM)'), 'warning');
     return;
   }
-  if (parseHHMMToMins(workEndTime) <= parseHHMMToMins(workStartTime)) {
-    showToast(L('⚠️ End time must be after start time', '⚠️ เวลาเลิกงานต้องหลังเวลาเริ่มงาน'), 'warning');
+  // 2026-09-24 (owner): an end before 05:00 is after midnight of the same work day.
+  if (!Number.isFinite(holidayWorkEndMins(workStartTime, workEndTime))) {
+    showToast(L('⚠️ End time must be after start time (before 05:00 = after midnight)', '⚠️ เวลาเลิกงานต้องหลังเวลาเริ่มงาน (ก่อน 05:00 = หลังเที่ยงคืน)'), 'warning');
     return;
   }
   const hwScanErr = scanWindowError(date, workStartTime, workEndTime);
@@ -16874,7 +16897,7 @@ function renderMyRequests() {
         })()
       : l.type === 'holiday-work'
       ? (() => {
-          const times = (l.workStartTime && l.workEndTime) ? `${l.workStartTime}–${l.workEndTime}` : l.dateFrom;
+          const times = (l.workStartTime && l.workEndTime) ? holidayWorkTimesLabel(l) : escapeHtml(l.dateFrom);
           const mode = l.compensationMode === 'paid' ? L('Paid', 'เงิน') : L('Annual leave', 'ลาพักร้อน');
           return currentLang === 'ja' ? `📅 ${times} (${mode})` : L(`📅 ${times} (${mode})`, `📅 ${times} (${mode})`);
         })()

@@ -48,7 +48,7 @@ const SHARED = ['isVoidLeaveStatus', 'round2HalfUp', 'round1HalfUp', 'deriveOffi
   'isHolidayWorkDay', 'isNonWorkDayForComp', 'isHolidayWorkOtRecord', 'companyTripDateInRange',
   'isFullDayPersonalLeaveStatus', 'isRestAttendanceDay', 'isDeviceScanSource', 'isEarlyMorningDayStatus',
   'deviceScanQualifiesForEarlyMorning', 'deviceScanQualifiesForLateNight', 'lateNightCheckoutOk',
-  'accumulateApprovedOtPay', 'effectiveOtMultiplier', 'computePayroll', 'splitHolidayWorkOtMinutes'];
+  'accumulateApprovedOtPay', 'effectiveOtMultiplier', 'computePayroll', 'splitHolidayWorkOtMinutes', 'holidayWorkEndMins'];
 const CLIENT_FNS = [...SHARED, 'scanWindowError', 'getApprovedHolidayWorkDays', 'abroadTravelCreditDays',
   'otEndCrossesMidnight', 'canSubmitHolidayWorkForDate', 'standardOtMultiplier', 'otPayAmountFromLeave'];
 const SERVER_FNS = [...SHARED, 'scanWindowError', 'getApprovedHolidayWorkAnnualLeaveDays', 'abroadTravelCreditDays',
@@ -156,11 +156,40 @@ test('scan window: OT end after midnight is checked against an after-midnight ch
     assert.strictEqual(s === null, ok, `server ${att.checkOut} vs ${end}: ${s}`);
   }
 });
-test('Holiday Work split is unchanged (end must still be after start)', () => {
+console.log('T5 Holiday Work past midnight (2026-09-24)');
+test('holidayWorkEndMins: end before 05:00 that is not after the start = after midnight', () => {
   for (const [side, X] of both(world())) {
-    assert.strictEqual(X.splitHolidayWorkOtMinutes('20:00', '01:00', SETTINGS).otHours30, 0, side);
-    assert.strictEqual(X.splitHolidayWorkOtMinutes('08:30', '17:30', SETTINGS).otHours20, 8, side);
+    assert.strictEqual(X.holidayWorkEndMins('20:00', '01:00'), 25 * 60, side);
+    assert.strictEqual(X.holidayWorkEndMins('08:30', '04:59'), 28 * 60 + 59, side);
+    assert.strictEqual(X.holidayWorkEndMins('08:30', '17:30'), 17 * 60 + 30, side);
+    assert.strictEqual(X.holidayWorkEndMins('03:00', '04:00'), 4 * 60, side);   // same early morning
+    assert.ok(Number.isNaN(X.holidayWorkEndMins('20:00', '05:00')), side);      // 05:00 is morning, before start
+    assert.ok(Number.isNaN(X.holidayWorkEndMins('10:00', '10:00')), side);
+    assert.ok(Number.isNaN(X.holidayWorkEndMins('10:00', '09:00')), side);
   }
+});
+test('split: start-day rate, x3 after 17:30 through midnight, lunch only on the start day', () => {
+  for (const [side, X] of both(world())) {
+    const s = (a, b) => X.splitHolidayWorkOtMinutes(a, b, SETTINGS);
+    assert.deepStrictEqual([s('20:00', '01:00').otHours20, s('20:00', '01:00').otHours30], [0, 5], side);
+    assert.deepStrictEqual([s('08:30', '02:00').otHours20, s('08:30', '02:00').otHours30], [8, 8.5], side);
+    assert.deepStrictEqual([s('10:00', '04:59').otHours20, s('10:00', '04:59').otHours30], [6.5, 11.48], side);
+    assert.deepStrictEqual([s('08:30', '17:30').otHours20, s('08:30', '17:30').otHours30], [8, 0], side);
+    assert.deepStrictEqual([s('20:00', '05:00').otHours20, s('20:00', '05:00').otHours30], [0, 0], side);
+  }
+});
+test('scan window: an after-midnight Holiday Work end is checked against the real check-out', () => {
+  const SAT = '2026-09-26';
+  const cases = [[{ checkIn: '08:00', checkOut: '01:30' }, '01:00', true], [{ checkIn: '08:00', checkOut: '23:00' }, '01:00', false]];
+  for (const [att, end, ok] of cases) {
+    const w = world({ att: { [SAT]: att } });
+    assert.strictEqual(makeClient(w).scanWindowError(SAT, '09:00', end, 1) === null, ok, `client ${att.checkOut}`);
+    assert.strictEqual(makeServer(w).scanWindowError(USER, SAT, '09:00', end) === null, ok, `server ${att.checkOut}`);
+  }
+});
+test('POST/PUT and the client form accept an after-midnight end (static)', () => {
+  assert.strictEqual((SERVER_SRC.match(/!Number\.isFinite\(holidayWorkEndMins\(/g) || []).length, 2, 'server POST + PUT');
+  assert.ok(/!Number\.isFinite\(holidayWorkEndMins\(workStartTime, workEndTime\)\)/.test(APP_SRC), 'client submitHolidayWork');
 });
 
 console.log('T1 Company Trip: no allowance of any kind');

@@ -1397,4 +1397,7 @@ window.LANG_JA = {
   "Only approved requests can be revoked": "承認済みの申請のみ取り消せます",
   "This request type has no pay to revoke": "この申請の種類には取り消す支給がありません",
   "Could not revoke the approval": "承認を取り消せませんでした",
+  // 2026-09-24: Holiday Work past midnight
+  "An end time before 05:00 means after midnight (same work day) — the whole shift is paid at this day's holiday rate.": "05:00より前の終了時刻は深夜0時以降（同じ勤務日）として扱い、勤務全体をこの日の休日レートで支給します。",
+  "⚠️ End time must be after start time (before 05:00 = after midnight)": "⚠️ 終了時刻は開始時刻より後にしてください（05:00より前＝深夜0時以降）",
 };
