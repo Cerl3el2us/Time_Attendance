@@ -1899,7 +1899,9 @@ function otRecordTotalHours(l) {
   if (hrs20 > 0 || hrs30 > 0) return Math.round((hrs20 + hrs30) * 100) / 100;
   return Number(l.otHours) || 0;
 }
-// On-screen estimate -- same 2 dp half-up rounding as accumulateApprovedOtPay (2026-09-24).
+// On-screen per-record ESTIMATE (2 dp half-up). 2026-09-24 (round 7): payroll pays OT once per
+// multiplier bucket from the total hours (otPayFromHourBuckets), so the sum of these estimates can
+// differ from the payslip by a satang or two.
 function otPayAmountFromLeave(l, hourlyRate) {
   const hrs20 = Number(l.otHours20) || 0;
   const hrs30 = Number(l.otHours30) || 0;
@@ -1931,29 +1933,44 @@ function otHoursRateDetail(l) {
   }
   return `${Number(l.otHours) || 0} ${L('h', 'ชม.')} ${otMultiplierLabel(effectiveOtMultiplier(l))}`;
 }
-// 2026-09-24 (owner): OT pay is kept to 2 decimal places, rounded half-up at the 3rd decimal
-// (was whole baht). Each amount and each running total goes through round2HalfUp so float noise
-// (0.1 + 0.2) never reaches the payslip.
-function accumulateApprovedOtPay(l, hourlyRate, acc) {
+// 2026-09-24 (owner, round 7): "OT is computed from the total hours, then rounded once". The
+// approved OT HOURS of the period are summed per multiplier bucket (office OT x1.5, driver OT,
+// paid Holiday Work x2/x3 all share the same buckets) and each bucket is paid once:
+// round2HalfUp(hourlyRate x multiplier x totalHours). Total OT = sum of the bucket amounts (each
+// already 2 dp). Per-record hours stay as stored; a bucket's running sum is round2HalfUp'd only to
+// drop float noise. Replaces accumulateApprovedOtPay (per-record rounding). The per-record
+// on-screen estimate (app.js otPayAmountFromLeave) stays an estimate.
+// DUAL-SYNC (identical text): app.js / server.js addOtHours, accumulateApprovedOtHours,
+// otPayFromHourBuckets.
+function addOtHours(buckets, mult, hrs) {
+  if (!(hrs > 0) || !(mult > 0)) return;
+  const k = String(mult);
+  buckets[k] = round2HalfUp((buckets[k] || 0) + hrs);
+}
+function accumulateApprovedOtHours(l, buckets) {
   const hrs20 = Number(l.otHours20) || 0;
   const hrs30 = Number(l.otHours30) || 0;
   if (hrs20 > 0 || hrs30 > 0) {
-    const amt20 = round2HalfUp(hourlyRate * 2 * hrs20);
-    const amt30 = round2HalfUp(hourlyRate * 3 * hrs30);
-    acc.ot20Hours += hrs20; acc.ot20Amount = round2HalfUp(acc.ot20Amount + amt20);
-    acc.ot30Hours += hrs30; acc.ot30Amount = round2HalfUp(acc.ot30Amount + amt30);
-    acc.otAmount = round2HalfUp(acc.otAmount + amt20 + amt30);
-    acc.otTotalHours += hrs20 + hrs30;
+    addOtHours(buckets, 2, hrs20);
+    addOtHours(buckets, 3, hrs30);
     return;
   }
-  const mult = effectiveOtMultiplier(l);
-  const hrs = Number(l.otHours) || 0;
-  const amt = round2HalfUp(hourlyRate * mult * hrs);
-  acc.otAmount = round2HalfUp(acc.otAmount + amt);
-  acc.otTotalHours += hrs;
-  if (mult === 1.5) { acc.ot15Amount = round2HalfUp(acc.ot15Amount + amt); acc.ot15Hours += hrs; }
-  else if (mult === 2) { acc.ot20Amount = round2HalfUp(acc.ot20Amount + amt); acc.ot20Hours += hrs; }
-  else if (mult === 3) { acc.ot30Amount = round2HalfUp(acc.ot30Amount + amt); acc.ot30Hours += hrs; }
+  addOtHours(buckets, effectiveOtMultiplier(l), Number(l.otHours) || 0);
+}
+function otPayFromHourBuckets(buckets, hourlyRate) {
+  const out = { otAmount: 0, otTotalHours: 0, ot15Amount: 0, ot15Hours: 0, ot20Amount: 0, ot20Hours: 0, ot30Amount: 0, ot30Hours: 0 };
+  Object.keys(buckets || {}).sort((a, b) => Number(a) - Number(b)).forEach(k => {
+    const mult = Number(k);
+    const hrs = round2HalfUp(buckets[k]);
+    if (!(mult > 0) || !(hrs > 0)) return;
+    const amt = round2HalfUp(hourlyRate * mult * hrs);
+    out.otAmount = round2HalfUp(out.otAmount + amt);
+    out.otTotalHours = round2HalfUp(out.otTotalHours + hrs);
+    if (mult === 1.5) { out.ot15Amount = amt; out.ot15Hours = hrs; }
+    else if (mult === 2) { out.ot20Amount = amt; out.ot20Hours = hrs; }
+    else if (mult === 3) { out.ot30Amount = amt; out.ot30Hours = hrs; }
+  });
+  return out;
 }
 function canSubmitHolidayWorkForDate(dateStr, userId) {
   const uid = userId || (currentUser && currentUser.id);
@@ -11285,25 +11302,17 @@ function computePayroll(user, start, end, periodIndex) {
     sum + (l.personalCarRate != null ? l.personalCarRate : (S.allowances.personalCar != null ? S.allowances.personalCar : 1000)), 0);
 
   const hourlyRate = base / 30 / 8;
-  let otAmount = 0, otTotalHours = 0;
-  let ot15Amount = 0, ot15Hours = 0;
-  let ot20Amount = 0, ot20Hours = 0;
-  let ot30Amount = 0, ot30Hours = 0;
+  // 2026-09-24 (owner, round 7): hours per multiplier bucket, paid once per bucket below
+  // (otPayFromHourBuckets). DUAL-SYNC.
+  const otHourBuckets = {};
   const paidHolidayWorkDates = new Set(
     (approvedHolidayWork || []).filter(l => l.compensationMode === 'paid').map(l => l.dateFrom)
   );
-  const otPayAcc = {
-    otAmount, otTotalHours, ot15Amount, ot15Hours, ot20Amount, ot20Hours, ot30Amount, ot30Hours,
-  };
   approvedOTs.forEach(l => {
     if (fullLeaveDates.has(l.dateFrom)) return;
     if (!l.isDriverOT && paidHolidayWorkDates.has(l.dateFrom)) return;
-    accumulateApprovedOtPay(l, hourlyRate, otPayAcc);
+    accumulateApprovedOtHours(l, otHourBuckets);
   });
-  otAmount = otPayAcc.otAmount; otTotalHours = otPayAcc.otTotalHours;
-  ot15Amount = otPayAcc.ot15Amount; ot15Hours = otPayAcc.ot15Hours;
-  ot20Amount = otPayAcc.ot20Amount; ot20Hours = otPayAcc.ot20Hours;
-  ot30Amount = otPayAcc.ot30Amount; ot30Hours = otPayAcc.ot30Hours;
   let holidayTransportTotal = 0;
   // 2026-09-24: display-only count of paid Holiday Work records with OT hours (payslip OT tile).
   const holidayWorkOtCount = approvedHolidayWork.filter(isHolidayWorkOtRecord).length;
@@ -11312,25 +11321,21 @@ function computePayroll(user, start, end, periodIndex) {
     if (!abroadDates.has(l.dateFrom)) {
       holidayTransportTotal += S.allowances.holidayTransport != null ? S.allowances.holidayTransport : 500;
     }
-    const hrs20 = Number(l.otHours20) || 0;
-    const hrs30 = Number(l.otHours30) || 0;
-    // 2026-09-24 (owner): 2 decimal places, half-up (was whole baht). Dual-sync.
-    const amt20 = round2HalfUp(hourlyRate * 2 * hrs20);
-    const amt30 = round2HalfUp(hourlyRate * 3 * hrs30);
-    ot20Hours += hrs20; ot30Hours += hrs30;
-    ot20Amount = round2HalfUp(ot20Amount + amt20); ot30Amount = round2HalfUp(ot30Amount + amt30);
-    otAmount = round2HalfUp(otAmount + amt20 + amt30);
-    otTotalHours += hrs20 + hrs30;
+    // 2026-09-24 (owner, round 7): the x2/x3 hours join the same buckets as OT. Dual-sync.
+    addOtHours(otHourBuckets, 2, Number(l.otHours20) || 0);
+    addOtHours(otHourBuckets, 3, Number(l.otHours30) || 0);
   });
   // 2026-09-01: guaranteed OT is a driver contract floor only (OT ×1.5 hours/month). Still
   // requires canOT so a driver removed from OT eligibility does not keep the top-up.
-  const guaranteedOT = user.guaranteedOT || 0;
-  if (user.role === 'driver' && canOT && guaranteedOT > ot15Hours) {
-    const extraH = guaranteedOT - ot15Hours;
-    // 2026-09-24 (owner): the top-up is OT pay too -- 2 decimal places, half-up. Dual-sync.
-    const extraA = round2HalfUp(hourlyRate * 1.5 * extraH);
-    ot15Hours += extraH; ot15Amount = round2HalfUp(ot15Amount + extraA); otAmount = round2HalfUp(otAmount + extraA); otTotalHours += extraH;
+  // 2026-09-24 (owner, round 7): the floor lifts the x1.5 bucket's TOTAL hours, which is then paid
+  // once like every bucket (no separately rounded top-up amount). Dual-sync.
+  const guaranteedOT = Number(user.guaranteedOT) || 0;
+  if (user.role === 'driver' && canOT && guaranteedOT > (otHourBuckets['1.5'] || 0)) {
+    otHourBuckets['1.5'] = round2HalfUp(guaranteedOT);
   }
+  const {
+    otAmount, otTotalHours, ot15Amount, ot15Hours, ot20Amount, ot20Hours, ot30Amount, ot30Hours,
+  } = otPayFromHourBuckets(otHourBuckets, hourlyRate);
 
   const totalUpcountryCount = upcountryCount + holidayWorkUpcountryCount;
   const allowance1 = S.allowances.upcountry * totalUpcountryCount;
@@ -11882,6 +11887,9 @@ async function renderPayslip() {
     const fmt2 = n => (Math.round((n || 0) * 100) / 100).toFixed(2);
     const hourlyRate = view.calc.hourlyRate;
     const calcLines = [];
+    // 2026-09-24 (owner, round 7): OT is now paid once per bucket from the bucket's TOTAL hours
+    // (otPayFromHourBuckets), so for a live calc the line is exact up to the 2-dp rate shown; an
+    // MD-approved snapshot made before that change still carries per-record rounding. Kept as ≈.
     // 2026-08-05 (Opus audit, M2): "=" changed to "≈" for the OT lines -- each OT request is
     // independently rounded server/app-side (round2HalfUp(hourlyRate x mult x hrs) PER record, see
     // computePayroll()), so once there is more than one approved OT request in a tier, the simple

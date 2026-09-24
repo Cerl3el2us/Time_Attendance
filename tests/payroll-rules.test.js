@@ -48,7 +48,7 @@ const SHARED = ['isVoidLeaveStatus', 'round2HalfUp', 'round1HalfUp', 'deriveOffi
   'isHolidayWorkDay', 'isNonWorkDayForComp', 'isHolidayWorkOtRecord', 'companyTripDateInRange',
   'isFullDayPersonalLeaveStatus', 'isRestAttendanceDay', 'isDeviceScanSource', 'isEarlyMorningDayStatus',
   'deviceScanQualifiesForEarlyMorning', 'deviceScanQualifiesForLateNight', 'lateNightCheckoutOk',
-  'accumulateApprovedOtPay', 'effectiveOtMultiplier', 'computePayroll', 'splitHolidayWorkOtMinutes', 'holidayWorkEndMins',
+  'addOtHours', 'accumulateApprovedOtHours', 'otPayFromHourBuckets', 'effectiveOtMultiplier', 'computePayroll', 'splitHolidayWorkOtMinutes', 'holidayWorkEndMins',
   'lateNightPoints', 'holidayWorkTooLong'];
 const CLIENT_FNS = [...SHARED, 'scanWindowError', 'getApprovedHolidayWorkDays', 'abroadTravelCreditDays',
   'otEndCrossesMidnight', 'canSubmitHolidayWorkForDate', 'standardOtMultiplier', 'otPayAmountFromLeave'];
@@ -329,17 +329,33 @@ test('round1HalfUp both sides', () => {
     assert.strictEqual(X.round2HalfUp(2.675), 2.68, side);
   }
 });
-test('OT pay per record and totals: 2 dp half-up, not whole baht (both sides)', () => {
+// 2026-09-24 (owner, round 7): OT is paid from the TOTAL hours per multiplier, rounded once.
+test('OT pay: hours summed per multiplier, each bucket rounded once (both sides)', () => {
   const hourly = 24123 / 30 / 8; // 100.5125
   for (const [side, X] of both(world())) {
-    const acc = { otAmount: 0, otTotalHours: 0, ot15Amount: 0, ot15Hours: 0, ot20Amount: 0, ot20Hours: 0, ot30Amount: 0, ot30Hours: 0 };
-    X.accumulateApprovedOtPay({ otHours: 1, otMultiplier: 1.5 }, hourly, acc);  // 150.76875 -> 150.77
-    X.accumulateApprovedOtPay({ otHours: 0.33, otMultiplier: 1.5 }, hourly, acc); // 49.7536875 -> 49.75
-    X.accumulateApprovedOtPay({ otHours20: 1, otHours30: 0.5 }, hourly, acc);   // 201.025 -> 201.03 ; 150.76875 -> 150.77
-    assert.strictEqual(acc.ot15Amount, 200.52, `${side} x1.5`);
-    assert.strictEqual(acc.ot20Amount, 201.03, `${side} x2`);
-    assert.strictEqual(acc.ot30Amount, 150.77, `${side} x3`);
-    assert.strictEqual(acc.otAmount, 552.32, `${side} total`);
+    const b = {};
+    // Three 0.33 h x1.5 records: per record 49.7536875 -> 49.75 each = 149.25 (old rule);
+    // total 0.99 h -> 149.2610625 -> 149.26 (owner rule). The two rules differ by 0.01.
+    X.accumulateApprovedOtHours({ otHours: 0.33, otMultiplier: 1.5 }, b);
+    X.accumulateApprovedOtHours({ otHours: 0.33, otMultiplier: 1.5 }, b);
+    X.accumulateApprovedOtHours({ otHours: 0.33, otMultiplier: 1.5 }, b);
+    X.accumulateApprovedOtHours({ otHours20: 1, otHours30: 0.5 }, b); // 201.025 -> 201.03 ; 150.76875 -> 150.77
+    assert.deepStrictEqual({ ...b }, { '1.5': 0.99, 2: 1, 3: 0.5 }, `${side} buckets`);
+    const r = X.otPayFromHourBuckets(b, hourly);
+    assert.strictEqual(r.ot15Amount, 149.26, `${side} x1.5 rounded once (per record would be 149.25)`);
+    assert.strictEqual(r.ot15Hours, 0.99, `${side} x1.5 hours`);
+    assert.strictEqual(r.ot20Amount, 201.03, `${side} x2`);
+    assert.strictEqual(r.ot30Amount, 150.77, `${side} x3`);
+    assert.strictEqual(r.otAmount, 501.06, `${side} total = sum of bucket amounts (per record: 501.05)`);
+    assert.strictEqual(r.otTotalHours, 2.49, `${side} total hours`);
+    const n = {};
+    X.accumulateApprovedOtHours({ otHours: 0.1, otMultiplier: 1.5 }, n);
+    X.accumulateApprovedOtHours({ otHours: 0.2, otMultiplier: 1.5 }, n);
+    assert.strictEqual(n['1.5'], 0.3, `${side} 0.1 + 0.2 h has no float noise`);
+    const z = {};
+    X.accumulateApprovedOtHours({ otHours: 0, otMultiplier: 1.5 }, z);
+    X.accumulateApprovedOtHours({ otHours: -2, otMultiplier: 1.5 }, z);
+    assert.deepStrictEqual({ ...z }, {}, `${side} zero/negative hours create no bucket`);
   }
   const C = makeClient(world());
   assert.strictEqual(C.otPayAmountFromLeave({ otHours: 1, otMultiplier: 1.5 }, hourly), 150.77, 'on-screen estimate');
@@ -352,7 +368,8 @@ test('computePayroll: PVD 1 dp, driver guaranteed-OT top-up 2 dp, gross parity',
   ], pDays: [{ date: '2026-11-24', status: 'present', checkIn: '08:00', checkOut: '19:00' }] });
   const start = new Date('2026-11-21T12:00:00'), end = new Date('2026-12-20T12:00:00');
   const hourly = 24691 / 30 / 8; // 102.879166...
-  const expOt = Math.round((hourly * 1.5 * 1.33) * 100) / 100 + Math.round((hourly * 1.5 * (10 - 1.33)) * 100) / 100;
+  // 2026-09-24 (round 7): the guaranteed floor lifts the x1.5 bucket to 10 h, paid once.
+  const expOt = hourly * 1.5 * 10;
   const out = [];
   for (const [side, X] of both(w)) {
     const r = X.computePayroll(driver, start, end, 1);

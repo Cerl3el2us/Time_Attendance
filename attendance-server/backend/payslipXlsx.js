@@ -245,7 +245,10 @@ function buildPayslipWorkbook({ companyInfo, user, calc, fin, period, attendance
   // 2026-09-15: omit zero-amount earnings rows (Bonus / Holiday Transport / OT / allowances
   // with amount 0). Manual allowances were already filtered. SSF/PVD/PIT below still always
   // print even at 0.00 — matching the user's Excel-slip request for earnings only.
-  const otTotal = (calc.ot15Amount || 0) + (calc.ot20Amount || 0) + (calc.ot30Amount || 0);
+  // 2026-09-24 (owner, round 7): each bucket amount is already paid once from the bucket's total
+  // hours (computePayroll otPayFromHourBuckets) or read as stored from an MD-approved snapshot --
+  // only the float noise of adding them up is removed here, nothing is recomputed.
+  const otTotal = Math.round(((calc.ot15Amount || 0) + (calc.ot20Amount || 0) + (calc.ot30Amount || 0)) * 100 + 1e-9) / 100;
   const earningsItems = [
     ['Basic Salary', calc.base], ['Position Allowance', calc.posAllowance],
     ['Housing Allowance', calc.housingAllowance], ['Transportation Allowance', calc.transport],

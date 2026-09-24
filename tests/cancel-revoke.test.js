@@ -53,7 +53,7 @@ const SETTINGS = {
 const SHARED = ['isVoidLeaveStatus', 'round2HalfUp', 'round1HalfUp', 'lateNightCheckoutMins', 'parseHHMMToMins',
   'isHolidayWorkDay', 'isNonWorkDayForComp', 'isHolidayWorkOtRecord', 'isFullDayPersonalLeaveStatus',
   'isRestAttendanceDay', 'isDeviceScanSource', 'isEarlyMorningDayStatus', 'deviceScanQualifiesForEarlyMorning',
-  'deviceScanQualifiesForLateNight', 'lateNightCheckoutOk', 'accumulateApprovedOtPay', 'effectiveOtMultiplier',
+  'deviceScanQualifiesForLateNight', 'lateNightCheckoutOk', 'addOtHours', 'accumulateApprovedOtHours', 'otPayFromHourBuckets', 'effectiveOtMultiplier',
   'computePayroll', 'splitHolidayWorkOtMinutes', 'holidayWorkEndMins', 'standardOtMultiplier', 'abroadTravelCreditDays',
   'isAbroadTravelDay', 'isRevocableLeaveType',
   // leave balance
