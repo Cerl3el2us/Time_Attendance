@@ -178,7 +178,7 @@ window.LANG_JA = {
   "Annual Leave (days/year)": "有給休暇（日/年）",
   "Annual Leave Balance": "有給残日数",
   "Annual leave by years of service": "勤続年数による年次有給",
-  "Applies to every employee from Start Date. The first row is when they can see and submit Annual Leave (before that, entitlement is 0). When they reach the next row, the yearly quota jumps immediately — even mid-year — remaining = new quota + carry-forward + holiday-work compensation − days already used this calendar year (Jan–Dec).": "全従業員に開始日から適用します。最初の行は年次有給の表示・申請が可能になる時点です（それまでは付与0日）。次の行に達すると当年の付与がすぐ増えます（年の途中でも）。残日数＝新付与＋繰越＋休日出勤補償−当年（1〜12月）の使用日数。",
+  "Applies to every employee from Start Date. The first row is when the yearly quota starts (before that, the quota is 0 — only days they earned through Holiday Work or abroad travel days, or carried forward, can be used). When they reach the next row, the yearly quota jumps immediately — even mid-year — remaining = new quota + carry-forward + holiday-work compensation − days already used this calendar year (Jan–Dec).": "全従業員に開始日から適用します。最初の行は年間付与が始まる時点です（それまでは付与0日 — 休日出勤・海外出張の移動日で獲得した日数、または繰越分のみ使用可）。次の行に達すると当年の付与がすぐ増えます（年の途中でも）。残日数＝新付与＋繰越＋休日出勤補償−当年（1〜12月）の使用日数。",
   "Add tier": "段階を追加",
   "After": "勤続",
   "months →": "か月 →",
@@ -257,7 +257,7 @@ window.LANG_JA = {
   "Click 'Edit' on the newly added row and fill in what's still missing: salary, position, personal details, bank account, etc.": "追加した行の「編集」をクリックし、給与・役職・個人情報・口座番号などを入力してください。",
   "Click to open Google Maps": "クリックしてGoogle Mapsを開く",
   "Click to revoke": "クリックして取り消し",
-  "Click to snapshot remaining annual leave (up to max) for each employee and carry it into next year.": "クリックして各社員の有給残日数（上限まで）を翌年に繰り越します。",
+  "Click in January, after the year has ended, to snapshot each employee’s remaining annual leave for last year (up to max, expired carry-forward excluded) and carry it into this year.": "年が明けた1月に（前年が終了してから）クリックすると、各社員の前年の有給残日数（上限まで、失効した繰越分を除く）を今年に繰り越します。",
   "Click to view details": "クリックして詳細を表示",
   "Clock In": "出勤打刻",
   "Clock in now": "今すぐ出勤打刻",
@@ -1369,4 +1369,8 @@ window.LANG_JA = {
   "Web check-outs awaiting review": "確認待ちのWeb退勤",
   "A web Check Out after {time}. Allowing it lets the employee request the Late Night allowance (it must first be approved by {md}).":
     "{time}以降のWeb退勤です。許可すると深夜残業手当を申請できるようになります（事前に{md}の承認が必要です）。",
+  // 2026-09-24: leave-balance batch — carry-forward expiry toggle, hourly leave lunch exclusion
+  "Forfeit unused carry-forward days after the expiry date": "有効期限を過ぎた未使用の繰越日数を失効させる",
+  "Carried-forward days are used first. When off, carried-forward days never expire and no expiry reminder is shown.": "繰越日数から先に消化されます。オフにすると繰越日数は失効せず、失効前の通知も表示されません。",
+  "⚠️ The selected time is entirely within the 12:00–13:00 lunch break": "⚠️ 選択した時間はすべて12:00〜13:00の昼休み内です",
 };

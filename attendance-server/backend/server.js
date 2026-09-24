@@ -3950,6 +3950,13 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
     if (A.leave && A.leave.carryForwardMax !== undefined && (typeof A.leave.carryForwardMax !== 'number' || !Number.isFinite(A.leave.carryForwardMax) || A.leave.carryForwardMax < 0 || A.leave.carryForwardMax > 60)) {
       return res.status(400).json({ success: false, message: 'appSettings.leave.carryForwardMax must be a number between 0 and 60' });
     }
+    // 2026-09-24: carry-forward expiry on/off toggle -- stored as a real boolean.
+    if (A.leave && A.leave.carryForwardExpiryEnabled !== undefined) {
+      const v = A.leave.carryForwardExpiryEnabled;
+      if (v === true || v === 'true') A.leave.carryForwardExpiryEnabled = true;
+      else if (v === false || v === 'false') A.leave.carryForwardExpiryEnabled = false;
+      else return res.status(400).json({ success: false, message: 'appSettings.leave.carryForwardExpiryEnabled must be true or false' });
+    }
     if (A.leave && A.leave.annualLeaveMinMonths !== undefined && (typeof A.leave.annualLeaveMinMonths !== 'number' || !Number.isFinite(A.leave.annualLeaveMinMonths) || A.leave.annualLeaveMinMonths < 0 || A.leave.annualLeaveMinMonths > 600)) {
       return res.status(400).json({ success: false, message: 'appSettings.leave.annualLeaveMinMonths must be a number between 0 and 600' });
     }
@@ -4703,7 +4710,23 @@ function hourlyLeaveShapeError(hourlyStart, hourlyEnd, dateFrom, dateTo) {
   if (!hourlyStart || !hourlyEnd) return 'hourlyStart and hourlyEnd are both required for hourly leave';
   if (parseHHMMToMins(hourlyEnd) <= parseHHMMToMins(hourlyStart)) return 'hourlyEnd must be after hourlyStart';
   if (dateTo && dateTo !== dateFrom) return 'hourly leave must be a single day (dateTo must equal dateFrom)';
+  // 2026-09-24 (owner): the lunch hour is not charged, so e.g. 12:00-13:00 would cost nothing.
+  if (hourlyLeaveChargedMinutes(hourlyStart, hourlyEnd) <= 0) return 'hourly leave falls entirely within the 12:00-13:00 lunch break';
   return null;
+}
+// DUAL-SYNC with app.js hourlyLeaveChargedMinutes.
+// 2026-09-24 (owner): hourly leave is charged the requested span MINUS its overlap with the
+// 12:00-13:00 lunch break (10:00-15:00 = 4h, 12:30-14:00 = 1h). 12:00-13:00 charges 0 and is
+// refused by hourlyLeaveShapeError above.
+function hourlyLeaveChargedMinutes(hourlyStart, hourlyEnd) {
+  const toMin = s => {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(s || ''));
+    return m ? Number(m[1]) * 60 + Number(m[2]) : NaN;
+  };
+  const s = toMin(hourlyStart), e = toMin(hourlyEnd);
+  if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s) return 0;
+  const lunchMin = Math.max(0, Math.min(e, 13 * 60) - Math.max(s, 12 * 60));
+  return e - s - lunchMin;
 }
 function deriveLeaveDaysCount(dateFrom, dateTo) {
   let days = 0;
@@ -4717,12 +4740,12 @@ function deriveLeaveDaysCount(dateFrom, dateTo) {
 }
 
 const DATE_OVERLAP_LEAVE_TYPES = new Set(['annual', 'sick', 'business', 'holiday-work', 'abroad']);
+// DUAL-SYNC with app.js leaveRecordMinutes. 2026-09-24: hourly leave excludes the 12:00-13:00
+// lunch overlap (hourlyLeaveChargedMinutes).
 function leaveMinutesOf(l) {
   if ((Number(l.days) || 0) > 0) return Number(l.days) * 8 * 60;
   if (l.hourlyStart && l.hourlyEnd && HHMM_RE.test(l.hourlyStart) && HHMM_RE.test(l.hourlyEnd)) {
-    const [sh, sm] = l.hourlyStart.split(':').map(Number);
-    const [eh, em] = l.hourlyEnd.split(':').map(Number);
-    return Math.max(0, (eh * 60 + em) - (sh * 60 + sm));
+    return hourlyLeaveChargedMinutes(l.hourlyStart, l.hourlyEnd);
   }
   if (typeof l.timePart === 'string') {
     const hM = l.timePart.match(/(\d+)\s*(?:ชม\.|h|時間)/);
@@ -4765,6 +4788,59 @@ function driverOtHoursOverCap(leaves, { userId, dateFrom, newHours, exceptId }) 
   ).reduce((s, l) => s + (Number(l.otHours) || 0), 0);
   return used + (Number(newHours) || 0) > OT_HOURS_MAX;
 }
+// DUAL-SYNC with app.js carryForwardExpiryEnabled / carryForwardExpiryDateStr /
+// leaveWorkingDaysBetween / leaveMinutesOnOrBefore / carryForwardForfeitMinutes.
+// 2026-09-24 (owner): carried-forward annual days expire on the configured month/day of the year
+// they were carried INTO. They are consumed first (FIFO): whatever part of the carry-forward is
+// not covered by annual leave dated on/before the expiry date (+ go-live opening-used) is
+// forfeited once that date has passed. Toggle: appSettings.leave.carryForwardExpiryEnabled
+// (missing = on). Late-arrival deductions deliberately do NOT count as carry-forward usage.
+function carryForwardExpiryEnabled() {
+  const lv = getAppSettings().leave;
+  return !(lv && lv.carryForwardExpiryEnabled === false);
+}
+function carryForwardExpiryDateStr(year) {
+  const lv = getAppSettings().leave || {};
+  const month = Math.min(12, Math.max(1, Math.trunc(Number(lv.carryForwardExpiryMonth)) || 3));
+  const lastDay = new Date(Number(year), month, 0).getDate();
+  const day = Math.min(lastDay, Math.max(1, Math.trunc(Number(lv.carryForwardExpiryDay)) || 31));
+  const p2 = n => String(n).padStart(2, '0');
+  return `${year}-${p2(month)}-${p2(day)}`;
+}
+// Working days (not weekend / public holiday) from fromStr to toStr inclusive -- the same count
+// submitLeave() stores in `days` (deriveLeaveDaysCount).
+function leaveWorkingDaysBetween(fromStr, toStr) {
+  return deriveLeaveDaysCount(fromStr, toStr);
+}
+// Minutes of leave `l` that fall on dates <= cutoffStr (a multi-day leave straddling the cutoff
+// counts only its working days up to and including the cutoff).
+function leaveMinutesOnOrBefore(l, cutoffStr) {
+  if (!l || !l.dateFrom || l.dateFrom > cutoffStr) return 0;
+  const total = leaveMinutesOf(l);
+  const to = l.dateTo || l.dateFrom;
+  if (to <= cutoffStr || !((Number(l.days) || 0) > 0)) return total;
+  return Math.min(total, leaveWorkingDaysBetween(l.dateFrom, cutoffStr) * 480);
+}
+// Carry-forward minutes forfeited for `year` as seen on asOfDateStr: 0 until the expiry date has
+// passed. includePending = the submission gate (pending leave dated on/before expiry already
+// reserved the carry-forward, so it must not be penalised twice); balances use approved only.
+function carryForwardForfeitMinutes(leaves, user, year, asOfDateStr, includePending, exceptId, cf) {
+  if (!user || !carryForwardExpiryEnabled()) return 0;
+  const expiry = carryForwardExpiryDateStr(year);
+  if (!(String(asOfDateStr || '') > expiry)) return 0;
+  const cfMap = cf || readSettings().leaveCarryForward || {};
+  const cfMin = ((Number(cfMap[`${year}_${user.id}`]) || 0) + (Number(cfMap[`comp_${year}_${user.id}`]) || 0)) * 480;
+  if (cfMin <= 0) return 0;
+  const yStart = `${year}-01-01`;
+  const openingUsed = Number((readSettings().leaveOpeningUsed || {})[`${year}_${user.id}_annual`]) || 0;
+  let usedBeforeMin = Math.max(0, openingUsed) * 480;
+  leaves.filter(l =>
+    l.userId === user.id && l.type === 'annual' && l.id !== exceptId &&
+    (includePending ? !['rejected', 'cancelled'].includes(l.status) : l.status === 'approved') &&
+    l.dateFrom >= yStart && l.dateFrom <= expiry
+  ).forEach(l => { usedBeforeMin += leaveMinutesOnOrBefore(l, expiry); });
+  return Math.max(0, cfMin - usedBeforeMin);
+}
 function leaveBalanceError(leaves, user, type, reqMin, exceptId, dateFrom) {
   if (type !== 'annual' && type !== 'business') return null;
   if (!user) return 'Insufficient leave balance';
@@ -4786,7 +4862,11 @@ function leaveBalanceError(leaves, user, type, reqMin, exceptId, dateFrom) {
   ).forEach(l => { usedMin += leaveMinutesOf(l); });
   const openingUsed = Number((readSettings().leaveOpeningUsed || {})[`${year}_${user.id}_${type}`]) || 0;
   usedMin += openingUsed * 8 * 60;
-  if (reqMin > Math.max(0, totalMin - usedMin)) return 'Insufficient leave balance';
+  // 2026-09-24: a request dated after the carry-forward expiry cannot use expired carry-forward;
+  // pending + approved leave dated on/before expiry counts as carry-forward usage (FIFO).
+  // Dual-sync with app.js submitLeave() balance gate.
+  const forfeitMin = type === 'annual' ? carryForwardForfeitMinutes(leaves, user, year, asOf, true, exceptId, cf) : 0;
+  if (reqMin > Math.max(0, totalMin - usedMin - forfeitMin)) return 'Insufficient leave balance';
   return null;
 }
 // Dual-sync with app.js: DEFAULT_ANNUAL_LEAVE_TIERS, normalizeAnnualLeaveTiers,
@@ -4875,14 +4955,26 @@ function sickLeaveEntitlementDays() {
 function businessLeaveEntitlementDays() {
   return normalizeQuotaDays(getAppSettings().leave && getAppSettings().leave.businessLeaveDays, DEFAULT_BUSINESS_LEAVE_DAYS);
 }
-function annualLeaveServiceError(user, type, dateFrom) {
+// DUAL-SYNC with app.js annualLeaveEarnedPoolDays / canUseAnnualLeave.
+// 2026-09-24 (owner): before the tenure unlock the quota part is 0, but days the employee EARNED
+// (holiday work taken as annual leave, abroad travel days) or carried forward are theirs to use.
+// annualLeaveServiceError lets the request through whenever that pool is > 0; leaveBalanceError
+// then limits the amount. Pool 0 = locked exactly as before.
+function annualLeaveEarnedPoolDays(leaves, user, year, exceptId) {
+  if (!user) return 0;
+  const cf = readSettings().leaveCarryForward || {};
+  return (Number(cf[`${year}_${user.id}`]) || 0) + (Number(cf[`comp_${year}_${user.id}`]) || 0)
+    + getApprovedHolidayWorkAnnualLeaveDays(leaves || [], user.id, year, exceptId);
+}
+function annualLeaveServiceError(user, type, dateFrom, leaves, exceptId) {
   if (type !== 'annual') return null;
+  const asOf = isValidDateStr(dateFrom) ? dateFrom : bangkokDateStr();
+  if (user && annualLeaveEarnedPoolDays(leaves, user, Number(asOf.slice(0, 4)), exceptId) > 0) return null;
   if (!user || !user.startDate) return 'Annual leave is not available yet';
   const months = getAnnualLeaveMinMonths();
   if (months <= 0) return null;
   const unlock = annualLeaveUnlockDateStr(user.startDate, months);
   if (!unlock) return 'Annual leave is not available yet';
-  const asOf = isValidDateStr(dateFrom) ? dateFrom : bangkokDateStr();
   if (asOf < unlock) {
     const firstDays = (getAnnualLeaveTiers()[0] && getAnnualLeaveTiers()[0].days) || 0;
     return `Annual leave unlocks after ${months} months of service (available from ${unlock}, ${firstDays} days)`;
@@ -5499,7 +5591,7 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
     if (overlap) {
       return res.status(409).json({ success:false, message:'Overlapping leave request already exists for this date range' });
     }
-    const tenureErr = annualLeaveServiceError(targetUser, type, body.dateFrom);
+    const tenureErr = annualLeaveServiceError(targetUser, type, body.dateFrom, leaves);
     if (tenureErr) return res.status(403).json({ success:false, message: tenureErr });
     const balErr = leaveBalanceError(leaves, targetUser, type, leaveMinutesOf(body), undefined, body.dateFrom);
     if (balErr) return res.status(409).json({ success:false, message: balErr });
@@ -6160,7 +6252,7 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
     if (overlapPut) {
       return res.status(409).json({ success:false, message:'Overlapping leave request already exists for this date range' });
     }
-    const tenureErrPut = annualLeaveServiceError(ownerUser || live, newType, resolvedDateFromForLock);
+    const tenureErrPut = annualLeaveServiceError(ownerUser || live, newType, resolvedDateFromForLock, leaves, leave.id);
     if (tenureErrPut) return res.status(403).json({ success:false, message: tenureErrPut });
     const balErrPut = leaveBalanceError(leaves, ownerUser || live, newType, leaveMinutesOf(merged), leave.id, resolvedDateFromForLock);
     if (balErrPut) return res.status(409).json({ success:false, message: balErrPut });
@@ -6263,7 +6355,10 @@ function annualLeaveRemainingMinutes(leaves, user, year, cf) {
   ).forEach(l => { usedMin += leaveMinutesOf(l); });
   const openingUsed = Number((readSettings().leaveOpeningUsed || {})[`${year}_${user.id}_annual`]) || 0;
   usedMin += openingUsed * 8 * 60;
-  return Math.max(0, effectiveMax * 8 * 60 - usedMin - annualLateDeductMinutes(user, year, leaves));
+  // 2026-09-24: the year is over by the time this snapshot matters, so expired carry-forward
+  // (FIFO forfeit) is always taken out -- app.js computeLeaveBalance does the same for a past year.
+  const forfeitMin = carryForwardForfeitMinutes(leaves, user, year, `${year + 1}-01-01`, false, undefined, cf);
+  return Math.max(0, effectiveMax * 8 * 60 - usedMin - annualLateDeductMinutes(user, year, leaves) - forfeitMin);
 }
 
 // Dual-sync with app.js processYearEndCarryForward: if Accounting already snapshotted next
@@ -7018,7 +7113,7 @@ const DEFAULT_APP_SETTINGS = {
     diligence: 200, longDistance: 150, longDistanceThresholdKm: 250, personalCar: 1000, phone: 1000
   },
   workSchedule: { standardStartHour: 8, standardStartMinute: 30 },
-  leave: { carryForwardMax: 5, carryForwardExpiryMonth: 3, carryForwardExpiryDay: 31, carryForwardNotifyDays: 30, annualLeaveMinMonths: 6, annualLeaveTiers: DEFAULT_ANNUAL_LEAVE_TIERS.map(t => ({ ...t })), sickLeaveDays: DEFAULT_SICK_LEAVE_DAYS, businessLeaveDays: DEFAULT_BUSINESS_LEAVE_DAYS },
+  leave: { carryForwardMax: 5, carryForwardExpiryEnabled: true, carryForwardExpiryMonth: 3, carryForwardExpiryDay: 31, carryForwardNotifyDays: 30, annualLeaveMinMonths: 6, annualLeaveTiers: DEFAULT_ANNUAL_LEAVE_TIERS.map(t => ({ ...t })), sickLeaveDays: DEFAULT_SICK_LEAVE_DAYS, businessLeaveDays: DEFAULT_BUSINESS_LEAVE_DAYS },
   map: { cartoApiKey: '' },
   allowanceTypes: [],
   lateDeductPolicy: {

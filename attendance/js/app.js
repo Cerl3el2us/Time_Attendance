@@ -1209,7 +1209,7 @@ let APP_SETTINGS = {
     diligence: 200, longDistance: 150, longDistanceThresholdKm: 250, personalCar: 1000, phone: 1000
   },
   workSchedule: { standardStartHour: 8, standardStartMinute: 30 },
-  leave: { carryForwardMax: 5, carryForwardExpiryMonth: 3, carryForwardExpiryDay: 31, carryForwardNotifyDays: 30, annualLeaveMinMonths: 6, annualLeaveTiers: DEFAULT_ANNUAL_LEAVE_TIERS.map(t => ({ ...t })), sickLeaveDays: DEFAULT_SICK_LEAVE_DAYS, businessLeaveDays: DEFAULT_BUSINESS_LEAVE_DAYS },
+  leave: { carryForwardMax: 5, carryForwardExpiryEnabled: true, carryForwardExpiryMonth: 3, carryForwardExpiryDay: 31, carryForwardNotifyDays: 30, annualLeaveMinMonths: 6, annualLeaveTiers: DEFAULT_ANNUAL_LEAVE_TIERS.map(t => ({ ...t })), sickLeaveDays: DEFAULT_SICK_LEAVE_DAYS, businessLeaveDays: DEFAULT_BUSINESS_LEAVE_DAYS },
   allowanceTypes: [],
   lateDeductPolicy: {
     enabled: false,
@@ -2612,6 +2612,10 @@ async function saveOpeningLeaveBalancesFromUI(year) {
     const openingMin = getOpeningUsedDays(year, g.userId, g.type) * 8 * 60;
     // Time already consumed in-app (approved leave + late), excluding prior openingUsed —
     // so re-saving remaining still lands on the number typed on the leave card.
+    // 2026-09-24: bal.forfeitMin (expired carry-forward) is deliberately NOT folded in here -- the
+    // opening-used value itself counts as carry-forward usage, so the typed remaining lands exactly
+    // whenever the implied prior-used covers the carry-forward (the go-live case). Only a remaining
+    // typed after the expiry date that is higher than quota + earned days can come back lower.
     const systemUsedMin = Math.max(0, bal.usedMin - openingMin + (bal.lateDeduct.deductMin || 0));
     // 2026-09-21: the lower bound used to be Math.max(0, ...), which silently discarded any
     // opening balance HIGHER than this year's pool (quota + carry-forward + holiday-work comp).
@@ -2680,6 +2684,95 @@ function getApprovedHolidayWorkDays(year, userId) {
   return hwDays + abroadTravelCreditDays(abroad, yStart, yEnd);
 }
 
+// DUAL-SYNC with server.js hourlyLeaveChargedMinutes.
+// 2026-09-24 (owner): hourly leave is charged the requested span MINUS its overlap with the
+// 12:00-13:00 lunch break (10:00-15:00 = 4h, 12:30-14:00 = 1h). 12:00-13:00 charges 0 and is
+// refused at submission (hourlyLeaveShapeError on the server, submitLeave() here).
+function hourlyLeaveChargedMinutes(hourlyStart, hourlyEnd) {
+  const toMin = s => {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(s || ''));
+    return m ? Number(m[1]) * 60 + Number(m[2]) : NaN;
+  };
+  const s = toMin(hourlyStart), e = toMin(hourlyEnd);
+  if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s) return 0;
+  const lunchMin = Math.max(0, Math.min(e, 13 * 60) - Math.max(s, 12 * 60));
+  return e - s - lunchMin;
+}
+
+// DUAL-SYNC with server.js carryForwardExpiryEnabled / carryForwardExpiryDateStr /
+// leaveWorkingDaysBetween / leaveMinutesOnOrBefore / carryForwardForfeitMinutes.
+// 2026-09-24 (owner): carried-forward annual days expire on the configured month/day of the year
+// they were carried INTO. They are consumed first (FIFO): whatever part of the carry-forward is
+// not covered by annual leave dated on/before the expiry date (+ go-live opening-used) is
+// forfeited once that date has passed. Toggle: appSettings.leave.carryForwardExpiryEnabled
+// (missing = on). Late-arrival deductions deliberately do NOT count as carry-forward usage.
+function carryForwardExpiryEnabled() {
+  return !(APP_SETTINGS.leave && APP_SETTINGS.leave.carryForwardExpiryEnabled === false);
+}
+function carryForwardExpiryDateStr(year) {
+  const lv = APP_SETTINGS.leave || {};
+  const month = Math.min(12, Math.max(1, Math.trunc(Number(lv.carryForwardExpiryMonth)) || 3));
+  const lastDay = new Date(Number(year), month, 0).getDate();
+  const day = Math.min(lastDay, Math.max(1, Math.trunc(Number(lv.carryForwardExpiryDay)) || 31));
+  const p2 = n => String(n).padStart(2, '0');
+  return `${year}-${p2(month)}-${p2(day)}`;
+}
+// Working days (not weekend / public holiday) from fromStr to toStr inclusive -- the same count
+// submitLeave() stores in `days`.
+function leaveWorkingDaysBetween(fromStr, toStr) {
+  let n = 0;
+  const d = new Date(fromStr + 'T12:00:00');
+  const end = new Date(toStr + 'T12:00:00');
+  while (d <= end) {
+    if (d.getDay() !== 0 && d.getDay() !== 6 && !isPublicHoliday(localDateStr(d))) n++;
+    d.setDate(d.getDate() + 1);
+  }
+  return n;
+}
+// Minutes of leave `l` that fall on dates <= cutoffStr (a multi-day leave straddling the cutoff
+// counts only its working days up to and including the cutoff).
+function leaveMinutesOnOrBefore(l, cutoffStr) {
+  if (!l || !l.dateFrom || l.dateFrom > cutoffStr) return 0;
+  const total = leaveRecordMinutes(l);
+  const to = l.dateTo || l.dateFrom;
+  if (to <= cutoffStr || !((Number(l.days) || 0) > 0)) return total;
+  return Math.min(total, leaveWorkingDaysBetween(l.dateFrom, cutoffStr) * 480);
+}
+// Carry-forward minutes forfeited for `year` as seen on asOfDateStr: 0 until the expiry date has
+// passed. includePending = the submission gate (pending leave dated on/before expiry already
+// reserved the carry-forward, so it must not be penalised twice); balances use approved only.
+function carryForwardForfeitMinutes(u, year, asOfDateStr, includePending, exceptId) {
+  if (!u || !carryForwardExpiryEnabled()) return 0;
+  const expiry = carryForwardExpiryDateStr(year);
+  if (!(String(asOfDateStr || '') > expiry)) return 0;
+  const cfMin = (getCarryForwardDays(year, u.id) + getCarryForwardCompDays(year, u.id)) * 480;
+  if (cfMin <= 0) return 0;
+  const yStart = `${year}-01-01`;
+  let usedBeforeMin = Math.max(0, getOpeningUsedDays(year, u.id, 'annual')) * 480;
+  DATA_LEAVES.filter(l =>
+    l.userId === u.id && l.type === 'annual' && l.id !== exceptId &&
+    (includePending ? !['rejected', 'cancelled'].includes(l.status) : l.status === 'approved') &&
+    l.dateFrom >= yStart && l.dateFrom <= expiry
+  ).forEach(l => { usedBeforeMin += leaveMinutesOnOrBefore(l, expiry); });
+  return Math.max(0, cfMin - usedBeforeMin);
+}
+
+// DUAL-SYNC with server.js annualLeaveEarnedPoolDays / canUseAnnualLeave.
+// 2026-09-24 (owner): before the tenure unlock (annualLeaveMinMonths) the quota part is 0, but
+// days the employee EARNED (holiday work taken as annual leave, abroad travel days) or carried
+// forward are theirs to use. Annual leave is shown and submittable whenever that pool is > 0;
+// the normal balance gate then limits how much. Pool 0 = locked exactly as before.
+function annualLeaveEarnedPoolDays(u, year) {
+  if (!u) return 0;
+  return getCarryForwardDays(year, u.id) + getCarryForwardCompDays(year, u.id) + getApprovedHolidayWorkDays(year, u.id);
+}
+function canUseAnnualLeave(u, asOfDate) {
+  if (!u) return false;
+  const asOf = asOfDate || businessDateStr();
+  if (isAnnualLeaveUnlocked(u, asOf)) return true;
+  return annualLeaveEarnedPoolDays(u, Number(asOf.slice(0, 4))) > 0;
+}
+
 // Shared leave-balance math — keeps the profile card (renderLeaveBalanceCard) and the leave-page
 // summary (renderLeaveBalanceSummary) in sync: year-scoped used, hourly-aware, comp + carry-forward
 // entitlement, and annual late-arrival deduction. Both surfaces must show the same remaining number.
@@ -2691,26 +2784,21 @@ function computeLeaveBalance(u, type, baseMax, year) {
   const openingUsedDays = getOpeningUsedDays(year, u.id, type);
   const yStart = `${year}-01-01`, yEnd = `${year}-12-31`;
   let usedMin = 0;
+  // 2026-09-24: leaveRecordMinutes() is the one hourly-aware (lunch-excluding) minutes helper.
   DATA_LEAVES.filter(l =>
     l.userId === u.id && l.type === type && l.status === 'approved' &&
     l.dateFrom >= yStart && l.dateFrom <= yEnd
-  ).forEach(l => {
-    if ((l.days || 0) > 0) usedMin += l.days * 8 * 60;
-    else if (l.hourlyStart && l.hourlyEnd) {
-      const [sh, sm] = l.hourlyStart.split(':').map(Number);
-      const [eh, em] = l.hourlyEnd.split(':').map(Number);
-      usedMin += Math.max(0, (eh*60+em) - (sh*60+sm));
-    } else if (l.timePart) {
-      const hM = l.timePart.match(/(\d+)\s*(?:ชม\.|h|時間)/);
-      const mM = l.timePart.match(/(\d+)\s*(?:น\.|m|分)/);
-      usedMin += (hM ? parseInt(hM[1]) : 0) * 60 + (mM ? parseInt(mM[1]) : 0);
-    }
-  });
+  ).forEach(l => { usedMin += leaveRecordMinutes(l); });
   usedMin += openingUsedDays * 8 * 60;
   const lateDeduct = type === 'annual' ? computeLateDeductMinutes(u.id, year) : { count: 0, deductMin: 0 };
   const totalMin = effectiveMax * 8 * 60;
-  const remMin = Math.max(0, totalMin - usedMin - lateDeduct.deductMin);
-  return { cfDays, compDays, effectiveMax, usedMin, lateDeduct, totalMin, remMin, remDays: Math.floor(remMin / 480), openingUsedDays };
+  // 2026-09-24: expired carry-forward (FIFO) leaves the balance only once today (Bangkok) is past
+  // the expiry date -- for a finished year that is always true, which is what the year-end
+  // carry-forward (processYearEndCarryForward) relies on. Dual-sync: server annualLeaveRemainingMinutes.
+  const cfExpiry = carryForwardExpiryDateStr(year);
+  const forfeitMin = type === 'annual' ? carryForwardForfeitMinutes(u, year, bangkokDateStr(), false) : 0;
+  const remMin = Math.max(0, totalMin - usedMin - lateDeduct.deductMin - forfeitMin);
+  return { cfDays, compDays, effectiveMax, usedMin, lateDeduct, totalMin, remMin, remDays: Math.floor(remMin / 480), openingUsedDays, forfeitMin, cfExpiry };
 }
 
 // 2026-09-21: days leave the balance only when a request is APPROVED (confirmed business rule), so
@@ -2732,28 +2820,32 @@ function pendingLeaveMinutes(userId, type, year, exceptId) {
     .reduce((sum, l) => sum + leaveRecordMinutes(l), 0);
 }
 
-// Called from Settings page — snapshots remaining annual leave for all users into next year
+// Called from Settings page — snapshots remaining annual leave for all users into next year.
+// 2026-09-24 (owner): processes the PREVIOUS calendar year (bangkokYear() - 1 -> bangkokYear()) and
+// is pressed in January, after that year has fully ended. Run in December it missed anything that
+// only counts once its date arrives (e.g. a 26 Dec abroad travel-day credit), losing it for good.
 async function processYearEndCarryForward(forYear) {
   if (blockIfObserver()) return;
   // `??` not `||`: a configured 0 means "no carry-forward". Dual-sync with server.js
   // refreshSnapshottedCarryForward.
   const rawMax = Number(APP_SETTINGS.leave.carryForwardMax ?? 5);
   const maxCF = Math.max(0, Math.min(60, Number.isFinite(rawMax) ? rawMax : 5));
-  const thisYear = forYear || bangkokYear();
+  const thisYear = forYear || (bangkokYear() - 1);
   const endOfYear   = `${thisYear}-12-31`;
   // 2026-09-23 (Opus audit M-2): one click rewrote every employee's next-year carry-forward with
   // no confirmation. Later approvals/cancellations now refresh the snapshot server-side, but the
   // run itself still overwrites whatever is there.
   const ok = confirm(currentLang === 'ja'
-    ? `${thisYear}年の残り有給休暇を${thisYear + 1}年へ繰り越します（全従業員、最大${maxCF}日）。既存の${thisYear + 1}年繰越値は上書きされます。続行しますか？`
-    : L(`Carry ${thisYear}'s remaining annual leave into ${thisYear + 1} for every employee (max ${maxCF} days)? Existing ${thisYear + 1} carry-forward values will be overwritten.`,
-        `ยกวันลาพักร้อนคงเหลือของปี ${thisYear} ไปปี ${thisYear + 1} ให้พนักงานทุกคน (สูงสุด ${maxCF} วัน)? ยอดยกไปปี ${thisYear + 1} ที่มีอยู่จะถูกเขียนทับ`));
+    ? `${thisYear}年（終了済み）の残り有給休暇を${thisYear + 1}年へ繰り越します（全従業員、最大${maxCF}日。失効した繰越分は除く）。既存の${thisYear + 1}年繰越値は上書きされます。続行しますか？`
+    : L(`Carry ${thisYear}'s remaining annual leave (the year that has just ended) into ${thisYear + 1} for every employee (max ${maxCF} days, expired carry-forward excluded)? Existing ${thisYear + 1} carry-forward values will be overwritten.`,
+        `ยกวันลาพักร้อนคงเหลือของปี ${thisYear} (ปีที่เพิ่งสิ้นสุด) ไปปี ${thisYear + 1} ให้พนักงานทุกคน (สูงสุด ${maxCF} วัน ไม่รวมวันยกยอดที่หมดอายุแล้ว)? ยอดยกไปปี ${thisYear + 1} ที่มีอยู่จะถูกเขียนทับ`));
   if (!ok) return;
 
   DATA_USERS.filter(u => isEmployeeRecord(u) && u.active).forEach(u => {
     // Use the same remaining pool as leave cards (quota + CF + holiday-work comp − approved
-    // − opening go-live used − late deduct). Skipping openingUsed here would over-carry after
-    // Accounting sets opening balances at go-live.
+    // − opening go-live used − late deduct − expired carry-forward). Skipping openingUsed here
+    // would over-carry after Accounting sets opening balances at go-live. Entitlement is as of
+    // 31 Dec of that year; probation employees (quota 0) still carry their earned days.
     const bal = computeLeaveBalance(u, 'annual', annualLeaveEntitlementDays(u, endOfYear), thisYear);
     const combinedLeftover = Math.max(0, bal.remMin / 480);
     const cfMerged = Math.min(combinedLeftover, maxCF);
@@ -2772,20 +2864,24 @@ async function processYearEndCarryForward(forYear) {
 function checkCarryForwardNotification() {
   const cf = APP_SETTINGS.leave;
   if (!cf || !currentUser) return;
-  const exM = (cf.carryForwardExpiryMonth || 3) - 1;
-  const exD = cf.carryForwardExpiryDay || 31;
+  // 2026-09-24: expiry is now enforced (carryForwardForfeitMinutes) and can be switched off.
+  if (!carryForwardExpiryEnabled()) return;
   const notifyDays = cf.carryForwardNotifyDays || 30;
   const year = bangkokYear();
-  const expiry = new Date(year, exM, exD);
+  const expiryStr = carryForwardExpiryDateStr(year);
+  const expiry = new Date(expiryStr + 'T00:00:00');
   const today = bangkokTodayDate(); today.setHours(0,0,0,0);
   const daysLeft = Math.ceil((expiry - today) / 86400000);
   if (daysLeft < 0 || daysLeft > notifyDays) return;
-  const myCF = getCarryForwardDays(year, currentUser.id);
-  if (myCF <= 0) return;
+  // What would actually be lost: carry-forward not yet covered by approved/pending annual leave
+  // dated on or before the expiry date (FIFO), not the raw carried amount.
+  const atRiskMin = carryForwardForfeitMinutes(currentUser, year, `${year + 1}-01-01`, true);
+  if (atRiskMin <= 0) return;
+  const atRisk = minToStr(atRiskMin);
   showToast(
-    currentLang === 'ja' ? `⚠️ 繰越有給休暇${myCF}日が${fmtDate(expiry)}に失効します — お早めにご利用ください！` :
-    L(`⚠️ ${myCF} carry-forward leave day(s) expire on ${fmtDate(expiry)} — use them soon!`,
-      `⚠️ วันลาพักร้อนยกยอด ${myCF} วัน จะหมดอายุ ${fmtDate(expiry)} — ใช้ให้ทันนะ!`),
+    currentLang === 'ja' ? `⚠️ 繰越有給休暇${atRisk}が${fmtDate(expiry)}に失効します — お早めにご利用ください！` :
+    L(`⚠️ ${atRisk} of carry-forward leave expires on ${fmtDate(expiry)} — use it soon!`,
+      `⚠️ วันลาพักร้อนยกยอด ${atRisk} จะหมดอายุ ${fmtDate(expiry)} — ใช้ให้ทันนะ!`),
     'warning'
   );
 }
@@ -3404,7 +3500,7 @@ function renderSettingsPage(_skipRefresh) {
 
     ${adminSection('🏖️', L('Leave Policy','นโยบายวันลา'), `
       <div style="font-size:12px;font-weight:600;color:#374151;margin-bottom:6px">${L('Annual leave by years of service','สิทธิ์ลาพักร้อนตามอายุงาน')}</div>
-      <div style="font-size:12px;color:#64748b;margin-bottom:10px;line-height:1.55">${L('Applies to every employee from Start Date. The first row is when they can see and submit Annual Leave (before that, entitlement is 0). When they reach the next row, the yearly quota jumps immediately — even mid-year — remaining = new quota + carry-forward + holiday-work compensation − days already used this calendar year (Jan–Dec).', 'ใช้กับพนักงานทุกคน นับจากวันเริ่มเข้าทำงาน แถวแรกคือเมื่อไหร่จะเห็นและยื่นลาพักร้อนได้ (ก่อนนั้นสิทธิ์เป็น 0) เมื่อครบแถวถัดไป โควตาปีนี้ขยับทันทีแม้กลางปี — คงเหลือ = โควตาใหม่ + ยกยอด + ชดเชยทำงานวันหยุด − วันที่ใช้ไปในปีปฏิทินนี้ (ม.ค.–ธ.ค.)')}</div>
+      <div style="font-size:12px;color:#64748b;margin-bottom:10px;line-height:1.55">${L('Applies to every employee from Start Date. The first row is when the yearly quota starts (before that, the quota is 0 — only days they earned through Holiday Work or abroad travel days, or carried forward, can be used). When they reach the next row, the yearly quota jumps immediately — even mid-year — remaining = new quota + carry-forward + holiday-work compensation − days already used this calendar year (Jan–Dec).', 'ใช้กับพนักงานทุกคน นับจากวันเริ่มเข้าทำงาน แถวแรกคือเมื่อไหร่โควตารายปีเริ่ม (ก่อนนั้นโควตาเป็น 0 — ใช้ได้เฉพาะวันที่ได้จากการทำงานวันหยุดหรือวันเดินทางต่างประเทศ หรือวันยกยอด) เมื่อครบแถวถัดไป โควตาปีนี้ขยับทันทีแม้กลางปี — คงเหลือ = โควตาใหม่ + ยกยอด + ชดเชยทำงานวันหยุด − วันที่ใช้ไปในปีปฏิทินนี้ (ม.ค.–ธ.ค.)')}</div>
       <div id="al-tiers-body">
         ${normalizeAnnualLeaveTiers(s.leave.annualLeaveTiers).map((tier, i) => annualLeaveTierRowHtml(tier, i)).join('')}
       </div>
@@ -3419,6 +3515,12 @@ function renderSettingsPage(_skipRefresh) {
         field(L('Max Carry-Forward Days','วันลาสูงสุดที่ยกยอดได้ (วัน)'), inp('set-cf-max', s.leave.carryForwardMax, 'number', 'min="0"')),
         field(L('Expiry Month','เดือนที่ยอดยกมาหมดอายุ'), `<select id="set-cf-expiry-month" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;background:var(--bg-card);color:var(--text);box-sizing:border-box">${[L('January','มกราคม'),L('February','กุมภาพันธ์'),L('March','มีนาคม'),L('April','เมษายน'),L('May','พฤษภาคม'),L('June','มิถุนายน'),L('July','กรกฎาคม'),L('August','สิงหาคม'),L('September','กันยายน'),L('October','ตุลาคม'),L('November','พฤศจิกายน'),L('December','ธันวาคม')].map((m,i)=>`<option value="${i+1}" ${s.leave.carryForwardExpiryMonth===i+1?'selected':''}>${m}</option>`).join('')}</select>`)
       )}
+      <label style="display:flex;align-items:flex-start;gap:8px;margin:0 0 12px;font-size:13px;font-weight:600;color:#374151;cursor:pointer">
+        <input id="set-cf-expiry-enabled" type="checkbox" ${s.leave.carryForwardExpiryEnabled !== false ? 'checked' : ''} onchange="syncCfExpiryInputsDisabled()" style="width:18px;height:18px;cursor:pointer;flex-shrink:0;margin-top:1px">
+        <span>${L('Forfeit unused carry-forward days after the expiry date', 'ตัดวันลายกยอดที่ใช้ไม่หมดทิ้งเมื่อถึงวันหมดอายุ')}
+          <span style="display:block;font-size:11px;font-weight:500;color:#94a3b8;margin-top:2px">${L('Carried-forward days are used first. When off, carried-forward days never expire and no expiry reminder is shown.', 'วันยกยอดจะถูกใช้ก่อนเสมอ ถ้าปิด วันยกยอดจะไม่หมดอายุและไม่มีการแจ้งเตือนวันหมดอายุ')}</span>
+        </span>
+      </label>
       ${row2(
         field(L('Expiry Day','วันที่หมดอายุ'), inp('set-cf-expiry-day', s.leave.carryForwardExpiryDay, 'number', 'min="1" max="31"')),
         field(L('Notify Before Expiry (days)','แจ้งเตือนล่วงหน้าก่อนหมดอายุ (วัน)'), inp('set-cf-notify', s.leave.carryForwardNotifyDays, 'number', 'min="1"'), L('Shows an in-app toast to the employee only — no email or manager notice', 'แจ้งเตือนแบบ toast ในแอปให้พนักงานคนนั้นเห็นเองเท่านั้น — ไม่มีอีเมลหรือแจ้ง manager'))
@@ -3428,11 +3530,11 @@ function renderSettingsPage(_skipRefresh) {
 
     ${adminSection('↩️', L('Year-End Carry-Forward', 'ยอดวันลายกไปปีหน้า'), `
       <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">
-        ${L('Click to snapshot remaining annual leave (up to max) for each employee and carry it into next year.','กดปุ่มเพื่อนำยอดวันลาพักร้อนคงเหลือ (ไม่เกินสูงสุด) ของพนักงานทุกคนยกไปปีหน้า')}
+        ${L('Click in January, after the year has ended, to snapshot each employee’s remaining annual leave for last year (up to max, expired carry-forward excluded) and carry it into this year.','กดในเดือนมกราคม หลังสิ้นปีแล้ว เพื่อนำยอดวันลาพักร้อนคงเหลือของปีที่แล้ว (ไม่เกินสูงสุด ไม่รวมวันยกยอดที่หมดอายุ) ของพนักงานทุกคนยกมาปีนี้')}
       </p>
       <div style="display:flex;gap:10px;flex-wrap:wrap">
-        <button class="btn btn-primary btn-sm" onclick="processYearEndCarryForward(${bangkokYear()})">
-          ↩️ ${currentLang === 'ja' ? `${bangkokYear()}年 → ${bangkokYear()+1}年 繰越処理` : L(`Process ${bangkokYear()} → ${bangkokYear()+1}`, `ประมวลผล ${bangkokYear()} → ${bangkokYear()+1}`)}
+        <button class="btn btn-primary btn-sm" onclick="processYearEndCarryForward(${bangkokYear() - 1})">
+          ↩️ ${currentLang === 'ja' ? `${bangkokYear()-1}年 → ${bangkokYear()}年 繰越処理` : L(`Process ${bangkokYear()-1} → ${bangkokYear()}`, `ประมวลผล ${bangkokYear()-1} → ${bangkokYear()}`)}
         </button>
       </div>
     `)}
@@ -3688,6 +3790,20 @@ function renderSettingsPage(_skipRefresh) {
     renderAllowanceTypesList();
     renderLateDeductPolicyUI();
   }
+  syncCfExpiryInputsDisabled();
+}
+
+// 2026-09-24: with carry-forward expiry switched off the expiry month/day/notify inputs have no
+// effect -- keep their values (saved as-is) but grey them out.
+function syncCfExpiryInputsDisabled() {
+  const toggle = document.getElementById('set-cf-expiry-enabled');
+  if (!toggle) return;
+  ['set-cf-expiry-month', 'set-cf-expiry-day', 'set-cf-notify'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.disabled = !toggle.checked;
+    el.style.opacity = toggle.checked ? '' : '0.5';
+  });
 }
 
 let _notifExtraDraft = [];
@@ -4068,6 +4184,8 @@ async function saveSettingsPage() {
   if ((document.getElementById('set-cf-max')?.value ?? '').trim() !== '') {
     APP_SETTINGS.leave.carryForwardMax      = fi('set-cf-max');
   }
+  const cfExpiryToggle = document.getElementById('set-cf-expiry-enabled');
+  if (cfExpiryToggle) APP_SETTINGS.leave.carryForwardExpiryEnabled = !!cfExpiryToggle.checked;
   APP_SETTINGS.leave.carryForwardExpiryMonth = parseInt(document.getElementById('set-cf-expiry-month')?.value) || 3;
   APP_SETTINGS.leave.carryForwardExpiryDay   = fi('set-cf-expiry-day');
   APP_SETTINGS.leave.carryForwardNotifyDays  = fi('set-cf-notify');
@@ -6532,7 +6650,7 @@ function updateEmpAnnualLeaveDisplay() {
   display.innerHTML = `${days} ${L('days', 'วัน')}${nextHtml}`;
 }
 function updateAnnualLeaveEntryVisibility() {
-  const unlocked = !currentUser || isAnnualLeaveUnlocked(currentUser);
+  const unlocked = !currentUser || canUseAnnualLeave(currentUser);
   const btn = document.getElementById('req-annual-leave-btn');
   if (btn) {
     btn.style.display = unlocked ? '' : 'none';
@@ -8614,8 +8732,29 @@ function renderMyProfile() {
     </div>`;
 }
 
+// 2026-09-24: small notes under the annual card -- expired carry-forward (FIFO forfeit) and, for a
+// probation employee using earned days, when the tenure quota starts. Shared by the profile card
+// and the Leave-page summary card.
+function annualLeaveCardNotesHtml(u, bal) {
+  let html = '';
+  if (bal && bal.forfeitMin > 0) {
+    const exp = fmtDate(new Date(bal.cfExpiry + 'T12:00:00'));
+    html += `<div class="detail" style="margin-top:3px;font-size:11px;color:#b45309">⌛ ${currentLang === 'ja'
+      ? `繰越 ${minToStr(bal.forfeitMin)} は${exp}に失効`
+      : L(`${minToStr(bal.forfeitMin)} carry-forward expired on ${exp}`, `วันยกยอด ${minToStr(bal.forfeitMin)} หมดอายุแล้วเมื่อ ${exp}`)}</div>`;
+  }
+  if (u && !isAnnualLeaveUnlocked(u)) {
+    const unlock = annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths());
+    html += `<div class="detail" style="margin-top:3px;font-size:11px;color:#64748b">🔒 ${currentLang === 'ja'
+      ? `勤続による付与は${unlock || '—'}から（現在は獲得日数のみ）`
+      : L(`Service-based quota starts ${unlock || '—'} (earned days only until then)`, `โควตาตามอายุงานเริ่ม ${unlock || '—'} (ก่อนหน้านั้นใช้ได้เฉพาะวันที่ได้รับเพิ่ม)`)}</div>`;
+  }
+  return html;
+}
+
 function renderLeaveBalanceCard(type, emoji, label, u, maxDays) {
-  if (type === 'annual' && !isAnnualLeaveUnlocked(u)) {
+  // 2026-09-24: locked only when there is also no earned/carried pool (canUseAnnualLeave).
+  if (type === 'annual' && !canUseAnnualLeave(u)) {
     const months = getAnnualLeaveMinMonths();
     const unlock = annualLeaveUnlockDateStr(u.startDate, months);
     const canSeeDays = isMdAccountingView();
@@ -8651,6 +8790,7 @@ function renderLeaveBalanceCard(type, emoji, label, u, maxDays) {
     <div class="amount">${remaining}</div>
     <div class="detail">/ ${total} ${L('days', 'วัน')} ${usedDays > 0 ? `<span style="color:#dc2626">${currentLang === 'ja' ? `(使用済み ${usedDays})` : L(`(used ${usedDays})`, `(ใช้ไป ${usedDays})`)}</span>` : L('remaining', 'คงเหลือ')}</div>
     ${pendingNote}
+    ${type === 'annual' ? annualLeaveCardNotesHtml(u, bal) : ''}
     <div class="leave-bar"><div class="leave-bar-fill" style="width:${pct}%"></div></div>
   </div>`;
 }
@@ -8930,6 +9070,13 @@ function openEmployeeProfile(id) {
   // the math from the raw start date each time.
   const nextMilestone = daysToNextTenureMilestone(u.startDate);
   const roleLabels = { md:t('role_md'), manager:t('role_manager'), accounting:t('role_accounting'), user:t('role_user'), driver:t('role_driver'), marketing:t('role_marketing'), superadmin:t('role_superadmin') };
+  // 2026-09-24 (owner): the "... Balance / คงเหลือ" fields showed the yearly entitlement; they now
+  // show what is actually left this year -- the same computeLeaveBalance() figure as the leave cards.
+  const profileLeaveBal = {
+    annual: computeLeaveBalance(u, 'annual', annualLeaveEntitlementDays(u)),
+    sick: computeLeaveBalance(u, 'sick', sickLeaveEntitlementDays()),
+    business: computeLeaveBalance(u, 'business', businessLeaveEntitlementDays()),
+  };
 
   document.getElementById('profile-modal-content').innerHTML = `
     <div style="text-align:center;padding:28px;background:linear-gradient(135deg,#1e3a5f,#2563eb);color:white;border-radius:14px 14px 0 0;position:relative">
@@ -8970,11 +9117,11 @@ function openEmployeeProfile(id) {
           <div class="profile-field"><label>${L('Rights', 'สิทธิ์')}</label><p><span class="role-badge role-${u.role}" style="display:inline-block">${roleLabels[u.role]}</span></p></div>
           <div class="profile-field"><label>${L('Start Date', 'วันเริ่มเข้าทำงาน')}</label><p>${startDate} ${currentLang === 'ja' ? `(${workYears}年${workMonths}ヶ月${workDaysTenure}日)` : L(`(${workYears}y ${workMonths}m ${workDaysTenure}d)`, `(${workYears} ปี ${workMonths} เดือน ${workDaysTenure} วัน)`)}</p>${nextMilestone ? `<p style="font-size:11px;color:#0891b2;margin-top:2px">${currentLang === 'ja' ? `勤続${nextMilestone.years}年まであと${nextMilestone.daysLeft}日` : L(`${nextMilestone.daysLeft} days to ${nextMilestone.years}-year anniversary`, `อีก ${nextMilestone.daysLeft} วัน จะครบ ${nextMilestone.years} ปี`)}</p>` : ''}</div>
           ${u.endDate ? `<div class="profile-field"><label>${L('End Date', 'วันที่สิ้นสุดการทำงาน')}</label><p style="color:#dc2626;font-weight:600">${fmtDate(new Date(u.endDate + 'T12:00:00'))}</p></div>` : ''}
-          <div class="profile-field"><label>${L('Annual Leave Balance', 'ลาพักร้อนคงเหลือ')}</label><p style="color:#2563eb;font-weight:700">${(!isAnnualLeaveUnlocked(u) && !isMdAccountingView())
+          <div class="profile-field"><label>${L('Annual Leave Balance', 'ลาพักร้อนคงเหลือ')}</label><p style="color:#2563eb;font-weight:700">${(!canUseAnnualLeave(u) && !isMdAccountingView())
             ? (currentLang === 'ja' ? `🔒 ${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'}まで利用不可` : L(`🔒 Locked until ${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'}`, `🔒 ยังไม่เปิดสิทธิ์ (ใช้ได้ ${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'})`))
-            : `${annualLeaveEntitlementDays(u)} ${L('days', 'วัน')}${!isAnnualLeaveUnlocked(u) ? (currentLang === 'ja' ? `（${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'}から）` : L(` (unlocks ${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'})`, ` (เปิดสิทธิ์ ${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'})`)) : (nextAnnualLeaveTier(u) ? (currentLang === 'ja' ? `（次は${nextAnnualLeaveTier(u).date}から${nextAnnualLeaveTier(u).days}日）` : L(` (next ${nextAnnualLeaveTier(u).days}d from ${nextAnnualLeaveTier(u).date})`, ` (ขั้นถัดไป ${nextAnnualLeaveTier(u).days} วัน ตั้งแต่ ${nextAnnualLeaveTier(u).date})`)) : '')}`}</p></div>
-          <div class="profile-field"><label>${L('Sick Leave Balance', 'ลาป่วยคงเหลือ')}</label><p style="color:#ef4444;font-weight:700">${sickLeaveEntitlementDays()} ${L('days', 'วัน')}</p></div>
-          <div class="profile-field"><label>${L('Business Leave Balance', 'ลากิจคงเหลือ')}</label><p style="color:#8b5cf6;font-weight:700">${businessLeaveEntitlementDays()} ${L('days', 'วัน')}</p></div>
+            : `${minToStr(profileLeaveBal.annual.remMin)}${!isAnnualLeaveUnlocked(u) ? (currentLang === 'ja' ? `（${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'}から）` : L(` (unlocks ${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'})`, ` (เปิดสิทธิ์ ${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'})`)) : (nextAnnualLeaveTier(u) ? (currentLang === 'ja' ? `（次は${nextAnnualLeaveTier(u).date}から${nextAnnualLeaveTier(u).days}日）` : L(` (next ${nextAnnualLeaveTier(u).days}d from ${nextAnnualLeaveTier(u).date})`, ` (ขั้นถัดไป ${nextAnnualLeaveTier(u).days} วัน ตั้งแต่ ${nextAnnualLeaveTier(u).date})`)) : '')}`}</p></div>
+          <div class="profile-field"><label>${L('Sick Leave Balance', 'ลาป่วยคงเหลือ')}</label><p style="color:#ef4444;font-weight:700">${minToStr(profileLeaveBal.sick.remMin)}</p></div>
+          <div class="profile-field"><label>${L('Business Leave Balance', 'ลากิจคงเหลือ')}</label><p style="color:#8b5cf6;font-weight:700">${minToStr(profileLeaveBal.business.remMin)}</p></div>
           <div class="profile-field"><label>${L('Status', 'สถานะ')}</label><p><span class="badge ${u.active ? 'badge-success':'badge-danger'}">${u.active ? L('● Active', '● ปกติ') : L('● Suspended', '● ระงับ')}</span></p></div>
         </div>
       </div>
@@ -9658,18 +9805,7 @@ function computeLeaveMinutesInRange(userId, type, startStr, endStr) {
   DATA_LEAVES.filter(l =>
     l.userId === userId && l.type === type && l.status === 'approved' &&
     l.dateFrom >= startStr && l.dateFrom <= endStr
-  ).forEach(l => {
-    if ((l.days || 0) > 0) min += l.days * 8 * 60;
-    else if (l.hourlyStart && l.hourlyEnd) {
-      const [sh, sm] = l.hourlyStart.split(':').map(Number);
-      const [eh, em] = l.hourlyEnd.split(':').map(Number);
-      min += Math.max(0, (eh * 60 + em) - (sh * 60 + sm));
-    } else if (l.timePart) {
-      const hM = l.timePart.match(/(\d+)\s*(?:ชม\.|h|時間)/);
-      const mM = l.timePart.match(/(\d+)\s*(?:น\.|m|分)/);
-      min += (hM ? parseInt(hM[1]) : 0) * 60 + (mM ? parseInt(mM[1]) : 0);
-    }
-  });
+  ).forEach(l => { min += leaveRecordMinutes(l); });
   return min;
 }
 
@@ -9748,15 +9884,12 @@ function renderReports() {
 // ===== EMPLOYEE LEAVE SUMMARY (MD / Accounting) =====
 let selectedLeaveSummaryYear = null;
 
+// DUAL-SYNC with server.js leaveMinutesOf. 2026-09-24: hourly leave excludes the 12:00-13:00
+// lunch overlap (hourlyLeaveChargedMinutes) -- every balance/report path goes through here.
 function leaveRecordMinutes(l) {
   if (!l) return 0;
   if ((l.days || 0) > 0) return l.days * 8 * 60;
-  if (l.hourlyStart && l.hourlyEnd) {
-    const [sh, sm] = l.hourlyStart.split(':').map(Number);
-    const [eh, em] = l.hourlyEnd.split(':').map(Number);
-    if (![sh, sm, eh, em].every(Number.isFinite)) return 0;
-    return Math.max(0, (eh * 60 + em) - (sh * 60 + sm));
-  }
+  if (l.hourlyStart && l.hourlyEnd) return hourlyLeaveChargedMinutes(l.hourlyStart, l.hourlyEnd);
   if (l.timePart) {
     const hM = l.timePart.match(/(\d+)\s*(?:ชม\.|h|時間)/);
     const mM = l.timePart.match(/(\d+)\s*(?:น\.|m|分)/);
@@ -11316,9 +11449,8 @@ function fmtB(n) { return '฿' + n.toLocaleString('th-TH', { minimumFractionDig
 // Falls back to the frozen `l.timePart` for older records saved before the raw fields existed.
 function formatTimePart(l) {
   if (l.hourlyStart && l.hourlyEnd) {
-    const [sh, sm] = l.hourlyStart.split(':').map(Number);
-    const [eh, em] = l.hourlyEnd.split(':').map(Number);
-    const totalMin = (eh * 60 + em) - (sh * 60 + sm);
+    // 2026-09-24: shows the CHARGED time (12:00-13:00 lunch excluded), same as the balance.
+    const totalMin = hourlyLeaveChargedMinutes(l.hourlyStart, l.hourlyEnd);
     const h = Math.floor(totalMin / 60), m = totalMin % 60;
     // SECURITY FIX 2026-08-06 (Opus audit): hourlyStart/hourlyEnd come straight from the leave
     // request POST body with no format validation -- this return value is interpolated into
@@ -12844,7 +12976,7 @@ function editLeaveRequest(id) {
 
 function openLeaveModal(type) {
   let t = type || 'annual';
-  if (t === 'annual' && !editingLeaveId && currentUser && !isAnnualLeaveUnlocked(currentUser)) {
+  if (t === 'annual' && !editingLeaveId && currentUser && !canUseAnnualLeave(currentUser)) {
     if (type) {
       showToast(annualLeaveLockedToast(currentUser), 'warning');
       return;
@@ -12878,7 +13010,7 @@ function openLeaveModal(type) {
 function closeLeaveModal() { document.getElementById('leave-modal').classList.remove('show'); editingLeaveId = null; }
 
 function setLeaveType(type) {
-  if (type === 'annual' && !editingLeaveId && currentUser && !isAnnualLeaveUnlocked(currentUser)) {
+  if (type === 'annual' && !editingLeaveId && currentUser && !canUseAnnualLeave(currentUser)) {
     showToast(annualLeaveLockedToast(currentUser), 'warning');
     return;
   }
@@ -12972,10 +13104,14 @@ function calcLeaveHours() {
   if (!start || !end) { sumEl.style.display = 'none'; return; }
   const [sh, sm] = start.split(':').map(Number);
   const [eh, em] = end.split(':').map(Number);
-  const totalMin = (eh * 60 + em) - (sh * 60 + sm);
-  if (totalMin <= 0) {
+  const rawMin = (eh * 60 + em) - (sh * 60 + sm);
+  // 2026-09-24 (owner): the 12:00-13:00 lunch hour is not charged.
+  const totalMin = hourlyLeaveChargedMinutes(start, end);
+  if (rawMin <= 0 || totalMin <= 0) {
     sumEl.style.display = '';
-    sumEl.textContent = L('⚠️ End time must be after start time', '⚠️ เวลาสิ้นสุดต้องหลังเวลาเริ่ม');
+    sumEl.textContent = rawMin <= 0
+      ? L('⚠️ End time must be after start time', '⚠️ เวลาสิ้นสุดต้องหลังเวลาเริ่ม')
+      : L('⚠️ The selected time is entirely within the 12:00–13:00 lunch break', '⚠️ ช่วงเวลาที่เลือกอยู่ในเวลาพักเที่ยง 12:00–13:00 ทั้งหมด');
     if (document.documentElement.getAttribute('data-theme') === 'dark') {
       sumEl.style.color = '#fcd34d'; sumEl.style.background = 'rgba(245,158,11,0.15)'; sumEl.style.borderColor = 'rgba(245,158,11,0.3)';
     } else {
@@ -12993,9 +13129,12 @@ function calcLeaveHours() {
   } else {
     sumEl.style.color = '#166534'; sumEl.style.background = '#f0fdf4'; sumEl.style.borderColor = '#bbf7d0';
   }
+  const lunchNote = totalMin < rawMin
+    ? (currentLang === 'ja' ? '（12:00–13:00の昼休みを除く）' : L(' (excl. 12:00–13:00 lunch)', ' (ไม่นับพักเที่ยง 12:00–13:00)'))
+    : '';
   sumEl.innerHTML = currentLang === 'ja'
-    ? `⏰ 合計 ${h > 0 ? h + '時間' : ''}${m > 0 ? m + '分' : ''}${backLabel}`
-    : L(`⏰ Total ${h > 0 ? h + 'h ' : ''}${m > 0 ? m + 'm' : ''}${backLabel}`, `⏰ รวม ${h > 0 ? h + ' ชั่วโมง ' : ''}${m > 0 ? m + ' นาที' : ''}${backLabel}`);
+    ? `⏰ 合計 ${h > 0 ? h + '時間' : ''}${m > 0 ? m + '分' : ''}${lunchNote}${backLabel}`
+    : L(`⏰ Total ${h > 0 ? h + 'h ' : ''}${m > 0 ? m + 'm' : ''}${lunchNote}${backLabel}`, `⏰ รวม ${h > 0 ? h + ' ชั่วโมง ' : ''}${m > 0 ? m + ' นาที' : ''}${lunchNote}${backLabel}`);
 }
 
 // 2026-08-06: half-day AM/PM shortcut buttons for the hourly leave mode -- pre-fills the exact
@@ -13047,8 +13186,10 @@ async function submitLeave() {
     if (!start || !end) { showToast(L('⚠️ Please specify start and end time', '⚠️ กรุณาระบุเวลาเริ่มและสิ้นสุด'), 'warning'); return; }
     const [sh, sm] = start.split(':').map(Number);
     const [eh, em] = end.split(':').map(Number);
-    const totalMin = (eh * 60 + em) - (sh * 60 + sm);
-    if (totalMin <= 0) { showToast(L('⚠️ End time must be after start time', '⚠️ เวลาสิ้นสุดต้องหลังเวลาเริ่ม'), 'warning'); return; }
+    if ((eh * 60 + em) - (sh * 60 + sm) <= 0) { showToast(L('⚠️ End time must be after start time', '⚠️ เวลาสิ้นสุดต้องหลังเวลาเริ่ม'), 'warning'); return; }
+    // 2026-09-24 (owner): the 12:00-13:00 lunch hour is not charged (hourlyLeaveChargedMinutes).
+    const totalMin = hourlyLeaveChargedMinutes(start, end);
+    if (totalMin <= 0) { showToast(L('⚠️ The selected time is entirely within the 12:00–13:00 lunch break', '⚠️ ช่วงเวลาที่เลือกอยู่ในเวลาพักเที่ยง 12:00–13:00 ทั้งหมด'), 'warning'); return; }
     const h = Math.floor(totalMin / 60), m = totalMin % 60;
     days = 0;
     hourlyStart = start;
@@ -13067,7 +13208,8 @@ async function submitLeave() {
     return;
   }
 
-  if (type === 'annual' && currentUser && !isAnnualLeaveUnlocked(currentUser, dateFrom)) {
+  // 2026-09-24: earned/carried days are usable before the tenure unlock (canUseAnnualLeave).
+  if (type === 'annual' && currentUser && !canUseAnnualLeave(currentUser, dateFrom)) {
     showToast(annualLeaveLockedToast(currentUser), 'warning');
     return;
   }
@@ -13125,23 +13267,17 @@ async function submitLeave() {
       l.dateFrom >= yStart && l.dateFrom <= yEnd
     );
     let usedMin = 0;
-    committedLeaves.forEach(l => {
-      if ((l.days || 0) > 0) usedMin += l.days * 8 * 60;
-      else if (l.hourlyStart && l.hourlyEnd) {
-        const [sh, sm] = l.hourlyStart.split(':').map(Number);
-        const [eh, em] = l.hourlyEnd.split(':').map(Number);
-        usedMin += Math.max(0, (eh*60+em) - (sh*60+sm));
-      } else if (l.timePart) {
-        const hM = l.timePart.match(/(\d+)\s*(?:ชม\.|h|時間)/); const mM = l.timePart.match(/(\d+)\s*(?:น\.|m|分)/);
-        usedMin += (hM ? parseInt(hM[1]) : 0) * 60 + (mM ? parseInt(mM[1]) : 0);
-      }
-    });
+    committedLeaves.forEach(l => { usedMin += leaveRecordMinutes(l); });
     usedMin += getOpeningUsedDays(thisYear, u.id, type) * 8 * 60;
     const lateDeductMin = type === 'annual' ? computeLateDeductMinutes(u.id, thisYear).deductMin : 0;
-    const remMin = Math.max(0, totalMin - usedMin - lateDeductMin);
+    // 2026-09-24: a request dated after the carry-forward expiry cannot use expired carry-forward.
+    // Pending + approved leave dated on/before expiry counts as carry-forward usage (FIFO).
+    // Dual-sync with server.js leaveBalanceError.
+    const forfeitMin = type === 'annual' ? carryForwardForfeitMinutes(u, thisYear, dateFrom, true, editingLeaveId) : 0;
+    const remMin = Math.max(0, totalMin - usedMin - lateDeductMin - forfeitMin);
     const reqMin = _leaveMode === 'days'
       ? days * 8 * 60
-      : (() => { const [sh,sm] = hourlyStart.split(':').map(Number); const [eh,em] = hourlyEnd.split(':').map(Number); return (eh*60+em)-(sh*60+sm); })();
+      : hourlyLeaveChargedMinutes(hourlyStart, hourlyEnd);
     if (reqMin > remMin) {
       // remMin here is what is still SUBMITTABLE -- committedLeaves above already counts pending
       // requests. The balance card shows the approved-only figure, which is larger, so name the
@@ -15174,7 +15310,7 @@ function renderLeaveBalanceSummary() {
 
   const thisYear = bangkokYear();
   el.innerHTML = CONFIGS.map(cfg => {
-    if (cfg.type === 'annual' && !isAnnualLeaveUnlocked(u)) {
+    if (cfg.type === 'annual' && !canUseAnnualLeave(u)) {
       const months = getAnnualLeaveMinMonths();
       const unlock = annualLeaveUnlockDateStr(u.startDate, months);
       const lockDetail = currentLang === 'ja'
@@ -15188,8 +15324,8 @@ function renderLeaveBalanceSummary() {
         <div class="leave-bar"><div class="leave-bar-fill" style="width:0%"></div></div>
       </div>`;
     }
-    const { cfDays, compDays, effectiveMax, usedMin, lateDeduct, totalMin, remMin, remDays, openingUsedDays } =
-      computeLeaveBalance(u, cfg.type, cfg.max, thisYear);
+    const bal = computeLeaveBalance(u, cfg.type, cfg.max, thisYear);
+    const { cfDays, compDays, effectiveMax, usedMin, lateDeduct, totalMin, remMin, remDays, openingUsedDays } = bal;
     const pct     = totalMin > 0 ? Math.round((remMin / totalMin) * 100) : 0;
     const usedStr = usedMin > 0 ? minToStr(usedMin) : L('0d', '0 วัน');
     const remStr  = minToStr(remMin);
@@ -15218,6 +15354,7 @@ function renderLeaveBalanceSummary() {
       ${compBadge}
       ${openingBadge}
       ${lateDeductBadge}
+      ${cfg.type === 'annual' ? annualLeaveCardNotesHtml(u, bal) : ''}
       <div class="detail" style="margin-top:5px;color:${usedMin > 0 ? cfg.color : '#10b981'};font-size:11px">${usedLabel}</div>
       <div class="leave-bar"><div class="leave-bar-fill" style="width:${pct}%"></div></div>
     </div>`;
@@ -18090,15 +18227,15 @@ function _faqRulesItems() {
       ) },
     { icon: '🏖️', roles: ['md','accounting','manager','user','driver','marketing'], q: _faq('How does Annual Leave carry-forward work?', 'วันลาพักร้อนยกยอดปีถัดไปยังไง?', '年次有給休暇の繰越はどう機能しますか？'),
       a: _faq(
-        `Unused Annual Leave carries over into next year — up to ${S.leave.carryForwardMax} days max — but only when Accounting/MD clicks "Process Carry-Forward" in Settings; it doesn't happen automatically at year-end. Carried-over days expire on ${S.leave.carryForwardExpiryDay}/${S.leave.carryForwardExpiryMonth} of the new year, with a reminder ${S.leave.carryForwardNotifyDays} days before that.`,
-        `วันลาพักร้อนที่เหลือยกไปปีถัดไปได้สูงสุด ${S.leave.carryForwardMax} วัน แต่ต้องให้ Accounting/MD กด "ประมวลผลยกยอด" ในหน้าตั้งค่าก่อน ไม่ได้ทำอัตโนมัติตอนสิ้นปี วันที่ยกยอดจะหมดอายุวันที่ ${S.leave.carryForwardExpiryDay}/${S.leave.carryForwardExpiryMonth} ของปีใหม่ และจะมีการแจ้งเตือนล่วงหน้า ${S.leave.carryForwardNotifyDays} วัน`,
-        `未消化の年次有給休暇は最大${S.leave.carryForwardMax}日まで翌年に繰り越せますが、Accounting/MDが設定画面で「繰越処理」をクリックした場合のみ有効で、年末に自動的には行われません。繰り越した日数は新年の${S.leave.carryForwardExpiryMonth}月${S.leave.carryForwardExpiryDay}日に失効し、その${S.leave.carryForwardNotifyDays}日前に通知されます。`
+        `Unused Annual Leave carries over into next year — up to ${S.leave.carryForwardMax} days max — but only when Accounting/MD clicks "Process Carry-Forward" in Settings in January, after the year has ended; it doesn't happen automatically. ${S.leave.carryForwardExpiryEnabled !== false ? `Carried-over days are used first. Any carried-over days still unused on ${S.leave.carryForwardExpiryDay}/${S.leave.carryForwardExpiryMonth} are forfeited, with a reminder ${S.leave.carryForwardNotifyDays} days before that.` : 'Carried-over days do not expire.'}`,
+        `วันลาพักร้อนที่เหลือยกไปปีถัดไปได้สูงสุด ${S.leave.carryForwardMax} วัน แต่ต้องให้ Accounting/MD กด "ประมวลผลยกยอด" ในหน้าตั้งค่าในเดือนมกราคม หลังสิ้นปีแล้ว ไม่ได้ทำอัตโนมัติ ${S.leave.carryForwardExpiryEnabled !== false ? `วันที่ยกยอดจะถูกใช้ก่อน ส่วนที่ยังใช้ไม่หมดภายในวันที่ ${S.leave.carryForwardExpiryDay}/${S.leave.carryForwardExpiryMonth} จะถูกตัดทิ้ง และจะมีการแจ้งเตือนล่วงหน้า ${S.leave.carryForwardNotifyDays} วัน` : 'วันที่ยกยอดไม่มีวันหมดอายุ'}`,
+        `未消化の年次有給休暇は最大${S.leave.carryForwardMax}日まで翌年に繰り越せますが、年が明けた1月にAccounting/MDが設定画面で「繰越処理」をクリックした場合のみ有効で、自動的には行われません。${S.leave.carryForwardExpiryEnabled !== false ? `繰り越した日数から先に消化されます。${S.leave.carryForwardExpiryMonth}月${S.leave.carryForwardExpiryDay}日までに使い切れなかった繰越分は失効し、その${S.leave.carryForwardNotifyDays}日前に通知されます。` : '繰り越した日数に有効期限はありません。'}`
       ) },
     { icon: '🏖️', roles: ['md','accounting','manager','user','driver','marketing'], q: _faq('When can a new employee use Annual Leave?', 'พนักงานใหม่ใช้ลาพักร้อนได้เมื่อไหร่?', '新入社員はいつから年次有給を使えますか？'),
       a: _faq(
-        `From Settings → Leave Policy, by years of service from Start Date: ${getAnnualLeaveTiers().map(t => `after ${t.afterMonths} months → ${t.days} days`).join('; ')}. Until the first tier, Annual Leave is hidden and cannot be submitted. When the next anniversary is reached, the quota for this calendar year jumps immediately (remaining = new quota + carry-forward + holiday-work compensation − days already used Jan–Dec). Sick leave is ${sickLeaveEntitlementDays()} days/year and Business leave is ${businessLeaveEntitlementDays()} days/year for everyone (Settings → Leave Policy), available immediately.`,
-        `จาก ตั้งค่า → นโยบายวันลา ตามอายุงานนับจากวันเริ่มเข้าทำงาน: ${getAnnualLeaveTiers().map(t => `ครบ ${t.afterMonths} เดือน → ${t.days} วัน`).join(' · ')} ก่อนขั้นแรกจะไม่เห็นและยื่นลาพักร้อนไม่ได้ เมื่อครบขั้นถัดไป โควตาปีปฏิทินนี้ขยับทันที (คงเหลือ = โควตาใหม่ + ยกยอด + ชดเชยทำงานวันหยุด − วันที่ใช้ไป ม.ค.–ธ.ค.) ลาป่วย ${sickLeaveEntitlementDays()} วัน/ปี และลากิจ ${businessLeaveEntitlementDays()} วัน/ปี สำหรับทุกคน (ตั้งค่า → นโยบายวันลา) ใช้ได้ทันที`,
-        `設定 → 休暇ポリシーの勤続年数（開始日から）: ${getAnnualLeaveTiers().map(t => `${t.afterMonths}か月後 → ${t.days}日`).join('、')}。最初の段階までは年次有給は表示されず申請もできません。次の段階に達すると当年の付与がすぐ増えます（残日数＝新付与＋繰越＋休日出勤補償−1〜12月の使用日数）。病気休暇は全員 ${sickLeaveEntitlementDays()}日/年、私用休暇は ${businessLeaveEntitlementDays()}日/年（設定 → 休暇ポリシー）ですぐ使えます。`
+        `From Settings → Leave Policy, by years of service from Start Date: ${getAnnualLeaveTiers().map(t => `after ${t.afterMonths} months → ${t.days} days`).join('; ')}. Until the first tier the quota is 0: Annual Leave is hidden and cannot be submitted, unless you already have earned days (Holiday Work taken as leave, abroad travel days) or carried-forward days — those can be used right away. When the next anniversary is reached, the quota for this calendar year jumps immediately (remaining = new quota + carry-forward + holiday-work compensation − days already used Jan–Dec). Sick leave is ${sickLeaveEntitlementDays()} days/year and Business leave is ${businessLeaveEntitlementDays()} days/year for everyone (Settings → Leave Policy), available immediately.`,
+        `จาก ตั้งค่า → นโยบายวันลา ตามอายุงานนับจากวันเริ่มเข้าทำงาน: ${getAnnualLeaveTiers().map(t => `ครบ ${t.afterMonths} เดือน → ${t.days} วัน`).join(' · ')} ก่อนขั้นแรกโควตาเป็น 0: จะไม่เห็นและยื่นลาพักร้อนไม่ได้ ยกเว้นมีวันที่ได้รับเพิ่ม (ทำงานวันหยุดแบบรับเป็นวันลา วันเดินทางต่างประเทศ) หรือวันยกยอด ซึ่งใช้ได้ทันที เมื่อครบขั้นถัดไป โควตาปีปฏิทินนี้ขยับทันที (คงเหลือ = โควตาใหม่ + ยกยอด + ชดเชยทำงานวันหยุด − วันที่ใช้ไป ม.ค.–ธ.ค.) ลาป่วย ${sickLeaveEntitlementDays()} วัน/ปี และลากิจ ${businessLeaveEntitlementDays()} วัน/ปี สำหรับทุกคน (ตั้งค่า → นโยบายวันลา) ใช้ได้ทันที`,
+        `設定 → 休暇ポリシーの勤続年数（開始日から）: ${getAnnualLeaveTiers().map(t => `${t.afterMonths}か月後 → ${t.days}日`).join('、')}。最初の段階までは付与0日のため年次有給は表示されず申請もできません。ただし獲得した日数（休日出勤の休暇補償・海外出張の移動日）や繰越分があれば、すぐに使えます。次の段階に達すると当年の付与がすぐ増えます（残日数＝新付与＋繰越＋休日出勤補償−1〜12月の使用日数）。病気休暇は全員 ${sickLeaveEntitlementDays()}日/年、私用休暇は ${businessLeaveEntitlementDays()}日/年（設定 → 休暇ポリシー）ですぐ使えます。`
       ) },
     { icon: '🚌', roles: ['md','accounting','manager','user','driver','marketing'], q: _faq('What happens on a Company Trip day?', 'วัน Company Trip เป็นยังไง?', '社員旅行日はどうなりますか？'),
       a: _faq(
@@ -18207,9 +18344,9 @@ function _faqHowToItems() {
         // typing times manually even a minute off the exact boundary reclassifies the day as
         // 'partial' instead of a clean 'am'/'pm', which can cause a wrong late/blank-day result.
         // The buttons exist specifically to avoid that.
-        _faq('<b>By Hour</b>: pick one date, then a start time and end time within that day — or use the 🌅 Morning Half-Day / 🌇 Afternoon Half-Day shortcut buttons, which fill in the exact correct boundary times for you and are the recommended way to request a half day off.',
-             '<b>ถ้าเลือกลาเป็นชั่วโมง</b>: เลือกวันที่หนึ่งวัน แล้วกรอกเวลาเริ่ม-สิ้นสุดในวันนั้น — หรือใช้ปุ่มลัด 🌅 ลาครึ่งวันเช้า / 🌇 ลาครึ่งวันบ่าย ที่จะกรอกเวลาที่ถูกต้องให้อัตโนมัติ แนะนำให้ใช้ปุ่มลัดนี้เมื่อลาครึ่งวัน',
-             '<b>時間単位を選んだ場合</b>：日付を1つ選び、その日の開始時刻と終了時刻を入力します — または🌅午前半休／🌇午後半休のショートカットボタンを使うと正確な境界時刻が自動入力されます。半休を申請する際はこちらの使用を推奨します。'),
+        _faq('<b>By Hour</b>: pick one date, then a start time and end time within that day — or use the 🌅 Morning Half-Day / 🌇 Afternoon Half-Day shortcut buttons, which fill in the exact correct boundary times for you and are the recommended way to request a half day off. The 12:00–13:00 lunch break is never charged (10:00–15:00 = 4 hours).',
+             '<b>ถ้าเลือกลาเป็นชั่วโมง</b>: เลือกวันที่หนึ่งวัน แล้วกรอกเวลาเริ่ม-สิ้นสุดในวันนั้น — หรือใช้ปุ่มลัด 🌅 ลาครึ่งวันเช้า / 🌇 ลาครึ่งวันบ่าย ที่จะกรอกเวลาที่ถูกต้องให้อัตโนมัติ แนะนำให้ใช้ปุ่มลัดนี้เมื่อลาครึ่งวัน ช่วงพักเที่ยง 12:00–13:00 ไม่ถูกนับ (10:00–15:00 = 4 ชั่วโมง)',
+             '<b>時間単位を選んだ場合</b>：日付を1つ選び、その日の開始時刻と終了時刻を入力します — または🌅午前半休／🌇午後半休のショートカットボタンを使うと正確な境界時刻が自動入力されます。半休を申請する際はこちらの使用を推奨します。12:00〜13:00の昼休みは差し引かれません（10:00〜15:00＝4時間）。'),
         _faq('<b>Reason</b> is required for every type. Backdated leave is allowed — a "Backdated" badge appears automatically, but it still needs approval like any other request.',
              '<b>เหตุผล</b> ต้องกรอกทุกประเภท ระบุวันย้อนหลังได้ — จะขึ้นป้าย "ย้อนหลัง" อัตโนมัติ แต่ยังต้องรออนุมัติเหมือนคำขอปกติ',
              '<b>理由</b>はすべての種類で必須です。過去日付の休暇申請も可能です — 自動的に「過去日付」バッジが表示されますが、他の申請と同様に承認が必要です。'),
