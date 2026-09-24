@@ -1249,6 +1249,9 @@ let APP_SETTINGS_UPDATED_AT = null;
 let PERIOD_LOCKS = {};
 // Carry-forward annual leave — keyed by "YYYY_userId" → days (number)
 let LEAVE_CARRY_FORWARD = {};
+// 2026-09-24: { '<source year>': { at, by, byId } } -- server-owned run log of the year-end
+// carry-forward (md/accounting only; stripped for everyone else by GET /api/settings).
+let LEAVE_CARRY_FORWARD_RUNS = {};
 let LEAVE_OPENING_USED = {};
 // 50 ทวิ Accounting overrides — keyed by "YYYY_userId" → { grossOverride, pitOverride }
 let TAWI50_OVERRIDES = {};
@@ -2308,6 +2311,7 @@ async function loadSettingsFromBackend() {
     // Load payroll/allowance/tax settings — deep merge so missing keys fall back to defaults
     if (data.periodLocks)       PERIOD_LOCKS        = data.periodLocks;
     if (data.leaveCarryForward) LEAVE_CARRY_FORWARD = data.leaveCarryForward;
+    LEAVE_CARRY_FORWARD_RUNS = (data.leaveCarryForwardRuns && typeof data.leaveCarryForwardRuns === 'object' && !Array.isArray(data.leaveCarryForwardRuns)) ? data.leaveCarryForwardRuns : {};
     if (data.leaveOpeningUsed)  LEAVE_OPENING_USED  = data.leaveOpeningUsed;
     if (data.tawi50Overrides)   TAWI50_OVERRIDES    = data.tawi50Overrides;
     if (data.appSettings) {
@@ -2514,13 +2518,8 @@ async function unlockPeriod() {
 }
 
 // ===== LEAVE CARRY-FORWARD =====
-async function saveLeaveCarryForward() {
-  if (blockIfObserver()) return;
-  await apiFetch(`/api/settings`, {
-    method: 'PUT', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ leaveCarryForward: LEAVE_CARRY_FORWARD })
-  });
-}
+// 2026-09-24: saveLeaveCarryForward() (PUT of the whole map) removed -- the year-end run is now
+// server-side (POST /api/leave-carry-forward/run + the automatic January job in server.js).
 
 function getCarryForwardKey(year, userId)     { return `${year}_${userId}`; }
 function getCarryForwardCompKey(year, userId) { return `comp_${year}_${userId}`; }
@@ -2955,40 +2954,83 @@ function pendingLeaveMinutes(userId, type, year, exceptId) {
     .reduce((sum, l) => sum + leaveRecordMinutes(l), 0);
 }
 
-// Called from Settings page — snapshots remaining annual leave for all users into next year.
-// 2026-09-24 (owner): processes the PREVIOUS calendar year (bangkokYear() - 1 -> bangkokYear()) and
-// is pressed in January, after that year has fully ended. Run in December it missed anything that
-// only counts once its date arrives (e.g. a 26 Dec abroad travel-day credit), losing it for good.
+// Settings page button -- carries LAST year's remaining annual leave into this year.
+// 2026-09-24 (owner): the run is now server-side (runYearEndCarryForward in server.js) and happens
+// automatically in January; this button asks the server to run the same function, e.g. when the
+// server was never up in January or the feature went live mid-year. A year already processed
+// (automatically or by hand) is refused with code 'cf-already-processed' -- no second run.
+// Earlier history: pressed in January for bangkokYear() - 1 -> bangkokYear(); run in December it
+// missed anything that only counts once its date arrives (e.g. a 26 Dec abroad travel-day credit).
+function carryForwardRunByLabel(run) {
+  if (!run) return '';
+  if (run.by === 'auto') return currentLang === 'ja' ? '自動' : L('automatic', 'อัตโนมัติ');
+  return String(run.by || '');
+}
+function carryForwardRunDateLabel(run) {
+  const ms = run ? Date.parse(run.at) : NaN;
+  if (!Number.isFinite(ms)) return '';
+  const b = ymdInTimeZone(ms, DEFAULT_TZ); // Bangkok calendar date of the run
+  return fmtDate(new Date(b.y, b.m, b.day));
+}
+// "The system already carried forward 2026 leave on 1 Jan 2027 (automatic)"
+function carryForwardAlreadyDoneText(year, run) {
+  const when = carryForwardRunDateLabel(run);
+  const by = carryForwardRunByLabel(run);
+  if (currentLang === 'ja') return `${year}年の有給休暇はすでに${when}に繰り越し済みです（${by}）`;
+  return L(`The system already carried forward ${year} leave on ${when} (${by})`,
+    `ระบบยกยอดวันลาของปี ${year} มาให้แล้วเมื่อ ${when} (${by})`);
+}
+function carryForwardStatusHtml(year) {
+  const run = LEAVE_CARRY_FORWARD_RUNS[String(year)];
+  if (run) return `✅ ${escapeHtml(carryForwardAlreadyDoneText(year, run))}`;
+  // Not recorded. In January the server job is about to run (at start-up and hourly); later in
+  // the year it will not run for this year any more -- say so, and when the next automatic run is.
+  if (bangkokDateStr().slice(5, 7) === '01') {
+    return currentLang === 'ja'
+      ? `⏳ ${year}年 → ${year + 1}年の繰越は今月中に自動で実行されます（未実行）`
+      : L(`⏳ ${year} → ${year + 1} has not run yet — it will run automatically this month`,
+          `⏳ ยังไม่ได้ยกยอด ${year} → ${year + 1} — ระบบจะทำให้อัตโนมัติภายในเดือนนี้`);
+  }
+  return currentLang === 'ja'
+    ? `ℹ️ ${year}年の繰越の実行記録はありません（この版より前の実行は記録されていません）。自動実行は毎年1月のみで、次回は${year + 2}年1月（${year + 1}年分）です。`
+    : L(`ℹ️ No carry-forward of ${year} is on record (runs before this version were not logged). The automatic run happens only in January — next: January ${year + 2} (for ${year + 1}).`,
+        `ℹ️ ไม่มีบันทึกการยกยอดของปี ${year} (การยกยอดก่อนเวอร์ชันนี้ไม่ได้บันทึกไว้) ระบบยกยอดอัตโนมัติเฉพาะเดือนมกราคม — ครั้งถัดไป: มกราคม ${year + 2} (ของปี ${year + 1})`);
+}
 async function processYearEndCarryForward(forYear) {
   if (blockIfObserver()) return;
-  // `??` not `||`: a configured 0 means "no carry-forward". Dual-sync with server.js
-  // refreshSnapshottedCarryForward.
+  const thisYear = forYear || (bangkokYear() - 1);
+  const done = LEAVE_CARRY_FORWARD_RUNS[String(thisYear)];
+  if (done) { showToast(`⚠️ ${carryForwardAlreadyDoneText(thisYear, done)}`, 'warning'); return; }
+  // `??` not `||`: a configured 0 means "no carry-forward" (server uses the same rule).
   const rawMax = Number(APP_SETTINGS.leave.carryForwardMax ?? 5);
   const maxCF = Math.max(0, Math.min(60, Number.isFinite(rawMax) ? rawMax : 5));
-  const thisYear = forYear || (bangkokYear() - 1);
-  const endOfYear   = `${thisYear}-12-31`;
-  // 2026-09-23 (Opus audit M-2): one click rewrote every employee's next-year carry-forward with
-  // no confirmation. Later approvals/cancellations now refresh the snapshot server-side, but the
-  // run itself still overwrites whatever is there.
+  // 2026-09-23 (Opus audit M-2): one click rewrites every employee's next-year carry-forward, so
+  // it still asks first.
   const ok = confirm(currentLang === 'ja'
     ? `${thisYear}年（終了済み）の残り有給休暇を${thisYear + 1}年へ繰り越します（全従業員、最大${maxCF}日。失効した繰越分は除く）。既存の${thisYear + 1}年繰越値は上書きされます。続行しますか？`
     : L(`Carry ${thisYear}'s remaining annual leave (the year that has just ended) into ${thisYear + 1} for every employee (max ${maxCF} days, expired carry-forward excluded)? Existing ${thisYear + 1} carry-forward values will be overwritten.`,
         `ยกวันลาพักร้อนคงเหลือของปี ${thisYear} (ปีที่เพิ่งสิ้นสุด) ไปปี ${thisYear + 1} ให้พนักงานทุกคน (สูงสุด ${maxCF} วัน ไม่รวมวันยกยอดที่หมดอายุแล้ว)? ยอดยกไปปี ${thisYear + 1} ที่มีอยู่จะถูกเขียนทับ`));
   if (!ok) return;
-
-  DATA_USERS.filter(u => isEmployeeRecord(u) && u.active).forEach(u => {
-    // Use the same remaining pool as leave cards (quota + CF + holiday-work comp − approved
-    // − opening go-live used − late deduct − expired carry-forward). Skipping openingUsed here
-    // would over-carry after Accounting sets opening balances at go-live. Entitlement is as of
-    // 31 Dec of that year; probation employees (quota 0) still carry their earned days.
-    const bal = computeLeaveBalance(u, 'annual', annualLeaveEntitlementDays(u, endOfYear), thisYear);
-    const combinedLeftover = Math.max(0, bal.remMin / 480);
-    const cfMerged = Math.min(combinedLeftover, maxCF);
-    LEAVE_CARRY_FORWARD[getCarryForwardKey(thisYear + 1, u.id)]     = cfMerged;
-    LEAVE_CARRY_FORWARD[getCarryForwardCompKey(thisYear + 1, u.id)] = 0;
-  });
   try {
-    await saveLeaveCarryForward();
+    const res = await apiFetch('/api/leave-carry-forward/run', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ year: thisYear }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) {
+      if (data.code === 'cf-already-processed') {
+        if (data.run) LEAVE_CARRY_FORWARD_RUNS[String(thisYear)] = data.run;
+        showToast(`⚠️ ${carryForwardAlreadyDoneText(thisYear, data.run)}`, 'warning');
+        await loadSettingsFromBackend();
+        renderSettingsPage();
+        return;
+      }
+      if (data.code === 'cf-bad-year') {
+        throw new Error(currentLang === 'ja' ? '繰り越せるのは前年のみです' : L('Only last year can be carried forward', 'ยกยอดได้เฉพาะปีที่แล้วเท่านั้น'));
+      }
+      throw new Error(data.message || ('HTTP ' + res.status));
+    }
+    await loadSettingsFromBackend();
     showToast(currentLang === 'ja' ? `✅ ${thisYear + 1}年への繰越処理が完了しました` : L(`✅ Carry-forward processed for ${thisYear + 1}`, `✅ บันทึกยอดยกไปปี ${thisYear + 1} เรียบร้อย`), 'success');
     renderSettingsPage();
   } catch(e) {
@@ -3652,7 +3694,7 @@ function renderSettingsPage(_skipRefresh) {
         field(L('Business Leave (days/year)','วันลากิจ (วัน/ปี)'), inp('set-business-leave-days', businessLeaveEntitlementDays(), 'number', 'min="0" max="365" step="1"'))
       )}
       <div style="font-size:12px;color:#64748b;margin:4px 0 12px">${L('Same quota for every employee. Available immediately (no tenure lock). Calendar year Jan–Dec; unused days do not carry forward.', 'โควตาเดียวกันทุกคน ใช้ได้ทันที (ไม่ล็อกตามอายุงาน) นับปีปฏิทิน ม.ค.–ธ.ค. วันที่เหลือไม่ยกยอด')}</div>
-      <div style="font-size:12px;color:#64748b;margin:12px 0">${L('This cap only applies when someone clicks "Process Carry-Forward" in the Year-End Carry-Forward section below — days beyond the cap are forfeited, not queued for later.', 'เพดานนี้จะถูกใช้ก็ต่อเมื่อมีคนกด "ประมวลผลยกยอด" ในส่วน Year-End Carry-Forward ด้านล่าง — วันที่เกินเพดานจะถูกตัดทิ้งเลย ไม่ได้เก็บไว้รอ')}</div>
+      <div style="font-size:12px;color:#64748b;margin:12px 0">${L('This cap applies when the year-end carry-forward runs (automatically in January, see Year-End Carry-Forward below) — days beyond the cap are forfeited, not queued for later.', 'เพดานนี้ใช้ตอนระบบยกยอดสิ้นปี (อัตโนมัติในเดือนมกราคม ดูส่วน Year-End Carry-Forward ด้านล่าง) — วันที่เกินเพดานจะถูกตัดทิ้งเลย ไม่ได้เก็บไว้รอ')}</div>
       ${row2(
         field(L('Max Carry-Forward Days','วันลาสูงสุดที่ยกยอดได้ (วัน)'), inp('set-cf-max', s.leave.carryForwardMax, 'number', 'min="0"')),
         field(L('Expiry Month','เดือนที่ยอดยกมาหมดอายุ'), `<select id="set-cf-expiry-month" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;background:var(--bg-card);color:var(--text);box-sizing:border-box">${[L('January','มกราคม'),L('February','กุมภาพันธ์'),L('March','มีนาคม'),L('April','เมษายน'),L('May','พฤษภาคม'),L('June','มิถุนายน'),L('July','กรกฎาคม'),L('August','สิงหาคม'),L('September','กันยายน'),L('October','ตุลาคม'),L('November','พฤศจิกายน'),L('December','ธันวาคม')].map((m,i)=>`<option value="${i+1}" ${s.leave.carryForwardExpiryMonth===i+1?'selected':''}>${m}</option>`).join('')}</select>`)
@@ -3672,8 +3714,9 @@ function renderSettingsPage(_skipRefresh) {
 
     ${adminSection('↩️', L('Year-End Carry-Forward', 'ยอดวันลายกไปปีหน้า'), `
       <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">
-        ${L('Click in January, after the year has ended, to snapshot each employee’s remaining annual leave for last year (up to max, expired carry-forward excluded) and carry it into this year.','กดในเดือนมกราคม หลังสิ้นปีแล้ว เพื่อนำยอดวันลาพักร้อนคงเหลือของปีที่แล้ว (ไม่เกินสูงสุด ไม่รวมวันยกยอดที่หมดอายุ) ของพนักงานทุกคนยกมาปีนี้')}
+        ${L('Runs automatically in January: each employee’s remaining annual leave for last year (up to max, expired carry-forward excluded) is carried into this year. Use the button only if it has not run (e.g. the server was off all January).','ระบบทำให้อัตโนมัติในเดือนมกราคม: ยอดวันลาพักร้อนคงเหลือของปีที่แล้ว (ไม่เกินสูงสุด ไม่รวมวันยกยอดที่หมดอายุ) ของพนักงานทุกคนจะถูกยกมาปีนี้ ใช้ปุ่มนี้เฉพาะเมื่อระบบยังไม่ได้ทำ (เช่น เซิร์ฟเวอร์ปิดตลอดเดือนมกราคม)')}
       </p>
+      <div style="font-size:13px;margin-bottom:12px">${carryForwardStatusHtml(bangkokYear() - 1)}</div>
       <div style="display:flex;gap:10px;flex-wrap:wrap">
         <button class="btn btn-primary btn-sm" onclick="processYearEndCarryForward(${bangkokYear() - 1})">
           ↩️ ${currentLang === 'ja' ? `${bangkokYear()-1}年 → ${bangkokYear()}年 繰越処理` : L(`Process ${bangkokYear()-1} → ${bangkokYear()}`, `ประมวลผล ${bangkokYear()-1} → ${bangkokYear()}`)}
@@ -4146,10 +4189,11 @@ function computeLateDeductMinutes(userId, year) {
     const dw = new Date(dateStr + 'T12:00:00').getDay();
     if (dw === 0 || dw === 6) return;
     if (isPublicHoliday(dateStr) || isCompanyTripDay(dateStr)) return;
-    // Skip days covered by approved annual/sick/business leave
+    // Skip days covered by approved annual/sick/business leave, or an approved Abroad trip
+    // (2026-09-24 owner: an Abroad day is never late). DUAL-SYNC: server annualLateDeductMinutes.
     const onLeave = DATA_LEAVES.some(l =>
       l.userId === userId && l.status === 'approved' &&
-      ['annual','sick','business'].includes(l.type) &&
+      ['annual','sick','business','abroad'].includes(l.type) &&
       dateStr >= l.dateFrom && dateStr <= (l.dateTo || l.dateFrom)
     );
     if (onLeave) return;
@@ -4555,7 +4599,6 @@ let currentGPS = null;
 let _serverClock = null;
 let _clockSyncTimer = null;
 let _clockSyncPromise = null;
-let _clockSyncQueuedQuery = null;
 let _gpsClockTimer = null;
 let editingEmployeeId = null;
 let selectedPeriodIndex = 0;
@@ -4899,7 +4942,10 @@ function generatePeriodDays(start, end, isCurrent, userId) {
     // 2026-09-23: after the overlay, so a review counts only for the effective (corrected) web
     // check-out it was made on. Dual-sync twin in server.js.
     const checkOutReview = uid ? checkoutReviewDecisionFor(DATA_CHECKOUT_REVIEWS[attKey(uid, dateStr)], checkOut, checkOutSource) : null;
-    days.push({ date: dateStr, dayName: dayNamesEn[d.getDay()], isWeekend, isPubHoliday, isFuture, isToday, status, checkIn, checkOut, earlyIn, lateOut, upcountry, longDistance, longDistanceKm, longDistanceAllowance, checkInSource, checkOutSource, earlyApproved, lateApproved, checkInGPS, checkOutGPS, holidayName, firstScanAfterCutoff, partialLeave, checkOutReview, rawCheckOut });
+    // 2026-09-24 (owner): scan instants + GPS zone, for the display-only local time on Abroad days.
+    const _abroadRec = (status === 'abroad' && uid) ? attendanceLog[attKey(uid, dateStr)] : null;
+    const abroadScan = _abroadRec ? { inAt: _abroadRec.checkInAt || null, inTz: _abroadRec.checkInGpsTz || null, outAt: _abroadRec.checkOutAt || null, outTz: _abroadRec.checkOutGpsTz || null } : null;
+    days.push({ date: dateStr, dayName: dayNamesEn[d.getDay()], isWeekend, isPubHoliday, isFuture, isToday, status, checkIn, checkOut, earlyIn, lateOut, upcountry, longDistance, longDistanceKm, longDistanceAllowance, checkInSource, checkOutSource, earlyApproved, lateApproved, checkInGPS, checkOutGPS, holidayName, firstScanAfterCutoff, partialLeave, checkOutReview, rawCheckOut, abroadScan });
     d.setDate(d.getDate() + 1);
   }
   return days;
@@ -5055,6 +5101,7 @@ async function loadAttendanceFromBackend() {
         rec.checkOut = timePart;
         rec.checkOutSource = source;
         if (gps) rec.checkOutGPS = gps;
+        stampAbroadScan(rec, 'out', raw, ev.gpsTz);
       } else if (!rec.checkIn && timePart >= CHECKIN_CUTOFF) {
         // No morning check-in on record and it's already past the cutoff — this scan can't be
         // a real arrival time, so record it as check-out instead and leave check-in blank.
@@ -5068,11 +5115,13 @@ async function loadAttendanceFromBackend() {
           rec.checkOut = timePart;
           rec.checkOutSource = source;
           if (gps) rec.checkOutGPS = gps;
+          stampAbroadScan(rec, 'out', raw, ev.gpsTz);
         }
       } else if (!rec.checkIn) {
         rec.checkIn = timePart;
         rec.checkInSource = source;
         if (gps) rec.checkInGPS = gps;
+        stampAbroadScan(rec, 'in', raw, ev.gpsTz);
         // 2026-08-09 (2nd-pass audit finding 4.2 follow-up): hardcoded '08:30' even though this is
         // the site that decides 'late' vs 'present' in the first place -- every downstream late-
         // deduction/display site already reads the configurable Settings value, so this was the
@@ -5090,6 +5139,7 @@ async function loadAttendanceFromBackend() {
           rec.checkOut = timePart;
           rec.checkOutSource = source;
           if (gps) rec.checkOutGPS = gps;
+          stampAbroadScan(rec, 'out', raw, ev.gpsTz);
         }
         // 2026-09-23: latest scan after check-in, morning ones included. Not a check-out (see
         // above), only scanWindowError's fallback end limit when no check-out exists -- e.g. a
@@ -5641,8 +5691,8 @@ function restoreTodayLog() {
   // ถ้า record มีแต่ไม่มี scans[] (ข้อมูลเก่าก่อน multi-scan) → สร้าง scans จาก checkIn/checkOut
   if (rec && !rec.scans) {
     rec.scans = [];
-    if (rec.checkIn)  rec.scans.push({ time: rec.checkIn,  type: 'in',  source: rec.checkInSource  || 'web', gps: rec.checkInGPS  || '—' });
-    if (rec.checkOut) rec.scans.push({ time: rec.checkOut, type: 'out', source: rec.checkOutSource || 'web', gps: rec.checkOutGPS || '—' });
+    if (rec.checkIn)  rec.scans.push({ time: rec.checkIn,  type: 'in',  source: rec.checkInSource  || 'web', gps: rec.checkInGPS  || '—', at: rec.checkInAt || null,  gpsTz: rec.checkInGpsTz || null });
+    if (rec.checkOut) rec.scans.push({ time: rec.checkOut, type: 'out', source: rec.checkOutSource || 'web', gps: rec.checkOutGPS || '—', at: rec.checkOutAt || null, gpsTz: rec.checkOutGpsTz || null });
   }
 
   renderTodayLog(rec?.scans || []);
@@ -5972,18 +6022,13 @@ function scanYmd() {
 // hint's "local to the check-in country" suffix removed -- GET /api/now always returns Bangkok
 // since the GPS-timezone feature was dropped (2026-09-23), so the label was always empty.
 async function syncServerClock() {
-  const lat = currentGPS && currentGPS.lat;
-  const lng = currentGPS && currentGPS.lng;
-  const q = (lat != null && lng != null)
-    ? `?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`
-    : '';
-  if (_clockSyncPromise) {
-    _clockSyncQueuedQuery = q;
-    return _clockSyncPromise;
-  }
+  // 2026-09-24: GPS lat/lng are no longer sent in the /api/now URL -- the server ignores them
+  // (the clock is always the NAS instant in Bangkok time), and coordinates do not belong in a
+  // query string. GPS still goes in the scan POST body.
+  if (_clockSyncPromise) return _clockSyncPromise;
   _clockSyncPromise = (async () => {
     try {
-      const res = await apiFetch('/api/now' + q);
+      const res = await apiFetch('/api/now');
       if (!res.ok) return;
       const data = await res.json();
       const epoch = Number(data.epoch);
@@ -5998,10 +6043,7 @@ async function syncServerClock() {
     } catch (e) {
       /* keep previous clock */
     } finally {
-      const queued = _clockSyncQueuedQuery;
-      _clockSyncQueuedQuery = null;
       _clockSyncPromise = null;
-      if (queued !== null && queued !== q) await syncServerClock();
     }
   })();
   return _clockSyncPromise;
@@ -6862,7 +6904,8 @@ async function doScan(source) {
     const _stdH = APP_SETTINGS.workSchedule?.standardStartHour ?? 8;
     const _stdM = APP_SETTINGS.workSchedule?.standardStartMinute ?? 30;
     const overTime = bk.h > _stdH || (bk.h === _stdH && bk.min > _stdM);
-    const isLate = overTime && effectiveRole() !== 'driver';
+    // 2026-09-24 (owner): an approved Abroad day is never late (local time differs from Bangkok).
+    const isLate = overTime && effectiveRole() !== 'driver' && !isApprovedAbroadDate(dateStr, currentUser.id);
     attendanceLog[key] = {
       checkIn: timeStr, checkOut: null,
       checkInGPS: gpsInfo, checkOutGPS: null,
@@ -6911,6 +6954,17 @@ async function doScan(source) {
       if (isFirst && !isAfterCutoff) attendanceLog[key].checkIn = serverTime;
       else if (attendanceLog[key].checkOut === timeStr) attendanceLog[key].checkOut = serverTime;
       if (data.timezone) attendanceLog[key].timezone = data.timezone;
+      // 2026-09-24: display-only local time at the scan location (Abroad days), from the saved instant.
+      const scanRec = attendanceLog[key];
+      const appended = (isFirst && !isAfterCutoff) || !(!isPreDawn && !isAfterCutoff && timeStr < '12:00');
+      if (isFirst && !isAfterCutoff) stampAbroadScan(scanRec, 'in', stamped, data.gpsTz);
+      else if (scanRec.checkOut === serverTime) stampAbroadScan(scanRec, 'out', stamped, data.gpsTz);
+      if (appended && Array.isArray(scanRec.scans) && scanRec.scans.length) {
+        const last = scanRec.scans[scanRec.scans.length - 1];
+        last.at = stamped;
+        last.gpsTz = data.gpsTz || null;
+        renderTodayLog(scanRec.scans);
+      }
     }
   } catch (e) {
     if (prevRec) attendanceLog[key] = prevRec;
@@ -7057,6 +7111,14 @@ function buildLogItem(e) {
   // be interpolated straight into innerHTML above. Set as a text node instead of escaping into
   // the template, so it's inherently immune rather than relying on getting the escaping right.
   el.querySelector('.log-gps').textContent = '📍 ' + (e.gps || '—');
+  // 2026-09-24 (owner): local time at the scan location, only on an approved Abroad day.
+  const localTxt = (currentUser && isApprovedAbroadDate(businessDateStr(), currentUser.id)) ? abroadLocalTimeText(e.at, e.gpsTz, null) : '';
+  if (localTxt) {
+    const lt = document.createElement('div');
+    lt.style.cssText = 'font-size:11px;color:#0369a1;margin-top:2px';
+    lt.textContent = '· ' + localTxt;
+    el.querySelector('.log-info').appendChild(lt);
+  }
   return el;
 }
 
@@ -7170,6 +7232,13 @@ async function setCheckoutReview(userId, dateStr, decision, checkOut) {
     const hasLateOut = DATA_LEAVES.some(l => l.userId === uid && l.type === 'late-out' && l.dateFrom === dateStr && !isVoidLeaveStatus(l.status));
     if (hasLateOut && !confirm(L('This employee already has a 🌙 Late Night request for this day. Mark the check-out as not allowed anyway? The 🌙 will not be paid while it stays not allowed.',
       'พนักงานมีคำขอ 🌙 แจ้งกลับดึกของวันนี้อยู่แล้ว ยืนยันไม่อนุญาตเวลาออก? 🌙 จะไม่ถูกจ่ายตราบที่ยังไม่อนุญาต'))) return;
+  } else if (decision === null) {
+    // 2026-09-24 (owner): undoing an ALLOW leaves the check-out unreviewed, which makes an existing
+    // 🌙 Late Night for that day unpayable again -- warn exactly like the Deny path above.
+    const prev = DATA_CHECKOUT_REVIEWS[attKey(uid, dateStr)];
+    const hasLateOut = DATA_LEAVES.some(l => l.userId === uid && l.type === 'late-out' && l.dateFrom === dateStr && !isVoidLeaveStatus(l.status));
+    if (prev && prev.decision === 'allow' && hasLateOut && !confirm(L('This employee already has a 🌙 Late Night request for this day. Undo the allowed check-out anyway? The 🌙 will not be paid until the check-out is allowed again.',
+      'พนักงานมีคำขอ 🌙 แจ้งกลับดึกของวันนี้อยู่แล้ว ยืนยันยกเลิกการอนุญาตเวลาออก? 🌙 จะไม่ถูกจ่ายจนกว่าจะอนุญาตเวลาออกอีกครั้ง'))) return;
   }
   try {
     const res = await apiFetch('/api/checkout-reviews', {
@@ -7696,13 +7765,13 @@ function renderAttendanceTable() {
       <td>${row.partialLeave && row.partialLeave.coverage === 'am' && !row.checkIn
         ? buildPartialLeaveChip(row.partialLeave)
         : (row.checkIn
-          ? `<span class="time-chip in">⬆️ ${escapeHtml(row.checkIn)}</span>${earlyWarnBadge}${inSrc}${gpsInBtn}`
+          ? `<span class="time-chip in">⬆️ ${escapeHtml(row.checkIn)}</span>${earlyWarnBadge}${inSrc}${abroadLocalTimeHtml(row, 'in')}${gpsInBtn}`
           : (row.checkOut ? `<span style="color:#f59e0b;font-size:11px">⚠️ ${L('No check-in', 'ไม่มีข้อมูลเข้า')}</span>` : '<span style="color:#cbd5e1">—</span>'))
       }</td>
       <td>${row.partialLeave && row.partialLeave.coverage === 'pm' && !row.checkOut
         ? buildPartialLeaveChip(row.partialLeave)
         : (row.checkOut
-          ? `<span class="time-chip out">⬇️ ${escapeHtml(row.checkOut)}</span>${outSrc}${gpsOutBtn}${buildReturnSubline(row)}${checkoutReviewHtml}`
+          ? `<span class="time-chip out">⬇️ ${escapeHtml(row.checkOut)}</span>${outSrc}${abroadLocalTimeHtml(row, 'out')}${gpsOutBtn}${buildReturnSubline(row)}${checkoutReviewHtml}`
           : (row.checkIn ? `<span style="color:#f59e0b;font-size:11px">⚠️ ${L('No check-out', 'ไม่มีข้อมูลออก')}</span>` : '<span style="color:#cbd5e1">—</span>'))
       }</td>
       <td class="col-hide-mobile"${hasAnyAllowanceTarget ? '' : ' style="display:none"'}>${allowIconsHtml}</td>
@@ -7736,7 +7805,7 @@ function renderAttendanceTable() {
             ${row.partialLeave && row.partialLeave.coverage === 'am' && !row.checkIn
               ? buildPartialLeaveChip(row.partialLeave)
               : (row.checkIn
-                ? `<span class="time-chip in">⬆️ ${escapeHtml(row.checkIn)}</span>${earlyWarnBadge}${inSrc}${gpsInBtn}`
+                ? `<span class="time-chip in">⬆️ ${escapeHtml(row.checkIn)}</span>${earlyWarnBadge}${inSrc}${abroadLocalTimeHtml(row, 'in')}${gpsInBtn}`
                 : '<span style="color:#cbd5e1;font-size:12px">—</span>')}
           </div>
           <div class="att-card-time-item">
@@ -7744,7 +7813,7 @@ function renderAttendanceTable() {
             ${row.partialLeave && row.partialLeave.coverage === 'pm' && !row.checkOut
               ? buildPartialLeaveChip(row.partialLeave)
               : (row.checkOut
-                ? `<span class="time-chip out">⬇️ ${escapeHtml(row.checkOut)}</span>${outSrc}${gpsOutBtn}${buildReturnSubline(row)}${checkoutReviewHtml}`
+                ? `<span class="time-chip out">⬇️ ${escapeHtml(row.checkOut)}</span>${outSrc}${abroadLocalTimeHtml(row, 'out')}${gpsOutBtn}${buildReturnSubline(row)}${checkoutReviewHtml}`
                 : '<span style="color:#cbd5e1;font-size:12px">—</span>')}
           </div>
         </div>
@@ -16120,6 +16189,9 @@ function showAttendanceDetail(date) {
     else document.getElementById('att-detail-gps-in').innerHTML = '';
     if (showGpsOut) renderGpsEntry('att-detail-gps-out', realRecord.checkOutGPS, L('⬇️ Out: ', '⬇️ ออก: '));
     else document.getElementById('att-detail-gps-out').innerHTML = '';
+    // 2026-09-24 (owner): local time at the scan location on an approved Abroad day.
+    if (showGpsIn)  document.getElementById('att-detail-gps-in').insertAdjacentHTML('beforeend', abroadLocalTimeHtml(row, 'in'));
+    if (showGpsOut) document.getElementById('att-detail-gps-out').insertAdjacentHTML('beforeend', abroadLocalTimeHtml(row, 'out'));
     gpsSection.style.display = '';
   } else {
     gpsSection.style.display = 'none';
@@ -16199,7 +16271,8 @@ function getCheckinStatusLists() {
   activeUsers.forEach(u => {
     const rec = attendanceLog[attKey(u.id, todayStr)];
     if (rec && rec.checkIn) {
-      checkedIn.push({ user: u, time: rec.checkIn, checkOut: rec.checkOut || null, isLate: rec.status === 'late' });
+      // 2026-09-24 (owner): an approved Abroad day is never shown as late.
+      checkedIn.push({ user: u, time: rec.checkIn, checkOut: rec.checkOut || null, isLate: rec.status === 'late' && !isApprovedAbroadDate(todayStr, u.id) });
     } else {
       notChecked.push(u);
     }
@@ -16347,6 +16420,39 @@ function isApprovedAbroadDate(dateStr, userId) {
   return DATA_LEAVES.some(l =>
     l.userId === uid && l.type === 'abroad' && l.status === 'approved' &&
     l.dateFrom <= dateStr && (l.dateTo || l.dateFrom) >= dateStr);
+}
+// 2026-09-24 (owner): on an approved Abroad day the attendance views also show the local time at
+// the scan location. DISPLAY-ONLY: event_time stays the NAS instant in Bangkok time (SECURITY FIX
+// 2026-09-23 HIGH-1); `gpsTz` is the zone the server derived from the scan's GPS (geo-tz).
+function stampAbroadScan(rec, side, eventTimeIso, gpsTz) {
+  if (!rec) return;
+  const tz = (typeof gpsTz === 'string' && isSafeTimeZone(gpsTz)) ? gpsTz : null;
+  const at = typeof eventTimeIso === 'string' && eventTimeIso ? eventTimeIso : null;
+  if (side === 'in') { rec.checkInAt = at; rec.checkInGpsTz = tz; }
+  else { rec.checkOutAt = at; rec.checkOutGpsTz = tz; }
+}
+// "11:00 Tokyo time" for a scan instant in `gpsTz`; '' when there is nothing useful to show
+// (no zone, Bangkok itself, or the row now shows a different, time-corrected value).
+function abroadLocalTimeText(eventTimeIso, gpsTz, shownTime) {
+  if (!eventTimeIso || !gpsTz || gpsTz === DEFAULT_TZ || !isSafeTimeZone(gpsTz)) return '';
+  if (shownTime && String(eventTimeIso).substring(11, 16) !== shownTime) return '';
+  const ms = Date.parse(eventTimeIso);
+  if (!Number.isFinite(ms)) return '';
+  let hhmm;
+  try {
+    hhmm = new Intl.DateTimeFormat('en-GB', { timeZone: gpsTz, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(ms);
+  } catch (e) {
+    return '';
+  }
+  const city = gpsTz.split('/').pop().replace(/_/g, ' ');
+  return currentLang === 'ja' ? `現地時間 ${hhmm}（${city}）` : L(`${hhmm} ${city} time`, `${hhmm} เวลาท้องถิ่น ${city}`);
+}
+// Only rows whose status is 'abroad' (= covered by an APPROVED Abroad request for that user).
+function abroadLocalTimeHtml(row, side) {
+  if (!row || row.status !== 'abroad' || !row.abroadScan) return '';
+  const a = row.abroadScan;
+  const txt = side === 'in' ? abroadLocalTimeText(a.inAt, a.inTz, row.checkIn) : abroadLocalTimeText(a.outAt, a.outTz, row.checkOut);
+  return txt ? `<div class="abroad-local-time" style="font-size:11px;color:#0369a1;margin-top:2px;white-space:nowrap">· ${escapeHtml(txt)}</div>` : '';
 }
 function blockIfAbroadDay(dateStr, type, silent = false) {
   if (!ABROAD_NO_CLAIM_TYPES.has(type)) return false;
@@ -17535,8 +17641,9 @@ function processLiveScanEvent(ev) {
       rec.checkOut = timePart;
       rec.checkOutSource = source;
       if (gps) rec.checkOutGPS = gps;
+      stampAbroadScan(rec, 'out', raw, ev.gpsTz);
     }
-    pushScan({ time: timePart, type: 'out', source, gps: gps || '—' });
+    pushScan({ time: timePart, type: 'out', source, gps: gps || '—', at: raw, gpsTz: ev.gpsTz || null });
   } else if (!rec.checkIn && timePart >= CHECKIN_CUTOFF) {
     // No morning check-in on record and it's already past the cutoff — this scan can't be
     // a real arrival time, so record it as check-out instead and leave check-in blank.
@@ -17547,12 +17654,14 @@ function processLiveScanEvent(ev) {
       rec.checkOut = timePart;
       rec.checkOutSource = source;
       if (gps) rec.checkOutGPS = gps;
+      stampAbroadScan(rec, 'out', raw, ev.gpsTz);
     }
-    pushScan({ time: timePart, type: 'out', source, gps: gps || '—' });
+    pushScan({ time: timePart, type: 'out', source, gps: gps || '—', at: raw, gpsTz: ev.gpsTz || null });
   } else if (!rec.checkIn) {
     rec.checkIn = timePart;
     rec.checkInSource = source;
     if (gps) rec.checkInGPS = gps;
+    stampAbroadScan(rec, 'in', raw, ev.gpsTz);
     // 2026-08-09 (2nd-pass audit finding 4.2 follow-up): same configurable-standard-start fix as
     // loadAttendanceFromBackend()'s copy above; this site was ALSO missing that sibling's
     // `role !== 'driver'` exemption (drivers are never marked 'late' anywhere else in the app --
@@ -17560,7 +17669,7 @@ function processLiveScanEvent(ev) {
     const _ws6 = APP_SETTINGS.workSchedule;
     const _stdStr6 = `${String(_ws6?.standardStartHour ?? 8).padStart(2,'0')}:${String(_ws6?.standardStartMinute ?? 30).padStart(2,'0')}`;
     rec.status = (user.role !== 'driver' && timePart > _stdStr6) ? 'late' : 'present';
-    pushScan({ time: timePart, type: 'in', source, gps: gps || '—' });
+    pushScan({ time: timePart, type: 'in', source, gps: gps || '—', at: raw, gpsTz: ev.gpsTz || null });
   } else {
     // See loadAttendanceFromBackend() for why a morning scan (< 12:00) is never accepted as check-out.
     const acceptOut = timePart >= '12:00';
@@ -17568,9 +17677,10 @@ function processLiveScanEvent(ev) {
       rec.checkOut = timePart;
       rec.checkOutSource = source;
       if (gps) rec.checkOutGPS = gps;
+      stampAbroadScan(rec, 'out', raw, ev.gpsTz);
     }
     if (acceptOut) {
-      pushScan({ time: timePart, type: 'out', source, gps: gps || '—' });
+      pushScan({ time: timePart, type: 'out', source, gps: gps || '—', at: raw, gpsTz: ev.gpsTz || null });
     }
     // Same lastScan as loadAttendanceFromBackend() (scanWindowError's fallback end limit).
     if (!rec.lastScan || timePart > rec.lastScan) rec.lastScan = timePart;
@@ -18620,9 +18730,9 @@ function _faqRulesItems() {
       ) },
     { icon: '🏖️', roles: ['md','accounting','manager','user','driver','marketing'], q: _faq('How does Annual Leave carry-forward work?', 'วันลาพักร้อนยกยอดปีถัดไปยังไง?', '年次有給休暇の繰越はどう機能しますか？'),
       a: _faq(
-        `Unused Annual Leave carries over into next year — up to ${S.leave.carryForwardMax} days max — but only when Accounting/MD clicks "Process Carry-Forward" in Settings in January, after the year has ended; it doesn't happen automatically. ${S.leave.carryForwardExpiryEnabled !== false ? `Carried-over days are used first. Any carried-over days still unused on ${S.leave.carryForwardExpiryDay}/${S.leave.carryForwardExpiryMonth} are forfeited, with a reminder ${S.leave.carryForwardNotifyDays} days before that.` : 'Carried-over days do not expire.'}`,
-        `วันลาพักร้อนที่เหลือยกไปปีถัดไปได้สูงสุด ${S.leave.carryForwardMax} วัน แต่ต้องให้ Accounting/MD กด "ประมวลผลยกยอด" ในหน้าตั้งค่าในเดือนมกราคม หลังสิ้นปีแล้ว ไม่ได้ทำอัตโนมัติ ${S.leave.carryForwardExpiryEnabled !== false ? `วันที่ยกยอดจะถูกใช้ก่อน ส่วนที่ยังใช้ไม่หมดภายในวันที่ ${S.leave.carryForwardExpiryDay}/${S.leave.carryForwardExpiryMonth} จะถูกตัดทิ้ง และจะมีการแจ้งเตือนล่วงหน้า ${S.leave.carryForwardNotifyDays} วัน` : 'วันที่ยกยอดไม่มีวันหมดอายุ'}`,
-        `未消化の年次有給休暇は最大${S.leave.carryForwardMax}日まで翌年に繰り越せますが、年が明けた1月にAccounting/MDが設定画面で「繰越処理」をクリックした場合のみ有効で、自動的には行われません。${S.leave.carryForwardExpiryEnabled !== false ? `繰り越した日数から先に消化されます。${S.leave.carryForwardExpiryMonth}月${S.leave.carryForwardExpiryDay}日までに使い切れなかった繰越分は失効し、その${S.leave.carryForwardNotifyDays}日前に通知されます。` : '繰り越した日数に有効期限はありません。'}`
+        `Unused Annual Leave carries over into next year — up to ${S.leave.carryForwardMax} days max. The system does this automatically in January, after the year has ended; nobody needs to press anything. ${S.leave.carryForwardExpiryEnabled !== false ? `Carried-over days are used first. Any carried-over days still unused on ${S.leave.carryForwardExpiryDay}/${S.leave.carryForwardExpiryMonth} are forfeited, with a reminder ${S.leave.carryForwardNotifyDays} days before that.` : 'Carried-over days do not expire.'}`,
+        `วันลาพักร้อนที่เหลือยกไปปีถัดไปได้สูงสุด ${S.leave.carryForwardMax} วัน ระบบยกยอดให้อัตโนมัติในเดือนมกราคม หลังสิ้นปีแล้ว ไม่ต้องกดอะไร ${S.leave.carryForwardExpiryEnabled !== false ? `วันที่ยกยอดจะถูกใช้ก่อน ส่วนที่ยังใช้ไม่หมดภายในวันที่ ${S.leave.carryForwardExpiryDay}/${S.leave.carryForwardExpiryMonth} จะถูกตัดทิ้ง และจะมีการแจ้งเตือนล่วงหน้า ${S.leave.carryForwardNotifyDays} วัน` : 'วันที่ยกยอดไม่มีวันหมดอายุ'}`,
+        `未消化の年次有給休暇は最大${S.leave.carryForwardMax}日まで翌年に繰り越されます。年が明けた1月にシステムが自動で繰り越すため、操作は不要です。${S.leave.carryForwardExpiryEnabled !== false ? `繰り越した日数から先に消化されます。${S.leave.carryForwardExpiryMonth}月${S.leave.carryForwardExpiryDay}日までに使い切れなかった繰越分は失効し、その${S.leave.carryForwardNotifyDays}日前に通知されます。` : '繰り越した日数に有効期限はありません。'}`
       ) },
     { icon: '🏖️', roles: ['md','accounting','manager','user','driver','marketing'], q: _faq('When can a new employee use Annual Leave?', 'พนักงานใหม่ใช้ลาพักร้อนได้เมื่อไหร่?', '新入社員はいつから年次有給を使えますか？'),
       a: _faq(

@@ -90,7 +90,7 @@ window.LANG_JA = {
   // down this file (only the LAST occurrence of a duplicate object-literal key wins at runtime in
   // JS, so this one was always dead weight; kept the effective one's translation).
   "ℹ️ PIT is an automatic estimate from base pay only — it does NOT include the bonus. Adjust the tax field yourself if the bonus should be taxed.": "ℹ️ 源泉徴収税（PIT）は基本給のみからの自動見積りです — ボーナスは含まれません。ボーナスにも課税したい場合は税額欄を手動で調整してください。",
-  "📌 Annual, Sick, and Business leave days all come from Settings → Leave Policy (not set per person). Annual leave follows years of service. Sick and Business are the same quota for everyone. These reset by calendar year (Jan 1 – Dec 31). Unused Annual Leave can carry over via Settings → Leave Policy → Year-End Carry-Forward.": "📌 年次・病気・私用休暇の日数はすべて「設定 → 休暇ポリシー」から決まります（個人設定ではありません）。年次は勤続年数、病気・私用は全員同じ付与です。暦年（1月1日〜12月31日）でリセットされます。未消化の年次有給は「設定 → 休暇ポリシー → 年末繰越」で翌年に繰り越せます。",
+  "📌 Annual, Sick, and Business leave days all come from Settings → Leave Policy (not set per person). Annual leave follows years of service. Sick and Business are the same quota for everyone. These reset by calendar year (Jan 1 – Dec 31). Unused Annual Leave carries over automatically in January (Settings → Leave Policy → Year-End Carry-Forward).": "📌 年次・病気・私用休暇の日数はすべて「設定 → 休暇ポリシー」から決まります（個人設定ではありません）。年次は勤続年数、病気・私用は全員同じ付与です。暦年（1月1日〜12月31日）でリセットされます。未消化の年次有給は毎年1月に自動で翌年に繰り越されます（設定 → 休暇ポリシー → 年末繰越）。",
   "📌 The per-period pay/skip toggle in Finalize Payroll only appears for Drivers. For other roles, this amount is automatically added to gross pay every period — there is no way to skip it for a single period.": "📌 給与確定画面での期ごとの支給/スキップ切替はDriverのみ表示されます。他の役職ではこの金額は毎期自動的に総支給額に加算され、特定の期だけスキップする方法はありません。",
   "Added to net pay directly — not included in the automatic PIT tax estimate. Adjust the PIT field yourself if the bonus should be taxed.": "手取り額に直接加算されます — 自動PIT税額見積りには含まれません。ボーナスに課税したい場合はPIT欄を手動で調整してください。",
   "Only editable for Drivers — toggle off if attendance that period doesn't qualify. Other roles always get it paid automatically.": "Driverのみ編集可能です — その期の勤怠が条件を満たさない場合はオフにしてください。他の役職では常に自動的に支給されます。",
@@ -102,7 +102,7 @@ window.LANG_JA = {
   "Hard cap on the deduction, regardless of salary": "給与額に関わらない控除の上限額",
   "Employees below this salary are exempt — no deduction": "この給与額未満の従業員は対象外 — 控除なし",
   "Salary above this is not counted for the calc — update together with Max Amount when the law changes": "この金額を超える給与部分は計算に含まれません — 法改正時は「上限額」と一緒に更新してください",
-  "This cap only applies when someone clicks \"Process Carry-Forward\" in the Year-End Carry-Forward section below — days beyond the cap are forfeited, not queued for later.": "この上限は下部の「年末繰越」セクションで「繰越処理」をクリックした場合にのみ適用されます — 上限を超えた日数は繰り越されず失効します",
+  "This cap applies when the year-end carry-forward runs (automatically in January, see Year-End Carry-Forward below) — days beyond the cap are forfeited, not queued for later.": "この上限は年末繰越の実行時（毎年1月に自動、下部の「年末繰越」参照）に適用されます — 上限を超えた日数は繰り越されず失効します",
   "Shows an in-app toast to the employee only — no email or manager notice": "従業員本人にアプリ内通知が表示されるだけです — メールやマネージャーへの通知はありません",
   "📌 Amount adds to this pay period's gross income. Advance subtracts from net pay this period (e.g. repaying a cash advance) — they move the payslip in opposite directions.": "📌 「金額」は今期の総支給額に加算されます。「前払い」は今期の手取り額から差し引かれます（前払い金の返済など）— この2つは給与明細に対して逆方向に作用します",
 
@@ -257,7 +257,7 @@ window.LANG_JA = {
   "Click 'Edit' on the newly added row and fill in what's still missing: salary, position, personal details, bank account, etc.": "追加した行の「編集」をクリックし、給与・役職・個人情報・口座番号などを入力してください。",
   "Click to open Google Maps": "クリックしてGoogle Mapsを開く",
   "Click to revoke": "クリックして取り消し",
-  "Click in January, after the year has ended, to snapshot each employee’s remaining annual leave for last year (up to max, expired carry-forward excluded) and carry it into this year.": "年が明けた1月に（前年が終了してから）クリックすると、各社員の前年の有給残日数（上限まで、失効した繰越分を除く）を今年に繰り越します。",
+  "Runs automatically in January: each employee’s remaining annual leave for last year (up to max, expired carry-forward excluded) is carried into this year. Use the button only if it has not run (e.g. the server was off all January).": "毎年1月に自動で実行されます：各社員の前年の有給残日数（上限まで、失効した繰越分を除く）を今年に繰り越します。実行されていない場合（例：1月中ずっとサーバーが停止していた）のみボタンを使用してください。",
   "Click to view details": "クリックして詳細を表示",
   "Clock In": "出勤打刻",
   "Clock in now": "今すぐ出勤打刻",
@@ -1400,4 +1400,9 @@ window.LANG_JA = {
   // 2026-09-24: Holiday Work past midnight
   "An end time before 05:00 means after midnight (same work day) — the whole shift is paid at this day's holiday rate.": "05:00より前の終了時刻は深夜0時以降（同じ勤務日）として扱い、勤務全体をこの日の休日レートで支給します。",
   "⚠️ End time must be after start time (before 05:00 = after midnight)": "⚠️ 終了時刻は開始時刻より後にしてください（05:00より前＝深夜0時以降）",
+  // 2026-09-24: automatic year-end carry-forward (status line / manual button), web check-out undo
+  "automatic": "自動",
+  "Only last year can be carried forward": "繰り越せるのは前年のみです",
+  "This employee already has a 🌙 Late Night request for this day. Undo the allowed check-out anyway? The 🌙 will not be paid until the check-out is allowed again.":
+    "この社員はこの日の🌙深夜残業申請をすでに提出しています。それでも退勤の許可を取り消しますか？再び許可されるまで🌙は支払われません。",
 };

@@ -535,6 +535,7 @@ function saveEvent(ev) {
 // holderName) used to be sent to ANY authenticated user via GET /api/events and to ANY
 // websocket client. REST uses projectEventsForViewer; WS TODAY_EVENTS/SCAN_EVENT now do the
 // same per connection (owner + privileged admin get the full row; colleagues get this projection).
+// 2026-09-24: `gpsTz` (display-only zone of the GPS position) is deliberately absent, same as `gps`.
 const EVENT_PUBLIC_FIELDS = ['id', 'employeeNo', 'event_time', 'eventType', 'created_at'];
 function toPublicEventProjection(e) {
   const out = {};
@@ -1151,8 +1152,35 @@ function businessDateFromYmd(ymd) {
   const p2 = n => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
 }
-// 2026-09-23: parseGpsCoords/timezoneFromCoords (geo-tz) removed -- a web scan's time no longer
-// depends on the client's GPS (see the HIGH-1 fix in POST /api/hikvision/event).
+// 2026-09-23: a web scan's time no longer depends on the client's GPS (see the HIGH-1 fix in
+// POST /api/hikvision/event).
+// 2026-09-24 (owner): parseGpsCoords/timezoneFromCoords restored for a DISPLAY-ONLY field
+// (`gpsTz` on the stored event) -- attendance views show the local time at the scan location on
+// approved Abroad days. It never feeds event_time/timezone or any payroll/late computation.
+function parseGpsCoords(raw) {
+  if (typeof raw !== 'string') return null;
+  const m = raw.trim().match(/^(-?\d{1,3}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)$/);
+  if (!m) return null;
+  const lat = Number(m[1]);
+  const lng = Number(m[2]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+  return { lat, lng };
+}
+let geoTzFind = null;
+// Returns an IANA zone, or '' when unknown (never a fallback zone -- '' means "show nothing").
+function timezoneFromCoords(lat, lng) {
+  try {
+    // geo-tz's default dataset ("alike since 1970") maps Bangkok coords to Asia/Jakarta; the
+    // comprehensive one returns Asia/Bangkok / Asia/Tokyo as expected.
+    if (!geoTzFind) geoTzFind = require('geo-tz/all').find;
+    const zones = geoTzFind(lat, lng);
+    const tz = Array.isArray(zones) ? zones[0] : '';
+    return isSafeTimeZone(tz) ? tz : '';
+  } catch (e) {
+    return '';
+  }
+}
 function eventInstantMs(raw) {
   if (!raw) return 0;
   const t = Date.parse(raw);
@@ -1536,9 +1564,18 @@ app.post('/api/hikvision/event', hikAuth, webScanLimiter, withEventsLock((req, r
     }
 
     const tz = req.hikSource === 'webscan' ? (req.hikTimezone || DEFAULT_TZ) : '';
+    // 2026-09-24 (owner): DISPLAY-ONLY zone of the GPS position (Abroad days show the local time
+    // there). Never touches event_time/timezone above. Like `gps`, it is not in
+    // EVENT_PUBLIC_FIELDS, so only the owner and privileged admins receive it (REST + WS).
+    let gpsTz = '';
+    if (req.hikSource === 'webscan' && gps) {
+      const coords = parseGpsCoords(gps);
+      if (coords) gpsTz = timezoneFromCoords(coords.lat, coords.lng);
+    }
     const record = saveEvent({
       employeeNo, holderName, event_time: eventTime, eventType,
       ...(gps ? { gps } : {}),
+      ...(gpsTz ? { gpsTz } : {}),
       ...(tz ? { timezone: tz } : {})
     });
     // Per-viewer SCAN_EVENT: owner and privileged admins get gps/holderName; everyone else
@@ -1546,7 +1583,7 @@ app.post('/api/hikvision/event', hikAuth, webScanLimiter, withEventsLock((req, r
     // on a single global payload.
     sendScanEvent(record);
     console.log(`[HIK] SAVED  emp=${employeeNo}  time=${eventTime}  tz=${tz || 'device'}  id=${record.id}`);
-    res.json({ success: true, id: record.id, event_time: eventTime, ...(tz ? { timezone: tz } : {}) });
+    res.json({ success: true, id: record.id, event_time: eventTime, ...(tz ? { timezone: tz } : {}), ...(gpsTz ? { gpsTz } : {}) });
   } catch (err) {
     console.error('[HIK] error:', err.message);
     res.status(500).json({ success: false, error: err.message });
@@ -3193,6 +3230,9 @@ function stripSensitiveSettingsForRole(settings, live) {
     out.appSettings = { ...out.appSettings, emailConfig: { ...out.appSettings.emailConfig, pass: undefined, smtpUser: undefined } };
   }
   delete out.tawi50Overrides;
+  // 2026-09-24: run log of the year-end carry-forward (who/when) -- only the md/accounting
+  // Settings page reads it.
+  delete out.leaveCarryForwardRuns;
   if (out.leaveCarryForward && live) {
     const year = bangkokYmd().y;
     const mine = {};
@@ -3283,6 +3323,12 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
     if (allowedRoles.includes(actor.role)) return true;
     if (isSuperAdminUser(actor) && allowedRoles.some(r => ['md', 'accounting', 'manager'].includes(r))) return true;
     return false;
+  }
+  // 2026-09-24: server-owned key -- written only by runYearEndCarryForward(). Not in
+  // SETTINGS_KEY_ROLES either (so the loop below would already 400 it), and Object.assign(current,
+  // body) keeps the stored value because a client can never send the key. Explicit for clarity.
+  if (Object.prototype.hasOwnProperty.call(body, 'leaveCarryForwardRuns')) {
+    return res.status(403).json({ success: false, message: 'leaveCarryForwardRuns is set by the server only' });
   }
   for (const key of Object.keys(body)) {
     // 2026-08-12 (3rd audit, F6c): `SETTINGS_KEY_ROLES[key]` is a plain-property lookup, so an
@@ -6386,9 +6432,11 @@ function annualLateDeductMinutes(user, year, leaves) {
     const dw = new Date(dateStr + 'T12:00:00').getDay();
     if (dw === 0 || dw === 6) return;
     if (isPublicHoliday(dateStr) || isCompanyTripDay(dateStr)) return;
+    // 2026-09-24 (owner): an approved Abroad day is never late either. DUAL-SYNC: app.js
+    // computeLateDeductMinutes.
     const onLeave = leaves.some(l =>
       l.userId === user.id && l.status === 'approved' &&
-      ['annual','sick','business'].includes(l.type) &&
+      ['annual','sick','business','abroad'].includes(l.type) &&
       dateStr >= l.dateFrom && dateStr <= (l.dateTo || l.dateFrom));
     if (onLeave) return;
     const corr = leaves.find(l =>
@@ -6427,8 +6475,8 @@ function annualLeaveRemainingMinutes(leaves, user, year, cf) {
   return Math.max(0, effectiveMax * 8 * 60 - usedMin - annualLateDeductMinutes(user, year, leaves) - forfeitMin);
 }
 
-// Dual-sync with app.js processYearEndCarryForward: if Accounting already snapshotted next
-// year's leftover, any later change to this year's annual pool (cancelling approved leave,
+// Dual-sync with runYearEndCarryForward below (formerly app.js processYearEndCarryForward): if the
+// year-end run already snapshotted next year's leftover, any later change to this year's annual pool (cancelling approved leave,
 // approving annual leave, approving holiday work credited as an annual day) must rewrite that
 // snapshot. No-op when next year's key is absent (year-end has not been processed yet).
 // 2026-09-23 (Opus audit HIGH): used to count only `l.days` and skip opening-used and the late
@@ -6451,6 +6499,97 @@ function refreshSnapshottedCarryForward(leaves, user, dateFrom) {
   cf[`comp_${nextYear}_${user.id}`] = 0;
   writeJSON('settings.json', settings);
 }
+
+// ===== YEAR-END CARRY-FORWARD (automatic in January) =====
+// 2026-09-24 (owner): the year-end carry-forward used to be a Settings button whose client code
+// (app.js processYearEndCarryForward) computed every employee's value and PUT the whole map. It
+// now runs HERE only -- automatically in January (on server start and hourly, see
+// scheduleYearEndCarryForward) and from the same button via POST /api/leave-carry-forward/run --
+// so there is one implementation. For source year Y-1 -> Y, every active employee record gets
+// CF(Y) = min(remaining annual leave of Y-1 in days, carryForwardMax) and comp(Y) = 0, using
+// annualLeaveRemainingMinutes (entitlement as of 31 Dec, expired carry-forward, opening used and
+// the late deduction all included -- the pool app.js computeLeaveBalance shows). Each run is
+// recorded in settings.leaveCarryForwardRuns[<source year>] = { at, by, byId }; a recorded year
+// is never run again (refreshSnapshottedCarryForward keeps the snapshot current afterwards).
+// Past January an unrun year is NOT auto-run (e.g. the feature ships mid-year) -- the manual
+// button covers that. DUAL-SYNC: key formats = app.js getCarryForwardKey/getCarryForwardCompKey.
+
+// Source year to auto-run for `todayStr` (Bangkok YYYY-MM-DD), or null. Pure.
+function carryForwardAutoRunYear(todayStr, runs) {
+  if (typeof todayStr !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(todayStr)) return null;
+  if (todayStr.slice(5, 7) !== '01') return null;
+  const fromYear = Number(todayStr.slice(0, 4)) - 1;
+  const r = (runs && typeof runs === 'object' && !Array.isArray(runs)) ? runs : {};
+  return r[String(fromYear)] ? null : fromYear;
+}
+// The carry-forward entries a run writes for fromYear -> fromYear + 1. Same user filter as the old
+// client function (isEmployeeRecord(u) && u.active). `??` not `||`: a configured 0 means "no
+// carry-forward" (dual-sync with refreshSnapshottedCarryForward).
+function computeYearEndCarryForward(leaves, users, fromYear, cf, carryForwardMax) {
+  const rawMax = Number(carryForwardMax ?? 5);
+  const maxCF = Math.max(0, Math.min(60, Number.isFinite(rawMax) ? rawMax : 5));
+  const out = {};
+  (users || []).filter(u => u && !u.isSystemAccount && u.active).forEach(u => {
+    const leftoverDays = Math.max(0, annualLeaveRemainingMinutes(leaves, u, fromYear, cf) / 480);
+    out[`${fromYear + 1}_${u.id}`] = Math.min(leftoverDays, maxCF);
+    out[`comp_${fromYear + 1}_${u.id}`] = 0;
+  });
+  return out;
+}
+// Runs fromYear -> fromYear + 1 once. `actor` = the live user record (manual) or null (automatic).
+// Synchronous read-modify-write of the WHOLE settings.json (every other key kept as read), the
+// same pattern as PUT /api/settings and refreshSnapshottedCarryForward. Never writes on a read
+// failure -- readSettings() would turn a corrupt file into {} and this would clobber it.
+function runYearEndCarryForward(fromYear, actor) {
+  const settings = readJSON('settings.json', {});
+  if (settings === null || typeof settings !== 'object' || Array.isArray(settings)) {
+    return { ok: false, status: 503, message: 'Service temporarily unavailable' };
+  }
+  const runs = (settings.leaveCarryForwardRuns && typeof settings.leaveCarryForwardRuns === 'object' && !Array.isArray(settings.leaveCarryForwardRuns))
+    ? settings.leaveCarryForwardRuns : {};
+  if (runs[String(fromYear)]) {
+    return { ok: false, status: 409, code: 'cf-already-processed', message: `Carry-forward for ${fromYear} has already been processed`, run: runs[String(fromYear)] };
+  }
+  const leaves = readLeaves();
+  const users = readUsers();
+  if (leaves === null || users === null) return { ok: false, status: 503, message: 'Service temporarily unavailable' };
+  const cf = (settings.leaveCarryForward && typeof settings.leaveCarryForward === 'object' && !Array.isArray(settings.leaveCarryForward))
+    ? settings.leaveCarryForward : {};
+  const computed = computeYearEndCarryForward(leaves, users, fromYear, cf, getAppSettings().leave?.carryForwardMax);
+  const run = { at: new Date().toISOString(), by: actor ? String(actor.name || actor.username || actor.id) : 'auto', byId: actor ? actor.id : null };
+  settings.leaveCarryForward = { ...cf, ...computed };
+  settings.leaveCarryForwardRuns = { ...runs, [String(fromYear)]: run };
+  writeJSON('settings.json', settings);
+  return { ok: true, run, count: Object.keys(computed).length / 2 };
+}
+function autoYearEndCarryForward() {
+  try {
+    const settings = readJSON('settings.json', {});
+    if (settings === null) return;
+    const fromYear = carryForwardAutoRunYear(bangkokDateStr(), settings.leaveCarryForwardRuns);
+    if (fromYear === null) return;
+    const r = runYearEndCarryForward(fromYear, null);
+    if (r.ok) console.log(`[CF] automatic carry-forward ${fromYear} -> ${fromYear + 1} done for ${r.count} employees`);
+    else if (r.code !== 'cf-already-processed') console.error(`[CF] automatic carry-forward ${fromYear} failed: ${r.message}`);
+  } catch (e) {
+    console.error('[CF] automatic carry-forward error:', e && e.message);
+  }
+}
+
+// Manual button (Settings -> Year-End Carry-Forward). md/accounting only; requireRole already
+// refuses observers and inactive accounts. Only the year that has just ended can be processed.
+app.post('/api/leave-carry-forward/run', requireRole('md', 'accounting'), withLeavesLock((req, res) => {
+  const body = parseBody(req) || {};
+  const year = Number(body.year);
+  if (!Number.isInteger(year) || year !== bangkokYmd().y - 1) {
+    return res.status(400).json({ success: false, code: 'cf-bad-year', message: 'Only last year can be carried forward' });
+  }
+  const live = (readUsers() || []).find(u => u.id === req.user.sub);
+  if (!live) return res.status(403).json({ success: false, message: 'Forbidden' });
+  const r = runYearEndCarryForward(year, live);
+  if (!r.ok) return res.status(r.status).json({ success: false, code: r.code, message: r.message, run: r.run });
+  res.json({ success: true, year, run: r.run, count: r.count });
+}));
 
 app.delete('/api/leaves/:id', withLeavesLock((req, res) => {
   try {
@@ -9392,6 +9531,18 @@ function scheduleCronNotification() {
 }
 
 scheduleCronNotification();
+
+// 2026-09-24 (owner): automatic year-end carry-forward -- at start-up (a server that was down on
+// 1 January still runs it while it is January) and then hourly. See runYearEndCarryForward.
+function scheduleYearEndCarryForward() {
+  try {
+    cron.schedule('7 * * * *', autoYearEndCarryForward, { timezone: 'Asia/Bangkok' });
+  } catch (e) {
+    console.error('[CF] could not schedule the automatic carry-forward:', e.message);
+  }
+  setTimeout(autoYearEndCarryForward, 10000);
+}
+scheduleYearEndCarryForward();
 
 server.listen(PORT, '0.0.0.0', () => console.log(`[HTTP] port ${PORT}`));
 server.on('error', err => console.error('[HTTP] error:', err.message));
