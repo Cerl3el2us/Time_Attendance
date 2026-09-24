@@ -8,8 +8,8 @@
 // are served from cache, but anything that WRITES (check-in, leave request, approval) is never
 // queued or replayed -- a time record invented from a phone's clock hours after the fact is worse
 // than an error message. Non-GET requests simply fail while offline and the UI says so.
-const SHELL_CACHE = 'ta-shell-v5';   // app shell: html/js/css/images, cache-first
-const DATA_CACHE  = 'ta-data-v5';    // GET /api responses, network-first
+const SHELL_CACHE = 'ta-shell-v6';   // app shell: html/js/css/images, cache-first
+const DATA_CACHE  = 'ta-data-v6';    // GET /api responses, network-first
 
 // Query strings are part of the key, so a `?v=` bump is a cache miss and fetches the new file --
 // the existing cache-buster keeps working unchanged. Old entries are dropped on activate.
@@ -67,7 +67,15 @@ self.addEventListener('fetch', e => {
     e.respondWith(
       fetch(req)
         .then(res => {
-          if (res && res.ok) {
+          // JSON only. Four GET routes under /api return FILES -- payslip-xlsx, payslip-xlsx-all,
+          // tawi50-xlsx-all and upload/:filename -- and caching those meant every payslip and
+          // attachment an admin ever opened was written to the device: megabytes per file, enough
+          // to hit the browser's storage quota (at which point cache writes fail silently, since
+          // the .catch() below swallows them), and a stale payslip could be replayed offline as if
+          // it were current. Nothing offline needs them: you cannot meaningfully download a fresh
+          // export without a network anyway.
+          const ct = res && res.headers ? (res.headers.get('content-type') || '') : '';
+          if (res && res.ok && ct.includes('application/json')) {
             const copy = res.clone();
             caches.open(DATA_CACHE).then(c => c.put(req, copy)).catch(() => {});
           }

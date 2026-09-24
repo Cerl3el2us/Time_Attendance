@@ -1186,6 +1186,21 @@ let _pendingLogoutTimer = null;
 // when the data on screen was last fetched. Writes are not queued -- see sw.js.
 let OFFLINE_SINCE = null;
 let LAST_ONLINE_AT = null;
+// 2026-09-25 (found while reviewing the offline work): the service worker keys cached GET /api
+// responses by URL, and almost every read endpoint is "mine"-scoped -- GET /api/leaves returns
+// whoever asked. On a shared browser that means user A's leave and payroll answers sit in the
+// cache under the same URLs user B will request, and the moment B's network drops the worker
+// serves them A's data. logout() already resets the in-memory equivalents (push subscription,
+// checkout reviews, inbox, approvals view) for exactly this reason; the cache has to go with them.
+// Called on logout AND after login, because a session can also end by expiry without logout().
+async function clearApiCache() {
+  try {
+    if (!('caches' in window)) return;
+    for (const k of await caches.keys()) {
+      if (k.startsWith('ta-data-')) await caches.delete(k);
+    }
+  } catch (_) { /* private mode / storage blocked -- nothing cached there either */ }
+}
 function setOfflineState(off) {
   if (off && !OFFLINE_SINCE) OFFLINE_SINCE = new Date();
   if (!off) { OFFLINE_SINCE = null; LAST_ONLINE_AT = new Date(); }
@@ -6094,6 +6109,10 @@ async function login() {
     }
     currentUser = data.user;
     AUTH_TOKEN = data.token;
+    // A session can end without logout() ever running -- token expiry, a closed tab, a crash -- so
+    // the previous user's cached API reads may still be here. Clearing on the way IN closes that
+    // hole too, and costs nothing: everything is about to be re-fetched anyway.
+    clearApiCache();
     // 2026-08-09 (Opus audit finding 6.1/6.3): a fresh token means any earlier "session expired"
     // state no longer applies, and any queued logout from before this login must not fire.
     _sessionExpiredShown = false;
@@ -6181,6 +6200,8 @@ async function logout() {
     }
   } catch(e) { console.warn('[push] unsubscribe-on-logout failed', e); }
   clearInterval(_sessionTimer);
+  // Before the token clears, so nothing can repopulate it from a late in-flight read.
+  await clearApiCache();
   clearSession();
   currentUser = null;
   AUTH_TOKEN = null;
