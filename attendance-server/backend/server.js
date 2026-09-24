@@ -4219,16 +4219,32 @@ function round2HalfUp(n) {
   if (!Number.isFinite(x)) return 0;
   return Math.sign(x) * Math.round(Math.abs(x) * 100 + 1e-9) / 100;
 }
+// 2026-09-24 (owner): provident fund is kept to 1 decimal place, rounded half-up at the 2nd
+// decimal (123.45 -> 123.5). Same epsilon idea as round2HalfUp. Dual-sync with app.js.
+function round1HalfUp(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 0;
+  return Math.sign(x) * Math.round(Math.abs(x) * 10 + 1e-9) / 10;
+}
+// 2026-09-24 (owner): a request ends in one of three terminal statuses -- 'rejected', 'cancelled'
+// (the owner cancelled an APPROVED record; the row is kept as history) or 'revoked' (MD/Accounting
+// took an approval back; kept as history). None of them counts toward pay, leave balance, earned
+// credit, overlap/duplicate checks, queues or badges. Every NEGATIVE status filter
+// ("anything but rejected" style) goes through this helper so a new terminal status can never
+// slip through one of them. Dual-sync with app.js.
+function isVoidLeaveStatus(s) {
+  return s === 'rejected' || s === 'cancelled' || s === 'revoked';
+}
 function hasActiveHolidayWork(leaves, userId, dateFrom, exceptId) {
   return (leaves || []).some(l =>
     l.id !== exceptId && l.userId === userId && l.type === 'holiday-work' &&
-    l.dateFrom === dateFrom && l.status !== 'rejected'
+    l.dateFrom === dateFrom && !isVoidLeaveStatus(l.status)
   );
 }
 function hasActiveOfficeOt(leaves, userId, dateFrom, exceptId) {
   return (leaves || []).some(l =>
     l.id !== exceptId && l.userId === userId && l.type === 'ot' && !l.isDriverOT &&
-    l.dateFrom === dateFrom && l.status !== 'rejected'
+    l.dateFrom === dateFrom && !isVoidLeaveStatus(l.status)
   );
 }
 function accumulateApprovedOtPay(l, hourlyRate, acc) {
@@ -4373,7 +4389,7 @@ function earlyMorningSubmitBlockReason(user, dateStr) {
   if (isHolidayWorkDay(dateStr)) {
     const hwLeaves = readLeaves() || [];
     const hasHw = hwLeaves.some(l =>
-      l.userId === user.id && l.type === 'holiday-work' && l.dateFrom === dateStr && l.status !== 'rejected'
+      l.userId === user.id && l.type === 'holiday-work' && l.dateFrom === dateStr && !isVoidLeaveStatus(l.status)
     );
     if (!hasHw) {
       return 'Early morning on a holiday requires a holiday work request first';
@@ -4417,7 +4433,7 @@ function abroadTravelCreditDays(abroadLeaves, yStart, yEnd) {
 // I-1): a pending trip approved later would otherwise pay Holiday Work AND the travel credit.
 function isAbroadTravelDay(leaves, userId, dateStr) {
   return leaves.some(l =>
-    l.userId === userId && l.type === 'abroad' && !['rejected', 'cancelled'].includes(l.status) &&
+    l.userId === userId && l.type === 'abroad' && !isVoidLeaveStatus(l.status) &&
     (l.dateFrom === dateStr || (l.dateTo || l.dateFrom) === dateStr));
 }
 // Earned annual-leave days for the year: holiday work taken as annual leave, plus abroad travel
@@ -4785,7 +4801,7 @@ function findOverlappingLeave(leaves, userId, type, dateFrom, dateTo, exceptId) 
     // 2026-09-23 (owner): Holiday Work is allowed on an approved Abroad day, so those two types
     // may overlap each other (every other pair still may not).
     !((type === 'abroad' && l.type === 'holiday-work') || (type === 'holiday-work' && l.type === 'abroad')) &&
-    !['rejected', 'cancelled'].includes(l.status) &&
+    !isVoidLeaveStatus(l.status) &&
     l.dateFrom &&
     l.dateFrom <= aTo && (l.dateTo || l.dateFrom) >= dateFrom
   ) || null;
@@ -4794,7 +4810,7 @@ function findOtDuplicate(leaves, { userId, dateFrom, isDriverOT, otMultiplier, e
   if (!dateFrom) return null;
   const others = leaves.filter(l =>
     l.id !== exceptId && l.userId === userId && l.type === 'ot' &&
-    l.dateFrom === dateFrom && l.status !== 'rejected'
+    l.dateFrom === dateFrom && !isVoidLeaveStatus(l.status)
   );
   if (!others.length) return null;
   if (!isDriverOT) return others[0];
@@ -4805,7 +4821,7 @@ function findOtDuplicate(leaves, { userId, dateFrom, isDriverOT, otMultiplier, e
 function driverOtHoursOverCap(leaves, { userId, dateFrom, newHours, exceptId }) {
   const used = leaves.filter(l =>
     l.id !== exceptId && l.userId === userId && l.type === 'ot' && l.isDriverOT &&
-    l.dateFrom === dateFrom && l.status !== 'rejected'
+    l.dateFrom === dateFrom && !isVoidLeaveStatus(l.status)
   ).reduce((s, l) => s + (Number(l.otHours) || 0), 0);
   return used + (Number(newHours) || 0) > OT_HOURS_MAX;
 }
@@ -4857,7 +4873,7 @@ function carryForwardForfeitMinutes(leaves, user, year, asOfDateStr, includePend
   let usedBeforeMin = Math.max(0, openingUsed) * 480;
   leaves.filter(l =>
     l.userId === user.id && l.type === 'annual' && l.id !== exceptId &&
-    (includePending ? !['rejected', 'cancelled'].includes(l.status) : l.status === 'approved') &&
+    (includePending ? !isVoidLeaveStatus(l.status) : l.status === 'approved') &&
     l.dateFrom >= yStart && l.dateFrom <= expiry
   ).forEach(l => { usedBeforeMin += leaveMinutesOnOrBefore(l, expiry); });
   return Math.max(0, cfMin - usedBeforeMin);
@@ -4877,7 +4893,7 @@ function leaveBalanceError(leaves, user, type, reqMin, exceptId, dateFrom) {
   let usedMin = 0;
   leaves.filter(l =>
     l.userId === user.id && l.type === type &&
-    !['rejected', 'cancelled'].includes(l.status) &&
+    !isVoidLeaveStatus(l.status) &&
     l.id !== exceptId &&
     l.dateFrom >= yStart && l.dateFrom <= yEnd
   ).forEach(l => { usedMin += leaveMinutesOf(l); });
@@ -5101,7 +5117,7 @@ function abroadTravelDayHolidayWorkConflict(leaves, userId, dateFrom, dateTo) {
   const travel = new Set([dateFrom, dateTo || dateFrom]);
   return leaves.some(l =>
     l.userId === userId && l.type === 'holiday-work' &&
-    !['rejected', 'cancelled'].includes(l.status) && travel.has(l.dateFrom));
+    !isVoidLeaveStatus(l.status) && travel.has(l.dateFrom));
 }
 function abroadSubmitBlockReason(user) {
   if (!user) return 'You are not eligible to submit abroad requests';
@@ -5551,7 +5567,7 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
     // Duplicate personal-car on the same date (pending or approved) is rejected — payroll would
     // otherwise pay both once approved. Same date + rejected is allowed (resubmit after a deny).
     if (type === 'personal-car' && leaves.some(l =>
-        l.userId === userId && l.type === 'personal-car' && l.dateFrom === body.dateFrom && l.status !== 'rejected')) {
+        l.userId === userId && l.type === 'personal-car' && l.dateFrom === body.dateFrom && !isVoidLeaveStatus(l.status))) {
       return res.status(409).json({ success:false, message:'Personal car use is already recorded for this date' });
     }
     // CORRECTNESS FIX 2026-08-16 (Opus audit C-2): nothing stopped the same workedDate from
@@ -5559,25 +5575,25 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
     // only catchable if the approver happens to remember every prior approval for that
     // employee/date. Same-date duplicate guard as personal-car (pending or approved).
     if (type === 'holiday-work' && leaves.some(l =>
-        l.userId === userId && l.type === 'holiday-work' && l.dateFrom === body.dateFrom && l.status !== 'rejected')) {
+        l.userId === userId && l.type === 'holiday-work' && l.dateFrom === body.dateFrom && !isVoidLeaveStatus(l.status))) {
       return res.status(409).json({ success:false, message:'A holiday work request for this date already exists' });
     }
     if (type === 'holiday-work' && hasActiveOfficeOt(leaves, userId, body.dateFrom)) {
       return res.status(409).json({ success:false, message:'An OT request already exists for this date — do not stack holiday work with office OT' });
     }
     if (type === 'holiday-work' && leaves.some(l =>
-        l.userId === userId && l.type === 'upcountry' && l.dateFrom === body.dateFrom && l.status !== 'rejected')) {
+        l.userId === userId && l.type === 'upcountry' && l.dateFrom === body.dateFrom && !isVoidLeaveStatus(l.status))) {
       return res.status(409).json({ success:false, message:'An upcountry request already exists for this date — use the holiday-work form instead' });
     }
     if (type === 'upcountry' && leaves.some(l =>
-        l.userId === userId && l.type === 'holiday-work' && l.dateFrom === body.dateFrom && l.status !== 'rejected')) {
+        l.userId === userId && l.type === 'holiday-work' && l.dateFrom === body.dateFrom && !isVoidLeaveStatus(l.status))) {
       return res.status(409).json({ success:false, message:'A holiday work request already exists for this date — upcountry is included automatically' });
     }
     if (type === 'upcountry' && body.dateFrom && isNonWorkDayForComp(body.dateFrom)) {
       return res.status(400).json({ success:false, message:'Upcountry is for weekdays only — on weekends/public holidays submit holiday work (the location counts as upcountry)' });
     }
     if (type === 'early-morning' && leaves.some(l =>
-        l.userId === userId && l.type === 'early-morning' && l.dateFrom === body.dateFrom && l.status !== 'rejected')) {
+        l.userId === userId && l.type === 'early-morning' && l.dateFrom === body.dateFrom && !isVoidLeaveStatus(l.status))) {
       return res.status(409).json({ success:false, message:'An early morning request for this date already exists' });
     }
     if (type === 'ot') {
@@ -6143,7 +6159,7 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
       }
       const dupHolidayWork = leaves.some(l =>
         l.id !== leave.id && l.userId === leave.userId && l.type === 'holiday-work' &&
-        l.dateFrom === resolvedDateFromForLock && l.status !== 'rejected');
+        l.dateFrom === resolvedDateFromForLock && !isVoidLeaveStatus(l.status));
       if (dupHolidayWork) {
         return res.status(409).json({ success:false, message:'A holiday work request for this date already exists' });
       }
@@ -6160,7 +6176,7 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
       safeUpdates.earlyMorningTier = resolvedTier;
       const dupEarlyMorning = leaves.some(l =>
         l.id !== leave.id && l.userId === leave.userId && l.type === 'early-morning' &&
-        l.dateFrom === resolvedDateFromForLock && l.status !== 'rejected');
+        l.dateFrom === resolvedDateFromForLock && !isVoidLeaveStatus(l.status));
       if (dupEarlyMorning) {
         return res.status(409).json({ success:false, message:'An early morning request for this date already exists' });
       }
@@ -6177,7 +6193,7 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
       // whether this specific request touched the field.
       const dupPersonalCar = leaves.some(l =>
         l.id !== leave.id && l.userId === leave.userId && l.type === 'personal-car' &&
-        l.dateFrom === resolvedDateFromForLock && l.status !== 'rejected');
+        l.dateFrom === resolvedDateFromForLock && !isVoidLeaveStatus(l.status));
       if (dupPersonalCar) {
         return res.status(409).json({ success:false, message:'Personal car use is already recorded for this date' });
       }
@@ -6255,7 +6271,7 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
     }
     if (newType === 'holiday-work' && leaves.some(l =>
         l.id !== leave.id && l.userId === leave.userId && l.type === 'upcountry' &&
-        l.dateFrom === resolvedDateFromForLock && l.status !== 'rejected')) {
+        l.dateFrom === resolvedDateFromForLock && !isVoidLeaveStatus(l.status))) {
       return res.status(409).json({ success:false, message:'An upcountry request already exists for this date — use the holiday-work form instead' });
     }
     // 2026-08-10 (round-3 audit, item 3): on a confirmed type change the `{...leave, ...safeUpdates}`
@@ -6481,7 +6497,19 @@ app.delete('/api/leaves/:id', withLeavesLock((req, res) => {
     } else if (approvedLeaveCancel) {
       console.log('[LEAVE] approved leave cancelled', JSON.stringify({ id, userId: leave.userId, type: leave.type, dateFrom: leave.dateFrom, dateTo: leave.dateTo, days: leave.days }));
     }
-    leaves.splice(idx, 1);
+    // 2026-09-24 (owner): cancelling an APPROVED record keeps it as history -- status 'cancelled'
+    // plus who/when -- instead of deleting it. isVoidLeaveStatus() keeps it out of pay, balances,
+    // overlap checks and queues everywhere, so the employee can re-file the same date. Pending
+    // cancels still hard-delete (owner decision: nothing was ever granted, nothing to keep).
+    const softCancel = isCancellablePersonalCar || approvedLeaveCancel;
+    if (softCancel) {
+      leaves[idx] = {
+        ...leave, status: 'cancelled', cancelledAt: new Date().toISOString(),
+        cancelledById: live.id, cancelledBy: live.name,
+      };
+    } else {
+      leaves.splice(idx, 1);
+    }
     saveLeaves(leaves);
     if (approvedLeaveCancel && ['annual', 'abroad'].includes(leave.type)) {
       try {
@@ -6490,8 +6518,101 @@ app.delete('/api/leaves/:id', withLeavesLock((req, res) => {
         console.error('[LEAVE] carry-forward refresh after cancel failed', e && e.message);
       }
     }
+    // A soft-cancelled row stays in everyone's list (greyed), so clients get an update, not a delete.
+    if (softCancel) {
+      broadcast({ type: 'LEAVE_UPDATED', leave: toPublicLeaveProjection(leaves[idx]) });
+      return res.json({ success:true, leave: leaves[idx] });
+    }
     broadcast({ type: 'LEAVE_DELETED', id });
     res.json({ success:true });
+  } catch(e) {
+    res.status(500).json({ success:false, error:e.message });
+  }
+}));
+
+// 2026-09-24 (owner): MD or Accounting may take back an approval on any money-bearing request,
+// only until payroll for that period is MD-approved. Every type below produces pay, an allowance
+// or earned annual-leave credit in computePayroll()/getApprovedHolidayWorkAnnualLeaveDays():
+// holiday-work (OT x2/x3 + holiday transport + upcountry, or +1 annual day), ot (office x1.5 and
+// driver OT), early-morning, late-out (Late Night allowance), upcountry, long-distance,
+// personal-car, abroad (daily allowance + travel-day annual credit). Leave types
+// (annual/sick/business) are not revocable here -- the owner cancel covers them.
+// Dual-sync with app.js isRevocableLeaveType.
+function isRevocableLeaveType(type) {
+  return ['holiday-work', 'ot', 'early-morning', 'late-out', 'upcountry', 'long-distance',
+    'personal-car', 'abroad'].includes(type);
+}
+const REVOKE_REASON_MAX = 500;
+app.post('/api/leaves/:id/revoke', requireRole('md', 'accounting'), withLeavesLock((req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const body = parseBody(req) || {};
+    const leaves = readLeaves();
+    if (leaves === null) return res.status(503).json({ success:false, message:'Service temporarily unavailable' });
+    const idx = leaves.findIndex(l => l.id === id);
+    if (idx < 0) return res.status(404).json({ success:false, message:'Not found' });
+    const leave = leaves[idx];
+    const users = readUsers() || [];
+    const live = users.find(u => u.id === req.user.sub);
+    if (!live) return res.status(403).json({ success:false, message:'Forbidden' });
+    // Conservative default (open question to the owner): nobody revokes their own approval.
+    if (leave.userId === live.id) {
+      return res.status(403).json({ success:false, code:'revoke-own', message:'You cannot revoke the approval of your own request' });
+    }
+    if (leave.status !== 'approved') {
+      return res.status(400).json({ success:false, code:'revoke-not-approved', message:'Only approved requests can be revoked' });
+    }
+    if (!isRevocableLeaveType(leave.type)) {
+      return res.status(400).json({ success:false, code:'revoke-type', message:'This request type has no pay to revoke' });
+    }
+    if (body.reason !== undefined && body.reason !== null && typeof body.reason !== 'string') {
+      return res.status(400).json({ success:false, message:'reason must be a string' });
+    }
+    const reason = String(body.reason || '').trim().slice(0, REVOKE_REASON_MAX);
+    if (!leave.dateFrom || !isValidDateStr(leave.dateFrom)) {
+      return res.status(400).json({ success:false, message:'Cannot verify pay period for this request' });
+    }
+    const dateTo = (leave.dateTo && isValidDateStr(leave.dateTo)) ? leave.dateTo : leave.dateFrom;
+    const finGuard = readJSON('finalize.json', {});
+    if (finGuard === null) return res.status(503).json({ success:false, message:'Service temporarily unavailable' });
+    if (mdApprovedPeriodInRange(leave.dateFrom, dateTo, leave.userId)) {
+      return res.status(409).json({ success:false, code:'period-frozen', message:'Payroll for this period has already been approved by the Managing Director -- the approval can no longer be revoked' });
+    }
+    if (lockedPeriodInRange(leave.dateFrom, dateTo)) {
+      return res.status(400).json({ success:false, code:'period-locked', message:'This pay period is locked' });
+    }
+    if (accountingConfirmedInRange(leave.dateFrom, dateTo, leave.userId)) {
+      return res.status(409).json({ success:false, code:'period-confirmed', message:'Accounting has already confirmed tax for this period — unconfirm before making changes' });
+    }
+    leaves[idx] = {
+      ...leave, status: 'revoked', revokedAt: new Date().toISOString(),
+      revokedById: live.id, revokedBy: live.name, revokeReason: reason,
+    };
+    saveLeaves(leaves);
+    console.log('[LEAVE] approval revoked', JSON.stringify({ id, userId: leave.userId, type: leave.type, dateFrom: leave.dateFrom, dateTo: leave.dateTo, by: live.id }));
+    // Earned annual-leave credit goes away with the approval (holiday work taken as a leave day,
+    // abroad travel days) -- rewrite next year's carry-forward snapshot like approve/cancel do.
+    const ownerUser = users.find(u => u.id === leave.userId);
+    const touchesAnnualPool = leave.type === 'abroad' ||
+      (leave.type === 'holiday-work' && leave.compensationMode === 'annual-leave');
+    if (touchesAnnualPool && ownerUser) {
+      try {
+        refreshSnapshottedCarryForward(leaves, ownerUser, leave.dateFrom);
+      } catch (e) {
+        console.error('[LEAVE] carry-forward refresh after revoke failed', e && e.message);
+      }
+    }
+    broadcast({ type: 'LEAVE_UPDATED', leave: toPublicLeaveProjection(leaves[idx]) });
+    // Same push channel notifyLeaveStatusChange() uses for approve/reject results.
+    const typeName = typeof getTypeLabel === 'function' ? getTypeLabel(leave.type, 'en') : leave.type;
+    Promise.resolve(sendPushToUser(leave.userId, {
+      title: 'Approval Revoked',
+      body: `The approval of your ${typeName} request (${leave.dateFrom}) was revoked`,
+      tag: 'ta-leave',
+      url: '/',
+      badge: badgeCountForUser(ownerUser),
+    })).catch(e => console.error('[PUSH] revoke notify error:', e && e.message));
+    res.json({ success:true, leave: leaves[idx] });
   } catch(e) {
     res.status(500).json({ success:false, error:e.message });
   }

@@ -31,7 +31,7 @@ const SHARED = ['normalizeAnnualLeaveTiers', 'getAnnualLeaveTiers', 'getAnnualLe
   'annualLeaveUnlockDateStr', 'isAnnualLeaveUnlocked', 'annualLeaveEntitlementDays',
   'abroadTravelCreditDays', 'hourlyLeaveChargedMinutes', 'carryForwardExpiryEnabled',
   'carryForwardExpiryDateStr', 'leaveWorkingDaysBetween', 'leaveMinutesOnOrBefore',
-  'carryForwardForfeitMinutes', 'annualLeaveEarnedPoolDays'];
+  'carryForwardForfeitMinutes', 'annualLeaveEarnedPoolDays', 'isVoidLeaveStatus'];
 const CLIENT_FNS = [...SHARED, 'leaveRecordMinutes', 'getApprovedHolidayWorkDays',
   'getCarryForwardKey', 'getCarryForwardCompKey', 'getCarryForwardDays', 'getCarryForwardCompDays',
   'getOpeningUsedKey', 'getOpeningUsedDays', 'computeLeaveBalance', 'canUseAnnualLeave', 'localDateStr'];

@@ -1133,6 +1133,8 @@
                 <option value="pending" data-en="Pending">รออนุมัติ</option>
                 <option value="approved" data-en="Approved">อนุมัติแล้ว</option>
                 <option value="rejected" data-en="Rejected">ปฏิเสธ</option>
+                <option value="cancelled" data-en="Cancelled">ยกเลิกแล้ว</option>
+                <option value="revoked" data-en="Approval revoked">เพิกถอนการอนุมัติแล้ว</option>
               </select>
               <input type="month" id="audit-filter-month" onchange="renderAuditLog()" title="กรองตามวันที่ยื่นคำขอ ไม่ใช่วันที่ของการลา/คำขอเอง" data-en-title="Filters by the date the request was submitted, not the leave/request's own date range" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--bg-card);color:var(--text)">
               <button class="btn btn-ghost btn-sm" onclick="document.getElementById('audit-filter-user').value='';document.getElementById('audit-filter-type').value='';document.getElementById('audit-filter-status').value='';document.getElementById('audit-filter-month').value='';renderAuditLog()" data-en="✕ Clear">✕ ล้างตัวกรอง</button>

@@ -228,7 +228,7 @@ window.LANG_JA = {
   "Cancel": "キャンセル",
   "Category name...": "カテゴリー名...",
   "Cancel Leave Request": "休暇申請をキャンセル",
-  "Cancel this approved leave? The days will be returned to your balance.": "承認済みの休暇をキャンセルしますか？日数は残日数に戻ります。",
+  "Cancel this approved leave? The days will be returned to your balance and the record stays in your history as cancelled.": "承認済みの休暇をキャンセルしますか？日数は残日数に戻り、記録は「取消済み」として履歴に残ります。",
   "Cannot cancel leave on or after the leave date — days already used stay deducted.": "休暇当日以降はキャンセルできません — 使用済み日数は戻りません。",
   "Card": "カード",
   "Card:": "カード：",
@@ -1388,4 +1388,13 @@ window.LANG_JA = {
   "Nothing awaiting review": "確認待ちの項目はありません",
   "No reviewed web check-outs in the current or previous pay period": "今期・前期に確認済みのWeb退勤はありません",
   "Pay period is closed — read-only": "給与期間は締め済みです — 閲覧のみ",
+  // 2026-09-24: cancelled / revoked records (history kept), MD/Accounting "Revoke approval"
+  "Cancelled": "取消済み",
+  "Approval revoked": "承認取消済み",
+  "Revoke approval": "承認の取り消し",
+  "Reason for revoking (optional):": "取り消しの理由（任意）:",
+  "You cannot revoke the approval of your own request": "自分の申請の承認は取り消せません",
+  "Only approved requests can be revoked": "承認済みの申請のみ取り消せます",
+  "This request type has no pay to revoke": "この申請の種類には取り消す支給がありません",
+  "Could not revoke the approval": "承認を取り消せませんでした",
 };

@@ -1011,12 +1011,12 @@ function canSubmitOTForDate(dateStr, userId) {
     if (user.role === 'driver') return { ok: true };
     if (isNonWorkDayForComp(ds)) return { ok: false, reason: 'holiday-ot' };
     const dup = DATA_LEAVES.some(l =>
-      l.userId === id && l.type === 'ot' && l.dateFrom === ds && l.status !== 'rejected' &&
+      l.userId === id && l.type === 'ot' && l.dateFrom === ds && !isVoidLeaveStatus(l.status) &&
       l.id !== editingLeaveId
     );
     if (dup) return { ok: false, reason: 'duplicate' };
     const hw = DATA_LEAVES.some(l =>
-      l.userId === id && l.type === 'holiday-work' && l.dateFrom === ds && l.status !== 'rejected' &&
+      l.userId === id && l.type === 'holiday-work' && l.dateFrom === ds && !isVoidLeaveStatus(l.status) &&
       l.id !== editingLeaveId
     );
     if (hw) return { ok: false, reason: 'holiday-work-ot' };
@@ -1054,12 +1054,12 @@ function canSubmitUpcountryForDate(dateStr, userId) {
   if (isNonWorkDayForComp(dateStr)) return { ok: false, reason: 'holiday' };
   return canSelectCheckedInDate(dateStr, uid, (ds, id) => {
     const dup = DATA_LEAVES.some(l =>
-      l.userId === id && l.type === 'upcountry' && l.dateFrom === ds && l.status !== 'rejected' &&
+      l.userId === id && l.type === 'upcountry' && l.dateFrom === ds && !isVoidLeaveStatus(l.status) &&
       l.id !== editingLeaveId
     );
     if (dup) return { ok: false, reason: 'duplicate' };
     const hw = DATA_LEAVES.some(l =>
-      l.userId === id && l.type === 'holiday-work' && l.dateFrom === ds && l.status !== 'rejected' &&
+      l.userId === id && l.type === 'holiday-work' && l.dateFrom === ds && !isVoidLeaveStatus(l.status) &&
       l.id !== editingLeaveId
     );
     if (hw) return { ok: false, reason: 'holiday-work' };
@@ -1075,7 +1075,7 @@ function canSubmitLongDistanceForDate(dateStr, userId) {
   }
   return canSelectCheckedInDate(dateStr, uid, (ds, id) => {
     const dup = DATA_LEAVES.some(l =>
-      l.userId === id && l.type === 'long-distance' && l.dateFrom === ds && l.status !== 'rejected' &&
+      l.userId === id && l.type === 'long-distance' && l.dateFrom === ds && !isVoidLeaveStatus(l.status) &&
       l.id !== editingLeaveId
     );
     if (dup) return { ok: false, reason: 'duplicate' };
@@ -1543,7 +1543,7 @@ function hasHolidayWorkClaimOnDate(dateStr, userId, approvedOnly) {
   if (!uid || !dateStr) return false;
   return DATA_LEAVES.some(l =>
     l.userId === uid && l.type === 'holiday-work' && l.dateFrom === dateStr &&
-    (approvedOnly ? l.status === 'approved' : l.status !== 'rejected')
+    (approvedOnly ? l.status === 'approved' : !isVoidLeaveStatus(l.status))
   );
 }
 function attendanceTimesForDate(dateStr, userId) {
@@ -1648,6 +1648,59 @@ function round2HalfUp(n) {
   const x = Number(n);
   if (!Number.isFinite(x)) return 0;
   return Math.sign(x) * Math.round(Math.abs(x) * 100 + 1e-9) / 100;
+}
+// 2026-09-24 (owner): provident fund is kept to 1 decimal place, rounded half-up at the 2nd
+// decimal (123.45 -> 123.5). Same epsilon idea as round2HalfUp. Dual-sync with server.js.
+function round1HalfUp(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 0;
+  return Math.sign(x) * Math.round(Math.abs(x) * 10 + 1e-9) / 10;
+}
+// 2026-09-24 (owner): a request ends in one of three terminal statuses -- 'rejected', 'cancelled'
+// (the owner cancelled an APPROVED record; the row is kept as history) or 'revoked' (MD/Accounting
+// took an approval back; kept as history). None of them counts toward pay, leave balance, earned
+// credit, overlap/duplicate checks, queues or badges. Every NEGATIVE status filter
+// ("anything but rejected" style) goes through this helper so a new terminal status can never
+// slip through one of them. Dual-sync with server.js.
+function isVoidLeaveStatus(s) {
+  return s === 'rejected' || s === 'cancelled' || s === 'revoked';
+}
+// 2026-09-24: cancelled/revoked rows stay in history lists, greyed and struck through.
+function isWithdrawnLeaveStatus(s) {
+  return s === 'cancelled' || s === 'revoked';
+}
+function withdrawnStatusBadgeHtml(status) {
+  if (status === 'cancelled') return `<span class="badge badge-gray">🚫 ${L('Cancelled', 'ยกเลิกแล้ว')}</span>`;
+  if (status === 'revoked') return `<span class="badge badge-gray">↩️ ${L('Approval revoked', 'เพิกถอนการอนุมัติแล้ว')}</span>`;
+  return '';
+}
+// "Cancelled by X at T" / "Revoked by X at T (reason)" -- HTML-escaped, '' for any other status.
+function withdrawnLeaveNoteHtml(l) {
+  if (!l || !isWithdrawnLeaveStatus(l.status)) return '';
+  const who = escapeHtml((l.status === 'cancelled' ? l.cancelledBy : l.revokedBy) || '—');
+  const when = escapeHtml(_fmtDtStr(l.status === 'cancelled' ? l.cancelledAt : l.revokedAt));
+  if (l.status === 'cancelled') {
+    return currentLang === 'ja' ? `${who} が ${when} に取り消し` : L(`Cancelled by ${who} at ${when}`, `ยกเลิกโดย ${who} เมื่อ ${when}`);
+  }
+  const reason = l.revokeReason ? ` (${escapeHtml(l.revokeReason)})` : '';
+  return (currentLang === 'ja' ? `${who} が ${when} に承認を取り消し` : L(`Revoked by ${who} at ${when}`, `เพิกถอนโดย ${who} เมื่อ ${when}`)) + reason;
+}
+// Style for a whole row/card of a cancelled or revoked record.
+function withdrawnRowStyle(l) {
+  return l && isWithdrawnLeaveStatus(l.status) ? 'opacity:.6;text-decoration:line-through;' : '';
+}
+// Dual-sync with server.js isRevocableLeaveType (the money-bearing request types).
+function isRevocableLeaveType(type) {
+  return ['holiday-work', 'ot', 'early-morning', 'late-out', 'upcountry', 'long-distance',
+    'personal-car', 'abroad'].includes(type);
+}
+// Client gate for the "Revoke approval" button -- the server re-checks everything.
+function canRevokeLeaveApproval(l) {
+  if (!l || !currentUser || l.status !== 'approved' || !isRevocableLeaveType(l.type)) return false;
+  if (!actingRoles().some(r => r === 'md' || r === 'accounting')) return false;
+  if (l.userId === currentUser.id) return false;
+  if (currentUser.isObserver) return false;
+  return !payPeriodBlockedForRange(l.dateFrom, l.dateTo || l.dateFrom, l.userId).blocked;
 }
 function otEndCrossesMidnight(hhmm) {
   const m = lateNightCheckoutMins(hhmm);
@@ -1771,18 +1824,18 @@ function canSubmitHolidayWorkForDate(dateStr, userId) {
     checkOutSource: times.checkOutSource || base.checkOutSource,
   };
   const dup = DATA_LEAVES.some(l =>
-    l.userId === uid && l.type === 'holiday-work' && l.dateFrom === dateStr && l.status !== 'rejected' &&
+    l.userId === uid && l.type === 'holiday-work' && l.dateFrom === dateStr && !isVoidLeaveStatus(l.status) &&
     l.id !== editingLeaveId
   );
   if (dup) return { ok: false, reason: 'duplicate', row };
   const officeOt = DATA_LEAVES.some(l =>
     l.userId === uid && l.type === 'ot' && !l.isDriverOT && l.dateFrom === dateStr &&
-    l.status !== 'rejected' && l.id !== editingLeaveId
+    !isVoidLeaveStatus(l.status) && l.id !== editingLeaveId
   );
   if (officeOt) return { ok: false, reason: 'office-ot', row };
   const upcountry = DATA_LEAVES.some(l =>
     l.userId === uid && l.type === 'upcountry' && l.dateFrom === dateStr &&
-    l.status !== 'rejected' && l.id !== editingLeaveId
+    !isVoidLeaveStatus(l.status) && l.id !== editingLeaveId
   );
   if (upcountry) return { ok: false, reason: 'upcountry', row };
   return { ok: true, row };
@@ -1867,7 +1920,7 @@ function canSubmitEarlyMorningForDate(dateStr, userId) {
   }
   const times = attendanceTimesForDate(dateStr, uid);
   const hwOverlap = DATA_LEAVES.some(l =>
-    l.userId === uid && l.type === 'holiday-work' && l.dateFrom === dateStr && l.status !== 'rejected' &&
+    l.userId === uid && l.type === 'holiday-work' && l.dateFrom === dateStr && !isVoidLeaveStatus(l.status) &&
     l.id !== editingLeaveId
   );
   if (!times.checkIn) return { ok: false, reason: 'no-checkin' };
@@ -1891,7 +1944,7 @@ function canSubmitEarlyMorningForDate(dateStr, userId) {
     return { ok: false, reason: 'bad-status', row };
   }
   const dup = DATA_LEAVES.some(l =>
-    l.userId === uid && l.type === 'early-morning' && l.dateFrom === dateStr && l.status !== 'rejected' &&
+    l.userId === uid && l.type === 'early-morning' && l.dateFrom === dateStr && !isVoidLeaveStatus(l.status) &&
     l.id !== editingLeaveId
   );
   if (dup) return { ok: false, reason: 'duplicate', row };
@@ -2721,7 +2774,7 @@ function abroadTravelCreditDays(abroadLeaves, yStart, yEnd) {
 // I-1): a pending trip approved later would otherwise pay Holiday Work AND the travel credit.
 function isAbroadTravelDay(leaves, userId, dateStr) {
   return leaves.some(l =>
-    l.userId === userId && l.type === 'abroad' && !['rejected', 'cancelled'].includes(l.status) &&
+    l.userId === userId && l.type === 'abroad' && !isVoidLeaveStatus(l.status) &&
     (l.dateFrom === dateStr || (l.dateTo || l.dateFrom) === dateStr));
 }
 // Earned annual-leave days for the year: holiday work taken as annual leave, plus abroad travel
@@ -2806,7 +2859,7 @@ function carryForwardForfeitMinutes(u, year, asOfDateStr, includePending, except
   let usedBeforeMin = Math.max(0, getOpeningUsedDays(year, u.id, 'annual')) * 480;
   DATA_LEAVES.filter(l =>
     l.userId === u.id && l.type === 'annual' && l.id !== exceptId &&
-    (includePending ? !['rejected', 'cancelled'].includes(l.status) : l.status === 'approved') &&
+    (includePending ? !isVoidLeaveStatus(l.status) : l.status === 'approved') &&
     l.dateFrom >= yStart && l.dateFrom <= expiry
   ).forEach(l => { usedBeforeMin += leaveMinutesOnOrBefore(l, expiry); });
   return Math.max(0, cfMin - usedBeforeMin);
@@ -2869,7 +2922,7 @@ function pendingLeaveMinutes(userId, type, year, exceptId) {
   return DATA_LEAVES
     .filter(l =>
       l.userId === userId && l.type === type &&
-      !['approved', 'rejected', 'cancelled'].includes(l.status) &&
+      l.status !== 'approved' && !isVoidLeaveStatus(l.status) &&
       l.id !== exceptId &&
       l.dateFrom >= yStart && l.dateFrom <= yEnd)
     .reduce((sum, l) => sum + leaveRecordMinutes(l), 0);
@@ -5380,6 +5433,13 @@ async function pollLeaveNotifications() {
               `${t} ${period} ${L('was rejected','ถูกปฏิเสธ')}`,
               { tag: `leaf-${leaf.id}` }
             );
+          } else if (leaf.status === 'revoked') {
+            // 2026-09-24: MD/Accounting took an approval back (see revokeLeaveApproval()).
+            showBrowserNotification(
+              currentLang === 'ja' ? '↩️ 承認が取り消されました' : L('↩️ Approval Revoked', '↩️ การอนุมัติถูกเพิกถอน'),
+              currentLang === 'ja' ? `${t} ${period} の承認が取り消されました` : L(`${t} ${period} approval was revoked`, `${t} ${period} ถูกเพิกถอนการอนุมัติ`),
+              { tag: `leaf-${leaf.id}` }
+            );
           }
         });
       }
@@ -7036,7 +7096,7 @@ function buildCheckoutReviewHtml(row, targetUser, withButtons) {
       return `<div class="checkout-review">${chip('#dcfce7', '#166534', L('✅ Reviewed — you can submit 🌙', '✅ ตรวจแล้ว ยื่น 🌙 ได้'))}</div>`;
     }
     if (decision === 'deny') {
-      const hasLateOut = DATA_LEAVES.some(l => l.userId === targetUser.id && l.type === 'late-out' && l.dateFrom === row.date && l.status !== 'rejected');
+      const hasLateOut = DATA_LEAVES.some(l => l.userId === targetUser.id && l.type === 'late-out' && l.dateFrom === row.date && !isVoidLeaveStatus(l.status));
       const notPaid = hasLateOut
         ? `<div style="font-size:10px;color:#991b1b;margin-top:2px">${escapeHtml(L('🌙 not paid — check-out not allowed', '🌙 ไม่จ่าย — เวลาออกไม่ได้รับอนุญาต'))}</div>`
         : '';
@@ -7073,7 +7133,7 @@ async function setCheckoutReview(userId, dateStr, decision, checkOut) {
   const uid = Number(userId);
   if (!currentUser || uid === Number(currentUser.id) || !isMdAccountingView()) return;
   if (decision === 'deny') {
-    const hasLateOut = DATA_LEAVES.some(l => l.userId === uid && l.type === 'late-out' && l.dateFrom === dateStr && l.status !== 'rejected');
+    const hasLateOut = DATA_LEAVES.some(l => l.userId === uid && l.type === 'late-out' && l.dateFrom === dateStr && !isVoidLeaveStatus(l.status));
     if (hasLateOut && !confirm(L('This employee already has a 🌙 Late Night request for this day. Mark the check-out as not allowed anyway? The 🌙 will not be paid while it stays not allowed.',
       'พนักงานมีคำขอ 🌙 แจ้งกลับดึกของวันนี้อยู่แล้ว ยืนยันไม่อนุญาตเวลาออก? 🌙 จะไม่ถูกจ่ายตราบที่ยังไม่อนุญาต'))) return;
   }
@@ -7213,7 +7273,7 @@ function buildRowActions(row, readOnly, actionUser) {
     : ((isWorkDay || row.status === 'abroad') && !isHolidayRow);
   if (canOTRow && otRowEligibleDay) {
     const otExisting = DATA_LEAVES.filter(l =>
-      l.userId === actor.id && l.type === 'ot' && l.dateFrom === row.date && l.status !== 'rejected'
+      l.userId === actor.id && l.type === 'ot' && l.dateFrom === row.date && !isVoidLeaveStatus(l.status)
     );
     const otFilled = _viewRole === 'driver'
       ? (otExisting.some(l => !l.isDriverOT) || otExisting.filter(l => l.isDriverOT).length >= 3)
@@ -7236,7 +7296,7 @@ function buildRowActions(row, readOnly, actionUser) {
   // แค่ flag นี้ต่อคนว่าใครได้สิทธิ์บ้าง)
   if (isAllowanceEligible(APP_SETTINGS.allowanceEligibility, _viewRole, 'personalCar') && actor.personalCarEligible === true && (APP_SETTINGS.allowances.personalCar || 0) > 0 && !row.isFuture && row.checkIn &&
       !['leave-annual','leave-sick','leave-business','company-trip'].includes(row.status)) {
-    const pcExists = DATA_LEAVES.find(l => l.userId === actor.id && l.type === 'personal-car' && l.dateFrom === row.date && l.status !== 'rejected');
+    const pcExists = DATA_LEAVES.find(l => l.userId === actor.id && l.type === 'personal-car' && l.dateFrom === row.date && !isVoidLeaveStatus(l.status));
     const pcStyle = pcExists ? 'color:#854d0e;margin-left:4px' : 'color:#ca8a04;margin-left:4px';
     const pcTitle = pcExists ? L('Personal car already submitted', 'ยื่นใช้รถส่วนตัวแล้ว') : L('Record personal car use', 'แจ้งใช้รถส่วนตัว');
     html += `<button class="btn btn-ghost btn-sm" style="${pcStyle}" title="${pcTitle}" onclick="${pcExists ? '' : `openPersonalCarModal('${row.date}')`}" ${pcExists ? 'disabled' : ''}>🚙</button>`;
@@ -8515,6 +8575,7 @@ function renderUserRequestsPanel(panel) {
       reason: l.reason,
       status: l.status,
       approver: l.approver || null,
+      leaf: l,
     }));
 
   const allReqs = [...fromLeaves]
@@ -8543,6 +8604,11 @@ function renderUserRequestsPanel(panel) {
           statusBadge = `<span class="badge badge-danger">❌ ${L('Rejected', 'ปฏิเสธ')}</span>`;
           statusClass = 'rejected';
           if (r.approver) metaExtra = `<span>❌ ${L('Rejected by', 'ปฏิเสธโดย')} ${escapeHtml(r.approver)}</span>`;
+        } else if (isWithdrawnLeaveStatus(r.status)) {
+          // 2026-09-24: cancelled / revoked history rows.
+          statusBadge = withdrawnStatusBadgeHtml(r.status);
+          statusClass = 'rejected';
+          metaExtra = `<span>${withdrawnLeaveNoteHtml(r.leaf)}</span>`;
         } else {
           statusBadge = `<span class="badge badge-warning">⏳ ${escapeHtml(r.status)}</span>`;
           statusClass = 'pending';
@@ -8615,13 +8681,15 @@ function openMyRequestsModal() {
       status:      l.status,
       approver:    l.approver || null,
       note:        l.note || '',
+      leaf:        l,
     }));
 
   const allReqs = [...fromLeaves]
     .sort((a, b) => new Date(b.serverCreatedAt || b.submittedAt) - new Date(a.serverCreatedAt || a.submittedAt));
 
   const pending = allReqs.filter(r => r.status === 'pending' || r.status === 'pending-md' || r.status === 'pending-accounting');
-  const done    = allReqs.filter(r => r.status === 'approved' || r.status === 'rejected');
+  // 2026-09-24: cancelled / revoked records are history too.
+  const done    = allReqs.filter(r => r.status === 'approved' || isVoidLeaveStatus(r.status));
 
   const _STEP_ROLE_LABEL = { manager: 'Manager', md: 'Managing Director', accounting: 'Accounting' };
   const _STATUS_TO_ROLE  = { pending: 'manager', 'pending-md': 'md', 'pending-accounting': 'accounting' };
@@ -8658,11 +8726,14 @@ function openMyRequestsModal() {
     } else if (r.status === 'approved') {
       statusBadge = `<span class="badge badge-success">✅ ${L('Approved', 'อนุมัติแล้ว')}</span>`;
       if (r.approver) stepHtml = `<div style="margin-top:6px;font-size:11px;color:#059669">✅ ${L('Approved by', 'อนุมัติโดย')} ${escapeHtml(r.approver)}</div>`;
+    } else if (isWithdrawnLeaveStatus(r.status)) {
+      statusBadge = withdrawnStatusBadgeHtml(r.status);
+      stepHtml = `<div style="margin-top:6px;font-size:11px;color:#64748b">${withdrawnLeaveNoteHtml(r.leaf)}</div>`;
     } else {
       statusBadge = `<span class="badge badge-danger">❌ ${L('Rejected', 'ถูกปฏิเสธ')}</span>`;
       if (r.approver) stepHtml = `<div style="margin-top:6px;font-size:11px;color:#dc2626">❌ ${L('Rejected by', 'ปฏิเสธโดย')} ${escapeHtml(r.approver)}</div>`;
     }
-    return `<div class="approval-card ${r.status.includes('pending') ? 'pending' : escapeHtml(r.status)}">
+    return `<div class="approval-card ${r.status.includes('pending') ? 'pending' : escapeHtml(r.status)}" style="${withdrawnRowStyle(r)}">
       <div class="approval-header"><h4 style="font-size:13px">${r.typeLabel}</h4>${statusBadge}</div>
       <div class="approval-meta" style="font-size:11px">
         <span>📅 ${r.dateLine}${r.daysPart}</span>
@@ -11868,7 +11939,7 @@ function renderApprovals() {
 
   const pendingFiltered = pendingAll.filter(matchTab).sort((a,b) => b.id - a.id);
   const decidedFiltered = DATA_LEAVES
-    .filter(l => (l.status === 'approved' || l.status === 'rejected') && matchTab(l))
+    .filter(l => (l.status === 'approved' || isVoidLeaveStatus(l.status)) && matchTab(l))
     .sort((a,b) => b.id - a.id)
     .slice(0, 20);
 
@@ -12094,11 +12165,13 @@ function renderApprovals() {
             ? fmtDate(new Date(l.dateFrom + 'T12:00:00'))
             : `${fmtDate(new Date(l.dateFrom + 'T12:00:00'))} – ${fmtDate(new Date(l.dateTo + 'T12:00:00'))}`;
           const ok = l.status === 'approved';
-          return `<div onclick="showApprovalDetail(${l.id})" style="background:${document.documentElement.getAttribute('data-theme')==='dark'?'#0f172a':'#f8fafc'};border:1px solid var(--border);border-radius:10px;padding:10px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;cursor:pointer" onmouseover="this.style.background=document.documentElement.getAttribute('data-theme')==='dark'?'#334155':'#f1f5f9'" onmouseout="this.style.background=document.documentElement.getAttribute('data-theme')==='dark'?'#0f172a':'#f8fafc'">
+          const histBadge = isWithdrawnLeaveStatus(l.status) ? withdrawnStatusBadgeHtml(l.status)
+            : `<span class="badge ${ok ? 'badge-success' : 'badge-danger'}">${ok ? L('✅ Approved', '✅ อนุมัติ') : L('❌ Rejected', '❌ ปฏิเสธ')}</span>`;
+          return `<div onclick="showApprovalDetail(${l.id})" style="${withdrawnRowStyle(l)}background:${document.documentElement.getAttribute('data-theme')==='dark'?'#0f172a':'#f8fafc'};border:1px solid var(--border);border-radius:10px;padding:10px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;cursor:pointer" onmouseover="this.style.background=document.documentElement.getAttribute('data-theme')==='dark'?'#334155':'#f1f5f9'" onmouseout="this.style.background=document.documentElement.getAttribute('data-theme')==='dark'?'#0f172a':'#f8fafc'">
             <span>${icon}</span>
             <span style="font-size:13px;font-weight:600;color:var(--text);flex:1">${escapeHtml(emp?.name || '—')}</span>
             <span style="font-size:12px;color:var(--text-muted)">${dateLine}</span>
-            <span class="badge ${ok ? 'badge-success' : 'badge-danger'}">${ok ? L('✅ Approved', '✅ อนุมัติ') : L('❌ Rejected', '❌ ปฏิเสธ')}</span>
+            ${histBadge}
           </div>`;
         }).join('')}
       </div>`;
@@ -12885,13 +12958,23 @@ function showApprovalDetail(id) {
     'pending-md':`<span class="badge badge-info">⏳ ${L('Pending Managing Director', 'รอ Managing Director')}</span>`,
     'pending-accounting': `<span class="badge badge-info">⏳ ${L('Pending Accounting', 'รอ Accounting')}</span>`,
     pending:    `<span class="badge badge-warning">⏳ ${L('Pending', 'รออนุมัติ')}</span>`,
+    cancelled:  withdrawnStatusBadgeHtml('cancelled'),
+    revoked:    withdrawnStatusBadgeHtml('revoked'),
   };
 
   // Same light-pastel-banner-hardcoded-in-dark-mode issue as the toolbar above — these status
   // banners stayed bright light-green/red/amber regardless of theme since they never checked
   // data-theme, unlike most of the rest of this modal which now reads CSS variables.
   const _isDarkDetail = document.documentElement.getAttribute('data-theme') === 'dark';
-  const decisionSection = (l.status === 'approved' || l.status === 'rejected') && l.approver
+  // 2026-09-24: cancelled / revoked -- grey banner with who/when (and the original approver).
+  const withdrawnSection = isWithdrawnLeaveStatus(l.status)
+    ? `<div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:6px">
+        <div>${statusMap[l.status]}</div>
+        <div style="font-size:13px;color:var(--text)">${withdrawnLeaveNoteHtml(l)}</div>
+        ${l.approver ? row(L('Approved by', 'อนุมัติโดย'), escapeHtml(l.approver)) : ''}
+      </div>`
+    : '';
+  const decisionSection = withdrawnSection ? withdrawnSection : (l.status === 'approved' || l.status === 'rejected') && l.approver
     ? `<div style="background:${l.status==='approved'?(_isDarkDetail?'rgba(16,185,129,0.15)':'#f0fdf4'):(_isDarkDetail?'rgba(239,68,68,0.15)':'#fff5f5')};border:1px solid ${l.status==='approved'?(_isDarkDetail?'rgba(16,185,129,0.3)':'#86efac'):(_isDarkDetail?'rgba(239,68,68,0.3)':'#fca5a5')};border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:6px">
         <div style="font-size:12px;font-weight:700;color:${l.status==='approved'?(_isDarkDetail?'#6ee7b7':'#16a34a'):(_isDarkDetail?'#fca5a5':'#dc2626')};letter-spacing:.4px">
           ${l.status==='approved'?L('✅ Approval Result','✅ ผลการอนุมัติ'):L('❌ Rejection Result','❌ ผลการปฏิเสธ')}
@@ -12912,6 +12995,11 @@ function showApprovalDetail(id) {
         <button onclick="rejectMockLeave(${l.id});closeApprovalDetail();" style="flex:1;padding:11px;border-radius:8px;background:#ef4444;color:#fff;border:none;font-size:14px;font-weight:700;cursor:pointer">❌ ${L('Reject', 'ไม่อนุมัติ')}</button>
       </div>`
     : '';
+  // 2026-09-24 (owner): MD / Accounting can take back an approval on a money-bearing request until
+  // payroll for its period is MD-approved (hidden when the server would refuse).
+  const revokeButton = canRevokeLeaveApproval(l)
+    ? `<button onclick="closeApprovalDetail();revokeLeaveApproval(${l.id});" style="width:100%;padding:11px;border-radius:8px;background:var(--bg-card);color:#b91c1c;border:1.5px solid #fca5a5;font-size:14px;font-weight:700;cursor:pointer">↩️ ${L('Revoke approval', 'เพิกถอนการอนุมัติ')}</button>`
+    : '';
 
   document.getElementById('adetail-title').textContent = `${icon} ${label.replace(/^[^\s]+ /,'')}`;
   document.getElementById('adetail-body').innerHTML = `
@@ -12929,7 +13017,8 @@ function showApprovalDetail(id) {
       ${l.type !== 'upcountry' ? row(L('Reason', 'เหตุผล'), `📝 ${escapeHtml(l.reason)}`) : ''}
     </div>
     ${decisionSection}
-    ${actionButtons}`;
+    ${actionButtons}
+    ${revokeButton}`;
   document.getElementById('approval-detail-modal').classList.add('show');
 }
 
@@ -13376,7 +13465,7 @@ async function submitLeave() {
       l.userId === currentUser.id &&
       l.id !== editingLeaveId &&
       ['annual','sick','business'].includes(l.type) &&
-      !['rejected','cancelled'].includes(l.status) &&
+      !isVoidLeaveStatus(l.status) &&
       l.dateFrom <= dateTo && (l.dateTo || l.dateFrom) >= dateFrom
     );
     if (overlap) {
@@ -13396,7 +13485,7 @@ async function submitLeave() {
     const totalMin = (totalEntitlement + cfDays + compDays) * 8 * 60;
     const committedLeaves = DATA_LEAVES.filter(l =>
       l.userId === u.id && l.type === type &&
-      !['rejected','cancelled'].includes(l.status) &&
+      !isVoidLeaveStatus(l.status) &&
       l.id !== editingLeaveId &&
       l.dateFrom >= yStart && l.dateFrom <= yEnd
     );
@@ -13967,7 +14056,7 @@ function canSubmitLateNightForDate(dateStr, userId, opts) {
     return { ok: false, reason: 'no-checkout' };
   }
   const dup = DATA_LEAVES.some(l =>
-    l.userId === uid && l.type === 'late-out' && l.dateFrom === dateStr && l.status !== 'rejected' &&
+    l.userId === uid && l.type === 'late-out' && l.dateFrom === dateStr && !isVoidLeaveStatus(l.status) &&
     l.id !== editingLeaveId
   );
   if (dup) return { ok: false, reason: 'duplicate' };
@@ -14419,7 +14508,7 @@ async function submitOT() {
   }
   if (blockIfCompanyTrip(date)) return;
   if (!editingLeaveId) {
-    const dup = DATA_LEAVES.find(l => l.userId === currentUser.id && l.type === 'ot' && l.dateFrom === date && l.status !== 'rejected');
+    const dup = DATA_LEAVES.find(l => l.userId === currentUser.id && l.type === 'ot' && l.dateFrom === date && !isVoidLeaveStatus(l.status));
     if (dup) {
       showToast(L('⚠️ An OT request for this date already exists', '⚠️ มีคำขอ OT ของวันนี้แล้ว'), 'warning');
       return;
@@ -14509,7 +14598,7 @@ async function submitDriverOT() {
   if (blockIfCompanyTrip(date)) return;
   const officeOt = DATA_LEAVES.find(l =>
     l.userId === currentUser.id && l.type === 'ot' && !l.isDriverOT &&
-    l.dateFrom === date && l.status !== 'rejected' && l.id !== editingLeaveId
+    l.dateFrom === date && !isVoidLeaveStatus(l.status) && l.id !== editingLeaveId
   );
   if (officeOt) {
     showToast(L('⚠️ An OT request for this date already exists', '⚠️ มีคำขอ OT ของวันนี้แล้ว'), 'warning');
@@ -14520,7 +14609,7 @@ async function submitDriverOT() {
   const DRIVER_OT_HOURS_MAX = 20;
   const existingDriverOt = DATA_LEAVES.filter(l =>
     l.userId === currentUser.id && l.type === 'ot' && l.isDriverOT &&
-    l.dateFrom === date && l.status !== 'rejected' && l.id !== editingLeaveId
+    l.dateFrom === date && !isVoidLeaveStatus(l.status) && l.id !== editingLeaveId
   );
   const takenTiers = new Set(existingDriverOt.map(l => Number(l.otMultiplier)));
   const usedHours = existingDriverOt.reduce((s, l) => s + (Number(l.otHours) || 0), 0);
@@ -14887,7 +14976,7 @@ async function submitAbroad() {
   // 2026-09-24 (review L-4): dropped `l.id !== editingLeaveId` -- editingLeaveId is this Abroad
   // record's id, never a Holiday Work id, so that comparison could never exclude anything.
   if (DATA_LEAVES.some(l => l.userId === currentUser.id && l.type === 'holiday-work' &&
-      !['rejected', 'cancelled'].includes(l.status) &&
+      !isVoidLeaveStatus(l.status) &&
       (l.dateFrom === dateFrom || l.dateFrom === dateTo))) {
     showToast(L("⚠️ A holiday work request exists on this trip's start or end date — travel days earn annual leave automatically; cancel that holiday work first",
       '⚠️ มีคำขอทำงานวันหยุดในวันเริ่มหรือวันสิ้นสุดทริป — วันเดินทางได้วันลาพักร้อนอัตโนมัติ กรุณายกเลิกคำขอทำงานวันหยุดนั้นก่อน'), 'warning');
@@ -15549,7 +15638,9 @@ function renderLeaveHistory() {
     }
     // 2026-08-16 (Opus audit L-10): was a generic "Pending" for every pending-* status, unlike
     // renderMyRequests() which already names the specific approver -- same map, copied verbatim.
-    const statusBadge = l.status === 'approved'
+    const statusBadge = isWithdrawnLeaveStatus(l.status)
+      ? `${withdrawnStatusBadgeHtml(l.status)}<div style="font-size:11px;color:#64748b;margin-top:2px">${withdrawnLeaveNoteHtml(l)}</div>`
+      : l.status === 'approved'
       ? `<span class="badge badge-success">✅ ${L('Approved', 'อนุมัติ')}</span>`
       : l.status === 'rejected'
       ? `<span class="badge badge-danger">❌ ${L('Rejected', 'ปฏิเสธ')}</span>`
@@ -15575,9 +15666,9 @@ function renderLeaveHistory() {
            ${isCancellableApprovedLeave(l) ? `<button class="btn btn-danger btn-sm" onclick="cancelLeave(${l.id})">${L('Cancel', 'ยกเลิก')}</button>` : ''}
          </div>`;
 
-    return `<tr>
+    return `<tr style="${isWithdrawnLeaveStatus(l.status) ? 'opacity:.6' : ''}">
       <td><span class="badge ${cfg.badgeClass}">${cfg.icon} ${escapeHtml(cfg.label)}</span></td>
-      <td>${dateLabel}</td>
+      <td style="${withdrawnRowStyle(l)}">${dateLabel}</td>
       <td class="col-hide-mobile">${Number(l.days)} ${L('days', 'วัน')}</td>
       <td class="col-hide-mobile">${escapeHtml(l.reason)}${l.attachment ? ` <a href="javascript:void(0)" class="att-open-link" data-attachment="${escapeHtml(l.attachment)}" data-attachment-name="${escapeHtml(l.attachmentName || l.attachment)}" title="${L('Open attachment', 'เปิดไฟล์แนบ')}">📎</a>` : ''}</td>
       <td>${statusBadge}</td>
@@ -15609,7 +15700,10 @@ function showLeaveDetail(id) {
     'pending-accounting': `<span class="badge badge-info">⏳ ${L('Pending Accounting', 'รอ Accounting')}</span>`,
     pending:   `<span class="badge badge-warning">⏳ ${L('Pending', 'รออนุมัติ')}</span>`,
   };
-  document.getElementById('leave-detail-status-badge').innerHTML = statusMap[l.status] || '';
+  // 2026-09-24: cancelled / revoked -- badge plus who/when (and the revoke reason).
+  document.getElementById('leave-detail-status-badge').innerHTML = isWithdrawnLeaveStatus(l.status)
+    ? `${withdrawnStatusBadgeHtml(l.status)} <span style="font-size:12px;color:#64748b">${withdrawnLeaveNoteHtml(l)}</span>`
+    : (statusMap[l.status] || '');
 
   const fmt = s => fmtDate(s);
   document.getElementById('leave-detail-dates').textContent = l.dateFrom === l.dateTo
@@ -15698,26 +15792,34 @@ async function cancelLeave(id) {
   const confirmMsg = approvedLeaveCancel
     ? (l.type === 'abroad'
       ? (currentLang === 'ja'
-        ? '承認済みの海外勤務を取り消しますか？該当日は欠勤に戻り、手当も付きません。'
-        : L('Cancel this approved Abroad trip? Those days go back to being absent and the allowance is not paid.',
-            'ยกเลิกทำงานต่างประเทศที่อนุมัติแล้ว? วันเหล่านั้นจะกลับไปเป็นขาดงาน และจะไม่ได้รับเบี้ยเลี้ยง'))
-      : L('Cancel this approved leave? The days will be returned to your balance.', 'ยกเลิกวันลาที่อนุมัติแล้ว? จำนวนวันจะถูกคืนเข้ายอดคงเหลือ'))
+        ? '承認済みの海外勤務を取り消しますか？該当日は欠勤に戻り、手当も付きません。記録は「取消済み」として履歴に残ります。'
+        : L('Cancel this approved Abroad trip? Those days go back to being absent and the allowance is not paid. The record stays in your history as cancelled.',
+            'ยกเลิกทำงานต่างประเทศที่อนุมัติแล้ว? วันเหล่านั้นจะกลับไปเป็นขาดงาน และจะไม่ได้รับเบี้ยเลี้ยง รายการจะยังอยู่ในประวัติเป็น "ยกเลิกแล้ว"'))
+      : L('Cancel this approved leave? The days will be returned to your balance and the record stays in your history as cancelled.', 'ยกเลิกวันลาที่อนุมัติแล้ว? จำนวนวันจะถูกคืนเข้ายอดคงเหลือ และรายการจะยังอยู่ในประวัติเป็น "ยกเลิกแล้ว"'))
     : L('Confirm cancellation of this request?', 'ยืนยันการยกเลิกคำขอนี้?');
   if (!confirm(confirmMsg)) return false;
   if (approvedLeaveCancel && !isCancellableApprovedLeave(l)) {
     showToast(L('Cannot cancel leave on or after the leave date — days already used stay deducted.', 'ถึงวันลาแล้ว ยกเลิกไม่ได้ — วันลาถูกใช้ไปแล้วจะไม่คืนยอด'), 'warning');
     return false;
   }
+  let cancelData = null;
   try {
     const res = await apiFetch(`/api/leaves/${id}`, { method: 'DELETE' });
-    const data = await res.json();
-    if (!data.success) throw new Error(data.message || 'Cancel failed');
+    cancelData = await res.json();
+    if (!cancelData.success) throw new Error(cancelData.message || 'Cancel failed');
   } catch(e) {
     showToast(L('❌ Could not cancel: ', '❌ ยกเลิกไม่สำเร็จ: ') + e.message, 'danger');
     return false;
   }
-  DATA_LEAVES = DATA_LEAVES.filter(x => x.id !== id);
-  if (approvedLeaveCancel && l.type === 'annual') {
+  // 2026-09-24 (owner): an approved record is kept as 'cancelled' history (server returns it);
+  // a pending one is still deleted.
+  if (cancelData && cancelData.leave) {
+    const cIdx = DATA_LEAVES.findIndex(x => x.id === id);
+    if (cIdx >= 0) DATA_LEAVES[cIdx] = cancelData.leave;
+  } else {
+    DATA_LEAVES = DATA_LEAVES.filter(x => x.id !== id);
+  }
+  if (approvedLeaveCancel && ['annual', 'abroad'].includes(l.type)) {
     await loadSettingsFromBackend();
   }
   updateMyRequestsBadge();
@@ -15727,6 +15829,70 @@ async function cancelLeave(id) {
   if (currentPage === 'attendance') renderAttendanceTable();
   if (currentPage === 'calendar') renderCalendarPage();
   showToast(L('🗑️ Request cancelled', '🗑️ ยกเลิกคำขอเรียบร้อยแล้ว'), 'info');
+  return true;
+}
+
+// 2026-09-24 (owner): MD / Accounting take back an approval on a money-bearing request (pay,
+// allowance and earned annual-leave credit stop). Only until payroll for the period is MD-approved;
+// the record stays in history as 'revoked'. Server: POST /api/leaves/:id/revoke.
+function revokeErrorMessage(code, fallback) {
+  if (code === 'period-frozen') {
+    return currentLang === 'ja'
+      ? 'この期間の給与はManaging Directorが承認済みのため、承認を取り消せません'
+      : L('Payroll for this period is already approved by the Managing Director — the approval can no longer be revoked',
+        'เงินเดือนรอบนี้ Managing Director อนุมัติแล้ว — เพิกถอนการอนุมัติไม่ได้แล้ว');
+  }
+  if (code === 'period-locked') return payPeriodBlockedMessage({ reason: 'period-locked' });
+  if (code === 'period-confirmed') return payPeriodBlockedMessage({ reason: 'period-confirmed' });
+  if (code === 'revoke-own') {
+    return L('You cannot revoke the approval of your own request', 'ไม่สามารถเพิกถอนการอนุมัติคำขอของตัวเองได้');
+  }
+  if (code === 'revoke-not-approved') return L('Only approved requests can be revoked', 'เพิกถอนได้เฉพาะคำขอที่อนุมัติแล้ว');
+  if (code === 'revoke-type') return L('This request type has no pay to revoke', 'คำขอประเภทนี้ไม่มีเงินที่ต้องเพิกถอน');
+  return fallback || L('Could not revoke the approval', 'เพิกถอนการอนุมัติไม่สำเร็จ');
+}
+async function revokeLeaveApproval(id) {
+  if (blockIfObserver()) return false;
+  const l = DATA_LEAVES.find(x => x.id === id);
+  if (!l) return false;
+  if (!canRevokeLeaveApproval(l)) {
+    const pp = payPeriodBlockedForRange(l.dateFrom, l.dateTo || l.dateFrom, l.userId);
+    showToast(pp.blocked ? revokeErrorMessage(pp.reason) : revokeErrorMessage(''), 'warning');
+    return false;
+  }
+  const emp = DATA_USERS.find(u => u.id === l.userId);
+  const empName = emp ? emp.name : `#${l.userId}`;
+  const confirmMsg = currentLang === 'ja'
+    ? `${empName} のこの申請の承認を取り消しますか？関連する手当・OT・付与された有給は支払われなくなります。記録は履歴に残ります。`
+    : L(`Revoke the approval of this request by ${empName}? Its pay, allowance or earned leave day will no longer be given. The record stays in history.`,
+      `เพิกถอนการอนุมัติคำขอนี้ของ ${empName}? เงิน/เบี้ยเลี้ยง/วันลาที่ได้จากคำขอนี้จะไม่ได้รับอีก รายการจะยังอยู่ในประวัติ`);
+  if (!confirm(confirmMsg)) return false;
+  const reasonIn = prompt(L('Reason for revoking (optional):', 'เหตุผลที่เพิกถอน (ไม่บังคับ):'), '');
+  if (reasonIn === null) return false;
+  try {
+    const res = await apiFetch(`/api/leaves/${id}/revoke`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason: String(reasonIn).trim().slice(0, 500) }),
+    });
+    const data = await res.json();
+    if (!data.success) {
+      showToast('❌ ' + revokeErrorMessage(data.code, data.message), 'danger');
+      return false;
+    }
+    const rIdx = DATA_LEAVES.findIndex(x => x.id === id);
+    if (rIdx >= 0 && data.leave) DATA_LEAVES[rIdx] = data.leave;
+  } catch (e) {
+    showToast('❌ ' + revokeErrorMessage('', e.message), 'danger');
+    return false;
+  }
+  if (l.type === 'abroad' || l.type === 'holiday-work') await loadSettingsFromBackend();
+  updateMyRequestsBadge();
+  updateApprovalBadge();
+  if (currentPage === 'approval') renderApprovals();
+  if (currentPage === 'attendance') renderAttendanceTable();
+  if (currentPage === 'payslip') renderPayslip();
+  if (currentPage === 'reports') renderReports();
+  showToast(currentLang === 'ja' ? '↩️ 承認を取り消しました' : L('↩️ Approval revoked', '↩️ เพิกถอนการอนุมัติแล้ว'), 'info');
   return true;
 }
 
@@ -16661,6 +16827,8 @@ function renderMyRequests() {
     'pending-accounting': { badge:`<span class="badge badge-info">⏳ ${L('Pending Accounting', 'รอ Accounting')}</span>`, dot:'#3b82f6' },
     'approved':   { badge:`<span class="badge badge-success">✅ ${L('Approved', 'อนุมัติแล้ว')}</span>`,            dot:'#10b981' },
     'rejected':   { badge:`<span class="badge badge-danger">❌ ${L('Rejected', 'ปฏิเสธ')}</span>`,                 dot:'#ef4444' },
+    'cancelled':  { badge: withdrawnStatusBadgeHtml('cancelled'), dot:'#94a3b8' },
+    'revoked':    { badge: withdrawnStatusBadgeHtml('revoked'),   dot:'#94a3b8' },
   };
 
   container.innerHTML = items.map(l => {
@@ -16694,7 +16862,9 @@ function renderMyRequests() {
       ? (currentLang === 'ja' ? `🚗 ${Number(l.mileageStart||0).toLocaleString()} → ${Number(l.mileageEnd||0).toLocaleString()} km (${Number(l.distanceKm||0).toLocaleString()} km)` : L(`🚗 ${Number(l.mileageStart||0).toLocaleString()} → ${Number(l.mileageEnd||0).toLocaleString()} km (${Number(l.distanceKm||0).toLocaleString()} km)`, `🚗 เลขไมล์ ${Number(l.mileageStart||0).toLocaleString()} → ${Number(l.mileageEnd||0).toLocaleString()} (${Number(l.distanceKm||0).toLocaleString()} กม.)`))
       : formatTimePart(l);
 
-    const approverLine = (l.status === 'approved' || l.status === 'rejected') && l.approver
+    const approverLine = isWithdrawnLeaveStatus(l.status)
+      ? `<span style="color:#94a3b8">• ${withdrawnLeaveNoteHtml(l)}</span>`
+      : (l.status === 'approved' || l.status === 'rejected') && l.approver
       ? `<span style="color:#94a3b8">• ${l.status === 'approved' ? L('Approved', 'อนุมัติ') : L('Rejected', 'ปฏิเสธ')} ${L('by', 'โดย')} ${escapeHtml(l.approver)}</span>`
       : l.status === 'pending-md'
       ? `<span style="color:#94a3b8">• ${L('Pending Managing Director', 'รอ Managing Director')}</span>`
@@ -16719,7 +16889,7 @@ function renderMyRequests() {
       : '';
 
     return `
-      <div class="card" style="border-left:4px solid ${cfg.border};transition:box-shadow .15s" onmouseover="this.style.boxShadow='0 4px 12px rgba(0,0,0,.08)'" onmouseout="this.style.boxShadow=''">
+      <div class="card" style="border-left:4px solid ${cfg.border};transition:box-shadow .15s;${isWithdrawnLeaveStatus(l.status) ? 'opacity:.6;' : ''}" onmouseover="this.style.boxShadow='0 4px 12px rgba(0,0,0,.08)'" onmouseout="this.style.boxShadow=''">
         <div class="card-body" style="padding:16px 20px">
           <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap">
             <div style="flex:1;min-width:0">
@@ -16728,7 +16898,7 @@ function renderMyRequests() {
                 ${sc.badge}
               </div>
               <div style="display:flex;align-items:center;gap:16px;font-size:13px;color:#475569;flex-wrap:wrap;margin-bottom:${l.reason ? '6px' : '0'}">
-                <span>📅 ${dateLine}</span>
+                <span style="${isWithdrawnLeaveStatus(l.status) ? 'text-decoration:line-through' : ''}">📅 ${dateLine}</span>
                 ${detail ? `<span>${detail}</span>` : ''}
                 <span>🕐 ${L('Submitted', 'ยื่นเมื่อ')} ${escapeHtml(_fmtDtStr(l.submittedAt))}</span>
                 ${approverLine}
@@ -17492,6 +17662,25 @@ function initHikvisionLive() {
         // already uses above.
         const lIdx = DATA_LEAVES.findIndex(l => l.id === data.leave?.id);
         if (lIdx >= 0) DATA_LEAVES[lIdx] = { ...DATA_LEAVES[lIdx], ...data.leave };
+        // 2026-09-24: a cancel/revoke of an approved record changes pay, balances and attendance
+        // everywhere, and the who/when/reason fields are not in the public broadcast -- refetch
+        // (authenticated) and re-render every page LEAVE_DELETED re-renders.
+        if (isWithdrawnLeaveStatus(data.leave?.status)) {
+          loadLeavesFromBackend().then(() => {
+            updateMyRequestsBadge(); updateApprovalBadge();
+            renderDashboard();
+            if (currentPage === 'leave') renderLeaveHistory();
+            if (currentPage === 'my-requests') renderMyRequests();
+            if (currentPage === 'approval') renderApprovals();
+            if (currentPage === 'attendance') renderAttendanceTable();
+            if (currentPage === 'calendar') renderCalendarPage();
+            if (currentPage === 'payslip') renderPayslip();
+            if (currentPage === 'reports') renderReports();
+            if (currentPage === 'leave-summary') renderLeaveSummary();
+            if (currentPage === 'profile') renderMyProfile();
+            if (currentPage === 'audit-log') renderAuditLog();
+          });
+        }
         updateMyRequestsBadge(); updateApprovalBadge();
         renderDashboard();
         if (currentPage === 'leave') renderLeaveHistory();
@@ -18208,6 +18397,8 @@ function renderAuditLog() {
   const statusBadge = {
     approved: `<span class="badge badge-success">${L('✅ Approved','✅ อนุมัติ')}</span>`,
     rejected: `<span class="badge badge-danger">${L('❌ Rejected','❌ ปฏิเสธ')}</span>`,
+    cancelled: withdrawnStatusBadgeHtml('cancelled'),
+    revoked: withdrawnStatusBadgeHtml('revoked'),
   };
   const pendingBadge = `<span class="badge badge-warning">${L('⏳ Pending','⏳ รออนุมัติ')}</span>`;
 
@@ -18242,10 +18433,14 @@ function renderAuditLog() {
     const pend = rows.filter(r => String(r.status).startsWith('pending')).length;
     const appr = rows.filter(r => r.status === 'approved').length;
     const rej  = rows.filter(r => r.status === 'rejected').length;
-    summary.textContent = L(
-      `${tot} records — ${appr} approved, ${pend} pending, ${rej} rejected`,
-      `${tot} รายการ — อนุมัติ ${appr}, รออนุมัติ ${pend}, ปฏิเสธ ${rej}`
-    );
+    // 2026-09-24: cancelled / revoked history records.
+    const wd   = rows.filter(r => isWithdrawnLeaveStatus(r.status)).length;
+    summary.textContent = currentLang === 'ja'
+      ? `${tot}件 — 承認 ${appr}、保留 ${pend}、却下 ${rej}、取消/承認取消 ${wd}`
+      : L(
+        `${tot} records — ${appr} approved, ${pend} pending, ${rej} rejected, ${wd} cancelled/revoked`,
+        `${tot} รายการ — อนุมัติ ${appr}, รออนุมัติ ${pend}, ปฏิเสธ ${rej}, ยกเลิก/เพิกถอน ${wd}`
+      );
   }
 
   const totalPages = Math.ceil(rows.length / AUDIT_PAGE_SIZE);
@@ -18278,7 +18473,9 @@ function renderAuditLog() {
       const reasonText = escapeHtml(reasonRaw.substring(0, 60));
       const reason = reasonText ? `<span title="${escapeHtml(reasonRaw)}" style="cursor:help">${reasonText}${reasonRaw.length>60?'…':''}</span>` : '<span style="color:var(--text-muted)">—</span>';
 
-      return `<tr>
+      // 2026-09-24: rows open the approval detail (where MD/Accounting can revoke an approval);
+      // cancelled/revoked rows are greyed and struck through.
+      return `<tr onclick="showApprovalDetail(${Number(r.id)})" style="cursor:pointer;${withdrawnRowStyle(r)}">
         <td class="col-hide-mobile" style="white-space:nowrap;color:var(--text-muted);font-size:12px">${dtStr}</td>
         <td><div style="font-weight:600">${name}</div>${pos}</td>
         <td style="white-space:nowrap">${typeLabel[r.type] || escapeHtml(r.type)}</td>

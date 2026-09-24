@@ -44,7 +44,7 @@ const SETTINGS = {
   payroll: { periodStartDay: 21 },
 };
 
-const SHARED = ['round2HalfUp', 'deriveOfficeOtFromEndTime', 'lateNightCheckoutMins', 'parseHHMMToMins',
+const SHARED = ['isVoidLeaveStatus', 'round2HalfUp', 'deriveOfficeOtFromEndTime', 'lateNightCheckoutMins', 'parseHHMMToMins',
   'isHolidayWorkDay', 'isNonWorkDayForComp', 'isHolidayWorkOtRecord', 'companyTripDateInRange',
   'isFullDayPersonalLeaveStatus', 'isRestAttendanceDay', 'isDeviceScanSource', 'isEarlyMorningDayStatus',
   'deviceScanQualifiesForEarlyMorning', 'deviceScanQualifiesForLateNight', 'lateNightCheckoutOk',
