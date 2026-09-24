@@ -3111,7 +3111,7 @@ function hourlyLeaveChargedMinutes(hourlyStart, hourlyEnd) {
 }
 
 // DUAL-SYNC with server.js carryForwardExpiryEnabled / carryForwardExpiryDateStr /
-// leaveWorkingDaysBetween / leaveMinutesOnOrBefore / carryForwardForfeitMinutes.
+// leaveMinutesOnOrBefore / carryForwardForfeitMinutes.
 // 2026-09-24 (owner): carried-forward annual days expire on the configured month/day of the year
 // they were carried INTO. They are consumed first (FIFO): whatever part of the carry-forward is
 // not covered by annual leave dated on/before the expiry date (+ go-live opening-used) is
@@ -3127,18 +3127,6 @@ function carryForwardExpiryDateStr(year) {
   const day = Math.min(lastDay, Math.max(1, Math.trunc(Number(lv.carryForwardExpiryDay)) || 31));
   const p2 = n => String(n).padStart(2, '0');
   return `${year}-${p2(month)}-${p2(day)}`;
-}
-// Working days (not weekend / public holiday) from fromStr to toStr inclusive -- the same count
-// submitLeave() stores in `days`.
-function leaveWorkingDaysBetween(fromStr, toStr) {
-  let n = 0;
-  const d = new Date(fromStr + 'T12:00:00');
-  const end = new Date(toStr + 'T12:00:00');
-  while (d <= end) {
-    if (d.getDay() !== 0 && d.getDay() !== 6 && !isPublicHoliday(localDateStr(d))) n++;
-    d.setDate(d.getDate() + 1);
-  }
-  return n;
 }
 // Minutes of leave `l` that count as carry-forward usage for a cutoff (the expiry date).
 // 2026-09-24 (owner, review HIGH): a leave that STARTS on or before the expiry date may use
@@ -8363,7 +8351,9 @@ function renderDashboard() {
     const role = currentUser && effectiveRole();
     const canEarlyLateDash   = isAllowanceEligible(eligDash, role, 'earlyLate');
     const canUpcountryDash   = isAllowanceEligible(eligDash, role, 'upcountry');
-    const canOTDash          = isAllowanceEligible(eligDash, role, 'ot');
+    // 2026-09-24 (round 7): same OT-or-Holiday-Work eligibility as Reports (reportOtVisible) --
+    // the count below (reportOtRecords) already includes paid Holiday Work OT for HW-only roles.
+    const canOTDash          = reportOtVisible(role);
     const canLongDistDash    = isAllowanceEligible(eligDash, role, 'longDistance');
     const canPersonalCarDash = isAllowanceEligible(eligDash, role, 'personalCar') && currentUser && currentUser.personalCarEligible === true;
     const tile = (icon, id, label, sub, color, kind) => `
@@ -8866,17 +8856,19 @@ function showDashPeriodDetail(kind) {
       </tr>`);
   } else if (kind === 'ot' || kind === 'longdistance' || kind === 'personalcar') {
     const type = kind === 'ot' ? 'ot' : kind === 'longdistance' ? 'long-distance' : 'personal-car';
-    const leaves = DATA_LEAVES.filter(l =>
+    // 2026-09-24 (round 7): the OT list uses the tile's own records (reportOtRecords: OT + paid
+    // Holiday Work OT, each by its own eligibility) so the list matches the count.
+    const leaves = (kind === 'ot' ? reportOtRecords(currentUser, startStr, endStr) : DATA_LEAVES.filter(l =>
       l.userId === uid && l.type === type && l.status === 'approved' &&
       l.dateFrom >= startStr && l.dateFrom <= endStr && !isCompanyTripDay(l.dateFrom)
-    ).sort((a, b) => a.dateFrom.localeCompare(b.dateFrom));
+    )).sort((a, b) => a.dateFrom.localeCompare(b.dateFrom));
     if (kind === 'ot') {
       headers = TH(L('Date', 'วันที่'), c) + THC(L('OT Hours', 'ชั่วโมง OT'), c) + THC(L('Rate', 'อัตรา'), c);
       let tot = 0;
       rows = leaves.map(l => {
         const h = otRecordTotalHours(l);
         tot += h;
-        const mult = otRateDisplay(l);
+        const mult = reportOtRateLabel(l);
         return `<tr style="border-bottom:1px solid #f1f5f9">
           <td style="padding:9px 14px;font-weight:600">${fmtDate(new Date(l.dateFrom + 'T12:00:00'))}</td>
           <td style="padding:9px 14px;text-align:center;color:#ea580c;font-weight:700">${fmtHrs(h)}</td>

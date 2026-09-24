@@ -46,7 +46,7 @@ const isWeekendStr = d => { const x = new Date(d + 'T12:00:00').getDay(); return
 
 const SHARED = ['normalizeAnnualLeaveTiers', 'getAnnualLeaveTiers', 'getAnnualLeaveMinMonths', 'annualLeaveUnlockDateStr',
   'isAnnualLeaveUnlocked', 'annualLeaveEntitlementDays', 'abroadTravelCreditDays', 'hourlyLeaveChargedMinutes',
-  'carryForwardExpiryEnabled', 'carryForwardExpiryDateStr', 'leaveWorkingDaysBetween', 'leaveMinutesOnOrBefore',
+  'carryForwardExpiryEnabled', 'carryForwardExpiryDateStr', 'leaveMinutesOnOrBefore',
   'carryForwardForfeitMinutes', 'isVoidLeaveStatus', 'isCancellableApprovedLeave', 'isRevocableLeaveType',
   'earnedCreditMinutesOf', 'earnedCreditYearsOf', 'earnedDayBalanceAsOf', 'carryForwardAfterCreditLoss', 'isEarnedDayUsed',
   'carryForwardRunRefusal'];

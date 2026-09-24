@@ -59,7 +59,7 @@ const SHARED = ['isVoidLeaveStatus', 'round2HalfUp', 'round1HalfUp', 'lateNightC
   // leave balance
   'normalizeAnnualLeaveTiers', 'getAnnualLeaveTiers', 'getAnnualLeaveMinMonths', 'annualLeaveUnlockDateStr',
   'isAnnualLeaveUnlocked', 'annualLeaveEntitlementDays', 'hourlyLeaveChargedMinutes', 'carryForwardExpiryEnabled',
-  'carryForwardExpiryDateStr', 'leaveWorkingDaysBetween', 'leaveMinutesOnOrBefore', 'carryForwardForfeitMinutes',
+  'carryForwardExpiryDateStr', 'leaveMinutesOnOrBefore', 'carryForwardForfeitMinutes',
   'annualLeaveEarnedPoolDays'];
 const CLIENT_FNS = [...SHARED, 'getApprovedHolidayWorkDays', 'canSubmitHolidayWorkForDate', 'leaveRecordMinutes',
   'pendingLeaveMinutes', 'getCarryForwardKey', 'getCarryForwardCompKey', 'getCarryForwardDays',

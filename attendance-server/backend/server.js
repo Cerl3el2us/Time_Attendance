@@ -5029,7 +5029,7 @@ function driverOtHoursOverCap(leaves, { userId, dateFrom, newHours, exceptId }) 
   return used + (Number(newHours) || 0) > OT_HOURS_MAX;
 }
 // DUAL-SYNC with app.js carryForwardExpiryEnabled / carryForwardExpiryDateStr /
-// leaveWorkingDaysBetween / leaveMinutesOnOrBefore / carryForwardForfeitMinutes.
+// leaveMinutesOnOrBefore / carryForwardForfeitMinutes.
 // 2026-09-24 (owner): carried-forward annual days expire on the configured month/day of the year
 // they were carried INTO. They are consumed first (FIFO): whatever part of the carry-forward is
 // not covered by annual leave dated on/before the expiry date (+ go-live opening-used) is
@@ -5046,11 +5046,6 @@ function carryForwardExpiryDateStr(year) {
   const day = Math.min(lastDay, Math.max(1, Math.trunc(Number(lv.carryForwardExpiryDay)) || 31));
   const p2 = n => String(n).padStart(2, '0');
   return `${year}-${p2(month)}-${p2(day)}`;
-}
-// Working days (not weekend / public holiday) from fromStr to toStr inclusive -- the same count
-// submitLeave() stores in `days` (deriveLeaveDaysCount).
-function leaveWorkingDaysBetween(fromStr, toStr) {
-  return deriveLeaveDaysCount(fromStr, toStr);
 }
 // Minutes of leave `l` that count as carry-forward usage for a cutoff (the expiry date).
 // 2026-09-24 (owner, review HIGH): a leave that STARTS on or before the expiry date may use

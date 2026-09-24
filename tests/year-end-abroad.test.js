@@ -29,7 +29,7 @@ function extractFunction(src, name) {
 const SHARED = ['normalizeAnnualLeaveTiers', 'getAnnualLeaveTiers', 'getAnnualLeaveMinMonths',
   'annualLeaveUnlockDateStr', 'isAnnualLeaveUnlocked', 'annualLeaveEntitlementDays',
   'abroadTravelCreditDays', 'hourlyLeaveChargedMinutes', 'carryForwardExpiryEnabled',
-  'carryForwardExpiryDateStr', 'leaveWorkingDaysBetween', 'leaveMinutesOnOrBefore',
+  'carryForwardExpiryDateStr', 'leaveMinutesOnOrBefore',
   'carryForwardForfeitMinutes', 'isVoidLeaveStatus'];
 const CLIENT_FNS = [...SHARED, 'leaveRecordMinutes', 'getApprovedHolidayWorkDays',
   'getCarryForwardKey', 'getCarryForwardCompKey', 'getCarryForwardDays', 'getCarryForwardCompDays',
