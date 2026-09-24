@@ -52,7 +52,7 @@ const SHARED = ['normalizeAnnualLeaveTiers', 'getAnnualLeaveTiers', 'getAnnualLe
   'isCarryForwardRunMonth', 'carryForwardRunRefusal'];
 const CLIENT_FNS = [...SHARED, 'leaveRecordMinutes', 'getApprovedHolidayWorkDays', 'getCarryForwardKey',
   'getCarryForwardCompKey', 'getCarryForwardDays', 'getCarryForwardCompDays', 'getOpeningUsedKey', 'getOpeningUsedDays',
-  'computeLeaveBalance', 'localDateStr', 'annualGateRemainingMinutes', 'isYearEndCountedLeaveStatus', 'annualLeaveRemainingMinutes', 'earnedDayUsedByRecord', 'approvedCancelBlockCode',
+  'computeLeaveBalance', 'localDateStr', 'annualGateRemainingMinutes', 'isYearEndCountedLeaveStatus', 'annualLeaveRemainingMinutes', 'earnedDayUsageOf', 'earnedDayUsedByRecord', 'approvedCancelBlockCode',
   'isRevokeCandidate', 'revokeBlockCode', 'canRevokeLeaveApproval', 'attendanceTimesForDate', 'attKey',
   'carryForwardFirstSourceYear', 'carryForwardNextRunJanuaryYear', 'carryForwardRefusalText',
   'isSafeTimeZone', 'tzOffsetMinutesAt', 'abroadLocalTimeText'];
@@ -140,6 +140,32 @@ test('a PENDING annual request counts as used -> refused', () => {
   const rec = hw('2026-11-07', 'annual-leave');
   const w = { today, user: USER, leaves: [rec, annual('2026-03-02', '2026-03-13', 10), annual('2026-12-21', '2026-12-21', 1, 'pending-manager')] };
   for (const [side, X] of both(w)) assert.strictEqual(refused(side, X, w, rec), true, side);
+});
+// 2026-09-24 (round 7, T5): the refusal names the annual leave that uses the earned day.
+test('round 7: earned-day-used names the blocking annual leave (latest first), same list on both sides', () => {
+  const rec = hw('2026-11-07', 'annual-leave');
+  const late = annual('2026-12-21', '2026-12-21', 1, 'pending-manager');
+  const w = { today, user: USER, leaves: [rec, annual('2026-03-02', '2026-03-13', 10), late] };
+  const [[, C], [, S]] = both(w);
+  const clientList = JSON.parse(JSON.stringify(C.earnedDayUsageOf(rec).blockedBy));
+  const err = S.earnedDayUsedError(w.leaves, w.user, rec);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(err.blockedBy)), clientList);
+  assert.deepStrictEqual(clientList, [{ id: late.id, type: 'annual', dateFrom: '2026-12-21', dateTo: '2026-12-21', status: 'pending-manager' }]);
+  assert.ok(err.message.endsWith('-- blocked by: annual leave 2026-12-21 (pending-manager); cancel it first'), err.message);
+  assert.strictEqual(C.earnedDayUsageOf(annual('2026-01-05', '2026-01-05', 1)), null, 'a record that earns nothing');
+});
+test('round 7: earnedDayBlockingLeaves covers the shortfall with the latest leave, max 5, void ignored', () => {
+  for (const [side, X] of both({ today, user: USER, leaves: [] })) {
+    const ls = [annual('2026-02-02', '2026-02-02', 1), annual('2026-05-04', '2026-05-05', 2), annual('2026-06-01', '2026-06-01', 1, 'cancelled'),
+      { ...annual('2026-07-01', '2026-07-01', 0), hourlyStart: '13:00', hourlyEnd: '15:00' }, annual('2025-12-30', '2025-12-30', 1)];
+    const minutesOf = side === 'client' ? X.leaveRecordMinutes : X.leaveMinutesOf;
+    const ids = n => JSON.parse(JSON.stringify(X.earnedDayBlockingLeaves(ls, 1, 2026, n, minutesOf))).map(b => b.dateFrom);
+    assert.deepStrictEqual(ids(60), ['2026-07-01'], `${side}: 2 h covers 1 h`);
+    assert.deepStrictEqual(ids(480), ['2026-07-01', '2026-05-04'], `${side}: 2 h is not a day`);
+    assert.deepStrictEqual(ids(9999), ['2026-07-01', '2026-05-04', '2026-02-02'], `${side}: never another year / a cancelled one`);
+    const many = Array.from({ length: 8 }, (_, i) => annual(`2026-08-${String(i + 3).padStart(2, '0')}`, null, 1));
+    assert.strictEqual(X.earnedDayBlockingLeaves(many, 1, 2026, 99999, minutesOf).length, 5, `${side}: at most 5`);
+  }
 });
 test('cancelled / rejected annual leave does not count as used -> allowed', () => {
   const rec = hw('2026-11-07', 'annual-leave');

@@ -1416,4 +1416,8 @@ window.LANG_JA = {
   "⚠️ Holiday Work cannot be longer than 20 hours": "⚠️ 休日出勤は20時間を超えられません",
   // 2026-09-24: review fix round -- JA gap found by the diff scan (finalize mobile gross)
   "Gross": "総支給額",
+  // 2026-09-24 (round 7): notification inbox (static labels)
+  "🔔 Notifications": "🔔 通知",
+  "Notifications": "通知",
+  "Mark all as read": "すべて既読にする",
 };

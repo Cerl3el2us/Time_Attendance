@@ -1119,6 +1119,9 @@ function applyLanguage() {
     // ("Disconnected") text via data-en-title — re-derive it from the actual live connection
     // state so it doesn't lie about a connected scanner right after a language toggle.
     updateWsStatus(hikvisionWs && hikvisionWs.readyState === 1 ? 'online' : 'offline');
+    // 2026-09-24 (round 7): the inbox is rendered from kind + params, so it follows the language.
+    updateNotificationBadge();
+    if (_notifPanelOpen) renderNotificationPanel();
     // Dark mode toggle label ("โหมดมืด"/"Dark Mode") is built from currentLang at the time
     // applyDarkMode() last ran — re-run it here so switching language actually updates the text
     // instead of leaving it frozen in whatever language was active on page load.
@@ -1252,6 +1255,10 @@ let LEAVE_CARRY_FORWARD = {};
 // 2026-09-24: { '<source year>': { at, by, byId } } -- server-owned run log of the year-end
 // carry-forward (md/accounting only; stripped for everyone else by GET /api/settings).
 let LEAVE_CARRY_FORWARD_RUNS = {};
+// 2026-09-24 (round 7): notification inbox state (declared up here, before any caller -- TDZ).
+let NOTIFICATIONS = [];
+let NOTIFICATIONS_UNREAD = 0;
+let _notifPanelOpen = false;
 let LEAVE_OPENING_USED = {};
 // 50 ทวิ Accounting overrides — keyed by "YYYY_userId" → { grossOverride, pitOverride }
 let TAWI50_OVERRIDES = {};
@@ -1843,6 +1850,30 @@ function revokeDependentsText(deps) {
     : L('These approved requests depend on the corrected time and will be revoked too:',
       'คำขอที่อนุมัติแล้วต่อไปนี้อาศัยเวลาที่แก้ไข จึงจะถูกเพิกถอนไปด้วย:');
   return '\n\n' + head + '\n' + deps.map(revokeDependentLine).join('\n');
+}
+// 2026-09-24 (owner, round 7): confirm lines for the Late Night / early-morning claims that go with
+// a Holiday Work (holidayWorkDependents). mode 'revoke' | 'cancel'.
+function hwDependentsText(deps, mode) {
+  if (!deps || !deps.length) return '';
+  const head = mode === 'cancel'
+    ? (currentLang === 'ja'
+      ? '次の承認済みの申請はこの休日出勤が前提のため、一緒に取り消されます:'
+      : L('These approved requests need this Holiday Work and will be cancelled too:',
+        'คำขอที่อนุมัติแล้วต่อไปนี้ต้องมีคำขอทำงานวันหยุดนี้ จึงจะถูกยกเลิกไปด้วย:'))
+    : (currentLang === 'ja'
+      ? '次の承認済みの申請はこの休日出勤が前提のため、一緒に承認が取り消されます:'
+      : L('These approved requests need this Holiday Work and will be revoked too:',
+        'คำขอที่อนุมัติแล้วต่อไปนี้ต้องมีคำขอทำงานวันหยุดนี้ จึงจะถูกเพิกถอนไปด้วย:'));
+  return '\n\n' + head + '\n' + deps.map(revokeDependentLine).join('\n');
+}
+function cancelDependentsText(deps) {
+  return hwDependentsText(deps, 'cancel');
+}
+function dependentsChangedText() {
+  return currentLang === 'ja'
+    ? 'この休日出勤に依存する申請が変わりました。もう一度確認してください。'
+    : L('The requests that depend on this Holiday Work have changed. Please confirm again.',
+      'คำขอที่อาศัยคำขอทำงานวันหยุดนี้เปลี่ยนไป กรุณายืนยันอีกครั้ง');
 }
 // Client gate for the "Revoke approval" button -- the server re-checks everything.
 function canRevokeLeaveApproval(l) {
@@ -3091,16 +3122,18 @@ function annualLeaveRemainingMinutes(u, year) {
   const forfeitMin = carryForwardForfeitMinutes(u, year, `${year + 1}-01-01`, true);
   return Math.max(0, effectiveMax * 8 * 60 - usedMin - computeLateDeductMinutes(u.id, year).deductMin - forfeitMin);
 }
-function earnedDayUsedByRecord(l) {
-  if (!l) return false;
+// 2026-09-24 (owner, round 7): null when the earned day is not used, else { blockedBy } -- the
+// owner's annual leave that uses it (earnedDayBlockingLeaves, same list the server returns).
+function earnedDayUsageOf(l) {
+  if (!l) return null;
   const owner = DATA_USERS.find(u => u.id === l.userId) || (currentUser && currentUser.id === l.userId ? currentUser : null);
-  if (!owner) return false;
+  if (!owner) return null;
   const rawMax = Number(APP_SETTINGS.leave?.carryForwardMax ?? 5);
   const maxCF = Math.max(0, Math.min(60, Number.isFinite(rawMax) ? rawMax : 5));
   const today = bangkokDateStr();
-  return earnedCreditYearsOf(l).some(year => {
+  for (const year of earnedCreditYearsOf(l)) {
     const creditMin = earnedCreditMinutesOf(l, year);
-    if (creditMin <= 0) return false;
+    if (creditMin <= 0) continue;
     const remWith = annualGateRemainingMinutes(owner, earnedDayBalanceAsOf(year, today));
     let dropMin = 0, nextRem = 0;
     if (LEAVE_CARRY_FORWARD[getCarryForwardKey(year + 1, owner.id)] !== undefined) {
@@ -3111,12 +3144,35 @@ function earnedDayUsedByRecord(l) {
       dropMin = Math.max(0, cfOld - cfNew) * 480;
       if (dropMin > 0) nextRem = annualGateRemainingMinutes(owner, earnedDayBalanceAsOf(year + 1, today));
     }
-    return isEarnedDayUsed(creditMin, remWith, dropMin, nextRem);
-  });
+    const shortfall = earnedDayShortfall(creditMin, remWith, dropMin, nextRem);
+    if (shortfall) {
+      return { blockedBy: earnedDayBlockingLeaves(DATA_LEAVES, owner.id, shortfall.next ? year + 1 : year, shortfall.minutes, leaveRecordMinutes) };
+    }
+  }
+  return null;
 }
-function earnedDayUsedMessage() {
-  return L('The annual-leave day earned from this record has already been used, so it cannot be cancelled or revoked',
+function earnedDayUsedByRecord(l) {
+  return !!earnedDayUsageOf(l);
+}
+// `blockers` = the blockedBy list (server response) or the record itself (computed here).
+// 2026-09-24 (owner, round 7): names the annual leave that uses the day -- "cancel it first".
+function earnedDayUsedMessage(blockers) {
+  const base = L('The annual-leave day earned from this record has already been used, so it cannot be cancelled or revoked',
     'วันลาพักร้อนที่ได้จากรายการนี้ถูกใช้ไปแล้ว จึงยกเลิกหรือเพิกถอนไม่ได้');
+  const list = Array.isArray(blockers) ? blockers : ((earnedDayUsageOf(blockers) || {}).blockedBy || []);
+  if (!list.length) return base;
+  const labels = getApprovalTypeLabels();
+  const items = list.map(b => {
+    const from = fmtDate(new Date(b.dateFrom + 'T12:00:00'));
+    const range = b.dateTo && b.dateTo !== b.dateFrom ? `${from} – ${fmtDate(new Date(b.dateTo + 'T12:00:00'))}` : from;
+    const st = String(b.status || '').startsWith('pending')
+      ? (currentLang === 'ja' ? '承認待ち' : L('pending', 'รออนุมัติ'))
+      : (currentLang === 'ja' ? '承認済み' : L('approved', 'อนุมัติแล้ว'));
+    return `${labels[b.type] || b.type} ${range} (${st})`;
+  }).join(', ');
+  return base + ' — ' + (currentLang === 'ja'
+    ? `原因: ${items} — 先にこちらを取り消してください`
+    : L(`Blocked by: ${items} — cancel it first`, `ติดอยู่ที่: ${items} — ยกเลิกรายการนี้ก่อน`));
 }
 // Why the owner cannot cancel an approved record right now (same guards as DELETE /api/leaves/:id):
 // a period code, 'earned-day-used', or '' when the Cancel action is allowed.
@@ -3125,8 +3181,9 @@ function approvedCancelBlockCode(l) {
   if (pp.blocked) return pp.reason;
   return earnedDayUsedByRecord(l) ? 'earned-day-used' : '';
 }
-function cancelBlockMessage(code) {
-  if (code === 'earned-day-used') return earnedDayUsedMessage();
+// `blockers` (optional): the server's blockedBy list, or the record (earnedDayUsedMessage).
+function cancelBlockMessage(code, blockers) {
+  if (code === 'earned-day-used') return earnedDayUsedMessage(blockers);
   return payPeriodBlockedMessage({ reason: code });
 }
 // Small grey note shown where the Cancel / Revoke button would be.
@@ -3384,6 +3441,108 @@ async function processYearEndCarryForward(forYear) {
   } catch(e) {
     showToast(L('❌ Error: ', '❌ ข้อผิดพลาด: ') + e.message, 'danger');
   }
+}
+
+// ===== 2026-09-24 (owner, round 7): carry-forward at risk / expiry policy impact =====
+// Active employees whose carry-forward for `year` is still at risk: what the FIFO rule would
+// forfeit if the expiry date were today (pending leave dated on/before the expiry counts as used)
+// -- the same figure the server's reminders use (server.js carryForwardAtRiskList).
+function cfAtRiskRows(year) {
+  return DATA_USERS.filter(u => isEmployeeRecord(u) && u.active !== false)
+    .map(u => ({ user: u, cfMin: (getCarryForwardDays(year, u.id) + getCarryForwardCompDays(year, u.id)) * 480,
+      atRiskMin: carryForwardForfeitMinutes(u, year, `${year + 1}-01-01`, true) }))
+    .filter(r => r.atRiskMin > 0)
+    .sort((a, b) => b.atRiskMin - a.atRiskMin || String(a.user.name).localeCompare(String(b.user.name)));
+}
+function cfDaysAndFull(min) {
+  const days = Math.round(Math.max(0, min) / 480 * 100) / 100;
+  return currentLang === 'ja' ? `${days}日（${minToStrFull(min)}）` : L(`${days} day(s) (${minToStrFull(min)})`, `${days} วัน (${minToStrFull(min)})`);
+}
+// Settings -> Leave Policy (md/accounting page): table of employees with carry-forward at risk.
+function cfAtRiskReportHtml() {
+  if (!carryForwardExpiryEnabled()) return '';
+  const year = bangkokYear();
+  const expiry = carryForwardExpiryDateStr(year);
+  const expired = bangkokDateStr() > expiry;
+  const rows = cfAtRiskRows(year);
+  const dateTxt = fmtDate(new Date(expiry + 'T12:00:00'));
+  const title = expired
+    ? (currentLang === 'ja' ? `⌛ ${year}年の繰越 — ${dateTxt}に失効した分` : L(`⌛ ${year} carry-forward forfeited on ${dateTxt}`, `⌛ วันยกยอดปี ${year} ที่หมดอายุไปเมื่อ ${dateTxt}`))
+    : (currentLang === 'ja' ? `⏳ 失効予定の繰越（${dateTxt}失効）` : L(`⏳ Carry-forward at risk — expires ${dateTxt}`, `⏳ วันยกยอดที่จะหมดอายุ — หมดอายุ ${dateTxt}`));
+  const hint = currentLang === 'ja'
+    ? '繰越分は先に消化されます。失効日までの年次有給（承認待ちを含む）で使われていない分です。対象者には失効日の29日前と7日前に通知されます。'
+    : L('Carried-forward days are used first; this is the part not yet covered by annual leave dated on or before the expiry (pending included). Employees are notified 29 and 7 days before the expiry.',
+        'วันยกยอดจะถูกใช้ก่อน ตัวเลขนี้คือส่วนที่ยังไม่มีวันลาพักร้อน (รวมที่รออนุมัติ) ลงไว้ภายในวันหมดอายุ พนักงานจะได้รับแจ้งเตือน 29 วันและ 7 วันก่อนวันหมดอายุ');
+  const th = (en, thTxt, ja) => `<th style="text-align:left;padding:6px 8px;font-size:12px;color:#64748b;border-bottom:1px solid var(--border)">${escapeHtml(currentLang === 'ja' ? ja : L(en, thTxt))}</th>`;
+  const body = rows.length
+    ? `<div class="table-wrap"><table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr>
+        ${th('Employee', 'พนักงาน', '社員')}${th('Carried forward', 'ยอดยกมา', '繰越')}${th(expired ? 'Forfeited' : 'At risk', expired ? 'ถูกตัดทิ้ง' : 'เสี่ยงหมดอายุ', expired ? '失効' : '失効予定')}
+      </tr></thead><tbody>${rows.map(r => `<tr>
+        <td style="padding:6px 8px;border-bottom:1px solid var(--border)">${escapeHtml(r.user.name)}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid var(--border)">${escapeHtml(cfDaysAndFull(r.cfMin))}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid var(--border);color:#b45309;font-weight:600">${escapeHtml(cfDaysAndFull(r.atRiskMin))}</td>
+      </tr>`).join('')}</tbody></table></div>`
+    : `<div style="font-size:12px;color:#64748b;padding:6px 0">${escapeHtml(currentLang === 'ja' ? '該当する社員はいません' : L('No employee has carry-forward at risk', 'ไม่มีพนักงานที่มีวันยกยอดเสี่ยงหมดอายุ'))}</div>`;
+  return `<div style="margin:6px 0 14px;padding:12px;border:1px solid #fde68a;background:#fffbeb;border-radius:10px">
+    <div style="font-size:13px;font-weight:700;color:#92400e;margin-bottom:4px">${escapeHtml(title)}</div>
+    <div style="font-size:11.5px;color:#92400e;margin-bottom:8px;line-height:1.5">${escapeHtml(hint)}</div>
+    ${body}
+  </div>`;
+}
+// T3: forfeit for `year` of every active employee under two expiry policies (enabled / month /
+// day), using the dual-sync forfeit helper with each policy swapped into APP_SETTINGS.leave (always
+// restored). Year-end view: what is forfeited by the end of the year with today's bookings.
+function cfExpiryPolicyImpact(oldPolicy, newPolicy, year) {
+  const lv = APP_SETTINGS.leave;
+  const keys = ['carryForwardExpiryEnabled', 'carryForwardExpiryMonth', 'carryForwardExpiryDay'];
+  const saved = keys.map(k => lv[k]);
+  const users = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active !== false);
+  const run = pol => {
+    keys.forEach(k => { lv[k] = pol[k]; });
+    return users.map(u => carryForwardForfeitMinutes(u, year, `${year + 1}-01-01`, true));
+  };
+  try {
+    const before = run(oldPolicy);
+    const after = run(newPolicy);
+    const affected = users.map((u, i) => ({ user: u, before: before[i], after: after[i] })).filter(r => r.before !== r.after);
+    return { affected, beforeMin: before.reduce((s, x) => s + x, 0), afterMin: after.reduce((s, x) => s + x, 0) };
+  } finally {
+    keys.forEach((k, i) => { lv[k] = saved[i]; });
+  }
+}
+// '' when the expiry policy inputs did not change, else the confirm text.
+function cfExpiryPolicyChangeMessage() {
+  const toggle = document.getElementById('set-cf-expiry-enabled');
+  if (!toggle) return '';
+  const lv = APP_SETTINGS.leave;
+  const oldPolicy = { carryForwardExpiryEnabled: lv.carryForwardExpiryEnabled !== false,
+    carryForwardExpiryMonth: lv.carryForwardExpiryMonth, carryForwardExpiryDay: lv.carryForwardExpiryDay };
+  const newPolicy = { carryForwardExpiryEnabled: !!toggle.checked,
+    carryForwardExpiryMonth: parseInt(document.getElementById('set-cf-expiry-month')?.value) || 3,
+    carryForwardExpiryDay: parseInt(document.getElementById('set-cf-expiry-day')?.value) || 0 };
+  const year = bangkokYear();
+  const expiryOf = pol => {
+    const saved = [lv.carryForwardExpiryMonth, lv.carryForwardExpiryDay];
+    lv.carryForwardExpiryMonth = pol.carryForwardExpiryMonth; lv.carryForwardExpiryDay = pol.carryForwardExpiryDay;
+    try { return carryForwardExpiryDateStr(year); } finally { [lv.carryForwardExpiryMonth, lv.carryForwardExpiryDay] = saved; }
+  };
+  const oldExp = expiryOf(oldPolicy), newExp = expiryOf(newPolicy);
+  const changed = oldPolicy.carryForwardExpiryEnabled !== newPolicy.carryForwardExpiryEnabled ||
+    (newPolicy.carryForwardExpiryEnabled && oldExp !== newExp);
+  if (!changed) return '';
+  const desc = (pol, exp) => pol.carryForwardExpiryEnabled
+    ? (currentLang === 'ja' ? `${fmtDate(new Date(exp + 'T12:00:00'))}に失効` : L(`expires ${fmtDate(new Date(exp + 'T12:00:00'))}`, `หมดอายุ ${fmtDate(new Date(exp + 'T12:00:00'))}`))
+    : (currentLang === 'ja' ? '失効なし' : L('no expiry', 'ไม่หมดอายุ'));
+  const imp = cfExpiryPolicyImpact(oldPolicy, newPolicy, year);
+  const lines = imp.affected.slice(0, 10).map(r => `• ${r.user.name}: ${cfDaysAndFull(r.before)} → ${cfDaysAndFull(r.after)}`);
+  if (imp.affected.length > 10) lines.push(`… +${imp.affected.length - 10}`);
+  const n = imp.affected.length;
+  const head = currentLang === 'ja'
+    ? `繰越有給の失効ルールを変更します（${desc(oldPolicy, oldExp)} → ${desc(newPolicy, newExp)}）。\n\n${year}年に失効する繰越の合計: ${cfDaysAndFull(imp.beforeMin)} → ${cfDaysAndFull(imp.afterMin)}（影響を受ける社員: ${n}名、現在の申請状況での年末時点）。`
+    : L(`You are changing the carry-forward expiry (${desc(oldPolicy, oldExp)} → ${desc(newPolicy, newExp)}).\n\nCarry-forward forfeited in ${year} in total: ${cfDaysAndFull(imp.beforeMin)} → ${cfDaysAndFull(imp.afterMin)} (${n} employee(s) affected, as of the end of the year with the leave booked now).`,
+        `กำลังเปลี่ยนกฎหมดอายุของวันลายกยอด (${desc(oldPolicy, oldExp)} → ${desc(newPolicy, newExp)})\n\nวันยกยอดที่ถูกตัดทิ้งรวมในปี ${year}: ${cfDaysAndFull(imp.beforeMin)} → ${cfDaysAndFull(imp.afterMin)} (มีผลกับพนักงาน ${n} คน ณ สิ้นปี ตามวันลาที่ยื่นไว้ตอนนี้)`);
+  const tail = currentLang === 'ja' ? '保存しますか？' : L('Save anyway?', 'ยืนยันบันทึก?');
+  return head + (lines.length ? '\n\n' + lines.join('\n') : '') + '\n\n' + tail;
 }
 
 function checkCarryForwardNotification() {
@@ -4057,6 +4216,7 @@ function renderSettingsPage(_skipRefresh) {
         field(L('Expiry Day','วันที่หมดอายุ'), inp('set-cf-expiry-day', s.leave.carryForwardExpiryDay, 'number', 'min="1" max="31"')),
         field(L('Notify Before Expiry (days)','แจ้งเตือนล่วงหน้าก่อนหมดอายุ (วัน)'), inp('set-cf-notify', s.leave.carryForwardNotifyDays, 'number', 'min="1"'), L('In-app toast window for the employee. Separately, employees with carry-forward still unused get a notification (and an email if they opted in) 29 days and 7 days before the expiry date.', 'ช่วงเวลาที่แสดง toast ในแอปให้พนักงาน นอกจากนี้ พนักงานที่ยังมีวันยกยอดเหลือจะได้รับการแจ้งเตือน (และอีเมลหากเปิดรับไว้) 29 วันและ 7 วันก่อนวันหมดอายุ'))
       )}
+      ${cfAtRiskReportHtml()}
       ${openingLeaveBalancesSectionHtml()}
     `)}
 
@@ -4618,6 +4778,10 @@ async function saveSettingsPage() {
           `⚠️ กำลังจะเปลี่ยนวันเริ่มรอบเงินเดือนจากวันที่ ${APP_SETTINGS.payroll.periodStartDay} เป็นวันที่ ${newPeriodStartDay} มีข้อมูล finalize/อนุมัติ/ล็อค/snapshot ที่อ้างอิงวันที่เริ่มรอบเดิมอยู่ — หลังเปลี่ยนแล้วจะไม่มีทางเข้าถึงข้อมูลเหล่านั้นได้อีกเลย (ไม่ได้ลบ แต่จะหาไม่เจอถาวร) ยืนยันจะดำเนินการต่อไหม?`));
     if (!ok) return;
   }
+  // 2026-09-24 (owner, round 7): changing the carry-forward expiry (on/off, month, day) asks first,
+  // with how many employees and how many days are affected this year (cfExpiryPolicyChangeMessage).
+  const cfPolicyMsg = cfExpiryPolicyChangeMessage();
+  if (cfPolicyMsg && !confirm(cfPolicyMsg)) return;
   const fv = id => (document.getElementById(id)?.value || '').trim();
   const fi = id => parseInt(document.getElementById(id)?.value) || 0;
   const ff = id => parseFloat(document.getElementById(id)?.value) || 0;
@@ -5694,6 +5858,8 @@ async function logout() {
   // MD/Accounting user's full review map (visible to isLeaveFullAccess roles) lingers in memory
   // for the next user who logs into this same tab/browser.
   DATA_CHECKOUT_REVIEWS = {};
+  // 2026-09-24 (round 7): the next user of this tab must not see this user's inbox.
+  resetNotifications();
   clearInterval(clockInterval);
   if (gpsWatchId !== null) { navigator.geolocation.clearWatch(gpsWatchId); gpsWatchId = null; }
   destroyGpsMap();
@@ -5976,6 +6142,7 @@ function initApp(startPage) {
   updateMyRequestsBadge();
   updateApprovalBadge();
   initHikvisionLive();
+  loadNotifications();
   // Load settings + attendance + leaves + holidays from backend async
   loadSettingsFromBackend().then(() => {
     // BUG FIX 2026-08-13: applyRolePermissions() (line ~3325 above) runs synchronously BEFORE
@@ -12159,6 +12326,147 @@ function leaveTypeLabel(l) {
   return (map[currentLang] || map.th)[l.type] || ('📋 ' + escapeHtml(String(l.type)));
 }
 
+// ===== CANCELLED / REVOKED HISTORY (2026-09-24, owner, round 7) =====
+// MD / Accounting only (managers and staff never see the switch): every cancelled (by the owner)
+// and revoked (MD / Accounting) record whose dates overlap the selected pay period, newest action
+// first, with the records that went with it (revokedWith / cancelledWith) nested under it.
+let _approvalView = 'queue';
+let _voidHistoryPeriod = 0;
+function renderApprovalViewSwitch() {
+  const el = document.getElementById('approval-view-switch');
+  if (!el) return;
+  if (!isMdAccountingView()) { el.innerHTML = ''; _approvalView = 'queue'; return; }
+  const btn = (view, label) => {
+    const on = _approvalView === view;
+    return `<button type="button" class="void-switch-btn${on ? ' active' : ''}" aria-pressed="${on}" onclick="setApprovalView('${view}')">${label}</button>`;
+  };
+  el.innerHTML = `<div class="void-switch" role="group" aria-label="${escapeHtml(currentLang === 'ja' ? '表示切替' : L('View', 'มุมมอง'))}">
+    ${btn('queue', `📥 ${escapeHtml(currentLang === 'ja' ? '承認待ち' : L('Approval queue', 'รายการรออนุมัติ'))}`)}
+    ${btn('void-history', `📜 ${escapeHtml(currentLang === 'ja' ? '取消・承認取消の履歴' : L('Cancelled & revoked', 'ประวัติยกเลิก / เพิกถอน'))}`)}
+  </div>`;
+}
+function setApprovalView(view) {
+  _approvalView = view === 'void-history' ? 'void-history' : 'queue';
+  renderApprovals();
+}
+function onVoidHistoryPeriodChange(v) {
+  _voidHistoryPeriod = Math.max(0, parseInt(v, 10) || 0);
+  renderVoidHistory();
+}
+// Pay-period index (0 = current) that contains dateStr; 0 when none of the listed periods does.
+function periodIndexForDateStr(dateStr) {
+  if (typeof dateStr !== 'string') return 0;
+  const opts = getPeriodOptions(PAYSLIP_PERIOD_COUNT);
+  const hit = opts.find(o => localDateStr(o.start) <= dateStr && dateStr <= localDateStr(o.end));
+  return hit ? hit.index : 0;
+}
+// From a notification: the history view on the period of that record.
+function openVoidHistoryForDate(dateStr) {
+  if (!isMdAccountingView()) return;
+  _approvalView = 'void-history';
+  _voidHistoryPeriod = periodIndexForDateStr(dateStr);
+  navigateTo('approval');
+}
+function voidActionAt(l) {
+  return (l && (l.status === 'cancelled' ? l.cancelledAt : l.revokedAt)) || '';
+}
+function voidParentId(l) {
+  return l && (l.status === 'revoked' ? l.revokedWith : l.cancelledWith);
+}
+// Pure. Withdrawn records overlapping [startStr, endStr] as groups { record, with: [...] }: a record
+// revoked / cancelled together with another one in the list is nested under it.
+function voidHistoryGroups(leaves, startStr, endStr) {
+  const inPeriod = (leaves || []).filter(l => l && isWithdrawnLeaveStatus(l.status) && l.dateFrom &&
+    l.dateFrom <= endStr && (l.dateTo || l.dateFrom) >= startStr);
+  const ids = new Set(inPeriod.map(l => l.id));
+  const children = new Map();
+  inPeriod.forEach(l => {
+    const p = voidParentId(l);
+    if (p != null && ids.has(p)) {
+      if (!children.has(p)) children.set(p, []);
+      children.get(p).push(l);
+    }
+  });
+  return inPeriod.filter(l => !(voidParentId(l) != null && ids.has(voidParentId(l))))
+    .map(l => ({ record: l, with: (children.get(l.id) || []).sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0)) }))
+    .sort((a, b) => String(voidActionAt(b.record)).localeCompare(String(voidActionAt(a.record))) || (Number(b.record.id) || 0) - (Number(a.record.id) || 0));
+}
+// Amount / hours of a withdrawn record (what it would have paid or used). Plain text.
+function voidRecordAmountText(l) {
+  if (!l) return '';
+  if (l.type === 'ot' || (l.type === 'holiday-work' && l.compensationMode === 'paid')) return otHoursRateDetail(l);
+  if (l.type === 'holiday-work') return currentLang === 'ja' ? '有給休暇 +1日' : L('+1 annual-leave day', 'วันลาพักร้อน +1 วัน');
+  if (['annual', 'sick', 'business'].includes(l.type)) return minToStr(leaveRecordMinutes(l));
+  if (l.type === 'personal-car' && l.personalCarRate != null) return `฿${Number(l.personalCarRate).toLocaleString()}`;
+  if (l.type === 'long-distance' && l.distanceKm != null) return `${Number(l.distanceKm).toLocaleString()} km`;
+  if (l.type === 'late-out' && l.lateOutTime) return l.lateOutTime;
+  if (l.type === 'early-morning') return `×${Number(l.earlyMorningTier) === 2 ? 2 : 1}`;
+  if (l.type === 'time-correction' && l.correctedTime) return l.correctedTime;
+  if (l.type === 'abroad' && l.dateFrom) {
+    const n = Math.round((new Date((l.dateTo || l.dateFrom) + 'T12:00:00') - new Date(l.dateFrom + 'T12:00:00')) / 86400000) + 1;
+    return currentLang === 'ja' ? `${n}日` : L(`${n} day(s)`, `${n} วัน`);
+  }
+  return '';
+}
+function voidRecordLineHtml(l, isChild) {
+  const emp = DATA_USERS.find(u => u.id === l.userId);
+  const empName = emp ? emp.name : `#${l.userId}`;
+  const dates = notifDateRange(l.dateFrom, l.dateTo || l.dateFrom);
+  const amount = voidRecordAmountText(l);
+  const cancelled = l.status === 'cancelled';
+  const statusText = cancelled
+    ? (currentLang === 'ja' ? '本人が取消' : L('Cancelled by the employee', 'พนักงานยกเลิกเอง'))
+    : (currentLang === 'ja' ? '承認取消' : L('Approval revoked', 'เพิกถอนการอนุมัติ'));
+  const who = (cancelled ? l.cancelledBy : l.revokedBy) || '—';
+  const reason = !cancelled && l.revokeReason ? l.revokeReason : '';
+  const lbl = (en, th, ja) => escapeHtml(currentLang === 'ja' ? ja : L(en, th));
+  if (isChild) {
+    const withTxt = cancelled
+      ? (currentLang === 'ja' ? '同時に取消' : L('Cancelled with it', 'ยกเลิกพร้อมกัน'))
+      : (currentLang === 'ja' ? '同時に承認取消' : L('Revoked with it', 'เพิกถอนพร้อมกัน'));
+    return `<div class="void-child">↳ <b>${escapeHtml(withTxt)}:</b> ${escapeHtml(notifTypeLabel(l.type))} · ${escapeHtml(dates)}${amount ? ` · ${escapeHtml(amount)}` : ''}</div>`;
+  }
+  return `<div class="void-card-top">
+      <span class="void-emp">👤 ${escapeHtml(empName)}</span>
+      <span class="void-type">${escapeHtml(notifTypeLabel(l.type))}</span>
+      <span class="void-dates">📅 ${escapeHtml(dates)}</span>
+      ${amount ? `<span class="void-amount">${escapeHtml(amount)}</span>` : ''}
+    </div>
+    <div class="void-card-meta">
+      ${withdrawnStatusBadgeHtml(l.status)} <span>${escapeHtml(statusText)}</span>
+      <span>· ${lbl('By', 'โดย', '実行者')}: <b>${escapeHtml(who)}</b></span>
+      <span>· ${escapeHtml(_fmtDtStr(voidActionAt(l)))}</span>
+    </div>
+    ${reason ? `<div class="void-reason">${lbl('Reason', 'เหตุผล', '理由')}: ${escapeHtml(reason)}</div>` : ''}`;
+}
+function renderVoidHistory() {
+  const el = document.getElementById('approval-void-history');
+  if (!el) return;
+  if (!isMdAccountingView()) { el.innerHTML = ''; return; }
+  const opts = getPeriodOptions(PAYSLIP_PERIOD_COUNT);
+  if (!opts.some(o => o.index === _voidHistoryPeriod)) _voidHistoryPeriod = 0;
+  const { start, end } = getPeriodBounds(_voidHistoryPeriod);
+  const groups = voidHistoryGroups(DATA_LEAVES, localDateStr(start), localDateStr(end));
+  const periodLbl = currentLang === 'ja' ? '給与期間' : L('Pay period', 'รอบเงินเดือน');
+  const select = `<label class="void-period"><span>${escapeHtml(periodLbl)}</span>
+    <select onchange="onVoidHistoryPeriodChange(this.value)" aria-label="${escapeHtml(periodLbl)}">${opts.map(o =>
+      `<option value="${o.index}" ${o.index === _voidHistoryPeriod ? 'selected' : ''}>${escapeHtml(o.index === 0 ? `${o.label}  ${L('← Current Period', '← รอบปัจจุบัน')}` : o.label)}</option>`).join('')}</select></label>`;
+  const intro = currentLang === 'ja'
+    ? '承認後に本人が取り消した申請と、MD／経理が承認を取り消した申請（この期間の日付のもの）。'
+    : L('Approved requests the employee cancelled, and approvals MD / Accounting revoked, dated in this pay period.',
+        'คำขอที่อนุมัติแล้วซึ่งพนักงานยกเลิกเอง และการอนุมัติที่ MD / Accounting เพิกถอน ที่มีวันที่อยู่ในรอบนี้');
+  const empty = currentLang === 'ja' ? 'この期間に取消・承認取消された申請はありません' : L('No cancelled or revoked requests in this pay period', 'ไม่มีคำขอที่ถูกยกเลิกหรือเพิกถอนในรอบนี้');
+  el.innerHTML = `<div class="card void-history">
+    <div class="void-head">
+      <h3>📜 ${escapeHtml(currentLang === 'ja' ? '取消・承認取消の履歴' : L('Cancelled & revoked history', 'ประวัติการยกเลิก / เพิกถอน'))}</h3>
+      ${select}
+    </div>
+    <p class="void-intro">${escapeHtml(intro)}</p>
+    ${groups.length ? groups.map(g => `<div class="void-card">${voidRecordLineHtml(g.record, false)}${g.with.map(c => voidRecordLineHtml(c, true)).join('')}</div>`).join('')
+      : `<div class="void-empty">${escapeHtml(empty)}</div>`}
+  </div>`;
+}
+
 function getApprovalTabs() {
   return [
     { id:'all',             label:t('appr_all'),    icon:'📋', types:null },
@@ -12414,6 +12722,15 @@ function renderApprovals() {
   const histEl = document.getElementById('approval-history-section');
   const summEl = document.getElementById('approval-summary-bar');
   if (!catEl) return;
+  // 2026-09-24 (owner, round 7): MD / Accounting can switch to the cancelled & revoked history.
+  renderApprovalViewSwitch();
+  const voidEl = document.getElementById('approval-void-history');
+  const showVoid = _approvalView === 'void-history' && isMdAccountingView();
+  catEl.style.display = showVoid ? 'none' : '';
+  if (histEl) histEl.style.display = showVoid ? 'none' : '';
+  if (summEl) summEl.style.display = showVoid ? 'none' : 'flex';
+  if (voidEl) voidEl.style.display = showVoid ? '' : 'none';
+  if (showVoid) { renderVoidHistory(); return; }
   catEl.innerHTML  = '';
   if (histEl) histEl.innerHTML = '';
   if (summEl) summEl.innerHTML = '';
@@ -13141,6 +13458,243 @@ function updateTopbarBell() {
   }
 }
 
+// ===== IN-APP NOTIFICATION INBOX (2026-09-24, owner, round 7) =====
+// Every push the server sends is also stored as an inbox item { id, kind, params, link, createdAt,
+// readAt } (server.js recordNotifications). The text is rendered HERE, in the viewer's current
+// language, from the kind + params (notificationText); an unknown kind gets a generic line.
+// GET /api/notifications (own only) / POST /api/notifications/read; the server pings this user's
+// socket with { type: 'NOTIFICATION', unread } after every new item.
+async function loadNotifications() {
+  if (!currentUser || !AUTH_TOKEN) return;
+  try {
+    const res = await apiFetch('/api/notifications');
+    if (!res.ok) return;
+    const d = await res.json();
+    if (!d || !d.success) return;
+    NOTIFICATIONS = Array.isArray(d.items) ? d.items : [];
+    NOTIFICATIONS_UNREAD = Math.max(0, Number(d.unread) || 0);
+    updateNotificationBadge();
+    if (_notifPanelOpen) renderNotificationPanel();
+  } catch (e) { console.warn('[notify] load failed', e); }
+}
+function updateNotificationBadge() {
+  const badge = document.getElementById('notif-badge');
+  const btn = document.getElementById('notif-bell-btn');
+  const n = NOTIFICATIONS_UNREAD;
+  if (badge) {
+    badge.hidden = !(n > 0);
+    badge.textContent = n > 99 ? '99+' : String(n);
+  }
+  if (btn) {
+    const base = currentLang === 'ja' ? '通知' : L('Notifications', 'การแจ้งเตือน');
+    const unread = n > 0 ? (currentLang === 'ja' ? `（未読${n}件）` : L(` (${n} unread)`, ` (ยังไม่อ่าน ${n})`)) : '';
+    btn.setAttribute('aria-label', base + unread);
+  }
+}
+function resetNotifications() {
+  NOTIFICATIONS = [];
+  NOTIFICATIONS_UNREAD = 0;
+  closeNotificationPanel();
+  updateNotificationBadge();
+}
+function toggleNotificationPanel(ev) {
+  if (ev) ev.stopPropagation();
+  if (_notifPanelOpen) { closeNotificationPanel(); return; }
+  const panel = document.getElementById('notif-panel');
+  if (!panel) return;
+  _notifPanelOpen = true;
+  panel.hidden = false;
+  const btn = document.getElementById('notif-bell-btn');
+  if (btn) btn.setAttribute('aria-expanded', 'true');
+  renderNotificationPanel();
+  loadNotifications();
+  const first = panel.querySelector('.notif-close');
+  if (first) first.focus();
+}
+function closeNotificationPanel() {
+  _notifPanelOpen = false;
+  const panel = document.getElementById('notif-panel');
+  if (panel) panel.hidden = true;
+  const btn = document.getElementById('notif-bell-btn');
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+}
+// Outside click / Escape closes the panel.
+document.addEventListener('click', e => {
+  if (!_notifPanelOpen) return;
+  const panel = document.getElementById('notif-panel');
+  const btn = document.getElementById('notif-bell-btn');
+  if (panel && !panel.contains(e.target) && btn && !btn.contains(e.target)) closeNotificationPanel();
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && _notifPanelOpen) {
+    closeNotificationPanel();
+    const btn = document.getElementById('notif-bell-btn');
+    if (btn) btn.focus();
+  }
+});
+function notifDateRange(from, to) {
+  if (!from) return '';
+  const f = fmtDate(new Date(from + 'T12:00:00'));
+  return to && to !== from ? `${f} – ${fmtDate(new Date(to + 'T12:00:00'))}` : f;
+}
+function notifTypeLabel(type) {
+  return getApprovalTypeLabels()[type] || String(type || '');
+}
+function notifRecordsText(records) {
+  return (Array.isArray(records) ? records : []).map(r => `${notifTypeLabel(r.type)} (${notifDateRange(r.dateFrom, r.dateTo)})`).join(', ');
+}
+function notifReasonText(reason) {
+  if (!reason) return '';
+  return currentLang === 'ja' ? ` — 理由: ${reason}` : L(` — reason: ${reason}`, ` — เหตุผล: ${reason}`);
+}
+// Plain text + icon for one item, in the CURRENT language. Pure apart from the label helpers.
+// Every server kind (server.js NOTIFICATION_KINDS) has a renderer; anything else is generic.
+const NOTIFICATION_RENDERERS = {
+  'request-approved': p => ({ icon: '✅', text: currentLang === 'ja'
+    ? `${notifTypeLabel(p.type)}の申請（${notifDateRange(p.dateFrom, p.dateTo)}）が承認されました`
+    : L(`Your ${notifTypeLabel(p.type)} request (${notifDateRange(p.dateFrom, p.dateTo)}) was approved`,
+        `คำขอ${notifTypeLabel(p.type)} (${notifDateRange(p.dateFrom, p.dateTo)}) ของคุณได้รับการอนุมัติแล้ว`) }),
+  'request-rejected': p => ({ icon: '❌', text: currentLang === 'ja'
+    ? `${notifTypeLabel(p.type)}の申請（${notifDateRange(p.dateFrom, p.dateTo)}）は却下されました`
+    : L(`Your ${notifTypeLabel(p.type)} request (${notifDateRange(p.dateFrom, p.dateTo)}) was rejected`,
+        `คำขอ${notifTypeLabel(p.type)} (${notifDateRange(p.dateFrom, p.dateTo)}) ของคุณไม่ได้รับการอนุมัติ`) }),
+  'approval-needed': p => ({ icon: '📝', text: currentLang === 'ja'
+    ? `${p.employeeName || ''}さんの${notifTypeLabel(p.type)}申請（${notifDateRange(p.dateFrom, p.dateTo)}）があなたの承認待ちです`
+    : L(`${p.employeeName || ''}: ${notifTypeLabel(p.type)} request (${notifDateRange(p.dateFrom, p.dateTo)}) needs your approval`,
+        `${p.employeeName || ''}: คำขอ${notifTypeLabel(p.type)} (${notifDateRange(p.dateFrom, p.dateTo)}) รอการอนุมัติจากคุณ`) }),
+  'request-revoked': p => {
+    const also = Array.isArray(p.also) && p.also.length ? notifRecordsText(p.also) : '';
+    const alsoText = also ? (currentLang === 'ja' ? `（同時に取消: ${also}）` : L(` — together with: ${also}`, ` — พร้อมกับ: ${also}`)) : '';
+    return { icon: '↩️', text: (currentLang === 'ja'
+      ? `${notifTypeLabel(p.type)}の申請（${notifDateRange(p.dateFrom, p.dateTo)}）の承認が${p.by || ''}により取り消されました`
+      : L(`The approval of your ${notifTypeLabel(p.type)} request (${notifDateRange(p.dateFrom, p.dateTo)}) was revoked by ${p.by || ''}`,
+          `การอนุมัติคำขอ${notifTypeLabel(p.type)} (${notifDateRange(p.dateFrom, p.dateTo)}) ของคุณถูกเพิกถอนโดย ${p.by || ''}`)) + alsoText + notifReasonText(p.reason) };
+  },
+  'accounting-revoked': p => ({ icon: '↩️', text: (currentLang === 'ja'
+    ? `${p.by || ''}（経理）が${p.employeeName || ''}さんの承認を取り消しました: ${notifRecordsText(p.records)}`
+    : L(`${p.by || ''} (Accounting) revoked the approval of ${p.employeeName || ''}: ${notifRecordsText(p.records)}`,
+        `${p.by || ''} (Accounting) เพิกถอนการอนุมัติของ ${p.employeeName || ''}: ${notifRecordsText(p.records)}`)) + notifReasonText(p.reason) }),
+  'approved-cancelled': p => ({ icon: '🚫', text: currentLang === 'ja'
+    ? `${p.employeeName || ''}さんが承認済みの申請を取り消しました: ${notifRecordsText(p.records)}`
+    : L(`${p.employeeName || ''} cancelled an approved request: ${notifRecordsText(p.records)}`,
+        `${p.employeeName || ''} ยกเลิกคำขอที่อนุมัติแล้ว: ${notifRecordsText(p.records)}`) }),
+  'cf-expiry-reminder': p => {
+    const min = Math.max(0, Number(p.minutes) || 0);
+    const days = Math.round(min / 480 * 100) / 100;
+    const date = notifDateRange(p.expiryDate);
+    return { icon: '⏳', text: currentLang === 'ja'
+      ? `繰越有給休暇${days}日（${minToStrFull(min)}）が${date}に失効します — それまでにご利用ください`
+      : L(`You have ${days} carry-forward day(s) (${minToStrFull(min)}) that expire on ${date} — use them before then`,
+          `คุณมีวันลาพักร้อนยกยอด ${days} วัน (${minToStrFull(min)}) ที่จะหมดอายุวันที่ ${date} — ใช้ให้ทันก่อนวันดังกล่าว`) };
+  },
+  'cf-run-overdue': p => {
+    const y = Number(p.year) || 0;
+    return { icon: '📅', text: currentLang === 'ja'
+      ? `${y}年の有給休暇の${y + 1}年への繰越がまだ実行されていません — 設定画面から実行してください（1〜2月のみ）`
+      : L(`The carry-forward of ${y} annual leave into ${y + 1} has not run yet — run it in Settings (January–February only)`,
+          `ยังไม่ได้ยกยอดวันลาพักร้อนปี ${y} ไปปี ${y + 1} — กดทำได้ที่หน้าตั้งค่า (เฉพาะเดือนมกราคม–กุมภาพันธ์)`) };
+  },
+};
+function notificationText(n) {
+  const r = n && Object.prototype.hasOwnProperty.call(NOTIFICATION_RENDERERS, n.kind) ? NOTIFICATION_RENDERERS[n.kind] : null;
+  if (r) {
+    try { return r((n.params && typeof n.params === 'object') ? n.params : {}); } catch (e) { /* generic below */ }
+  }
+  return { icon: '🔔', text: currentLang === 'ja' ? '新しい通知があります' : L('You have a new notification', 'คุณมีการแจ้งเตือนใหม่') };
+}
+// "5 min ago" for the last 24 h, else the date + time.
+function notificationTimeLabel(iso) {
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return '';
+  const diffMin = Math.floor((Date.now() - ms) / 60000);
+  if (diffMin < 1) return currentLang === 'ja' ? 'たった今' : L('just now', 'เมื่อสักครู่');
+  if (diffMin < 60) return currentLang === 'ja' ? `${diffMin}分前` : L(`${diffMin} min ago`, `${diffMin} นาทีที่แล้ว`);
+  if (diffMin < 24 * 60) {
+    const h = Math.floor(diffMin / 60);
+    return currentLang === 'ja' ? `${h}時間前` : L(`${h} h ago`, `${h} ชั่วโมงที่แล้ว`);
+  }
+  return _fmtDtStr(iso);
+}
+function renderNotificationPanel() {
+  const list = document.getElementById('notif-list');
+  const markAll = document.getElementById('notif-markall-btn');
+  if (markAll) markAll.disabled = !(NOTIFICATIONS_UNREAD > 0);
+  if (!list) return;
+  if (!NOTIFICATIONS.length) {
+    list.innerHTML = `<div class="notif-empty">🔕 ${escapeHtml(currentLang === 'ja' ? '通知はありません' : L('No notifications yet', 'ยังไม่มีการแจ้งเตือน'))}</div>`;
+    return;
+  }
+  const unreadLbl = currentLang === 'ja' ? '未読' : L('Unread', 'ยังไม่อ่าน');
+  list.innerHTML = NOTIFICATIONS.map(n => {
+    const { icon, text } = notificationText(n);
+    const unread = !n.readAt;
+    return `<button type="button" role="listitem" class="notif-item${unread ? ' unread' : ''}" onclick="onNotificationClick('${escapeHtml(String(n.id)).replace(/\\/g, '')}')">
+      <span class="notif-item-icon" aria-hidden="true">${icon}</span>
+      <span class="notif-item-body">
+        <span class="notif-item-text" style="display:block">${escapeHtml(text)}</span>
+        <span class="notif-item-time" style="display:block">${escapeHtml(notificationTimeLabel(n.createdAt))}</span>
+      </span>
+      <span class="notif-item-dot${unread ? '' : ' read'}"${unread ? ` role="img" aria-label="${escapeHtml(unreadLbl)}"` : ' aria-hidden="true"'}></span>
+    </button>`;
+  }).join('');
+}
+async function postNotificationsRead(body) {
+  try {
+    const res = await apiFetch('/api/notifications/read', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const d = await res.json().catch(() => ({}));
+    if (res.ok && d.success) {
+      NOTIFICATIONS_UNREAD = Math.max(0, Number(d.unread) || 0);
+      updateNotificationBadge();
+    }
+  } catch (e) { console.warn('[notify] mark read failed', e); }
+}
+async function markAllNotificationsRead() {
+  if (!(NOTIFICATIONS_UNREAD > 0)) return;
+  const now = new Date().toISOString();
+  NOTIFICATIONS.forEach(n => { if (!n.readAt) n.readAt = now; });
+  NOTIFICATIONS_UNREAD = 0;
+  updateNotificationBadge();
+  renderNotificationPanel();
+  await postNotificationsRead({ all: true });
+}
+async function onNotificationClick(id) {
+  const n = NOTIFICATIONS.find(x => String(x.id) === String(id));
+  if (!n) return;
+  if (!n.readAt) {
+    n.readAt = new Date().toISOString();
+    NOTIFICATIONS_UNREAD = Math.max(0, NOTIFICATIONS_UNREAD - 1);
+    updateNotificationBadge();
+    postNotificationsRead({ ids: [n.id] });
+  }
+  closeNotificationPanel();
+  openNotificationLink(n.link);
+}
+// Navigates to the page the item is about and opens the record when it is still in this session.
+function openNotificationLink(link) {
+  if (!link || !link.page || !currentUser) return;
+  const leave = link.leaveId ? DATA_LEAVES.find(l => l.id === Number(link.leaveId)) : null;
+  if (link.page === 'approval-history') {
+    if (!isMdAccountingView()) return;
+    openVoidHistoryForDate(link.date || (leave && leave.dateFrom) || null);
+    return;
+  }
+  if (link.page === 'approval') {
+    navigateTo('approval');
+    if (leave && currentPage === 'approval') showApprovalDetail(leave.id);
+    return;
+  }
+  if (link.page === 'my-requests') {
+    // Leave-type records live on the Leave page for roles that have it; everything else on My Requests.
+    const leavePage = leave && ['annual', 'sick', 'business'].includes(leave.type) && !isMdView();
+    navigateTo(leavePage ? 'leave' : 'my-requests');
+    if (leave && (currentPage === 'leave' || currentPage === 'my-requests')) showLeaveDetail(leave.id);
+    return;
+  }
+  if (['leave', 'settings'].includes(link.page)) navigateTo(link.page);
+}
+
 function onTopbarBellClick() {
   if (!currentUser) return;
   const role = effectiveRole();
@@ -13499,7 +14053,7 @@ function showApprovalDetail(id) {
   const revokeButton = canRevokeLeaveApproval(l)
     ? `<button onclick="closeApprovalDetail();revokeLeaveApproval(${l.id});" style="width:100%;padding:11px;border-radius:8px;background:var(--bg-card);color:#b91c1c;border:1.5px solid #fca5a5;font-size:14px;font-weight:700;cursor:pointer">↩️ ${L('Revoke approval', 'เพิกถอนการอนุมัติ')}</button>`
     : revokeBlock
-    ? `<div style="font-size:12px;color:#94a3b8;text-align:center;line-height:1.5">🔒 ${escapeHtml(revokeErrorMessage(revokeBlock))}</div>`
+    ? `<div style="font-size:12px;color:#94a3b8;text-align:center;line-height:1.5">🔒 ${escapeHtml(revokeErrorMessage(revokeBlock, '', l))}</div>`
     : '';
 
   document.getElementById('adetail-title').textContent = `${icon} ${label.replace(/^[^\s]+ /,'')}`;
@@ -16169,7 +16723,7 @@ function renderLeaveHistory() {
          </div>`
       : `<div style="display:flex;gap:6px;justify-content:flex-end">
            <button class="btn btn-ghost btn-sm" onclick="showLeaveDetail(${l.id})">${L('Details', 'รายละเอียด')}</button>
-           ${isCancellableApprovedLeave(l) ? (approvedCancelBlockCode(l) ? actionBlockedNoteHtml(cancelBlockMessage(approvedCancelBlockCode(l))) : `<button class="btn btn-danger btn-sm" onclick="cancelLeave(${l.id})">${L('Cancel', 'ยกเลิก')}</button>`) : ''}
+           ${isCancellableApprovedLeave(l) ? (approvedCancelBlockCode(l) ? actionBlockedNoteHtml(cancelBlockMessage(approvedCancelBlockCode(l), l)) : `<button class="btn btn-danger btn-sm" onclick="cancelLeave(${l.id})">${L('Cancel', 'ยกเลิก')}</button>`) : ''}
          </div>`;
 
     return `<tr style="${isWithdrawnLeaveStatus(l.status) ? 'opacity:.6' : ''}">
@@ -16298,9 +16852,12 @@ async function cancelLeave(id) {
   }
   // 2026-09-24 (owner): an earned annual-leave day that is already used cannot be cancelled away.
   if (approvedLeaveCancel && earnedDayUsedByRecord(l)) {
-    showToast(earnedDayUsedMessage(), 'warning');
+    showToast(earnedDayUsedMessage(l), 'warning');
     return false;
   }
+  // 2026-09-24 (owner, round 7): an approved Holiday Work takes the Late Night / early-morning
+  // claims that needed it (holidayWorkDependents) -- listed in the confirm, sent as dependentIds.
+  let cancelDeps = approvedLeaveCancel && l.type === 'holiday-work' ? holidayWorkDependents(l, DATA_LEAVES) : [];
   // 2026-09-21: abroad is cancellable too, but it consumes no leave quota — the generic
   // "days returned to your balance" wording would be a lie for it, so it gets its own line.
   // 2026-09-24 (owner): approved Holiday Work -- cancelled so it can be re-filed with the other
@@ -16319,17 +16876,25 @@ async function cancelLeave(id) {
             'ยกเลิกทำงานต่างประเทศที่อนุมัติแล้ว? วันเหล่านั้นจะกลับไปเป็นขาดงาน และจะไม่ได้รับเบี้ยเลี้ยง รายการจะยังอยู่ในประวัติเป็น "ยกเลิกแล้ว"'))
       : L('Cancel this approved leave? The days will be returned to your balance and the record stays in your history as cancelled.', 'ยกเลิกวันลาที่อนุมัติแล้ว? จำนวนวันจะถูกคืนเข้ายอดคงเหลือ และรายการจะยังอยู่ในประวัติเป็น "ยกเลิกแล้ว"'))
     : L('Confirm cancellation of this request?', 'ยืนยันการยกเลิกคำขอนี้?');
-  if (!confirm(confirmMsg)) return false;
+  if (!confirm(confirmMsg + cancelDependentsText(cancelDeps))) return false;
   if (approvedLeaveCancel && !isCancellableApprovedLeave(l)) {
     showToast(L('Cannot cancel leave on or after the leave date — days already used stay deducted.', 'ถึงวันลาแล้ว ยกเลิกไม่ได้ — วันลาถูกใช้ไปแล้วจะไม่คืนยอด'), 'warning');
     return false;
   }
   let cancelData = null;
   try {
-    const res = await apiFetch(`/api/leaves/${id}`, { method: 'DELETE' });
-    cancelData = await res.json();
+    const del = () => apiFetch(`/api/leaves/${id}`, approvedLeaveCancel && l.type === 'holiday-work'
+      ? { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dependentIds: cancelDeps.map(x => x.id) }) }
+      : { method: 'DELETE' }).then(r => r.json());
+    cancelData = await del();
+    if (!cancelData.success && cancelData.code === 'cancel-dependents-changed' && Array.isArray(cancelData.dependents)) {
+      // The server's list differs from this browser's -- show the real one and ask once more.
+      cancelDeps = cancelData.dependents;
+      if (!confirm(dependentsChangedText() + cancelDependentsText(cancelDeps))) return false;
+      cancelData = await del();
+    }
     // 2026-09-24: server codes (period guards, earned-day-used) worded client-side.
-    if (!cancelData.success) throw new Error(cancelData.code ? cancelBlockMessage(cancelData.code) : (cancelData.message || 'Cancel failed'));
+    if (!cancelData.success) throw new Error(cancelData.code ? cancelBlockMessage(cancelData.code, cancelData.blockedBy) : (cancelData.message || 'Cancel failed'));
   } catch(e) {
     showToast(L('❌ Could not cancel: ', '❌ ยกเลิกไม่สำเร็จ: ') + e.message, 'danger');
     return false;
@@ -16339,6 +16904,10 @@ async function cancelLeave(id) {
   if (cancelData && cancelData.leave) {
     const cIdx = DATA_LEAVES.findIndex(x => x.id === id);
     if (cIdx >= 0) DATA_LEAVES[cIdx] = cancelData.leave;
+    (Array.isArray(cancelData.dependents) ? cancelData.dependents : []).forEach(dl => {
+      const di = DATA_LEAVES.findIndex(x => x.id === dl.id);
+      if (di >= 0) DATA_LEAVES[di] = dl;
+    });
   } else {
     DATA_LEAVES = DATA_LEAVES.filter(x => x.id !== id);
   }
@@ -16358,7 +16927,8 @@ async function cancelLeave(id) {
 // 2026-09-24 (owner): MD / Accounting take back an approval on a money-bearing request (pay,
 // allowance and earned annual-leave credit stop). Only until payroll for the period is MD-approved;
 // the record stays in history as 'revoked'. Server: POST /api/leaves/:id/revoke.
-function revokeErrorMessage(code, fallback) {
+// `blockers` (optional, round 7): the server's blockedBy list or the record (earned-day-used).
+function revokeErrorMessage(code, fallback, blockers) {
   if (code === 'period-frozen') {
     return currentLang === 'ja'
       ? 'この期間の給与はManaging Directorが承認済みのため、承認を取り消せません'
@@ -16372,13 +16942,14 @@ function revokeErrorMessage(code, fallback) {
   }
   if (code === 'revoke-not-approved') return L('Only approved requests can be revoked', 'เพิกถอนได้เฉพาะคำขอที่อนุมัติแล้ว');
   if (code === 'revoke-type') return L('This request type has no pay to revoke', 'คำขอประเภทนี้ไม่มีเงินที่ต้องเพิกถอน');
-  if (code === 'earned-day-used') return earnedDayUsedMessage();
+  if (code === 'earned-day-used') return earnedDayUsedMessage(blockers);
   if (code === 'revoke-dependents-changed') {
     return currentLang === 'ja'
       ? 'この時刻修正に依存する申請が変わりました。もう一度確認してください。'
       : L('The requests that depend on this time correction have changed. Please confirm again.',
         'คำขอที่อาศัยการแก้ไขเวลานี้เปลี่ยนไป กรุณายืนยันอีกครั้ง');
   }
+  if (code === 'cancel-dependents-changed') return dependentsChangedText();
   return fallback || L('Could not revoke the approval', 'เพิกถอนการอนุมัติไม่สำเร็จ');
 }
 async function revokeLeaveApproval(id) {
@@ -16386,7 +16957,7 @@ async function revokeLeaveApproval(id) {
   const l = DATA_LEAVES.find(x => x.id === id);
   if (!l) return false;
   if (!canRevokeLeaveApproval(l)) {
-    showToast(revokeErrorMessage(isRevokeCandidate(l) ? revokeBlockCode(l) : ''), 'warning');
+    showToast(revokeErrorMessage(isRevokeCandidate(l) ? revokeBlockCode(l) : '', '', l), 'warning');
     return false;
   }
   const emp = DATA_USERS.find(u => u.id === l.userId);
@@ -16405,8 +16976,13 @@ async function revokeLeaveApproval(id) {
   // 2026-09-24 (owner): revoking a time correction also revokes the approved requests that
   // depended on the corrected times (timeCorrectionDependents) -- listed here, sent as
   // dependentIds so the server refuses if its own list differs.
-  let deps = l.type === 'time-correction' ? timeCorrectionDependentsOf(l) : [];
-  if (!confirm(confirmMsg + revokeDependentsText(deps))) return false;
+  // 2026-09-24 (owner, round 7): same for a Holiday Work -- its Late Night / early-morning claims
+  // on that rest day (holidayWorkDependents).
+  const sendsDeps = l.type === 'time-correction' || l.type === 'holiday-work';
+  let deps = l.type === 'time-correction' ? timeCorrectionDependentsOf(l)
+    : l.type === 'holiday-work' ? holidayWorkDependents(l, DATA_LEAVES) : [];
+  const depsText = d => (l.type === 'holiday-work' ? hwDependentsText(d, 'revoke') : revokeDependentsText(d));
+  if (!confirm(confirmMsg + depsText(deps))) return false;
   const reasonIn = prompt(L('Reason for revoking (optional):', 'เหตุผลที่เพิกถอน (ไม่บังคับ):'), '');
   if (reasonIn === null) return false;
   let revokedDeps = [];
@@ -16414,21 +16990,21 @@ async function revokeLeaveApproval(id) {
     const post = () => apiFetch(`/api/leaves/${id}/revoke`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ reason: String(reasonIn).trim().slice(0, 500),
-        ...(l.type === 'time-correction' ? { dependentIds: deps.map(x => x.id) } : {}) }),
+        ...(sendsDeps ? { dependentIds: deps.map(x => x.id) } : {}) }),
     }).then(r => r.json());
     let data = await post();
     if (!data.success && data.code === 'revoke-dependents-changed' && Array.isArray(data.dependents)) {
       // The server's list differs from this browser's -- show the real one and ask once more.
       deps = data.dependents;
-      const again = currentLang === 'ja'
+      const again = l.type === 'holiday-work' ? dependentsChangedText() : currentLang === 'ja'
         ? 'この時刻修正に依存する申請が変わりました。もう一度確認してください。'
         : L('The requests that depend on this time correction have changed. Please confirm again.',
           'คำขอที่อาศัยการแก้ไขเวลานี้เปลี่ยนไป กรุณายืนยันอีกครั้ง');
-      if (!confirm(again + revokeDependentsText(deps))) return false;
+      if (!confirm(again + depsText(deps))) return false;
       data = await post();
     }
     if (!data.success) {
-      showToast('❌ ' + revokeErrorMessage(data.code, data.message), 'danger');
+      showToast('❌ ' + revokeErrorMessage(data.code, data.message, data.blockedBy), 'danger');
       return false;
     }
     const rIdx = DATA_LEAVES.findIndex(x => x.id === id);
@@ -17499,7 +18075,7 @@ function renderMyRequests() {
     // mode); when the server would refuse, the reason is shown instead of the button.
     const approvedCancelBlock = isCancellableApprovedLeave(l) ? approvedCancelBlockCode(l) : '';
     const actionRow = approvedCancelBlock
-      ? actionBlockedNoteHtml(cancelBlockMessage(approvedCancelBlock))
+      ? actionBlockedNoteHtml(cancelBlockMessage(approvedCancelBlock, l))
       : isLegacyAutoApprovedPersonalCar(l) || isCancellableApprovedLeave(l)
       ? `<div style="display:flex;gap:6px;flex-shrink:0">
            <button class="btn btn-danger btn-sm" onclick="cancelLeave(${l.id})">${L('Cancel', 'ยกเลิก')}</button>
@@ -18205,7 +18781,11 @@ function initHikvisionLive() {
     return;
   }
 
-  hikvisionWs.onopen = () => { updateWsStatus('online'); console.log('[WS] connected'); };
+  hikvisionWs.onopen = () => {
+    updateWsStatus('online'); console.log('[WS] connected');
+    // 2026-09-24 (round 7): catch up on notifications stored while the socket was down.
+    loadNotifications();
+  };
 
   hikvisionWs.onmessage = msg => {
     try {
@@ -18219,6 +18799,13 @@ function initHikvisionLive() {
             if (typeof window._maTriggerLoad === 'function') window._maTriggerLoad();
           }
         }
+      }
+      // 2026-09-24 (round 7): a new inbox item (or a read on another device) for THIS user only.
+      if (data.type === 'NOTIFICATION') {
+        NOTIFICATIONS_UNREAD = Math.max(0, Number(data.unread) || 0);
+        updateNotificationBadge();
+        if (_notifPanelOpen) loadNotifications();
+        else if (NOTIFICATIONS.length) loadNotifications();
       }
       if (data.type === 'TODAY_EVENTS') {
         (data.events || []).forEach(e => {
