@@ -37,7 +37,7 @@ const CLIENT_FNS = [...SHARED, 'leaveRecordMinutes', 'getApprovedHolidayWorkDays
   'computeLateDeductMinutes', 'isSafeTimeZone', 'tzOffsetMinutesAt', 'abroadLocalTimeText', 'abroadLocalTimeHtml', 'escapeHtml', 'stampAbroadScan'];
 const SERVER_FNS = [...SHARED, 'leaveMinutesOf', 'getApprovedHolidayWorkAnnualLeaveDays',
   'deriveLeaveDaysCount', 'ta_localDateStr', 'isValidDateStr', 'isYearEndCountedLeaveStatus', 'annualLeaveRemainingMinutes',
-  'annualLateDeductMinutes', 'carryForwardAutoRunYear', 'computeYearEndCarryForward'];
+  'annualLateDeductMinutes', 'isCarryForwardRunMonth', 'carryForwardAutoRunYear', 'computeYearEndCarryForward'];
 
 const TIERS = [{ afterMonths: 6, days: 3 }, { afterMonths: 12, days: 6 }, { afterMonths: 24, days: 8 }, { afterMonths: 36, days: 10 }];
 const LATE_POLICY = { enabled: true, effectiveFromPeriod: '20260101', tiers: [{ fromMin: 1, toMin: 30, deductMin: 30 }, { fromMin: 31, toMin: 240, deductMin: 60 }] };
@@ -101,9 +101,10 @@ test('already recorded (auto or manual) -> never again', () => {
   assert.strictEqual(S.carryForwardAutoRunYear('2027-01-02', { 2026: { at: '2027-01-01T00:07:00Z', by: 'auto', byId: null } }), null);
   assert.strictEqual(S.carryForwardAutoRunYear('2027-01-02', { 2026: { at: '2027-01-01T03:00:00Z', by: 'Sirintorn', byId: 4 } }), null);
 });
-test('outside January -> no auto-run (mid-year ship, December)', () => {
+test('outside January-February -> no auto-run (mid-year ship, December); February runs (round 7)', () => {
   const S = makeServer({ today: '2026-09-24', leave: leaveSettings() });
-  for (const d of ['2026-09-24', '2026-12-31', '2027-02-01', '2026-02-01']) assert.strictEqual(S.carryForwardAutoRunYear(d, {}), null, d);
+  for (const d of ['2026-09-24', '2026-12-31', '2027-03-01', '2026-02-01']) assert.strictEqual(S.carryForwardAutoRunYear(d, {}, 2026), null, d);
+  assert.strictEqual(S.carryForwardAutoRunYear('2027-02-01', {}), 2026, 'server off all January -> February run');
 });
 test('garbage date / garbage runs are safe', () => {
   const S = makeServer({ today: '2027-01-01', leave: leaveSettings() });

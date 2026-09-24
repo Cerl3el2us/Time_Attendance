@@ -103,7 +103,7 @@ window.LANG_JA = {
   "Employees below this salary are exempt — no deduction": "この給与額未満の従業員は対象外 — 控除なし",
   "Salary above this is not counted for the calc — update together with Max Amount when the law changes": "この金額を超える給与部分は計算に含まれません — 法改正時は「上限額」と一緒に更新してください",
   "This cap applies when the year-end carry-forward runs (automatically in January, see Year-End Carry-Forward below) — days beyond the cap are forfeited, not queued for later.": "この上限は年末繰越の実行時（毎年1月に自動、下部の「年末繰越」参照）に適用されます — 上限を超えた日数は繰り越されず失効します",
-  "Shows an in-app toast to the employee only — no email or manager notice": "従業員本人にアプリ内通知が表示されるだけです — メールやマネージャーへの通知はありません",
+  "In-app toast window for the employee. Separately, employees with carry-forward still unused get a notification (and an email if they opted in) 29 days and 7 days before the expiry date.": "従業員本人へのアプリ内トースト表示期間です。これとは別に、繰越が未消化の従業員には失効日の29日前と7日前に通知（希望者にはメールも）が届きます。",
   "📌 Amount adds to this pay period's gross income. Advance subtracts from net pay this period (e.g. repaying a cash advance) — they move the payslip in opposite directions.": "📌 「金額」は今期の総支給額に加算されます。「前払い」は今期の手取り額から差し引かれます（前払い金の返済など）— この2つは給与明細に対して逆方向に作用します",
 
   // Symbols / short units
@@ -257,7 +257,7 @@ window.LANG_JA = {
   "Click 'Edit' on the newly added row and fill in what's still missing: salary, position, personal details, bank account, etc.": "追加した行の「編集」をクリックし、給与・役職・個人情報・口座番号などを入力してください。",
   "Click to open Google Maps": "クリックしてGoogle Mapsを開く",
   "Click to revoke": "クリックして取り消し",
-  "Runs automatically in January: each employee’s remaining annual leave for last year (up to max, expired carry-forward excluded) is carried into this year. Use the button only if it has not run (e.g. the server was off all January).": "毎年1月に自動で実行されます：各社員の前年の有給残日数（上限まで、失効した繰越分を除く）を今年に繰り越します。実行されていない場合（例：1月中ずっとサーバーが停止していた）のみボタンを使用してください。",
+  "Runs automatically in January (and still in February if the server was off): each employee’s remaining annual leave for last year (up to max, expired carry-forward excluded) is carried into this year. Use the button (January–February) only if it has not run. From 15 January, MD and Accounting get a daily notification until it has run.": "毎年1月に自動で実行されます（サーバー停止時は2月にも実行）：各社員の前年の有給残日数（上限まで、失効した繰越分を除く）を今年に繰り越します。実行されていない場合のみボタン（1〜2月）を使用してください。1月15日以降、実行されるまでMDと経理に毎日通知が届きます。",
   "Click to view details": "クリックして詳細を表示",
   "Clock In": "出勤打刻",
   "Clock in now": "今すぐ出勤打刻",

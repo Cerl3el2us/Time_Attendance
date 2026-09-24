@@ -262,8 +262,15 @@ webpush.setVapidDetails('mailto:tairo.b@hotmail.co.jp', VAPID_KEYS.publicKey, VA
 
 const PUSH_STATUS_TO_ROLE = { pending: 'manager', 'pending-accounting': 'accounting', 'pending-md': 'md' };
 
-async function sendPushToUser(userId, payload) {
+// 2026-09-24 (owner, round 7): optional `inbox` = { kind, params, link } -- the same notification is
+// stored in the in-app inbox (recordNotifications) FIRST, synchronously, whether or not this user
+// has a push subscription. Omitted (test push) = push only, nothing stored.
+async function sendPushToUser(userId, payload, inbox) {
   if (userId == null) return;
+  if (inbox && inbox.kind) {
+    try { recordNotifications([{ userId, kind: inbox.kind, params: inbox.params, link: inbox.link }]); }
+    catch (e) { console.error('[NOTIFY] inbox record failed:', e && e.message); }
+  }
   const subs = readPushSubs().filter(s => Number(s.userId) === Number(userId));
   // CORRECTNESS FIX 2026-08-13 (P-4, Opus audit): was a read-modify-write PER dead subscription,
   // each one racing any concurrent push send or a POST /api/push-subscribe landing in between --
@@ -291,11 +298,133 @@ async function sendPushToUser(userId, payload) {
   }
 }
 
-async function sendPushToRole(role, payload) {
+async function sendPushToRole(role, payload, inbox) {
   const users = readUsers() || [];
   for (const u of users.filter(u => u.active !== false && u.role === role)) {
-    await sendPushToUser(u.id, payload);
+    await sendPushToUser(u.id, payload, inbox);
   }
+}
+
+// ===== IN-APP NOTIFICATION INBOX (2026-09-24, owner, round 7) =====
+// Many users never enable browser push (iOS especially), so every notification is ALSO stored in
+// data/notifications.json, one item per recipient user, even when that user has no push
+// subscription. An item stores a message KIND + params, never rendered text -- the client renders
+// it in the viewer's current app language (app.js notificationText; unknown kind = generic text).
+// Retention: NOTIFICATION_RETENTION_DAYS, and the NOTIFICATION_MAX_PER_USER newest per user --
+// pruned on every write and by the hourly cron (runHourlyLeaveJobs). Test pushes are not stored.
+// Item: { id, userId, createdAt, readAt|null, kind, params, link }.
+const NOTIFICATIONS_FILE = path.join(DATA_DIR, 'notifications.json');
+if (!fs.existsSync(NOTIFICATIONS_FILE)) fs.writeFileSync(NOTIFICATIONS_FILE, '[]');
+const NOTIFICATION_RETENTION_DAYS = 90;
+const NOTIFICATION_MAX_PER_USER = 300;
+// Every kind the server writes (app.js NOTIFICATION_RENDERERS has one renderer per kind).
+const NOTIFICATION_KINDS = ['request-approved', 'request-rejected', 'approval-needed', 'request-revoked',
+  'accounting-revoked', 'approved-cancelled', 'cf-expiry-reminder', 'cf-run-overdue'];
+// Pages a link may point at (app.js openNotificationLink).
+const NOTIFICATION_LINK_PAGES = ['my-requests', 'approval', 'approval-history', 'leave', 'settings'];
+// null on a read/parse failure or a non-array -- mutating callers fail closed (never overwrite it).
+function readNotifications() {
+  try {
+    const v = JSON.parse(fs.readFileSync(NOTIFICATIONS_FILE, 'utf8'));
+    return Array.isArray(v) ? v : null;
+  } catch (e) { return null; }
+}
+// Holds employee names / revoke reasons -> chmod 600 like the other personal-data files.
+function saveNotifications(arr) { atomicWrite(NOTIFICATIONS_FILE, JSON.stringify(arr, null, 2), true); }
+// Pure. Drops items older than the retention window (by createdAt) and keeps the newest
+// NOTIFICATION_MAX_PER_USER per user. Returns a new array, oldest first (append order on disk).
+function pruneNotifications(items, nowMs) {
+  const cutoff = new Date(nowMs - NOTIFICATION_RETENTION_DAYS * 86400000).toISOString();
+  const newestFirst = (Array.isArray(items) ? items : [])
+    .filter(n => n && typeof n.createdAt === 'string' && n.createdAt >= cutoff)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || String(b.id).localeCompare(String(a.id)));
+  const perUser = new Map();
+  const kept = newestFirst.filter(n => {
+    const k = String(n.userId);
+    const c = perUser.get(k) || 0;
+    perUser.set(k, c + 1);
+    return c < NOTIFICATION_MAX_PER_USER;
+  });
+  return kept.reverse();
+}
+// Pure. Only a whitelisted page and a numeric leaveId / YYYY-MM-DD date survive.
+function sanitizeNotificationLink(link) {
+  if (!link || typeof link !== 'object' || !NOTIFICATION_LINK_PAGES.includes(link.page)) return null;
+  const out = { page: link.page };
+  if (Number.isInteger(Number(link.leaveId)) && Number(link.leaveId) > 0) out.leaveId = Number(link.leaveId);
+  if (typeof link.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(link.date)) out.date = link.date;
+  return out;
+}
+// Pure. One stored item (kind/params/link sanitised; params must be a plain JSON object).
+function buildNotificationItem(id, userId, kind, params, link, nowIso) {
+  const p = (params && typeof params === 'object' && !Array.isArray(params)) ? JSON.parse(JSON.stringify(params)) : {};
+  return { id, userId: Number(userId), createdAt: nowIso, readAt: null,
+    kind: typeof kind === 'string' ? kind.slice(0, 40) : 'unknown', params: p, link: sanitizeNotificationLink(link) };
+}
+// Pure. The viewer's own items, newest first, plus the unread count (of ALL own items).
+function notificationsForViewer(items, userId, limit) {
+  const own = (Array.isArray(items) ? items : []).filter(n => n && Number(n.userId) === Number(userId))
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)) || String(b.id).localeCompare(String(a.id)));
+  const unread = own.filter(n => !n.readAt).length;
+  return { items: own.slice(0, limit || NOTIFICATION_MAX_PER_USER), unread };
+}
+// Pure (mutates `items`). Marks the viewer's OWN unread items read: every one (all) or those whose
+// id is in `ids`. Other users' items are never touched. Returns how many changed.
+function markNotificationsRead(items, userId, ids, all, nowIso) {
+  const want = new Set((Array.isArray(ids) ? ids : []).map(String));
+  let changed = 0;
+  (items || []).forEach(n => {
+    if (!n || Number(n.userId) !== Number(userId) || n.readAt) return;
+    if (all || want.has(String(n.id))) { n.readAt = nowIso; changed++; }
+  });
+  return changed;
+}
+function unreadNotificationCount(items, userId) {
+  return (items || []).filter(n => n && Number(n.userId) === Number(userId) && !n.readAt).length;
+}
+// Stores one item per entry ({ userId, kind, params, link }) and pings each recipient's own open
+// sockets with a lightweight NOTIFICATION event (unread count only). Synchronous
+// read-modify-write with no await inside, so it cannot interleave with another write in this
+// process. A read failure skips the inbox (logged) and never overwrites the file.
+function recordNotifications(entries) {
+  const list = (entries || []).filter(e => e && Number.isInteger(Number(e.userId)) && e.kind);
+  if (!list.length) return [];
+  const items = readNotifications();
+  if (items === null) {
+    console.error('[NOTIFY] notifications.json unreadable -- inbox items not stored');
+    return [];
+  }
+  const nowIso = new Date().toISOString();
+  const added = list.map(e => buildNotificationItem(`${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`,
+    e.userId, e.kind, e.params, e.link, nowIso));
+  const next = pruneNotifications(items.concat(added), Date.now());
+  saveNotifications(next);
+  const userIds = [...new Set(added.map(n => n.userId))];
+  userIds.forEach(uid => sendNotificationEvent(uid, unreadNotificationCount(next, uid)));
+  return added;
+}
+// Per-user WS ping (like sendScanEvent's per-socket targeting, never a global broadcast).
+function sendNotificationEvent(userId, unread) {
+  refreshWsViewers();
+  const msg = JSON.stringify({ type: 'NOTIFICATION', unread });
+  clients.forEach(ws => {
+    if (ws.readyState === 1 && ws.viewerCtx && Number(ws.viewerCtx.userId) === Number(userId)) ws.send(msg);
+  });
+}
+// Hourly cron + boot: retention prune without a new item.
+function pruneNotificationsFile() {
+  const items = readNotifications();
+  if (items === null) return;
+  const next = pruneNotifications(items, Date.now());
+  if (next.length !== items.length) saveNotifications(next);
+}
+// Push + inbox to every active md/accounting user except `exceptUserId` (T4 overdue run, T7 cancel).
+function notifyMdAccounting(payload, inbox, exceptUserId) {
+  (readUsers() || []).filter(u => ['md', 'accounting'].includes(u.role) && u.active !== false && !isSystemAccountUser(u) &&
+    u.id !== exceptUserId).forEach(u => {
+    Promise.resolve(sendPushToUser(u.id, { ...payload, badge: badgeCountForUser(u) }, inbox))
+      .catch(e => console.error('[PUSH] md/accounting notify error:', e && e.message));
+  });
 }
 
 // Same turn-check as app.js isMyTurnOrDelegate() — used for the home-screen badge count so
@@ -341,12 +470,17 @@ function notifyLeaveStatusChange(oldStatus, leave) {
       tag: 'ta-leave',
       url: '/',
       badge: badgeCountForUser(emp)
+    }, {
+      kind: leave.status === 'approved' ? 'request-approved' : 'request-rejected',
+      params: { leaveId: leave.id, type: leave.type, dateFrom: leave.dateFrom, dateTo: leave.dateTo || leave.dateFrom },
+      link: { page: 'my-requests', leaveId: leave.id },
     });
     // Email is opt-in per user (emp.emailNotifyOnResult) — only fires on the FINAL outcome
     // (approved/rejected), never on intermediate multi-step approval transitions.
     sendResultEmail(leave).catch(e => console.error('[EMAIL] result notify error:', e.message));
   } else if (PUSH_STATUS_TO_ROLE[leave.status] && leave.status !== oldStatus) {
     const role = PUSH_STATUS_TO_ROLE[leave.status];
+    const owner = users.find(u => u.id === leave.userId);
     users.filter(u => u.active !== false && u.role === role).forEach(u => {
       const n = badgeCountForUser(u);
       sendPushToUser(u.id, {
@@ -357,6 +491,11 @@ function notifyLeaveStatusChange(oldStatus, leave) {
         tag: 'ta-approval',
         url: '/',
         badge: n
+      }, {
+        kind: 'approval-needed',
+        params: { leaveId: leave.id, type: leave.type, dateFrom: leave.dateFrom, dateTo: leave.dateTo || leave.dateFrom,
+          employeeName: owner ? owner.name : '' },
+        link: { page: 'approval', leaveId: leave.id },
       });
     });
   }
@@ -2334,6 +2473,12 @@ function handleUserUpdate(req, res, users, idx, updates) {
   const after = canOpenDoor(users[idx]);
   const empNo = String(users[idx].employeeNo || '');
   saveUsers(users);   // HR fact persists first, regardless of whether the device push below succeeds
+  // 2026-09-24 (owner, round 7): inactive -> active after last year's carry-forward run already
+  // happened (it skipped this inactive employee) -> compute and write their carry-forward now.
+  if (!wasActive && users[idx].active !== false) {
+    try { carryForwardForReactivatedUser(users[idx]); }
+    catch (e) { console.error('[CF] reactivation carry-forward failed:', e && e.message); }
+  }
   // SECURITY FIX 2026-08-05 (Opus audit, F-1, CRITICAL): this used to echo the full raw record
   // back verbatim -- `users[idx]` straight from readUsers(), no projection at all -- to WHOEVER
   // made the request, including a `manager` (whose write side is correctly restricted to a small
@@ -3012,6 +3157,35 @@ function bangkokNowIso() {
   }
 }
 
+// 2026-09-24 (owner, round 7): the in-app notification inbox -- own items only. The global auth
+// middleware already refuses deactivated accounts (reads and writes) and observers' writes, same
+// as every other own-data endpoint.
+const NOTIFICATIONS_UNAVAILABLE = 'Notifications are temporarily unavailable';
+app.get('/api/notifications', (req, res) => {
+  if (!req.user) return res.status(401).json({ success:false, message:'Unauthorized' });
+  const items = readNotifications();
+  if (items === null) return res.status(503).json({ success:false, message: NOTIFICATIONS_UNAVAILABLE });
+  const out = notificationsForViewer(items, req.user.sub);
+  res.json({ success:true, items: out.items, unread: out.unread });
+});
+const withNotificationsLock = makeHandlerLock('NOTIFICATIONS');
+app.post('/api/notifications/read', withNotificationsLock((req, res) => {
+  if (!req.user) return res.status(401).json({ success:false, message:'Unauthorized' });
+  const body = parseBody(req) || {};
+  const all = body.all === true;
+  if (!all && (!Array.isArray(body.ids) || !body.ids.length || body.ids.length > 500 ||
+      !body.ids.every(x => (typeof x === 'string' && x.length <= 64) || Number.isInteger(x)))) {
+    return res.status(400).json({ success:false, message:'ids (non-empty array) or all:true required' });
+  }
+  const items = readNotifications();
+  if (items === null) return res.status(503).json({ success:false, message: NOTIFICATIONS_UNAVAILABLE });
+  const changed = markNotificationsRead(items, req.user.sub, body.ids, all, new Date().toISOString());
+  if (changed) saveNotifications(items);
+  const unread = unreadNotificationCount(items, req.user.sub);
+  if (changed) sendNotificationEvent(req.user.sub, unread);
+  res.json({ success:true, changed, unread });
+}));
+
 app.get('/api/announcements', (req, res) => {
   const list = readAnnouncements();
   if (list === null) return res.status(503).json({ success: false, message: 'Service temporarily unavailable' });
@@ -3279,6 +3453,9 @@ function stripSensitiveSettingsForRole(settings, live) {
   // 2026-09-24: run log of the year-end carry-forward (who/when) -- only the md/accounting
   // Settings page reads it.
   delete out.leaveCarryForwardRuns;
+  // 2026-09-24 (round 7): server-owned reminder logs (T2 / T4) -- md/accounting only too.
+  delete out.cfExpiryRemindersSent;
+  delete out.cfRunOverdueRemindersSent;
   if (out.leaveCarryForward && live) {
     const year = bangkokYmd().y;
     const mine = {};
@@ -3376,6 +3553,12 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
   // body) keeps the stored value because a client can never send the key. Explicit for clarity.
   if (Object.prototype.hasOwnProperty.call(body, 'leaveCarryForwardRuns')) {
     return res.status(403).json({ success: false, message: 'leaveCarryForwardRuns is set by the server only' });
+  }
+  // 2026-09-24 (round 7): same for the reminder "sent on day X" logs.
+  for (const k of ['cfExpiryRemindersSent', 'cfRunOverdueRemindersSent']) {
+    if (Object.prototype.hasOwnProperty.call(body, k)) {
+      return res.status(403).json({ success: false, message: `${k} is set by the server only` });
+    }
   }
   // 2026-09-24 (owner): same for the carry-forward values themselves. No client path sends the key
   // any more (saveLeaveCarryForward was removed with the server-side year-end run); a PUT that
@@ -4623,10 +4806,49 @@ function earnedDayBalanceAsOf(year, todayStr) {
 function carryForwardAfterCreditLoss(leftoverWithMin, creditMin, maxCF) {
   return Math.min(Math.max(0, leftoverWithMin - creditMin) / 480, maxCF);
 }
+// 2026-09-24 (owner, round 7): WHY the earned day counts as used -- which balance would go
+// negative and by how many minutes ({ next: false } = that year's, { next: true } = next year's
+// after the carry-forward refresh). null = not used. DUAL-SYNC (identical text):
+// earnedDayShortfall, isEarnedDayUsed, earnedDayBlockingLeaves.
+function earnedDayShortfall(creditMin, remainingWithMin, nextCfDropMin, nextRemainingWithMin) {
+  if (!(creditMin > 0)) return null;
+  if (remainingWithMin - creditMin < 0) return { next: false, minutes: creditMin - remainingWithMin };
+  if (nextCfDropMin > 0 && nextRemainingWithMin - nextCfDropMin < 0) return { next: true, minutes: nextCfDropMin - nextRemainingWithMin };
+  return null;
+}
 function isEarnedDayUsed(creditMin, remainingWithMin, nextCfDropMin, nextRemainingWithMin) {
-  if (!(creditMin > 0)) return false;
-  if (remainingWithMin - creditMin < 0) return true;
-  return nextCfDropMin > 0 && nextRemainingWithMin - nextCfDropMin < 0;
+  return !!earnedDayShortfall(creditMin, remainingWithMin, nextCfDropMin, nextRemainingWithMin);
+}
+// The owner's annual leave (pending or approved, dated in `year`) that uses the earned day: the
+// LATEST first, as many as it takes to cover the shortfall (at most 5) -- cancelling those gives
+// the balance back. minutesOf = this side's leave-minutes function (server leaveMinutesOf,
+// app.js leaveRecordMinutes).
+function earnedDayBlockingLeaves(leaves, userId, year, shortfallMin, minutesOf) {
+  const yStart = `${year}-01-01`, yEnd = `${year}-12-31`;
+  const sorted = (leaves || []).filter(l => l && l.userId === userId && l.type === 'annual' &&
+    !isVoidLeaveStatus(l.status) && l.dateFrom >= yStart && l.dateFrom <= yEnd)
+    .sort((a, b) => String(b.dateFrom).localeCompare(String(a.dateFrom)) || (Number(b.id) || 0) - (Number(a.id) || 0));
+  const out = [];
+  let covered = 0;
+  for (const l of sorted) {
+    if (covered >= shortfallMin || out.length >= 5) break;
+    out.push({ id: l.id, type: l.type, dateFrom: l.dateFrom, dateTo: l.dateTo || l.dateFrom, status: l.status });
+    covered += minutesOf(l);
+  }
+  return out;
+}
+// 2026-09-24 (owner, round 7): revoking OR the owner cancelling an approved Holiday Work also
+// takes that employee's approved Late Night (late-out) and early-morning claims on that rest day
+// with it -- on a rest day both require a Holiday Work (submit validators). A claim is dependent
+// when it is valid with this Holiday Work and invalid without it: the date is a Holiday Work day
+// (weekend / public holiday, not a Company Trip) and no OTHER active Holiday Work of that employee
+// remains on it. DUAL-SYNC (identical text).
+function holidayWorkDependents(hw, leaves) {
+  if (!hw || hw.type !== 'holiday-work' || !hw.dateFrom || !isHolidayWorkDay(hw.dateFrom)) return [];
+  const sameDay = (leaves || []).filter(l => l && l.id !== hw.id && l.userId === hw.userId && l.dateFrom === hw.dateFrom);
+  if (sameDay.some(l => l.type === 'holiday-work' && !isVoidLeaveStatus(l.status))) return [];
+  return sameDay.filter(l => l.status === 'approved' && (l.type === 'late-out' || l.type === 'early-morning'))
+    .sort((x, y) => (Number(x.id) || 0) - (Number(y.id) || 0));
 }
 function earnedDayUsedError(leaves, owner, leave) {
   if (!owner || !leave) return null;
@@ -4647,8 +4869,13 @@ function earnedDayUsedError(leaves, owner, leave) {
       dropMin = Math.max(0, cfOld - cfNew) * 480;
       if (dropMin > 0) nextRem = leaveBalanceRemainingMinutes(leaves, owner, 'annual', undefined, earnedDayBalanceAsOf(year + 1, today));
     }
-    if (isEarnedDayUsed(creditMin, remWith, dropMin, nextRem)) {
-      return { code: 'earned-day-used', message: 'The annual-leave day earned from this record has already been used, so it cannot be cancelled or revoked' };
+    const shortfall = earnedDayShortfall(creditMin, remWith, dropMin, nextRem);
+    if (shortfall) {
+      // 2026-09-24 (owner, round 7): say which annual leave uses it (latest first).
+      const blockedBy = earnedDayBlockingLeaves(leaves, owner.id, shortfall.next ? year + 1 : year, shortfall.minutes, leaveMinutesOf);
+      return { code: 'earned-day-used', blockedBy,
+        message: 'The annual-leave day earned from this record has already been used, so it cannot be cancelled or revoked' +
+          (blockedBy.length ? ` -- blocked by: ${blockedBy.map(b => `annual leave ${b.dateFrom}${b.dateTo !== b.dateFrom ? ` to ${b.dateTo}` : ''} (${b.status})`).join(', ')}; cancel it first` : '') };
     }
   }
   return null;
@@ -6698,9 +6925,10 @@ function refreshSnapshottedCarryForward(leaves, user, dateFrom) {
 // Source year to auto-run for `todayStr` (Bangkok YYYY-MM-DD), or null. Pure.
 // 2026-09-24 (owner): never for a year before the system started (firstSourceYear, see
 // carryForwardFirstSourceYear); omitted = no floor.
+// 2026-09-24 (owner, round 7): January AND February (was January only).
 function carryForwardAutoRunYear(todayStr, runs, firstSourceYear) {
   if (typeof todayStr !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(todayStr)) return null;
-  if (todayStr.slice(5, 7) !== '01') return null;
+  if (!isCarryForwardRunMonth(todayStr)) return null;
   const fromYear = Number(todayStr.slice(0, 4)) - 1;
   if (Number.isInteger(firstSourceYear) && fromYear < firstSourceYear) return null;
   const r = (runs && typeof runs === 'object' && !Array.isArray(runs)) ? runs : {};
@@ -6709,8 +6937,13 @@ function carryForwardAutoRunYear(todayStr, runs, firstSourceYear) {
 // 2026-09-24 (owner): the manual run (Settings button / POST /api/leave-carry-forward/run) is
 // allowed only in January (Bangkok), only for the year that has just ended, and never for a year
 // before the system started. Returns the refusal code or null. DUAL-SYNC: app.js carryForwardRunRefusal.
+// 2026-09-24 (owner, round 7): January OR February; the code is now 'cf-not-jan-feb'.
+// DUAL-SYNC (identical text): isCarryForwardRunMonth, carryForwardRunRefusal.
+function isCarryForwardRunMonth(todayStr) {
+  return typeof todayStr === 'string' && (todayStr.slice(5, 7) === '01' || todayStr.slice(5, 7) === '02');
+}
 function carryForwardRunRefusal(todayStr, fromYear, firstSourceYear) {
-  if (typeof todayStr !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(todayStr) || todayStr.slice(5, 7) !== '01') return 'cf-not-january';
+  if (typeof todayStr !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(todayStr) || !isCarryForwardRunMonth(todayStr)) return 'cf-not-jan-feb';
   if (!Number.isInteger(fromYear) || fromYear !== Number(todayStr.slice(0, 4)) - 1) return 'cf-bad-year';
   if (Number.isInteger(firstSourceYear) && fromYear < firstSourceYear) return 'cf-before-system-start';
   return null;
@@ -6761,6 +6994,29 @@ function runYearEndCarryForward(fromYear, actor) {
   writeJSON('settings.json', settings);
   return { ok: true, run, count: Object.keys(computed).length / 2 };
 }
+// 2026-09-24 (owner, round 7): an employee reactivated after last year's run was recorded, with no
+// carry-forward key for this year, gets the SAME computation the run does (computeYearEndCarryForward
+// for that one user), written in one whole-file settings read-modify-write. Existing keys are never
+// overwritten. Returns the written entries or null.
+function carryForwardForReactivatedUser(user) {
+  if (!user || isSystemAccountUser(user) || user.active === false) return null;
+  const year = Number(bangkokDateStr().slice(0, 4));
+  const fromYear = year - 1;
+  const settings = readJSON('settings.json', {});
+  if (settings === null || typeof settings !== 'object' || Array.isArray(settings)) return null;
+  if (!plainObj(settings.leaveCarryForwardRuns)[String(fromYear)]) return null;
+  const cf = plainObj(settings.leaveCarryForward);
+  if (cf[`${year}_${user.id}`] !== undefined) return null;
+  const leaves = readLeaves();
+  if (leaves === null) return null;
+  const computed = computeYearEndCarryForward(leaves, [user], fromYear, cf, getAppSettings().leave?.carryForwardMax);
+  const toWrite = {};
+  Object.keys(computed).forEach(k => { if (cf[k] === undefined) toWrite[k] = computed[k]; });
+  settings.leaveCarryForward = { ...cf, ...toWrite };
+  writeJSON('settings.json', settings);
+  console.log('[CF] carry-forward written for reactivated employee', JSON.stringify({ userId: user.id, fromYear, ...toWrite }));
+  return toWrite;
+}
 function autoYearEndCarryForward() {
   try {
     const settings = readJSON('settings.json', {});
@@ -6775,6 +7031,124 @@ function autoYearEndCarryForward() {
   }
 }
 
+// ===== 2026-09-24 (owner, round 7): hourly leave jobs =====
+// One hourly cron tick (scheduleYearEndCarryForward) runs, each isolated in its own try/catch:
+// the automatic carry-forward, the overdue-run reminder, the carry-forward expiry reminders and
+// the notification-inbox retention prune.
+function runHourlyLeaveJobs() {
+  autoYearEndCarryForward();
+  try { remindOverdueCarryForwardRun(); } catch (e) { console.error('[CF] overdue reminder error:', e && e.message); }
+  try { runCfExpiryReminders(); } catch (e) { console.error('[CF] expiry reminder error:', e && e.message); }
+  try { pruneNotificationsFile(); } catch (e) { console.error('[NOTIFY] prune error:', e && e.message); }
+}
+function plainObj(v) { return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {}; }
+// Server-owned "sent on day X" maps keep ~2 years of keys. Pure.
+function pruneDatedMap(map, todayStr) {
+  const cutoff = `${Number(todayStr.slice(0, 4)) - 2}${todayStr.slice(4)}`;
+  const out = {};
+  Object.keys(plainObj(map)).forEach(k => { if (k >= cutoff) out[k] = map[k]; });
+  return out;
+}
+function addDaysToDateStr(dateStr, n) {
+  const d = new Date(dateStr + 'T12:00:00');
+  d.setDate(d.getDate() + n);
+  const p2 = x => String(x).padStart(2, '0');
+  return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+}
+// T4: last year's run still not recorded on/after 15 January -> MD + Accounting are reminded once
+// per day (settings.cfRunOverdueRemindersSent[<Bangkok date>], server-owned) until it is done --
+// but only through February: after the run window closes the run can no longer be made, so a
+// reminder would ask for the impossible. Pure. Returns the source year or null.
+function carryForwardOverdueReminderYear(todayStr, runs, sentMap, firstSourceYear) {
+  if (typeof todayStr !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(todayStr)) return null;
+  if (!isCarryForwardRunMonth(todayStr) || todayStr.slice(5) < '01-15') return null;
+  const fromYear = Number(todayStr.slice(0, 4)) - 1;
+  if (Number.isInteger(firstSourceYear) && fromYear < firstSourceYear) return null;
+  if (plainObj(runs)[String(fromYear)]) return null;
+  if (plainObj(sentMap)[todayStr]) return null;
+  return fromYear;
+}
+function remindOverdueCarryForwardRun() {
+  const settings = readJSON('settings.json', {});
+  if (settings === null || typeof settings !== 'object' || Array.isArray(settings)) return;
+  const today = bangkokDateStr();
+  const fromYear = carryForwardOverdueReminderYear(today, settings.leaveCarryForwardRuns, settings.cfRunOverdueRemindersSent, carryForwardFirstSourceYear());
+  if (fromYear === null) return;
+  // Recorded BEFORE sending, so a failing send can never repeat the reminder the same day.
+  settings.cfRunOverdueRemindersSent = pruneDatedMap({ ...plainObj(settings.cfRunOverdueRemindersSent), [today]: new Date().toISOString() }, today);
+  writeJSON('settings.json', settings);
+  console.log(`[CF] carry-forward ${fromYear} -> ${fromYear + 1} still not run -- reminding MD / Accounting`);
+  notifyMdAccounting({ title: 'Year-end carry-forward not run yet',
+    body: `The carry-forward of ${fromYear} annual leave into ${fromYear + 1} has not run yet -- run it in Settings (January or February only)`,
+    tag: 'ta-cf-run', url: '/' }, { kind: 'cf-run-overdue', params: { year: fromYear }, link: { page: 'settings' } }, null);
+}
+// T2: carry-forward expiry reminders on (expiry date - 29 days) and (expiry date - 7 days) --
+// 1 Nov and 23 Nov for a 30 Nov expiry. Pure.
+function cfExpiryReminderDates(expiryStr) {
+  return [addDaysToDateStr(expiryStr, -29), addDaysToDateStr(expiryStr, -7)];
+}
+function cfExpiryReminderDue(todayStr, expiryStr, sentMap) {
+  return cfExpiryReminderDates(expiryStr).includes(todayStr) && !plainObj(sentMap)[todayStr];
+}
+// Active employees whose carry-forward is still at risk for `year`: what the FIFO rule would
+// forfeit if the expiry date were today (carryForwardForfeitMinutes as seen after the expiry,
+// pending leave dated on/before the expiry counts as used -- app.js checkCarryForwardNotification
+// and the Settings at-risk report use the same figure).
+function carryForwardAtRiskList(leaves, users, year, cf) {
+  return employeeActiveRecords(users || [])
+    .map(u => ({ user: u, minutes: carryForwardForfeitMinutes(leaves, u, year, `${year + 1}-01-01`, true, undefined, cf) }))
+    .filter(x => x.minutes > 0);
+}
+// "1.5 day(s) (1d 4h 0m)" in the email language. Pure.
+function cfAmountText(minutes, lang) {
+  const m = Math.max(0, Math.round(Number(minutes) || 0));
+  const days = Math.round(m / 480 * 100) / 100;
+  const d = Math.floor(m / 480), h = Math.floor((m % 480) / 60), mm = m % 60;
+  if (lang === 'ja') return `${days}日（${d}日${h}時間${mm}分）`;
+  if (lang === 'en') return `${days} day(s) (${d}d ${h}h ${mm}m)`;
+  return `${days} วัน (${d} วัน ${h} ชม. ${mm} นาที)`;
+}
+function runCfExpiryReminders() {
+  if (!carryForwardExpiryEnabled()) return;
+  const today = bangkokDateStr();
+  const year = Number(today.slice(0, 4));
+  const expiry = carryForwardExpiryDateStr(year);
+  const settings = readJSON('settings.json', {});
+  if (settings === null || typeof settings !== 'object' || Array.isArray(settings)) return;
+  if (!cfExpiryReminderDue(today, expiry, settings.cfExpiryRemindersSent)) return;
+  const leaves = readLeaves();
+  const users = readUsers();
+  if (leaves === null || users === null) return;
+  settings.cfExpiryRemindersSent = pruneDatedMap({ ...plainObj(settings.cfExpiryRemindersSent), [today]: new Date().toISOString() }, today);
+  writeJSON('settings.json', settings);
+  const atRisk = carryForwardAtRiskList(leaves, users, year, plainObj(settings.leaveCarryForward));
+  console.log(`[CF] expiry reminder ${today} (expiry ${expiry}): ${atRisk.length} employee(s) with carry-forward at risk`);
+  atRisk.forEach(({ user, minutes }) => {
+    Promise.resolve(sendPushToUser(user.id, {
+      title: 'Carry-forward leave expiring',
+      body: `You have ${cfAmountText(minutes, 'en')} of carry-forward leave that expire on ${expiry} -- use it before then`,
+      tag: 'ta-cf-expiry', url: '/', badge: badgeCountForUser(user),
+    }, { kind: 'cf-expiry-reminder', params: { minutes, expiryDate: expiry }, link: { page: 'leave' } }))
+      .catch(e => console.error('[PUSH] cf expiry reminder error:', e && e.message));
+    sendCfExpiryEmail(user, minutes, expiry).catch(e => console.error('[EMAIL] cf expiry reminder error:', e && e.message));
+  });
+}
+// Opt-in result email (emailNotifyOnResult) in the employee's language (notifyLangEmail).
+async function sendCfExpiryEmail(user, minutes, expiryStr) {
+  if (!user || !user.email || !user.emailNotifyOnResult) return;
+  const transport = getEmailTransport();
+  if (!transport) return;
+  const cfg = readSettings().emailConfig || {};
+  const lang = emailLangOf(user.notifyLangEmail);
+  const t = EMAIL_I18N[lang];
+  const C = EMAIL_COLORS;
+  const dateText = fmtEmailDateLong(new Date(expiryStr + 'T12:00:00').getTime(), lang);
+  const bodyHtml = `<div style="font-size:14px;color:${C.text};line-height:1.6">${escapeHtml(t.cfExpiryBody(cfAmountText(minutes, lang), dateText))}</div>`;
+  const html = emailShell({ headerBg: C.amber, headerIcon: '⏳', headerTitle: escapeHtml(t.cfExpiryTitle), headerSubtitle: null, bodyHtml, footerText: t.footer });
+  await transport.sendMail({ from: `"${cfg.fromName || 'Time Attendance Application'}" <${cfg.user}>`, to: user.email, subject: t.cfExpiryTitle, html });
+  console.log('[EMAIL] carry-forward expiry reminder sent to', user.email);
+}
+
 // Manual button (Settings -> Year-End Carry-Forward). md/accounting only; requireRole already
 // refuses observers and inactive accounts. Only the year that has just ended can be processed.
 app.post('/api/leave-carry-forward/run', requireRole('md', 'accounting'), withLeavesLock((req, res) => {
@@ -6783,7 +7157,7 @@ app.post('/api/leave-carry-forward/run', requireRole('md', 'accounting'), withLe
   const refusal = carryForwardRunRefusal(bangkokDateStr(), year, carryForwardFirstSourceYear());
   if (refusal) {
     const msg = {
-      'cf-not-january': 'Carry-forward can only be run in January',
+      'cf-not-jan-feb': 'Carry-forward can only be run in January or February',
       'cf-bad-year': 'Only last year can be carried forward',
       'cf-before-system-start': 'That year is before the system started',
     }[refusal];
@@ -6799,6 +7173,8 @@ app.post('/api/leave-carry-forward/run', requireRole('md', 'accounting'), withLe
 app.delete('/api/leaves/:id', withLeavesLock((req, res) => {
   try {
     const id = parseInt(req.params.id);
+    // 2026-09-24 (round 7): optional JSON body { dependentIds } (Holiday Work cancel confirm).
+    const cancelBody = parseBody(req) || {};
     const leaves = readLeaves();
     // SECURITY FIX 2026-08-13 (C-2): same fail-closed guard as POST/PUT /api/leaves.
     if (leaves === null) return res.status(503).json({ success:false, message:'Service temporarily unavailable' });
@@ -6853,7 +7229,16 @@ app.delete('/api/leaves/:id', withLeavesLock((req, res) => {
     // used cannot be cancelled away. No-op for records that earn nothing.
     if (approvedLeaveCancel) {
       const earnedErr = earnedDayUsedError(leaves, live, leave);
-      if (earnedErr) return res.status(409).json({ success:false, code: earnedErr.code, message: earnedErr.message });
+      if (earnedErr) return res.status(409).json({ success:false, code: earnedErr.code, message: earnedErr.message, blockedBy: earnedErr.blockedBy });
+    }
+    // 2026-09-24 (owner, round 7): cancelling an approved Holiday Work cancels the Late Night /
+    // early-morning claims that needed it (holidayWorkDependents) in the same write. The owner's
+    // confirm listed dependentIds; a different server list refuses (409) and returns the real one.
+    const cancelDeps = approvedLeaveCancel && leave.type === 'holiday-work' ? holidayWorkDependents(leave, leaves) : [];
+    if (cancelDeps.length || Array.isArray(cancelBody.dependentIds)) {
+      const depErr = dependentsMismatchOrGuardError(cancelBody.dependentIds, cancelDeps, leaves, live);
+      if (depErr) return res.status(depErr.status).json({ success:false, ...depErr.body,
+        ...(depErr.body.code === 'dependents-changed' ? { code: 'cancel-dependents-changed' } : {}) });
     }
     // HYGIENE FIX 2026-08-13 (LOW-3, Opus retrospective audit): a cancelled personal-car record
     // (see the F-B fix above) is the first case in this handler where a hard-delete removes a
@@ -6875,15 +7260,26 @@ app.delete('/api/leaves/:id', withLeavesLock((req, res) => {
     // overlap checks and queues everywhere, so the employee can re-file the same date. Pending
     // cancels still hard-delete (owner decision: nothing was ever granted, nothing to keep).
     const softCancel = isCancellablePersonalCar || approvedLeaveCancel;
+    const cancelledDeps = [];
     if (softCancel) {
+      const cancelledAt = new Date().toISOString();
       leaves[idx] = {
-        ...leave, status: 'cancelled', cancelledAt: new Date().toISOString(),
+        ...leave, status: 'cancelled', cancelledAt,
         cancelledById: live.id, cancelledBy: live.name,
       };
+      cancelDeps.forEach(dep => {
+        const di = leaves.findIndex(l => l.id === dep.id);
+        if (di < 0) return;
+        leaves[di] = { ...leaves[di], status: 'cancelled', cancelledAt, cancelledById: live.id, cancelledBy: live.name, cancelledWith: leave.id };
+        cancelledDeps.push(leaves[di]);
+      });
     } else {
       leaves.splice(idx, 1);
     }
     saveLeaves(leaves);
+    if (cancelledDeps.length) {
+      console.log('[LEAVE] cancelled together with Holiday Work', JSON.stringify({ id, dependents: cancelledDeps.map(l => l.id) }));
+    }
     const cancelTouchesAnnualPool = ['annual', 'abroad'].includes(leave.type) ||
       (leave.type === 'holiday-work' && leave.compensationMode === 'annual-leave');
     // 2026-09-24 (review M): a PENDING annual request counts in the year-end pool too, so its
@@ -6898,7 +7294,10 @@ app.delete('/api/leaves/:id', withLeavesLock((req, res) => {
     // A soft-cancelled row stays in everyone's list (greyed), so clients get an update, not a delete.
     if (softCancel) {
       broadcastLeaveUpdated(leaves[idx]);
-      return res.json({ success:true, leave: leaves[idx] });
+      cancelledDeps.forEach(l => broadcastLeaveUpdated(l));
+      // 2026-09-24 (owner, round 7): MD and Accounting hear about every cancelled APPROVED record.
+      notifyApprovedRecordCancelled(live, [leaves[idx], ...cancelledDeps]);
+      return res.json({ success:true, leave: leaves[idx], dependents: cancelledDeps });
     }
     broadcast({ type: 'LEAVE_DELETED', id });
     res.json({ success:true });
@@ -6906,6 +7305,58 @@ app.delete('/api/leaves/:id', withLeavesLock((req, res) => {
     res.status(500).json({ success:false, error:e.message });
   }
 }));
+
+// 2026-09-24 (owner, round 7): shared by the revoke route and the owner cancel. `wantIds` = the
+// dependentIds the user confirmed (undefined = an old client that sent none: no cross-check).
+// Returns null or { status, body }: 409 'dependents-changed' with the real list, or the first
+// period / earned-day guard any dependent fails (the whole action is refused).
+function dependentsMismatchOrGuardError(wantIds, deps, leaves, ownerUser) {
+  if (Array.isArray(wantIds)) {
+    const want = [...new Set(wantIds.map(Number))].sort((a, b) => a - b).join(',');
+    const have = deps.map(l => Number(l.id)).sort((a, b) => a - b).join(',');
+    if (want !== have) {
+      return { status: 409, body: { code: 'dependents-changed',
+        dependents: deps.map(l => ({ id: l.id, type: l.type, dateFrom: l.dateFrom, dateTo: l.dateTo || l.dateFrom,
+          otEndTime: l.otEndTime, workStartTime: l.workStartTime, workEndTime: l.workEndTime, lateOutTime: l.lateOutTime,
+          earlyMorningTier: l.earlyMorningTier })),
+        message: 'The records that depend on this one have changed -- review the list and confirm again' } };
+    }
+  }
+  for (const dep of deps) {
+    if (!dep.dateFrom || !isValidDateStr(dep.dateFrom)) {
+      return { status: 400, body: { dependentId: dep.id, message: 'Cannot verify pay period for this request' } };
+    }
+    const depTo = (dep.dateTo && isValidDateStr(dep.dateTo)) ? dep.dateTo : dep.dateFrom;
+    if (mdApprovedPeriodInRange(dep.dateFrom, depTo, dep.userId)) {
+      return { status: 409, body: { code: 'period-frozen', dependentId: dep.id, message: 'Payroll for this period has already been approved by the Managing Director -- the approval can no longer be revoked' } };
+    }
+    if (lockedPeriodInRange(dep.dateFrom, depTo)) {
+      return { status: 400, body: { code: 'period-locked', dependentId: dep.id, message: 'This pay period is locked' } };
+    }
+    if (accountingConfirmedInRange(dep.dateFrom, depTo, dep.userId)) {
+      return { status: 409, body: { code: 'period-confirmed', dependentId: dep.id, message: 'Accounting has already confirmed tax for this period — unconfirm before making changes' } };
+    }
+    const depEarnedErr = earnedDayUsedError(leaves, ownerUser, dep);
+    if (depEarnedErr) return { status: 409, body: { code: depEarnedErr.code, dependentId: dep.id, message: depEarnedErr.message, blockedBy: depEarnedErr.blockedBy } };
+  }
+  return null;
+}
+// 2026-09-24 (owner, round 7): the owner cancelled APPROVED record(s) (soft cancel, incl. the
+// Holiday Work dependents) -> push + inbox to every active MD and Accounting user except the
+// canceller: employee, type(s), date(s).
+function notifyApprovedRecordCancelled(actor, records) {
+  if (!actor || !Array.isArray(records) || !records.length) return;
+  const what = records.map(r => {
+    const range = r.dateTo && r.dateTo !== r.dateFrom ? `${r.dateFrom} to ${r.dateTo}` : r.dateFrom;
+    return `${getTypeLabel(r.type, 'en')} (${range})`;
+  }).join(', ');
+  notifyMdAccounting({ title: 'Approved Request Cancelled', body: `${actor.name} cancelled an approved request: ${what}`.slice(0, 900),
+    tag: 'ta-leave-cancel', url: '/' }, {
+    kind: 'approved-cancelled',
+    params: { employeeName: actor.name, records: records.map(r => ({ id: r.id, type: r.type, dateFrom: r.dateFrom, dateTo: r.dateTo || r.dateFrom })) },
+    link: { page: 'approval-history', leaveId: records[0].id, date: records[0].dateFrom },
+  }, actor.id);
+}
 
 // 2026-09-24 (owner): MD or Accounting may take back an approval on any money-bearing request,
 // only until payroll for that period is MD-approved. Every type below produces pay, an allowance
@@ -6999,6 +7450,11 @@ function notifyMdsOfAccountingRevoke(actor, ownerUser, records, reason) {
   (readUsers() || []).filter(u => u.role === 'md' && u.active !== false && u.id !== actor.id).forEach(md => {
     Promise.resolve(sendPushToUser(md.id, {
       title: 'Approval Revoked by Accounting', body, tag: 'ta-leave-revoke', url: '/', badge: badgeCountForUser(md),
+    }, {
+      kind: 'accounting-revoked',
+      params: { employeeName: ownerUser ? ownerUser.name : '', by: actor.name, reason: String(reason || ''),
+        records: records.map(r => ({ id: r.id, type: r.type, dateFrom: r.dateFrom, dateTo: r.dateTo || r.dateFrom })) },
+      link: { page: 'approval-history', leaveId: records[0].id, date: records[0].dateFrom },
     })).catch(e => console.error('[PUSH] revoke MD notify error:', e && e.message));
   });
 }
@@ -7048,10 +7504,20 @@ app.post('/api/leaves/:id/revoke', requireRole('md', 'accounting'), withLeavesLo
     // 2026-09-24 (owner): an earned annual-leave day already used cannot be revoked away
     // (annual-mode Holiday Work, an Abroad trip whose travel-day credit has arrived).
     const earnedErr = earnedDayUsedError(leaves, ownerUser, leave);
-    if (earnedErr) return res.status(409).json({ success:false, code: earnedErr.code, message: earnedErr.message });
+    if (earnedErr) return res.status(409).json({ success:false, code: earnedErr.code, message: earnedErr.message, blockedBy: earnedErr.blockedBy });
+    // 2026-09-24 (owner, round 7): a Holiday Work revoke takes the Late Night / early-morning
+    // claims that needed it (holidayWorkDependents) -- same cross-check and guards as below.
+    if (leave.type === 'holiday-work') {
+      const hwDeps = holidayWorkDependents(leave, leaves);
+      if (hwDeps.length || Array.isArray(body.dependentIds)) {
+        const depErr = dependentsMismatchOrGuardError(body.dependentIds, hwDeps, leaves, ownerUser);
+        if (depErr) return res.status(depErr.status).json({ success:false, ...depErr.body,
+          ...(depErr.body.code === 'dependents-changed' ? { code: 'revoke-dependents-changed' } : {}) });
+      }
+    }
     // 2026-09-24 (owner, review M): a time-correction revoke takes the records that depended on
     // the corrected times with it (timeCorrectionDependents), all-or-nothing, in one write.
-    let dependents = [];
+    let dependents = leave.type === 'holiday-work' ? holidayWorkDependents(leave, leaves) : [];
     if (leave.type === 'time-correction') {
       if (!ownerUser) return res.status(404).json({ success:false, message:'Employee not found' });
       const reviews = readCheckoutReviews();
@@ -7087,7 +7553,7 @@ app.post('/api/leaves/:id/revoke', requireRole('md', 'accounting'), withLeavesLo
           return res.status(409).json({ success:false, code:'period-confirmed', dependentId: dep.id, message:'Accounting has already confirmed tax for this period — unconfirm before making changes' });
         }
         const depEarnedErr = earnedDayUsedError(leaves, ownerUser, dep);
-        if (depEarnedErr) return res.status(409).json({ success:false, code: depEarnedErr.code, dependentId: dep.id, message: depEarnedErr.message });
+        if (depEarnedErr) return res.status(409).json({ success:false, code: depEarnedErr.code, dependentId: dep.id, message: depEarnedErr.message, blockedBy: depEarnedErr.blockedBy });
       }
     }
     const revokedAt = new Date().toISOString();
@@ -7129,6 +7595,11 @@ app.post('/api/leaves/:id/revoke', requireRole('md', 'accounting'), withLeavesLo
       tag: 'ta-leave',
       url: '/',
       badge: badgeCountForUser(ownerUser),
+    }, {
+      kind: 'request-revoked',
+      params: { leaveId: leave.id, type: leave.type, dateFrom: leave.dateFrom, dateTo: dateTo, by: live.name, reason,
+        also: alsoRevoked.map(r => ({ id: r.id, type: r.type, dateFrom: r.dateFrom })) },
+      link: { page: 'my-requests', leaveId: leave.id },
     })).catch(e => console.error('[PUSH] revoke notify error:', e && e.message));
     // 2026-09-24 (owner): the result email follows the employee's own opt-in
     // (emailNotifyOnResult) and language (notifyLangEmail), same template as approve/reject.
@@ -9526,6 +9997,8 @@ const EMAIL_I18N = {
     colType: 'ประเภท', colDate: 'วันที่', colRequested: 'ยื่นคำขอเมื่อ', colPending: 'ค้างมา',
     daysSuffix: d => `${d} วัน`,
     footer: 'อีเมลนี้ส่งโดยระบบอัตโนมัติ — กรุณาอย่าตอบกลับ',
+    cfExpiryTitle: '⏳ วันลาพักร้อนยกยอดใกล้หมดอายุ',
+    cfExpiryBody: (amount, date) => `คุณมีวันลาพักร้อนยกยอด ${amount} ที่จะหมดอายุในวันที่ ${date} — กรุณาใช้ก่อนวันดังกล่าว`,
     resultSubject: approved => approved ? '✅ คำขอของคุณได้รับการอนุมัติ' : '❌ คำขอของคุณไม่ได้รับการอนุมัติ',
     resultApproved: 'คำขอนี้ได้รับการอนุมัติแล้ว',
     resultRejected: 'คำขอนี้ไม่ได้รับการอนุมัติ',
@@ -9549,6 +10022,8 @@ const EMAIL_I18N = {
     colType: 'Type', colDate: 'Date', colRequested: 'Requested On', colPending: 'Pending for',
     daysSuffix: d => `${d} day${d === 1 ? '' : 's'}`,
     footer: 'This email was sent automatically — please do not reply.',
+    cfExpiryTitle: '⏳ Carry-forward leave expiring soon',
+    cfExpiryBody: (amount, date) => `You have ${amount} of carry-forward annual leave that expire on ${date} — please use it before then.`,
     resultSubject: approved => approved ? '✅ Your request has been approved' : '❌ Your request was not approved',
     resultApproved: 'This request has been approved.',
     resultRejected: 'This request was not approved.',
@@ -9572,6 +10047,8 @@ const EMAIL_I18N = {
     colType: '種類', colDate: '日付', colRequested: '申請日', colPending: '経過日数',
     daysSuffix: d => `${d}日`,
     footer: 'このメールは自動送信されています。返信しないでください。',
+    cfExpiryTitle: '⏳ 繰越有給休暇の失効が近づいています',
+    cfExpiryBody: (amount, date) => `繰越有給休暇${amount}が${date}に失効します。それまでにご利用ください。`,
     resultSubject: approved => approved ? '✅ 申請が承認されました' : '❌ 申請は承認されませんでした',
     resultApproved: 'この申請は承認されました。',
     resultRejected: 'この申請は承認されませんでした。',
@@ -9915,11 +10392,11 @@ scheduleCronNotification();
 // 1 January still runs it while it is January) and then hourly. See runYearEndCarryForward.
 function scheduleYearEndCarryForward() {
   try {
-    cron.schedule('7 * * * *', autoYearEndCarryForward, { timezone: 'Asia/Bangkok' });
+    cron.schedule('7 * * * *', runHourlyLeaveJobs, { timezone: 'Asia/Bangkok' });
   } catch (e) {
     console.error('[CF] could not schedule the automatic carry-forward:', e.message);
   }
-  setTimeout(autoYearEndCarryForward, 10000);
+  setTimeout(runHourlyLeaveJobs, 10000);
 }
 scheduleYearEndCarryForward();
 

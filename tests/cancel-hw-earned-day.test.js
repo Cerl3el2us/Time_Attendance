@@ -48,8 +48,8 @@ const SHARED = ['normalizeAnnualLeaveTiers', 'getAnnualLeaveTiers', 'getAnnualLe
   'isAnnualLeaveUnlocked', 'annualLeaveEntitlementDays', 'abroadTravelCreditDays', 'hourlyLeaveChargedMinutes',
   'carryForwardExpiryEnabled', 'carryForwardExpiryDateStr', 'leaveMinutesOnOrBefore',
   'carryForwardForfeitMinutes', 'isVoidLeaveStatus', 'isCancellableApprovedLeave', 'isRevocableLeaveType',
-  'earnedCreditMinutesOf', 'earnedCreditYearsOf', 'earnedDayBalanceAsOf', 'carryForwardAfterCreditLoss', 'isEarnedDayUsed',
-  'carryForwardRunRefusal'];
+  'earnedCreditMinutesOf', 'earnedCreditYearsOf', 'earnedDayBalanceAsOf', 'carryForwardAfterCreditLoss', 'earnedDayShortfall', 'isEarnedDayUsed', 'earnedDayBlockingLeaves',
+  'isCarryForwardRunMonth', 'carryForwardRunRefusal'];
 const CLIENT_FNS = [...SHARED, 'leaveRecordMinutes', 'getApprovedHolidayWorkDays', 'getCarryForwardKey',
   'getCarryForwardCompKey', 'getCarryForwardDays', 'getCarryForwardCompDays', 'getOpeningUsedKey', 'getOpeningUsedDays',
   'computeLeaveBalance', 'localDateStr', 'annualGateRemainingMinutes', 'isYearEndCountedLeaveStatus', 'annualLeaveRemainingMinutes', 'earnedDayUsedByRecord', 'approvedCancelBlockCode',
@@ -116,8 +116,8 @@ const trip = (dateFrom, dateTo, status = 'approved') => ({ id: nextId++, userId:
 
 console.log('T2 shared helpers are identical in both files');
 test('earnedCreditMinutesOf / earnedCreditYearsOf / earnedDayBalanceAsOf / carryForwardAfterCreditLoss / isEarnedDayUsed', () => {
-  ['earnedCreditMinutesOf', 'earnedCreditYearsOf', 'earnedDayBalanceAsOf', 'carryForwardAfterCreditLoss', 'isEarnedDayUsed',
-    'carryForwardRunRefusal', 'isRevocableLeaveType', 'isCancellableApprovedLeave'].forEach(n => {
+  ['earnedCreditMinutesOf', 'earnedCreditYearsOf', 'earnedDayBalanceAsOf', 'carryForwardAfterCreditLoss', 'earnedDayShortfall', 'isEarnedDayUsed', 'earnedDayBlockingLeaves', 'holidayWorkDependents',
+    'isCarryForwardRunMonth', 'carryForwardRunRefusal', 'isRevocableLeaveType', 'isCancellableApprovedLeave'].forEach(n => {
     if (n === 'isCancellableApprovedLeave') return; // date regex differs by design (isValidDateStr vs inline)
     sameSource(n);
   });
@@ -308,16 +308,18 @@ test('not opted in -> no email', async () => {
   assert.strictEqual(sent.length, 0);
 });
 
-console.log('T5 carry-forward: January only, never before the system started');
+console.log('T5 carry-forward: January-February only (round 7), never before the system started');
 test('carryForwardRunRefusal (both sides)', () => {
   const w = { today, user: USER, leaves: [] };
   for (const [side, X] of both(w)) {
     assert.strictEqual(X.carryForwardRunRefusal('2027-01-15', 2026, 2026), null, side);
-    assert.strictEqual(X.carryForwardRunRefusal('2027-02-01', 2026, 2026), 'cf-not-january', side);
-    assert.strictEqual(X.carryForwardRunRefusal('2026-09-24', 2025, 2026), 'cf-not-january', side);
+    assert.strictEqual(X.carryForwardRunRefusal('2027-02-01', 2026, 2026), null, `${side} round 7: February allowed`);
+    assert.strictEqual(X.carryForwardRunRefusal('2027-02-28', 2026, 2026), null, side);
+    assert.strictEqual(X.carryForwardRunRefusal('2027-03-01', 2026, 2026), 'cf-not-jan-feb', side);
+    assert.strictEqual(X.carryForwardRunRefusal('2026-09-24', 2025, 2026), 'cf-not-jan-feb', side);
     assert.strictEqual(X.carryForwardRunRefusal('2027-01-15', 2025, 2026), 'cf-bad-year', side);
     assert.strictEqual(X.carryForwardRunRefusal('2026-01-15', 2025, 2026), 'cf-before-system-start', side);
-    assert.strictEqual(X.carryForwardRunRefusal('', 2026, 2026), 'cf-not-january', side);
+    assert.strictEqual(X.carryForwardRunRefusal('', 2026, 2026), 'cf-not-jan-feb', side);
     assert.strictEqual(X.carryForwardFirstSourceYear(), 2026, side);
   }
 });
@@ -325,6 +327,8 @@ test('automatic run skips a year before the system started', () => {
   const S = makeServer({ today, user: USER, leaves: [] });
   assert.strictEqual(S.carryForwardAutoRunYear('2026-01-05', {}, 2026), null);
   assert.strictEqual(S.carryForwardAutoRunYear('2027-01-05', {}, 2026), 2026);
+  assert.strictEqual(S.carryForwardAutoRunYear('2027-02-20', {}, 2026), 2026, 'round 7: February too');
+  assert.strictEqual(S.carryForwardAutoRunYear('2027-03-01', {}, 2026), null);
   assert.ok(SERVER_SRC.includes('carryForwardAutoRunYear(bangkokDateStr(), settings.leaveCarryForwardRuns, carryForwardFirstSourceYear())'));
   const i = SERVER_SRC.indexOf("app.post('/api/leave-carry-forward/run'");
   assert.ok(SERVER_SRC.slice(i, i + 800).includes('carryForwardRunRefusal(bangkokDateStr(), year, carryForwardFirstSourceYear())'));
@@ -333,8 +337,9 @@ test('button text outside January names the next automatic January', () => {
   const C = makeClient({ today: '2026-09-24', user: USER, leaves: [] });
   assert.strictEqual(C.carryForwardNextRunJanuaryYear('2026-09-24'), 2027);
   assert.strictEqual(C.carryForwardNextRunJanuaryYear('2027-01-10'), 2027);
+  assert.strictEqual(C.carryForwardNextRunJanuaryYear('2027-02-10'), 2027, 'February is still this window');
   assert.strictEqual(C.carryForwardNextRunJanuaryYear('2027-03-10'), 2028);
-  assert.strictEqual(C.carryForwardRefusalText('cf-not-january', '2026-09-24'), 'Carry-forward runs automatically in January 2027');
+  assert.strictEqual(C.carryForwardRefusalText('cf-not-jan-feb', '2026-09-24'), 'Carry-forward runs automatically in January 2027 (the button works in January–February only)');
 });
 
 console.log('T6 leaveCarryForward is server-only');

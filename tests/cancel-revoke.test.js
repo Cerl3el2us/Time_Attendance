@@ -244,7 +244,7 @@ console.log('server endpoints (static checks)');
 test('DELETE keeps an approved record as cancelled with who/when; pending still deleted', () => {
   const del = SERVER_SRC.slice(SERVER_SRC.indexOf("app.delete('/api/leaves/:id'"));
   const body = del.slice(0, del.indexOf('\napp.'));
-  assert.ok(/status: 'cancelled', cancelledAt: new Date\(\)\.toISOString\(\)/.test(body));
+  assert.ok(body.includes('const cancelledAt = new Date().toISOString();') && body.includes("...leave, status: 'cancelled', cancelledAt,"));
   assert.ok(/cancelledById: live\.id, cancelledBy: live\.name/.test(body));
   assert.ok(/leaves\.splice\(idx, 1\)/.test(body), 'pending cancel still hard-deletes');
   // 2026-09-24 (review fix 14): per-viewer broadcast (colleagues' void records hidden).
