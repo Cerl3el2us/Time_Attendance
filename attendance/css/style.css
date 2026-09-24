@@ -3478,3 +3478,16 @@ tr.finalize-row-confirmed:hover td {
   .void-switch { display: flex; }
   .void-switch-btn { flex: 1; min-height: 44px; }
 }
+/* 2026-09-24 (round 7): one more topbar button (🔔) -- let the page title shrink with an ellipsis
+   instead of wrapping letter by letter on a phone, and tighten the right-hand cluster. */
+.topbar-left { min-width: 0; flex: 1 1 auto; }
+.page-title { min-width: 0; }
+.page-title h1 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.topbar-right { flex-shrink: 0; }
+@media (max-width: 480px) {
+  .topbar-right { gap: 6px; }
+  .topbar-left { gap: 8px; }
+  .topbar-right .btn-icon { width: 40px; height: 40px; }
+  #topbar-name { display: none; }
+  .topbar-user-btn { padding: 6px 8px !important; }
+}

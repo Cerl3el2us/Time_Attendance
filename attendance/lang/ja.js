@@ -1420,4 +1420,8 @@ window.LANG_JA = {
   "🔔 Notifications": "🔔 通知",
   "Notifications": "通知",
   "Mark all as read": "すべて既読にする",
+  // round 7: request-type labels used by the inbox / history that had no JA entry
+  "🔄 Holiday Work": "🔄 休日出勤",
+  "🌅 Early Morning": "🌅 早朝出勤",
+  "🚙 Personal Car": "🚙 自家用車",
 };
