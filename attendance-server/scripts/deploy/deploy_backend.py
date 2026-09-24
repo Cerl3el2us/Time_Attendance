@@ -43,14 +43,28 @@ FIND_PID = "ps aux | grep 'node server.js' | grep -v grep | awk '{print $2}'"
 #   setx NAS_PASSWORD "your-password"   (CMD, not PowerShell; takes effect on next terminal open)
 NAS_PASSWORD = os.environ.get('NAS_PASSWORD')
 if not NAS_PASSWORD:
-    raise SystemExit('[ERROR] NAS_PASSWORD env var not set. Run: setx NAS_PASSWORD "your-password" in CMD, then reopen terminal.')
+    raise SystemExit(
+        '[ERROR] NAS_PASSWORD env var not set.\n'
+        '  In cmd.exe (NOT PowerShell), run:\n'
+        '      setx NAS_PASSWORD "your-password"\n'
+        '      setx NAS_USER "your-nas-account"     (optional; default: Teerawat)\n'
+        '  Then CLOSE this terminal and open a new one.\n'
+        '  The account must be in the DSM administrators group (the restart step uses sudo).\n'
+        '  See attendance-server/DEVELOPER_HANDOFF.md for the full handover checklist.')
 
 SUPERADMIN_PASSWORD = os.environ.get('SUPERADMIN_PASSWORD', '')
 
+# 2026-09-24 (owner): the account was hard-coded to 'Teerawat', so only that one person could
+# deploy -- if the account were disabled the deploy path was dead until someone edited this file.
+# Any NAS account works now, but it MUST be in the DSM administrators group: the restart step
+# below runs `sudo -S kill -9`. Unset = 'Teerawat', so existing machines keep working untouched.
+#   setx NAS_USER "admin"   (CMD, not PowerShell; takes effect on next terminal open)
+NAS_USER = os.environ.get('NAS_USER') or 'Teerawat'
+
 client = paramiko.SSHClient()
 client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-client.connect('192.168.100.100', port=22, username='Teerawat', password=NAS_PASSWORD, timeout=10)
-print('[SSH] connected')
+client.connect('192.168.100.100', port=22, username=NAS_USER, password=NAS_PASSWORD, timeout=10)
+print(f'[SSH] connected as {NAS_USER}')
 
 def run(cmd, timeout=20):
     try:
@@ -79,8 +93,10 @@ def run_sudo(cmd, timeout=20):
     return out.decode(errors='replace')
 
 def kill_pids(pids):
-    """Kills each PID as Teerawat first; falls back to sudo for any PID not owned by
-    Teerawat (root-owned, e.g. the watchdog having respawned it -- see 2026-07-18 note above)."""
+    """Kills each PID as the connecting account first; falls back to sudo for any PID owned by
+    someone else (root-owned, e.g. the watchdog having respawned it -- see 2026-07-18 note above).
+    2026-09-24: compares against NAS_USER, not a hard-coded 'Teerawat' -- with a different account
+    every PID looked foreign and took the sudo path even when a plain kill would have done."""
     for pid in pids:
         # SECURITY FIX 2026-08-13 (Opus audit, HIGH): pid came from an earlier separate SSH
         # round-trip (FIND_PID), and this never re-validated it was still an integer or still the
@@ -97,8 +113,8 @@ def kill_pids(pids):
             print(f'  [WARN] pid {pid} no longer looks like the backend (cmdline: {cmdline!r}) -- skipping kill, may have already exited or been recycled')
             continue
         owner = run(f'ps -o user= -p {pid} 2>/dev/null')
-        if owner and owner.strip() != 'Teerawat':
-            print(f'  [NOTE] pid {pid} is owned by "{owner.strip()}", not Teerawat -- using sudo to kill it')
+        if owner and owner.strip() != NAS_USER:
+            print(f'  [NOTE] pid {pid} is owned by "{owner.strip()}", not {NAS_USER} -- using sudo to kill it')
             result = run_sudo(f'kill -9 {pid}')
             if result.strip():
                 print(f'  [sudo kill output] {result.strip()}')
@@ -140,8 +156,8 @@ if old_pid and new_pid and (set(old_pid.split()) & set(new_pid.split())):
     print('[WARN] new pid overlaps with the pre-restart pid -- restart may not have taken effect')
 
 new_owner = run(f"ps -o user= -p {new_pid.split()[-1]} 2>/dev/null") if new_pid else None
-if new_owner and new_owner.strip() != 'Teerawat':
-    print(f'[WARN] the running process is owned by "{new_owner.strip()}", not Teerawat -- the watchdog likely respawned it as root; future restarts of this script will need sudo again until this is cleaned up')
+if new_owner and new_owner.strip() != NAS_USER:
+    print(f'[WARN] the running process is owned by "{new_owner.strip()}", not {NAS_USER} -- the watchdog likely respawned it as root; future restarts of this script will need sudo again until this is cleaned up')
 
 health = run('curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/health')
 print('[VERIFY] health check HTTP', health)

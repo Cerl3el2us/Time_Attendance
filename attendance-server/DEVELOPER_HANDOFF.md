@@ -42,9 +42,30 @@ See `Z:\Time_Attendance\attendance-server\README.md` for the fuller folder map (
 
 ## Access & credentials — READ BEFORE YOU TOUCH ANYTHING
 
-Everything below currently authenticates as **one personal Synology DSM
-account (`Teerawat`)** — Samba share, SSH, and the deploy script all use it.
-There is no separate service/shared account.
+Everything below authenticates as a Synology DSM account — Samba share, SSH,
+and the deploy script. There is no dedicated service account; the deploy
+script simply uses whichever account you give it.
+
+### Setting up deployment on a new machine (or for a new person)
+
+`deploy_backend.py` reads two environment variables. Set them **once** in
+**cmd.exe** (not PowerShell), then **close and reopen the terminal** — an
+already-open window keeps its old copy of the environment:
+
+```
+setx NAS_PASSWORD "the-account-password"
+setx NAS_USER "the-account-name"
+```
+
+- `NAS_USER` is optional. If it is not set the script uses **`Teerawat`**, so
+  existing machines keep working with no change.
+- Whichever account you use **must be in the DSM `administrators` group** —
+  the restart step runs `sudo -S kill -9`. A plain user account will connect
+  over SSH and then fail at the restart.
+- The account also needs SSH enabled in DSM (Control Panel → Terminal & SNMP).
+
+If `NAS_PASSWORD` is missing the script stops immediately and prints the exact
+`setx` command to run, so a newcomer does not have to find this document first.
 
 - Ask the current NAS administrator for: the DSM account username/password
   (for `net use Z:` and SSH), and the `NAS_PASSWORD` value `deploy_backend.py`

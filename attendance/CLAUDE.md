@@ -37,7 +37,10 @@ Sync เฉพาะไฟล์ memory ของโปรเจกต์ Time A
   (moved 2026-08-16 from `/volume1/web/attendance-server/`, which itself was moved 2026-07-14
   from `/volume1/Teerawat/attendance-backend/`)
 - **Deploy:** `python Z:\Time_Attendance\attendance-server\scripts\deploy\deploy_backend.py`
-  (needs `NAS_PASSWORD` env var set first, via `setx NAS_PASSWORD "..."` in cmd.exe)
+  (needs `NAS_PASSWORD` env var set first, via `setx NAS_PASSWORD "..."` in cmd.exe;
+  optional `NAS_USER` picks the DSM account — unset = `Teerawat`; the account must be
+  a DSM administrator because the restart step uses `sudo`. Full setup steps live in
+  `attendance-server/DEVELOPER_HANDOFF.md`)
 - **Live URL:** https://attendance.tozaiboeki.co.th (Cloudflare Tunnel — this is the real
   production URL; the LAN fallback `http://192.168.100.100/Time_Attendance/attendance/` also still works — URL updated 2026-08-16 when the compatibility symlinks were removed same day; the old `/attendance/` path no longer works at all)
 - **NAS credentials:** user: Teerawat / (ask the current admin for the password — no longer stored in plaintext here as of 2026-08-13, see the Opus-audited exposure this file itself was flagged for; set it as the `NAS_PASSWORD` env var per `deploy_backend.py`'s own convention)
