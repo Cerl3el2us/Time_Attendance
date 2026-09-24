@@ -1786,6 +1786,13 @@ function reportOtRecords(u, startStr, endStr) {
     l.userId === u.id && l.dateFrom >= startStr && l.dateFrom <= endStr && !isCompanyTripDay(l.dateFrom) &&
     ((canOT && l.type === 'ot' && l.status === 'approved') || (canHW && isHolidayWorkOtRecord(l))));
 }
+// 2026-09-24 (review): Reports show the OT rows/counts for a role eligible for OT OR for Holiday
+// Work -- reportOtRecords() already filters each record type by its own eligibility, and the
+// payslip tile counts paid Holiday Work OT for HW-only roles, so Reports must not hide it.
+function reportOtVisible(role) {
+  const el = APP_SETTINGS.allowanceEligibility;
+  return isAllowanceEligible(el, role, 'ot') || isAllowanceEligible(el, role, 'holidayWork');
+}
 // Rate cell for an OT detail row -- Holiday Work rows are labelled as such.
 function reportOtRateLabel(l) {
   return l.type === 'holiday-work' ? `🔄 ${L('Holiday Work', 'ทำงานวันหยุด')} ${otRateDisplay(l)}` : otRateDisplay(l);
@@ -10281,7 +10288,7 @@ function computeReportPeriodStats(u, start, end, periodIndex) {
   const pad2r = n => String(n).padStart(2, '0');
   const startStr = `${start.getFullYear()}-${pad2r(start.getMonth() + 1)}-${pad2r(start.getDate())}`;
   const endStr   = `${end.getFullYear()}-${pad2r(end.getMonth() + 1)}-${pad2r(end.getDate())}`;
-  const canOTRow = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'ot');
+  const canOTRow = reportOtVisible(u.role);
   // 2026-09-24: includes paid Holiday Work OT (reportOtRecords).
   const otDays = canOTRow ? reportOtRecords(u, startStr, endStr).length : 0;
 
@@ -10728,7 +10735,7 @@ function buildReportDetailTables(u, days, startStr, endStr) {
   const TH  = (txt,c) => `<th style="padding:9px 14px;text-align:left;border-bottom:2px solid ${c};font-size:12px;font-weight:700;color:#64748b">${txt}</th>`;
   const THC = (txt,c) => `<th style="padding:9px 14px;text-align:center;border-bottom:2px solid ${c};font-size:12px;font-weight:700;color:#64748b">${txt}</th>`;
   const canEarlyLateRpt   = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'earlyLate');
-  const canOTRpt          = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'ot');
+  const canOTRpt          = reportOtVisible(u.role);
   const canPersonalCarRpt = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'personalCar') && u.personalCarEligible === true;
   const isDriverU = u.role === 'driver';
   // 2026-09-24: includes paid Holiday Work OT (reportOtRecords).
@@ -10813,7 +10820,7 @@ function showReportDetail(userId) {
   // report tell the truth rather than changing what anyone is paid).
   const canUpcountryRpt   = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'upcountry');
   const canEarlyLateRpt   = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'earlyLate');
-  const canOTRpt          = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'ot');
+  const canOTRpt          = reportOtVisible(u.role);
   const canLongDistRpt    = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'longDistance');
   const canPersonalCarRpt = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'personalCar') && u.personalCarEligible === true;
   const isDriverU = u.role === 'driver';
@@ -10882,7 +10889,7 @@ function showReportDetailYearly(userId, year) {
 
   const canUpcountryRpt   = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'upcountry');
   const canEarlyLateRpt   = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'earlyLate');
-  const canOTRpt          = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'ot');
+  const canOTRpt          = reportOtVisible(u.role);
   const canLongDistRpt    = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'longDistance');
   const canPersonalCarRpt = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'personalCar') && u.personalCarEligible === true;
   const yearStartStr = periods[0]?.stats.startStr;
@@ -16661,7 +16668,9 @@ function isApprovedAbroadDate(dateStr, userId) {
 // 2026-09-23 HIGH-1); `gpsTz` is the zone the server derived from the scan's GPS (geo-tz).
 function stampAbroadScan(rec, side, eventTimeIso, gpsTz) {
   if (!rec) return;
-  const tz = (typeof gpsTz === 'string' && isSafeTimeZone(gpsTz)) ? gpsTz : null;
+  // 2026-09-24 (review): Etc/* (open sea / no country) is never shown -- DUAL-SYNC with server.js
+  // timezoneFromCoords, which no longer stores it.
+  const tz = (typeof gpsTz === 'string' && isSafeTimeZone(gpsTz) && !gpsTz.startsWith('Etc/')) ? gpsTz : null;
   const at = typeof eventTimeIso === 'string' && eventTimeIso ? eventTimeIso : null;
   if (side === 'in') { rec.checkInAt = at; rec.checkInGpsTz = tz; }
   else { rec.checkOutAt = at; rec.checkOutGpsTz = tz; }
@@ -16684,6 +16693,7 @@ function tzOffsetMinutesAt(ms, tz) {
 // (no zone, Bangkok itself, or the row now shows a different, time-corrected value).
 function abroadLocalTimeText(eventTimeIso, gpsTz, shownTime) {
   if (!eventTimeIso || !gpsTz || gpsTz === DEFAULT_TZ || !isSafeTimeZone(gpsTz)) return '';
+  if (String(gpsTz).startsWith('Etc/')) return ''; // 2026-09-24 (review): sea / no-country zone
   if (shownTime && String(eventTimeIso).substring(11, 16) !== shownTime) return '';
   const ms = Date.parse(eventTimeIso);
   if (!Number.isFinite(ms)) return '';

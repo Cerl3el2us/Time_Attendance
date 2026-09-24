@@ -34,7 +34,7 @@ const SHARED = ['normalizeAnnualLeaveTiers', 'getAnnualLeaveTiers', 'getAnnualLe
 const CLIENT_FNS = [...SHARED, 'leaveRecordMinutes', 'getApprovedHolidayWorkDays',
   'getCarryForwardKey', 'getCarryForwardCompKey', 'getCarryForwardDays', 'getCarryForwardCompDays',
   'getOpeningUsedKey', 'getOpeningUsedDays', 'computeLeaveBalance', 'localDateStr', 'isYearEndCountedLeaveStatus', 'annualLeaveRemainingMinutes',
-  'computeLateDeductMinutes', 'isSafeTimeZone', 'tzOffsetMinutesAt', 'abroadLocalTimeText', 'abroadLocalTimeHtml', 'escapeHtml'];
+  'computeLateDeductMinutes', 'isSafeTimeZone', 'tzOffsetMinutesAt', 'abroadLocalTimeText', 'abroadLocalTimeHtml', 'escapeHtml', 'stampAbroadScan'];
 const SERVER_FNS = [...SHARED, 'leaveMinutesOf', 'getApprovedHolidayWorkAnnualLeaveDays',
   'deriveLeaveDaysCount', 'ta_localDateStr', 'isValidDateStr', 'isYearEndCountedLeaveStatus', 'annualLeaveRemainingMinutes',
   'annualLateDeductMinutes', 'carryForwardAutoRunYear', 'computeYearEndCarryForward'];
@@ -199,6 +199,23 @@ test('nothing for Bangkok, no zone, unsafe zone, or a time-corrected row', () =>
   assert.strictEqual(C.abroadLocalTimeText('2026-09-24T09:00:00+07:00', null, '09:00'), '');
   assert.strictEqual(C.abroadLocalTimeText('2026-09-24T09:00:00+07:00', '<script>', '09:00'), '');
   assert.strictEqual(C.abroadLocalTimeText('2026-09-24T09:00:00+07:00', 'Asia/Tokyo', '08:30'), '');
+});
+// 2026-09-24 (review fix 9): Etc/* zones (open sea, no country) are neither stored nor shown.
+test('Etc/* zone: no note on the client, not stamped, and not stored by the server', () => {
+  const C = makeClient({ today: '2026-09-24', leaves: [], users: [], cf: {}, openingUsed: {}, leave: leaveSettings() });
+  assert.strictEqual(C.abroadLocalTimeText('2026-09-24T09:00:00+07:00', 'Etc/GMT-9', '09:00'), '');
+  assert.strictEqual(C.abroadLocalTimeText('2026-09-24T09:00:00+07:00', 'Etc/GMT+7', null), '');
+  const rec = {};
+  C.stampAbroadScan(rec, 'in', '2026-09-24T09:00:00+07:00', 'Etc/GMT-9');
+  assert.strictEqual(rec.checkInGpsTz, null);
+  C.stampAbroadScan(rec, 'out', '2026-09-24T18:00:00+07:00', 'Asia/Tokyo');
+  assert.strictEqual(rec.checkOutGpsTz, 'Asia/Tokyo');
+  for (const [zone, want] of [['Etc/GMT-9', ''], ['Etc/UTC', ''], ['Asia/Tokyo', 'Asia/Tokyo']]) {
+    const S = { geoTzFind: () => [zone] };
+    vm.createContext(S);
+    vm.runInContext(['isSafeTimeZone', 'timezoneFromCoords'].map(n => extractFunction(SERVER_SRC, n)).join('\n'), S);
+    assert.strictEqual(S.timezoneFromCoords(35, 139), want, zone);
+  }
 });
 test('row html only on status abroad', () => {
   const C = makeClient({ today: '2026-09-24', leaves: [], users: [], cf: {}, openingUsed: {}, leave: leaveSettings() });

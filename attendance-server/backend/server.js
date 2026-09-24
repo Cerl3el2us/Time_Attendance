@@ -1186,6 +1186,10 @@ function timezoneFromCoords(lat, lng) {
     if (!geoTzFind) geoTzFind = require('geo-tz/all').find;
     const zones = geoTzFind(lat, lng);
     const tz = Array.isArray(zones) ? zones[0] : '';
+    // 2026-09-24 (review): Etc/* zones (open sea, no country) are not stored -- the Abroad
+    // local-time note would only show a meaningless "GMT-7 time". DUAL-SYNC: app.js
+    // abroadLocalTimeText / stampAbroadScan hide them too (older stored events).
+    if (typeof tz === 'string' && tz.startsWith('Etc/')) return '';
     return isSafeTimeZone(tz) ? tz : '';
   } catch (e) {
     return '';
@@ -9716,7 +9720,12 @@ function scheduleYearEndCarryForward() {
 }
 scheduleYearEndCarryForward();
 
-server.listen(PORT, '0.0.0.0', () => console.log(`[HTTP] port ${PORT}`));
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`[HTTP] port ${PORT}`);
+  // 2026-09-24 (review): geo-tz/all is lazy-loaded (~1.2 s) inside the events lock on the first
+  // web scan with GPS -- warm it once the server is listening so no scan waits for it.
+  setImmediate(() => { try { timezoneFromCoords(13.75, 100.5); } catch (e) { /* display-only */ } });
+});
 server.on('error', err => console.error('[HTTP] error:', err.message));
 
 // ===== HTTPS (port 3443) =====
