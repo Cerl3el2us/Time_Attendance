@@ -964,8 +964,9 @@ function broadcast(d) {
 // 2026-09-24 (owner): a colleague's cancelled / revoked record is not shown to plain users --
 // only the owner and md/accounting/manager (isLeaveFullAccess) see it. Used by GET /api/leaves and
 // by every LEAVE_UPDATED broadcast (broadcastLeaveUpdated). Pure.
+// 2026-09-24 (owner, round 7): REJECTED records are hidden from colleagues the same way.
 function isHiddenFromColleaguesStatus(s) {
-  return s === 'cancelled' || s === 'revoked';
+  return s === 'cancelled' || s === 'revoked' || s === 'rejected';
 }
 function leaveVisibleToViewer(l, viewerId, leaveFullAccess) {
   if (!l) return false;
@@ -4823,7 +4824,7 @@ app.get('/api/leaves', (req, res) => {
   const leaves = readLeaves();
   if (leaves === null) return res.status(503).json({ success:false, message:'Service temporarily unavailable' });
   if (isLeaveFullAccess(live)) return res.json(leaves);
-  // 2026-09-24 (owner): colleagues' cancelled / revoked records are left out (leaveVisibleToViewer).
+  // 2026-09-24 (owner): colleagues' cancelled / revoked / rejected records are left out (leaveVisibleToViewer).
   res.json(leaves.filter(l => leaveVisibleToViewer(l, live.id, false))
     .map(l => l.userId === live.id ? l : toPublicLeaveProjection(l)));
 });

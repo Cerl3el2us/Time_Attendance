@@ -18248,8 +18248,10 @@ function initHikvisionLive() {
         const lIdx = DATA_LEAVES.findIndex(l => l.id === data.leave?.id);
         // 2026-09-24 (owner): a plain user does not keep a colleague's cancelled / revoked record
         // (the server no longer sends it -- GET /api/leaves, broadcastLeaveUpdated); drop it.
+        // Round 7 (owner): rejected too (server isHiddenFromColleaguesStatus).
         const seesAllLeaves = !!currentUser && (['md', 'accounting', 'manager'].includes(currentUser.role) || isSuperAdmin());
-        if (lIdx >= 0 && isWithdrawnLeaveStatus(data.leave?.status) && !seesAllLeaves && data.leave.userId !== currentUser?.id) {
+        const hiddenFromColleagues = isWithdrawnLeaveStatus(data.leave?.status) || data.leave?.status === 'rejected';
+        if (lIdx >= 0 && hiddenFromColleagues && !seesAllLeaves && data.leave.userId !== currentUser?.id) {
           DATA_LEAVES.splice(lIdx, 1);
         } else if (lIdx >= 0) DATA_LEAVES[lIdx] = { ...DATA_LEAVES[lIdx], ...data.leave };
         // 2026-09-24: a cancel/revoke of an approved record changes pay, balances and attendance

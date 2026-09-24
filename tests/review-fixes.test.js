@@ -191,7 +191,7 @@ test('only Accounting revokes notify; every active MD gets one push with employe
   assert.strictEqual(sent.length, 0, 'an MD revoke does not notify');
 });
 
-console.log('Fix 14: colleagues\' cancelled / revoked records hidden from plain users');
+console.log('Fix 14: colleagues\' cancelled / revoked / rejected records hidden from plain users (rejected: round 7)');
 test('leaveVisibleToViewer: owner and full-access see everything; plain users do not see colleagues\' void records', () => {
   const X = sandbox(SERVER_SRC, ['isHiddenFromColleaguesStatus', 'leaveVisibleToViewer'], {});
   const own = { userId: 1, status: 'revoked' }, colRev = { userId: 2, status: 'revoked' }, colCan = { userId: 2, status: 'cancelled' };
@@ -199,7 +199,9 @@ test('leaveVisibleToViewer: owner and full-access see everything; plain users do
   assert.strictEqual(X.leaveVisibleToViewer(own, 1, false), true);
   assert.strictEqual(X.leaveVisibleToViewer(colRev, 1, false), false);
   assert.strictEqual(X.leaveVisibleToViewer(colCan, 1, false), false);
-  assert.strictEqual(X.leaveVisibleToViewer(colRej, 1, false), true);
+  assert.strictEqual(X.leaveVisibleToViewer(colRej, 1, false), false, 'round 7: colleague rejected hidden');
+  assert.strictEqual(X.leaveVisibleToViewer({ userId: 1, status: 'rejected' }, 1, false), true, 'own rejected kept');
+  assert.strictEqual(X.leaveVisibleToViewer(colRej, 1, true), true, 'full access sees rejected');
   assert.strictEqual(X.leaveVisibleToViewer(colOk, 1, false), true);
   assert.strictEqual(X.leaveVisibleToViewer(colRev, 1, true), true);
 });
@@ -221,11 +223,16 @@ test('broadcastLeaveUpdated: plain colleague sockets get LEAVE_DELETED {id} only
   }
   X.broadcastLeaveUpdated({ id: 43, userId: 5, type: 'ot', status: 'approved', dateFrom: THU });
   assert.strictEqual(colleague.got[1].type, 'LEAVE_UPDATED', 'non-void updates still reach colleagues');
+  X.broadcastLeaveUpdated({ id: 44, userId: 5, type: 'ot', status: 'rejected', dateFrom: THU });
+  assert.deepStrictEqual(colleague.got[2], { type: 'LEAVE_DELETED', id: 44 }, 'round 7: a colleague\'s rejection is a delete');
+  assert.strictEqual(owner.got[2].type, 'LEAVE_UPDATED', 'owner still sees own rejection');
+  assert.strictEqual(manager.got[2].type, 'LEAVE_UPDATED', 'manager still sees rejections');
 });
 test('GET /api/leaves filters plain users; no raw LEAVE_UPDATED broadcast left (static)', () => {
   assert.ok(/leaves\.filter\(l => leaveVisibleToViewer\(l, live\.id, false\)\)/.test(SERVER_SRC));
   assert.strictEqual((SERVER_SRC.match(/type: 'LEAVE_UPDATED'/g) || []).length, 1, 'only inside broadcastLeaveUpdated');
-  assert.ok(/isWithdrawnLeaveStatus\(data\.leave\?\.status\) && !seesAllLeaves/.test(APP_SRC), 'client drops a colleague\'s void record');
+  assert.ok(/const hiddenFromColleagues = isWithdrawnLeaveStatus\(data\.leave\?\.status\) \|\| data\.leave\?\.status === 'rejected';/.test(APP_SRC) &&
+    /hiddenFromColleagues && !seesAllLeaves/.test(APP_SRC), 'client drops a colleague\'s void / rejected record');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ', 0 failed'}`);
