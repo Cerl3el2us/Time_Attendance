@@ -153,7 +153,6 @@ const i18n = {
     checkin_status_in:'เข้างานแล้ว', checkin_status_out:'ยังไม่ได้เข้างาน',
     checkin_gps_ok:'GPS พร้อม', checkin_gps_searching:'กำลังค้นหาตำแหน่ง...',
     checkin_gps_off:'ไม่สามารถระบุตำแหน่งได้',
-    checkin_tz_ot:'เวลาเลิกงานเป็นเวลาท้องถิ่นของประเทศที่เช็กอิน OT นับหลัง 17:30',
     today_log:'บันทึกวันนี้', no_log:'ยังไม่มีบันทึก',
     // dashboard
     dash_today_checkin:'เช็คอินวันนี้', dash_on_leave:'ลาวันนี้', dash_late:'มาสาย',
@@ -262,7 +261,6 @@ const i18n = {
     checkin_status_in:'Checked In', checkin_status_out:'Not Checked In',
     checkin_gps_ok:'GPS Ready', checkin_gps_searching:'Locating...',
     checkin_gps_off:'Location unavailable',
-    checkin_tz_ot:'End time is local to the check-in country. OT starts after 17:30.',
     today_log:"Today's Log", no_log:'No records yet',
     // dashboard
     dash_today_checkin:"Today's Check-ins", dash_on_leave:'On Leave', dash_late:'Late',
@@ -367,7 +365,6 @@ const i18n = {
     checkin_status_in:'出勤済み', checkin_status_out:'未出勤',
     checkin_gps_ok:'GPS準備完了', checkin_gps_searching:'位置情報取得中...',
     checkin_gps_off:'位置情報が利用できません',
-    checkin_tz_ot:'終了時刻はチェックインした国の現地時間です。OTは17:30以降です。',
     today_log:'本日のログ', no_log:'記録はまだありません',
     dash_today_checkin:'本日のチェックイン', dash_on_leave:'休暇中', dash_late:'遅刻',
     dash_ot:'本日の残業', dash_pending:'承認待ち', dash_events_today:'本日のイベント',
@@ -4024,6 +4021,18 @@ function minToStr(min) {
   return parts.length ? parts.join(' ') : (ja ? '0日' : L('0d', '0 วัน'));
 }
 
+// 2026-09-24 (owner): a REMAINING leave balance always shows all three units, zeros included
+// ("11 วัน 3 ชั่วโมง 0 นาที" / "11d 3h 0m" / "11日 3時間 0分"). minToStr() above stays as-is for
+// used/pending/deducted amounts and messages.
+function minToStrFull(min) {
+  const n = Math.max(0, Math.round(Number(min) || 0));
+  const d = Math.floor(n / 480);
+  const h = Math.floor((n % 480) / 60);
+  const m = n % 60;
+  if (currentLang === 'ja') return `${d}日 ${h}時間 ${m}分`;
+  return L(`${d}d ${h}h ${m}m`, `${d} วัน ${h} ชั่วโมง ${m} นาที`);
+}
+
 function computeLateDeductMinutes(userId, year) {
   const policy = APP_SETTINGS.lateDeductPolicy;
   if (!policy?.enabled || !policy.effectiveFromPeriod) return { count: 0, deductMin: 0 };
@@ -5472,7 +5481,7 @@ function initApp(startPage) {
       if (currentPage === 'checkin') { restoreTodayLog(); updateScanButton(); }
       if (currentPage === 'reports') renderReports();
       // FIX (final review, T4): the Approvals page's "Web check-outs awaiting review" box
-      // (checkoutReviewPendingItems) reads attendanceLog, but this initial load never re-rendered
+      // (checkoutReviewBoxItems) reads attendanceLog, but this initial load never re-rendered
       // the Approvals page -- an MD/Accounting user who opened Approvals before attendanceLog
       // finished loading would see an empty/stale box until some unrelated action re-rendered it.
       if (currentPage === 'approval') renderApprovals();
@@ -5865,17 +5874,9 @@ function scanTimeZone() {
 function scanYmd() {
   return ymdInTimeZone(serverNowMs(), scanTimeZone());
 }
-function timezoneShortLabel(tz) {
-  if (!tz || tz === DEFAULT_TZ) return '';
-  try {
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: tz, timeZoneName: 'short'
-    }).formatToParts(new Date(serverNowMs()));
-    return ((parts.find(p => p.type === 'timeZoneName') || {}).value || '').trim();
-  } catch (e) {
-    return (tz.split('/').pop() || '').replace(/_/g, ' ');
-  }
-}
+// 2026-09-24: timezoneShortLabel() + the scan-clock timezone badge (#checkin-clock-tz) and the OT
+// hint's "local to the check-in country" suffix removed -- GET /api/now always returns Bangkok
+// since the GPS-timezone feature was dropped (2026-09-23), so the label was always empty.
 async function syncServerClock() {
   const lat = currentGPS && currentGPS.lat;
   const lng = currentGPS && currentGPS.lng;
@@ -5930,12 +5931,6 @@ function startClock() {
     const td = document.getElementById('topbar-date');
     if (tt) tt.textContent = `${h}:${m}:${s}`;
     if (td) td.textContent = fmtDateLong(dateObj);
-    const tzEl = document.getElementById('checkin-clock-tz');
-    if (tzEl) {
-      const abbr = timezoneShortLabel(scanTimeZone());
-      tzEl.textContent = abbr;
-      tzEl.style.display = abbr ? '' : 'none';
-    }
   }
   syncServerClock().then(update);
   update();
@@ -9173,9 +9168,9 @@ function openEmployeeProfile(id) {
           ${u.endDate ? `<div class="profile-field"><label>${L('End Date', 'วันที่สิ้นสุดการทำงาน')}</label><p style="color:#dc2626;font-weight:600">${fmtDate(new Date(u.endDate + 'T12:00:00'))}</p></div>` : ''}
           <div class="profile-field"><label>${L('Annual Leave Balance', 'ลาพักร้อนคงเหลือ')}</label><p style="color:#2563eb;font-weight:700">${(!canUseAnnualLeave(u) && !isMdAccountingView())
             ? (currentLang === 'ja' ? `🔒 ${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'}まで利用不可` : L(`🔒 Locked until ${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'}`, `🔒 ยังไม่เปิดสิทธิ์ (ใช้ได้ ${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'})`))
-            : `${minToStr(profileLeaveBal.annual.remMin)}${!isAnnualLeaveUnlocked(u) ? (currentLang === 'ja' ? `（${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'}から）` : L(` (unlocks ${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'})`, ` (เปิดสิทธิ์ ${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'})`)) : (nextAnnualLeaveTier(u) ? (currentLang === 'ja' ? `（次は${nextAnnualLeaveTier(u).date}から${nextAnnualLeaveTier(u).days}日）` : L(` (next ${nextAnnualLeaveTier(u).days}d from ${nextAnnualLeaveTier(u).date})`, ` (ขั้นถัดไป ${nextAnnualLeaveTier(u).days} วัน ตั้งแต่ ${nextAnnualLeaveTier(u).date})`)) : '')}`}</p></div>
-          <div class="profile-field"><label>${L('Sick Leave Balance', 'ลาป่วยคงเหลือ')}</label><p style="color:#ef4444;font-weight:700">${minToStr(profileLeaveBal.sick.remMin)}</p></div>
-          <div class="profile-field"><label>${L('Business Leave Balance', 'ลากิจคงเหลือ')}</label><p style="color:#8b5cf6;font-weight:700">${minToStr(profileLeaveBal.business.remMin)}</p></div>
+            : `${minToStrFull(profileLeaveBal.annual.remMin)}${!isAnnualLeaveUnlocked(u) ? (currentLang === 'ja' ? `（${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'}から）` : L(` (unlocks ${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'})`, ` (เปิดสิทธิ์ ${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'})`)) : (nextAnnualLeaveTier(u) ? (currentLang === 'ja' ? `（次は${nextAnnualLeaveTier(u).date}から${nextAnnualLeaveTier(u).days}日）` : L(` (next ${nextAnnualLeaveTier(u).days}d from ${nextAnnualLeaveTier(u).date})`, ` (ขั้นถัดไป ${nextAnnualLeaveTier(u).days} วัน ตั้งแต่ ${nextAnnualLeaveTier(u).date})`)) : '')}`}</p></div>
+          <div class="profile-field"><label>${L('Sick Leave Balance', 'ลาป่วยคงเหลือ')}</label><p style="color:#ef4444;font-weight:700">${minToStrFull(profileLeaveBal.sick.remMin)}</p></div>
+          <div class="profile-field"><label>${L('Business Leave Balance', 'ลากิจคงเหลือ')}</label><p style="color:#8b5cf6;font-weight:700">${minToStrFull(profileLeaveBal.business.remMin)}</p></div>
           <div class="profile-field"><label>${L('Status', 'สถานะ')}</label><p><span class="badge ${u.active ? 'badge-success':'badge-danger'}">${u.active ? L('● Active', '● ปกติ') : L('● Suspended', '● ระงับ')}</span></p></div>
         </div>
       </div>
@@ -9980,7 +9975,7 @@ function leaveSummaryBalances(u, year) {
 
 function leaveSummaryUsedRemCell(bal, color) {
   const used = minToStr(bal.usedMin);
-  const rem = minToStr(bal.remMin);
+  const rem = minToStrFull(bal.remMin);
   const pct = bal.totalMin > 0 ? Math.min(100, Math.round((bal.remMin / bal.totalMin) * 100)) : 0;
   return `<div class="ls-balance-cell" style="line-height:1.35">
     <div style="font-size:12px;font-weight:700;color:${color}">${used} <span style="color:#94a3b8;font-weight:500">/</span> ${rem}</div>
@@ -9994,7 +9989,7 @@ function leaveSummaryMobileStack(bal) {
   const line = (emoji, b, color) =>
     `<div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;font-size:11px;line-height:1.45;margin-top:2px">
       <span style="flex-shrink:0">${emoji}</span>
-      <span style="text-align:right;font-weight:700;color:${color}">${minToStr(b.usedMin)} <span style="color:#94a3b8;font-weight:500">/</span> ${minToStr(b.remMin)}</span>
+      <span style="text-align:right;font-weight:700;color:${color}">${minToStr(b.usedMin)} <span style="color:#94a3b8;font-weight:500">/</span> ${minToStrFull(b.remMin)}</span>
     </div>`;
   return `<div style="min-width:0">
     ${line('🏖️', bal.annual, '#2563eb')}
@@ -10114,9 +10109,9 @@ function showLeaveSummaryDetail(userId) {
   body.innerHTML = `
     <div style="font-size:12px;color:#64748b;margin-bottom:12px">${L('Year', 'ปี')} <strong>${year}</strong>
       · ${L('Used / remaining', 'ใช้ / เหลือ')}:
-      <span style="color:#2563eb;font-weight:600">${minToStr(bal.annual.usedMin)} / ${minToStr(bal.annual.remMin)}</span> ·
-      <span style="color:#ef4444;font-weight:600">${minToStr(bal.sick.usedMin)} / ${minToStr(bal.sick.remMin)}</span> ·
-      <span style="color:#8b5cf6;font-weight:600">${minToStr(bal.business.usedMin)} / ${minToStr(bal.business.remMin)}</span>
+      <span style="color:#2563eb;font-weight:600">${minToStr(bal.annual.usedMin)} / ${minToStrFull(bal.annual.remMin)}</span> ·
+      <span style="color:#ef4444;font-weight:600">${minToStr(bal.sick.usedMin)} / ${minToStrFull(bal.sick.remMin)}</span> ·
+      <span style="color:#8b5cf6;font-weight:600">${minToStr(bal.business.usedMin)} / ${minToStrFull(bal.business.remMin)}</span>
     </div>
     ${(bal.annual.openingUsedDays > 0 || bal.sick.openingUsedDays > 0 || bal.business.openingUsedDays > 0)
       ? `<div style="font-size:11px;color:#64748b;margin:-4px 0 12px;line-height:1.5">📋 ${L('Includes time used before go-live', 'รวมยอดที่ใช้ก่อนเปิดระบบ')}:
@@ -11698,9 +11693,12 @@ let _approvalSelected = new Set();
 // 2026-09-23: web check-outs at/after the Late Night time still waiting for an Accounting/MD
 // review, built client-side with the shared dual-sync trigger. Current + previous pay period,
 // other employees only (never the reviewer's own record), open periods only.
-function checkoutReviewPendingItems() {
-  if (!currentUser || currentUser.isObserver || !isMdAccountingView()) return [];
-  const items = [];
+// 2026-09-24: one scan now also collects the already-reviewed trigger days for the box's
+// "Reviewed" tab -- same users/periods, but locked/confirmed/MD-approved periods are kept there
+// (flagged `locked`, shown read-only) instead of being dropped.
+function checkoutReviewBoxItems() {
+  const out = { pending: [], reviewed: [] };
+  if (!currentUser || currentUser.isObserver || !isMdAccountingView()) return out;
   const users = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active !== false &&
     Number(u.id) !== Number(currentUser.id) &&
     isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'earlyLate'));
@@ -11708,33 +11706,87 @@ function checkoutReviewPendingItems() {
     const { start, end, isCurrent } = getPeriodBounds(idx);
     users.forEach(u => {
       generatePeriodDays(start, end, isCurrent, u.id).forEach(day => {
-        if (day.checkOutReview || !checkoutReviewTrigger(day, u, APP_SETTINGS)) return;
-        if (payPeriodBlockedForDate(day.date, u.id).blocked) return;
-        items.push({ user: u, day });
+        if (!checkoutReviewTrigger(day, u, APP_SETTINGS)) return;
+        const locked = payPeriodBlockedForDate(day.date, u.id).blocked;
+        if (day.checkOutReview) {
+          out.reviewed.push({ user: u, day, locked, review: DATA_CHECKOUT_REVIEWS[attKey(u.id, day.date)] || null });
+        } else if (!locked) {
+          out.pending.push({ user: u, day });
+        }
       });
     });
   });
-  return items.sort((a, b) => b.day.date.localeCompare(a.day.date) ||
-    String(a.user.name || '').localeCompare(String(b.user.name || '')));
+  const byDateThenName = (a, b) => b.day.date.localeCompare(a.day.date) ||
+    String(a.user.name || '').localeCompare(String(b.user.name || ''));
+  out.pending.sort(byDateThenName);
+  out.reviewed.sort(byDateThenName);
+  return out;
 }
 
-function checkoutReviewPendingBoxHtml(items) {
-  const rows = items.map(({ user, day }) => {
+// 2026-09-24: which tab of the web check-out review box is showing ('pending' | 'reviewed'),
+// kept across re-renders (live scans, allow/deny/undo) for as long as the page stays loaded.
+let _checkoutReviewTab = 'pending';
+
+function setCheckoutReviewTab(tab) {
+  _checkoutReviewTab = tab === 'reviewed' ? 'reviewed' : 'pending';
+  refreshCheckoutReviewPendingBox();
+}
+
+function checkoutReviewDayCells(user, day) {
+  const raw = (day.rawCheckOut && day.rawCheckOut !== day.checkOut)
+    ? ` <span style="color:#64748b;font-size:11px">(${escapeHtml(L('corrected from', 'แก้จาก'))} ${escapeHtml(day.rawCheckOut)})</span>`
+    : '';
+  return `<td style="padding:6px 8px">${escapeHtml(user.name)}</td>
+      <td style="padding:6px 8px;white-space:nowrap">${escapeHtml(fmtDate(new Date(day.date + 'T12:00:00')))}</td>
+      <td style="padding:6px 8px;white-space:nowrap">🌐 ${escapeHtml(day.checkOut)}${raw}</td>`;
+}
+
+function checkoutReviewPendingRowsHtml(items) {
+  return items.map(({ user, day }) => {
     const uid = Number(user.id);
     const d = escapeJsAttr(day.date);
-    const raw = (day.rawCheckOut && day.rawCheckOut !== day.checkOut)
-      ? ` <span style="color:#64748b;font-size:11px">(${escapeHtml(L('corrected from', 'แก้จาก'))} ${escapeHtml(day.rawCheckOut)})</span>`
-      : '';
     return `<tr>
-      <td style="padding:6px 8px">${escapeHtml(user.name)}</td>
-      <td style="padding:6px 8px;white-space:nowrap">${escapeHtml(fmtDate(new Date(day.date + 'T12:00:00')))}</td>
-      <td style="padding:6px 8px;white-space:nowrap">🌐 ${escapeHtml(day.checkOut)}${raw}</td>
+      ${checkoutReviewDayCells(user, day)}
       <td style="padding:6px 8px;white-space:nowrap;text-align:right">
         <button class="btn btn-ghost btn-sm" style="color:#059669" title="${escapeHtml(L('Allow this web check-out (unlocks 🌙)', 'อนุญาตเวลาออกผ่านเว็บนี้ (ปลดล็อก 🌙)'))}" onclick="setCheckoutReview(${uid}, '${d}', 'allow', '${escapeJsAttr(day.checkOut || '')}')">✅</button>
         <button class="btn btn-ghost btn-sm" style="color:#dc2626" title="${escapeHtml(L('Do not allow this web check-out', 'ไม่อนุญาตเวลาออกผ่านเว็บนี้'))}" onclick="setCheckoutReview(${uid}, '${d}', 'deny', '${escapeJsAttr(day.checkOut || '')}')">❌</button>
       </td>
     </tr>`;
   }).join('');
+}
+
+// Undo goes through the same setCheckoutReview(..., null, ...) as the ↩️ on the attendance row,
+// so every guard (observer, own record, 409 stale check-out / locked period) is shared.
+function checkoutReviewReviewedRowsHtml(items) {
+  return items.map(({ user, day, locked, review }) => {
+    const uid = Number(user.id);
+    const d = escapeJsAttr(day.date);
+    const decision = day.checkOutReview === 'allow'
+      ? `<span style="color:#166534;white-space:nowrap">${escapeHtml(L('✅ Allowed', '✅ อนุญาตแล้ว'))}</span>`
+      : `<span style="color:#991b1b;white-space:nowrap">${escapeHtml(L('❌ Not allowed', '❌ ไม่อนุญาต'))}</span>`;
+    const atDate = review && review.at ? new Date(review.at) : null;
+    const when = atDate && !isNaN(atDate.getTime()) ? fmtDateTime(atDate) : '';
+    const by = `${escapeHtml((review && review.by) || '—')}${when ? `<div style="font-size:11px;color:#64748b">${escapeHtml(when)}</div>` : ''}`;
+    const action = locked
+      ? `<span style="font-size:12px;color:#64748b" title="${escapeHtml(L('Pay period is closed — read-only', 'งวดเงินเดือนปิดแล้ว — ดูได้อย่างเดียว'))}">🔒</span>`
+      : `<button class="btn btn-ghost btn-sm" style="color:#64748b" title="${escapeHtml(L('Undo review', 'ยกเลิกผลตรวจสอบ'))}" onclick="setCheckoutReview(${uid}, '${d}', null, '${escapeJsAttr(day.checkOut || '')}')">↩️</button>`;
+    return `<tr>
+      ${checkoutReviewDayCells(user, day)}
+      <td style="padding:6px 8px">${decision}</td>
+      <td style="padding:6px 8px">${by}</td>
+      <td style="padding:6px 8px;white-space:nowrap;text-align:right">${action}</td>
+    </tr>`;
+  }).join('');
+}
+
+function checkoutReviewPendingBoxHtml(pending, reviewed) {
+  reviewed = reviewed || [];
+  const tab = _checkoutReviewTab === 'reviewed' ? 'reviewed' : 'pending';
+  const th = (text, align) => `<th style="padding:6px 8px;text-align:${align || 'left'};color:var(--text-muted)">${escapeHtml(text)}</th>`;
+  const tabBtn = (key, label, n) => {
+    const active = tab === key;
+    return `<button type="button" class="btn btn-sm ${active ? 'btn-primary' : 'btn-ghost'}" style="margin-right:6px" aria-pressed="${active}" onclick="setCheckoutReviewTab('${key}')">${escapeHtml(label)} (${n})</button>`;
+  };
   // Time comes from Settings and the MD's name from the current active MD account, so the hint
   // follows either change without a code edit.
   const lateTime = String(lateOutThresholdHour(1)).padStart(2, '0') + '.00';
@@ -11742,35 +11794,42 @@ function checkoutReviewPendingBoxHtml(items) {
   const hint = L('A web Check Out after {time}. Allowing it lets the employee request the Late Night allowance (it must first be approved by {md}).',
     'กด Check Out บนเว็บหลังเวลา {time} — การอนุญาตเป็นการเปิดสิทธิ์ให้ยื่นขอ Allowance กลับดึกได้ (ต้องได้รับการยินยอมจากทาง {md} ก่อน)')
     .replace(/\{time\}/g, () => lateTime).replace(/\{md\}/g, () => mdName);
-  return `<div style="margin-bottom:14px;padding:12px 14px;border:1px solid #f59e0b;border-radius:10px;background:var(--bg-card)">
-    <div style="font-weight:700;color:var(--text);margin-bottom:4px">⚠️ ${escapeHtml(L('Web check-outs awaiting review', 'เช็กเอาท์ผ่านเว็บที่รอตรวจสอบ'))} (${items.length})</div>
-    <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">${escapeHtml(hint)}</div>
-    <div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
+  const list = tab === 'reviewed' ? reviewed : pending;
+  const head = tab === 'reviewed'
+    ? th(L('Employee', 'ชื่อพนักงาน')) + th(L('Date', 'วันที่')) + th(L('Check Out', 'ออกงาน')) +
+      th(L('Result', 'ผลตรวจสอบ')) + th(L('Reviewed by', 'ตรวจสอบโดย')) + th(L('Action', 'ดำเนินการ'), 'right')
+    : th(L('Employee', 'ชื่อพนักงาน')) + th(L('Date', 'วันที่')) + th(L('Check Out', 'ออกงาน')) + th(L('Action', 'ดำเนินการ'), 'right');
+  const body = !list.length
+    ? `<div style="font-size:13px;color:var(--text-muted);padding:6px 2px">${escapeHtml(tab === 'reviewed'
+      ? L('No reviewed web check-outs in the current or previous pay period', 'ไม่มีเช็กเอาท์ผ่านเว็บที่ตรวจแล้วในงวดนี้และงวดก่อน')
+      : L('Nothing awaiting review', 'ไม่มีรายการรอตรวจสอบ'))}</div>`
+    : `<div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
       <table style="width:100%;border-collapse:collapse;font-size:13px">
-        <thead><tr>
-          <th style="padding:6px 8px;text-align:left;color:var(--text-muted)">${escapeHtml(L('Employee', 'ชื่อพนักงาน'))}</th>
-          <th style="padding:6px 8px;text-align:left;color:var(--text-muted)">${escapeHtml(L('Date', 'วันที่'))}</th>
-          <th style="padding:6px 8px;text-align:left;color:var(--text-muted)">${escapeHtml(L('Check Out', 'ออกงาน'))}</th>
-          <th style="padding:6px 8px;text-align:right;color:var(--text-muted)">${escapeHtml(L('Action', 'ดำเนินการ'))}</th>
-        </tr></thead>
-        <tbody>${rows}</tbody>
+        <thead><tr>${head}</tr></thead>
+        <tbody>${tab === 'reviewed' ? checkoutReviewReviewedRowsHtml(list) : checkoutReviewPendingRowsHtml(list)}</tbody>
       </table>
-    </div>
+    </div>`;
+  return `<div style="margin-bottom:14px;padding:12px 14px;border:1px solid #f59e0b;border-radius:10px;background:var(--bg-card)">
+    <div style="font-weight:700;color:var(--text);margin-bottom:4px">⚠️ ${escapeHtml(L('Web check-out review', 'ตรวจสอบเช็กเอาท์ผ่านเว็บ'))}</div>
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">${escapeHtml(hint)}</div>
+    <div style="margin-bottom:8px">${tabBtn('pending', L('Awaiting review', 'รอตรวจสอบ'), pending.length)}${tabBtn('reviewed', L('Reviewed', 'ตรวจแล้ว'), reviewed.length)}</div>
+    ${body}
   </div>`;
 }
 
-// Refreshes ONLY the "Web check-outs awaiting review" box inside the Approvals summary bar --
+// Refreshes ONLY the web check-out review box inside the Approvals summary bar --
 // creating it, updating its rows, or removing it if it's now empty -- without touching the rest
 // of the Approvals page or `_approvalSelected`. renderApprovals() itself calls this (DRY: one
 // place builds/updates the box) but a live scan on the Approvals page must NOT go through the
 // full renderApprovals(), since that clears `_approvalSelected` and redraws every Quick Table
 // checkbox, wiping out an MD's in-progress bulk selection whenever anyone scans in/out.
+// 2026-09-24: the box now shows whenever EITHER tab (awaiting / reviewed) has entries.
 function refreshCheckoutReviewPendingBox() {
   const summEl = document.getElementById('approval-summary-bar');
   if (!summEl) return;
-  const items = checkoutReviewPendingItems();
+  const { pending, reviewed } = checkoutReviewBoxItems();
   let box = document.getElementById('checkout-review-pending-box');
-  if (!items.length) {
+  if (!pending.length && !reviewed.length) {
     if (box) box.remove();
     return;
   }
@@ -11779,7 +11838,7 @@ function refreshCheckoutReviewPendingBox() {
     box.id = 'checkout-review-pending-box';
     summEl.insertBefore(box, summEl.firstChild);
   }
-  box.innerHTML = checkoutReviewPendingBoxHtml(items);
+  box.innerHTML = checkoutReviewPendingBoxHtml(pending, reviewed);
 }
 
 function renderApprovals() {
@@ -13360,12 +13419,12 @@ async function submitLeave() {
       const heldMin = pendingLeaveMinutes(u.id, type, thisYear, editingLeaveId);
       showToast(heldMin > 0
         ? (currentLang === 'ja'
-          ? `⚠️ 有給残日数が不足しています — 申請可能: ${minToStr(remMin)}（残り ${minToStr(remMin + heldMin)}、うち承認待ち ${minToStr(heldMin)} を確保済み）`
-          : L(`⚠️ Insufficient leave balance — ${minToStr(remMin)} available (${minToStr(remMin + heldMin)} remaining, ${minToStr(heldMin)} held for pending approval)`,
-              `⚠️ วันลาไม่พอ — ยื่นได้อีก ${minToStr(remMin)} (คงเหลือ ${minToStr(remMin + heldMin)} โดยกันไว้สำหรับใบที่รออนุมัติ ${minToStr(heldMin)})`))
+          ? `⚠️ 有給残日数が不足しています — 申請可能: ${minToStrFull(remMin)}（残り ${minToStrFull(remMin + heldMin)}、うち承認待ち ${minToStr(heldMin)} を確保済み）`
+          : L(`⚠️ Insufficient leave balance — ${minToStrFull(remMin)} available (${minToStrFull(remMin + heldMin)} remaining, ${minToStr(heldMin)} held for pending approval)`,
+              `⚠️ วันลาไม่พอ — ยื่นได้อีก ${minToStrFull(remMin)} (คงเหลือ ${minToStrFull(remMin + heldMin)} โดยกันไว้สำหรับใบที่รออนุมัติ ${minToStr(heldMin)})`))
         : (currentLang === 'ja'
-          ? `⚠️ 有給残日数が不足しています — 残り: ${minToStr(remMin)}`
-          : L(`⚠️ Insufficient leave balance — remaining: ${minToStr(remMin)}`, `⚠️ วันลาไม่พอ — คงเหลือ: ${minToStr(remMin)}`)), 'warning');
+          ? `⚠️ 有給残日数が不足しています — 残り: ${minToStrFull(remMin)}`
+          : L(`⚠️ Insufficient leave balance — remaining: ${minToStrFull(remMin)}`, `⚠️ วันลาไม่พอ — คงเหลือ: ${minToStrFull(remMin)}`)), 'warning');
       return;
     }
   }
@@ -14193,8 +14252,6 @@ function openOTModal(date) {
       ? L('Only dates you actually checked in are selectable', 'เลือกได้เฉพาะวันที่ลงเวลาเข้างาน')
       : L('Weekdays with a check-in and a check-out only. Weekends and public holidays use Holiday Work.',
           'เลือกได้เฉพาะวันทำงานที่สแกนเข้าและสแกนออกแล้ว เสาร์-อาทิตย์และวันหยุดบริษัทให้ยื่นขอทำงานวันหยุด');
-    const tzAbbr = timezoneShortLabel(scanTimeZone());
-    if (!isDriver && tzAbbr) hint.textContent += ' — ' + t('checkin_tz_ot') + ` (${tzAbbr})`;
   }
   // 2026-09-23: the ⏱️ row icon passes its own date. If that exact day has no check-out yet, say
   // why instead of silently opening the form on some other selectable date.
@@ -15422,7 +15479,7 @@ function renderLeaveBalanceSummary() {
     const { cfDays, compDays, effectiveMax, usedMin, lateDeduct, totalMin, remMin, remDays, openingUsedDays } = bal;
     const pct     = totalMin > 0 ? Math.round((remMin / totalMin) * 100) : 0;
     const usedStr = usedMin > 0 ? minToStr(usedMin) : L('0d', '0 วัน');
-    const remStr  = minToStr(remMin);
+    const remStr  = minToStrFull(remMin);
 
     const cfBadge = cfDays > 0
       ? `<div style="margin-top:3px;font-size:11px;color:#7c3aed">↩ ${currentLang === 'ja' ? `繰越+${cfDays}日` : L(`+${cfDays}d carry-forward`,`+${cfDays} วันยกยอด`)}</div>` : '';
@@ -17307,7 +17364,7 @@ function processLiveScanEvent(ev) {
   saveSession();
   if (currentPage === 'attendance') renderAttendanceTable();
   // FIX (final review, T4): the Approvals page's "Web check-outs awaiting review" box
-  // (checkoutReviewPendingItems) reads attendanceLog, but a live scan updating attendanceLog here
+  // (checkoutReviewBoxItems) reads attendanceLog, but a live scan updating attendanceLog here
   // never re-rendered it -- Accounting/MD sitting on the Approvals page would not see a newly
   // triggering web check-out appear until some unrelated re-render happened.
   // FIX (re-review): was calling the full renderApprovals(), which clears `_approvalSelected` and

@@ -1380,4 +1380,12 @@ window.LANG_JA = {
   "This date is a Company Trip day — no allowance of any kind is paid, so Holiday Work cannot be filed": "この日は社員旅行日です — 手当は一切支給されないため、休日出勤は申請できません",
   "Holiday Work": "休日出勤",
   "Holiday work already exists on this trip's start or end date, and a travel day cannot also carry holiday work. Reject this trip (the employee can resubmit it with other dates), or reject that holiday work first if it is still pending": "この出張の出発日または帰着日にすでに休日出勤があり、移動日に休日出勤を重ねることはできません。この出張を却下する（社員は別の日程で再申請できます）か、その休日出勤がまだ承認待ちであれば先に却下してください",
+  // 2026-09-24: web check-out review box — Awaiting / Reviewed tabs (Approvals page)
+  "Web check-out review": "Web退勤の確認",
+  "Awaiting review": "確認待ち",
+  "Reviewed": "確認済み",
+  "Reviewed by": "確認者",
+  "Nothing awaiting review": "確認待ちの項目はありません",
+  "No reviewed web check-outs in the current or previous pay period": "今期・前期に確認済みのWeb退勤はありません",
+  "Pay period is closed — read-only": "給与期間は締め済みです — 閲覧のみ",
 };

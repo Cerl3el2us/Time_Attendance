@@ -696,14 +696,6 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-.clock-tz {
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  color: rgba(255,255,255,0.72);
-  margin-bottom: 8px;
-}
-
 .date-display {
   font-size: 15px;
   opacity: 0.75;

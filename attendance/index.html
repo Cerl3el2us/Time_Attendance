@@ -2,6 +2,8 @@
 <html lang="th">
 <head>
   <meta charset="UTF-8">
+  <!-- 2026-09-24: relaxed CSP (inline onclick/style handlers still need unsafe-inline). Origins: jsDelivr = maplibre/flatpickr, Google Fonts, Wikimedia = bank logos, CARTO/ArcGIS = GPS map style/tiles/glyphs, Nominatim = GPS reverse geocode, 192.168.100.100:3000/3443 = LAN API+WS (NAS_BACKEND/NAS_WS), blob: = MapLibre worker + attachment/xlsx blobs. frame-ancestors is ignored in a meta tag. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https://upload.wikimedia.org https://basemaps.cartocdn.com https://*.basemaps.cartocdn.com https://server.arcgisonline.com https://192.168.100.100:3443 http://192.168.100.100:3000; connect-src 'self' wss://attendance.tozaiboeki.co.th https://192.168.100.100:3443 wss://192.168.100.100:3443 http://192.168.100.100:3000 ws://192.168.100.100:3000 https://basemaps.cartocdn.com https://*.basemaps.cartocdn.com https://server.arcgisonline.com https://nominatim.openstreetmap.org; worker-src 'self' blob:; child-src 'self' blob:; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Time Attendance — Tozai Boeki Kaisha (Thailand) Ltd.</title>
   <link rel="icon" type="image/jpeg" href="images/logo-short.jpg">
@@ -15,8 +17,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="css/style.css?v=20260915m">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css"/>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css" integrity="sha384-MinO0mNliZ3vwppuPOUnGa+iq619pfMhLVUXfC4LHwSCvF9H+6P/KO4Q7qBOYV5V" crossorigin="anonymous"/>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css" integrity="sha384-RkASv+6KfBMW9eknReJIJ6b3UnjKOKC5bOUaNgIY778NFbQ8MtWq9Lr/khUgqtTt" crossorigin="anonymous">
 </head>
 <body>
 
@@ -306,7 +308,6 @@
           <div>
             <div class="checkin-panel mb-6">
               <div class="clock-display">00:00:00</div>
-              <div class="clock-tz" id="checkin-clock-tz" style="display:none"></div>
               <div class="date-display">วันที่ —</div>
               <div class="checkin-status">
                 <span class="status-dot none" id="checkin-status-dot"></span>
@@ -2587,10 +2588,10 @@
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
-<script src="lang/ja.js?v=20260924a"></script>  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ja.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/th.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js" integrity="sha384-SYKAG6cglRMN0RVvhNeBY0r3FYKNOJtznwA0v7B5Vp9tr31xAHsZC0DqkQ/pZDmj" crossorigin="anonymous"></script>
+<script src="lang/ja.js?v=20260924a"></script>  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js" integrity="sha384-5JqMv4L/Xa0hfvtF06qboNdhvuYXUku9ZrhZh3bSk8VXF0A/RuSLHpLsSV9Zqhl6" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ja.js" integrity="sha384-mKor8U8jwukUkfxaFPCsxKF9S62PXq4gG7zcZ5yQ2x3KL1msprJZeFlKFEDeeb5V" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/th.js" integrity="sha384-E6OVFg1zUc/pckGxry0YZ6VeZ1E17l7Jl8ZQx58jbEfxxkz9LqknQhiIrA9zg/8b" crossorigin="anonymous"></script>
 
 <script src="js/app.js?v=20260924a"></script>
 </body>
