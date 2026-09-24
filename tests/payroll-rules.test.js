@@ -48,7 +48,8 @@ const SHARED = ['isVoidLeaveStatus', 'round2HalfUp', 'round1HalfUp', 'deriveOffi
   'isHolidayWorkDay', 'isNonWorkDayForComp', 'isHolidayWorkOtRecord', 'companyTripDateInRange',
   'isFullDayPersonalLeaveStatus', 'isRestAttendanceDay', 'isDeviceScanSource', 'isEarlyMorningDayStatus',
   'deviceScanQualifiesForEarlyMorning', 'deviceScanQualifiesForLateNight', 'lateNightCheckoutOk',
-  'accumulateApprovedOtPay', 'effectiveOtMultiplier', 'computePayroll', 'splitHolidayWorkOtMinutes', 'holidayWorkEndMins'];
+  'accumulateApprovedOtPay', 'effectiveOtMultiplier', 'computePayroll', 'splitHolidayWorkOtMinutes', 'holidayWorkEndMins',
+  'lateNightPoints', 'holidayWorkTooLong'];
 const CLIENT_FNS = [...SHARED, 'scanWindowError', 'getApprovedHolidayWorkDays', 'abroadTravelCreditDays',
   'otEndCrossesMidnight', 'canSubmitHolidayWorkForDate', 'standardOtMultiplier', 'otPayAmountFromLeave'];
 const SERVER_FNS = [...SHARED, 'scanWindowError', 'getApprovedHolidayWorkAnnualLeaveDays', 'abroadTravelCreditDays',
@@ -190,6 +191,51 @@ test('scan window: an after-midnight Holiday Work end is checked against the rea
 test('POST/PUT and the client form accept an after-midnight end (static)', () => {
   assert.strictEqual((SERVER_SRC.match(/!Number\.isFinite\(holidayWorkEndMins\(/g) || []).length, 2, 'server POST + PUT');
   assert.ok(/!Number\.isFinite\(holidayWorkEndMins\(workStartTime, workEndTime\)\)/.test(APP_SRC), 'client submitHolidayWork');
+});
+
+// 2026-09-24 (review fix 5): the after-midnight rule only for a start at/after 05:00; 20 h cap.
+test('holidayWorkEndMins: start before 05:00 never wraps; 04:00-03:00 and 00:00-00:00 refused; 18:00-02:00 ok', () => {
+  for (const [side, X] of both(world())) {
+    assert.ok(Number.isNaN(X.holidayWorkEndMins('04:00', '03:00')), side);
+    assert.ok(Number.isNaN(X.holidayWorkEndMins('00:00', '00:00')), side);
+    assert.ok(Number.isNaN(X.holidayWorkEndMins('04:59', '04:00')), side);
+    assert.strictEqual(X.holidayWorkEndMins('18:00', '02:00'), 26 * 60, side);
+    assert.strictEqual(X.holidayWorkEndMins('05:00', '04:00'), 28 * 60, side); // 23 h -> refused by the cap
+    assert.strictEqual(X.holidayWorkTooLong('18:00', '02:00'), false, side);
+    assert.strictEqual(X.holidayWorkTooLong('05:00', '04:00'), true, side);
+    assert.strictEqual(X.holidayWorkTooLong('06:00', '02:00'), false, side); // exactly 20 h
+    assert.strictEqual(X.holidayWorkTooLong('06:00', '02:01'), true, side);
+    assert.strictEqual(X.holidayWorkTooLong('04:00', '03:00'), false, side); // already invalid, not "too long"
+  }
+  assert.strictEqual((SERVER_SRC.match(/if \(holidayWorkTooLong\(/g) || []).length, 2, 'server POST + PUT refuse');
+  assert.ok(/if \(holidayWorkTooLong\(workStartTime, workEndTime\)\)/.test(APP_SRC), 'client submitHolidayWork refuses');
+});
+
+// 2026-09-24 (review fix 2): a Late Night check-out after midnight is the x2 tier, not x1.
+test('lateNightPoints both sides: before 05:00 = after midnight', () => {
+  for (const [side, X] of both(world())) {
+    assert.strictEqual(X.lateNightPoints('19:30', 20), 1, side);
+    assert.strictEqual(X.lateNightPoints('20:00', 20), 2, side);
+    assert.strictEqual(X.lateNightPoints('23:59', 20), 2, side);
+    assert.strictEqual(X.lateNightPoints('00:00', 20), 2, side);
+    assert.strictEqual(X.lateNightPoints('01:30', 20), 2, side);
+    assert.strictEqual(X.lateNightPoints('04:59', 20), 2, side);
+    assert.strictEqual(X.lateNightPoints('01:30', 26), 1, side); // x2 from 02:00 (26 h)
+  }
+  assert.ok(!/parseInt\(\s*(d|row)\.lateOut/.test(APP_SRC), 'no parseInt(lateOut) tier decision left in app.js');
+  assert.ok(!/parseInt\(\s*d\.lateOut/.test(SERVER_SRC), 'none left in server.js');
+});
+test('computePayroll: device check-out at 01:30 pays Late Night x2 on both engines', () => {
+  const pDays = [{ date: '2026-11-26', status: 'present', checkIn: '08:20', checkOut: '01:30', checkInSource: 'device',
+    checkOutSource: 'device', lateOut: '01:30', lateApproved: true }];
+  const w = world({ pDays });
+  const start = new Date('2026-11-21T12:00:00'), end = new Date('2026-12-20T12:00:00');
+  const c = makeClient(w).computePayroll(w.user, start, end, 1);
+  const s = makeServer(w).computePayroll(w.user, start, end, 1);
+  for (const [side, r] of [['client', c], ['server', s]]) {
+    assert.strictEqual(r.lateNightCount, 2, `${side} lateNightCount`);
+    assert.strictEqual(r.allowance2, 200, `${side} Late Night x2 money`);
+  }
 });
 
 console.log('T1 Company Trip: no allowance of any kind');

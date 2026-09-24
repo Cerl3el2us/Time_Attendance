@@ -4211,8 +4211,17 @@ function holidayWorkEndMins(workStartTime, workEndTime) {
   const endMin = parseHHMMToMins(workEndTime);
   if (!Number.isFinite(startMin) || !Number.isFinite(endMin)) return NaN;
   if (endMin > startMin) return endMin;
+  // 2026-09-24 (review M): the after-midnight rule applies only to a shift that STARTS at/after
+  // 05:00 -- 04:00-03:00 used to become a 23-hour shift.
+  if (startMin < 5 * 60) return NaN;
   const nextDay = lateNightCheckoutMins(workEndTime);
   return nextDay > startMin ? nextDay : NaN;
+}
+// 2026-09-24 (review M): a Holiday Work shift may not be longer than 20 hours (the same cap as
+// server.js OT_HOURS_MAX); refused on submit/edit. Dual-sync (identical text) with the other file.
+function holidayWorkTooLong(workStartTime, workEndTime) {
+  const endMin = holidayWorkEndMins(workStartTime, workEndTime);
+  return Number.isFinite(endMin) && endMin - parseHHMMToMins(workStartTime) > 20 * 60;
 }
 // The whole shift is paid at the START day's Holiday Work rate (x2 inside 08:30-17:30, x3 outside
 // it, so every hour after midnight is x3); lunch 12:00-13:00 is removed only where the x2 window
@@ -5523,6 +5532,9 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
       if (!Number.isFinite(holidayWorkEndMins(body.workStartTime, body.workEndTime))) {
         return res.status(400).json({ success:false, message:'workEndTime must be after workStartTime (an end before 05:00 counts as after midnight)' });
       }
+      if (holidayWorkTooLong(body.workStartTime, body.workEndTime)) {
+        return res.status(400).json({ success:false, code:'hw-too-long', message:'Holiday Work cannot be longer than 20 hours' });
+      }
       const hwLocErr = validateHolidayWorkLocation(body.locations);
       if (hwLocErr) return res.status(400).json({ success:false, message:hwLocErr });
       if (!body.attachment && !(Number(body.fileCount) > 0)) {
@@ -6178,6 +6190,9 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
       }
       if (!Number.isFinite(holidayWorkEndMins(resolvedWorkStart, resolvedWorkEnd))) {
         return res.status(400).json({ success:false, message:'workEndTime must be after workStartTime (an end before 05:00 counts as after midnight)' });
+      }
+      if (holidayWorkTooLong(resolvedWorkStart, resolvedWorkEnd)) {
+        return res.status(400).json({ success:false, code:'hw-too-long', message:'Holiday Work cannot be longer than 20 hours' });
       }
       const hwLocErrPut = validateHolidayWorkLocation(resolvedLocations);
       if (hwLocErrPut) return res.status(400).json({ success:false, message:hwLocErrPut });
@@ -7651,6 +7666,13 @@ function lateNightCheckoutMins(hhmm) {
   const mins = h * 60 + m;
   return mins < 5 * 60 ? mins + 24 * 60 : mins;
 }
+// 2026-09-24 (review M): Late Night points for a qualifying day -- 2 once the check-out is at/after
+// the x2 threshold hour, else 1. Used to compare the parseInt() hour of lateOut, which read "01:30" as hour 1
+// and paid x1 for a check-out past midnight; lateNightCheckoutMins puts before-05:00 on the
+// previous evening's clock (+24h).
+function lateNightPoints(lateOut, thr2Hour) {
+  return lateNightCheckoutMins(lateOut) >= Number(thr2Hour) * 60 ? 2 : 1;
+}
 // An Accounting/MD review applies only to a web check-out, and only while the day's current
 // effective check-out is still the time that was reviewed -- a later web tap or an approved
 // time-correction puts the day back to pending (null).
@@ -8295,9 +8317,9 @@ function computePayroll(user, start, end, periodIndex) {
         }
       }
       if (deviceScanQualifiesForLateNight(d, holidayWorkDates)) {
-        const lnHr = parseInt(d.lateOut);
-        lateNightCount += lnHr >= _ln2Thr ? 2 : 1;
-        earlyLateBonus += lnHr >= _ln2Thr ? S.allowances.lateNight2 : S.allowances.lateNight1;
+        const lnPts = lateNightPoints(d.lateOut, _ln2Thr);
+        lateNightCount += lnPts;
+        earlyLateBonus += lnPts === 2 ? S.allowances.lateNight2 : S.allowances.lateNight1;
       }
     });
     approvedEarlyMorning.forEach(l => {

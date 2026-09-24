@@ -1323,6 +1323,13 @@ function lateNightCheckoutMins(hhmm) {
   const mins = h * 60 + m;
   return mins < 5 * 60 ? mins + 24 * 60 : mins;
 }
+// 2026-09-24 (review M): Late Night points for a qualifying day -- 2 once the check-out is at/after
+// the x2 threshold hour, else 1. Used to compare the parseInt() hour of lateOut, which read "01:30" as hour 1
+// and paid x1 for a check-out past midnight; lateNightCheckoutMins puts before-05:00 on the
+// previous evening's clock (+24h).
+function lateNightPoints(lateOut, thr2Hour) {
+  return lateNightCheckoutMins(lateOut) >= Number(thr2Hour) * 60 ? 2 : 1;
+}
 // An Accounting/MD review applies only to a web check-out, and only while the day's current
 // effective check-out is still the time that was reviewed -- a later web tap or an approved
 // time-correction puts the day back to pending (null).
@@ -1611,8 +1618,17 @@ function holidayWorkEndMins(workStartTime, workEndTime) {
   const endMin = parseHHMMToMins(workEndTime);
   if (!Number.isFinite(startMin) || !Number.isFinite(endMin)) return NaN;
   if (endMin > startMin) return endMin;
+  // 2026-09-24 (review M): the after-midnight rule applies only to a shift that STARTS at/after
+  // 05:00 -- 04:00-03:00 used to become a 23-hour shift.
+  if (startMin < 5 * 60) return NaN;
   const nextDay = lateNightCheckoutMins(workEndTime);
   return nextDay > startMin ? nextDay : NaN;
+}
+// 2026-09-24 (review M): a Holiday Work shift may not be longer than 20 hours (the same cap as
+// server.js OT_HOURS_MAX); refused on submit/edit. Dual-sync (identical text) with the other file.
+function holidayWorkTooLong(workStartTime, workEndTime) {
+  const endMin = holidayWorkEndMins(workStartTime, workEndTime);
+  return Number.isFinite(endMin) && endMin - parseHHMMToMins(workStartTime) > 20 * 60;
 }
 // The whole shift is paid at the START day's Holiday Work rate (x2 inside 08:30-17:30, x3 outside
 // it, so every hour after midnight is x3); lunch 12:00-13:00 is removed only where the x2 window
@@ -7874,9 +7890,8 @@ function renderAttendanceTable() {
       l.userId === targetUserId && l.type === 'holiday-work' && l.status === 'approved'
     ).map(l => l.dateFrom));
     if (canEarlyLateTarget && deviceScanQualifiesForLateNight(row, _lnHwDates)) {
-      const h = parseInt(row.lateOut.split(':')[0]);
       const _ln2Thr = _ATallowances.lateNightThreshold2Hour || _ATallowances.lateNightThresholdHour || 20;
-      const bonus = h >= _ln2Thr ? `฿${_ATallowances.lateNight2 || 480}` : `฿${_ATallowances.lateNight1 || 240}`;
+      const bonus = lateNightPoints(row.lateOut, _ln2Thr) === 2 ? `฿${_ATallowances.lateNight2 || 480}` : `฿${_ATallowances.lateNight1 || 240}`;
       lateBadge = attAllowIcon('🌙', `${L('Late Night', 'Late Night')} ${row.lateOut} (${bonus})`);
     }
 
@@ -8243,7 +8258,7 @@ function renderDashboard() {
       earlyCount += mins <= (_S.earlyThreshold2Min||390) ? 2 : mins <= (_S.earlyThreshold1Min||450) ? 1 : 0;
     }
     if (d.lateOut && deviceScanQualifiesForLateNight(d, _dashHwDates)) {
-      lateNightCount += parseInt(d.lateOut) >= _ln2Thr ? 2 : 1;
+      lateNightCount += lateNightPoints(d.lateOut, _ln2Thr);
     }
   });
 
@@ -8679,7 +8694,7 @@ function showDashPeriodDetail(kind) {
     const ln2 = _S.lateNightThreshold2Hour || _S.lateNightThresholdHour || 20;
     let tot = 0;
     rows = days.filter(d => deviceScanQualifiesForLateNight(d, _dashHwDates)).map(d => {
-      const pts = parseInt(d.lateOut) >= ln2 ? 2 : 1;
+      const pts = lateNightPoints(d.lateOut, ln2);
       tot += pts;
       return `<tr style="border-bottom:1px solid #f1f5f9">
         <td style="padding:9px 14px;font-weight:600">${fmtDate(new Date(d.date + 'T12:00:00'))}</td>
@@ -10260,7 +10275,7 @@ function computeReportPeriodStats(u, start, end, periodIndex) {
   const _ln2 = _SA.lateNightThreshold2Hour || _SA.lateNightThresholdHour || 20;
   let lateNightCount = 0;
   days.filter(d => deviceScanQualifiesForLateNight(d, _rptHwDates)).forEach(d => {
-    lateNightCount += parseInt(d.lateOut) >= _ln2 ? 2 : 1;
+    lateNightCount += lateNightPoints(d.lateOut, _ln2);
   });
 
   const pad2r = n => String(n).padStart(2, '0');
@@ -10756,7 +10771,7 @@ function buildReportDetailTables(u, days, startStr, endStr) {
   const lnDays=canEarlyLateRpt?days.filter(d=>{const hwDates=new Set(DATA_LEAVES.filter(l=>l.userId===u.id&&l.type==='holiday-work'&&l.status==='approved').map(l=>l.dateFrom));return deviceScanQualifiesForLateNight(d,hwDates);}):[];
   if (lnDays.length>0) {
     let tot=0;
-    const rows=lnDays.map(d=>{const p=parseInt(d.lateOut)>=lnThr2?2:1;tot+=p;return`<tr style="border-bottom:1px solid #f1f5f9"><td style="padding:9px 14px;font-weight:600">${fmtDate(new Date(d.date+'T12:00:00'))}</td><td style="padding:9px 14px;text-align:center">${escapeHtml(d.lateOut)}</td><td style="padding:9px 14px;text-align:center;color:#1d4ed8;font-weight:700">${p} ${L('times','ครั้ง')}</td></tr>`;}).join('');
+    const rows=lnDays.map(d=>{const p=lateNightPoints(d.lateOut,lnThr2);tot+=p;return`<tr style="border-bottom:1px solid #f1f5f9"><td style="padding:9px 14px;font-weight:600">${fmtDate(new Date(d.date+'T12:00:00'))}</td><td style="padding:9px 14px;text-align:center">${escapeHtml(d.lateOut)}</td><td style="padding:9px 14px;text-align:center;color:#1d4ed8;font-weight:700">${p} ${L('times','ครั้ง')}</td></tr>`;}).join('');
     html+=`<div style="padding:10px 16px 6px;font-weight:700;font-size:13px;color:#1e40af;background:#eff6ff;border-top:2px solid #e2e8f0;border-bottom:1px solid #bfdbfe">🌙 ${t('rpt_latenight')} — ${tot} ${L('times','ครั้ง')}</div>
     <table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:#f0f7ff">${TH(L('Date','วันที่'),'#bfdbfe')}${THC(L('Check Out','เวลาออก'),'#bfdbfe')}${THC(L('Count','จำนวนครั้ง'),'#bfdbfe')}</tr></thead><tbody>${rows}</tbody>
     <tfoot><tr style="background:#eff6ff"><td colspan="2" style="padding:8px 14px;font-weight:700;color:#1e40af">${L('Total','รวม')}</td><td style="padding:8px 14px;text-align:center;font-weight:700;color:#1d4ed8">${tot} ${L('times','ครั้ง')}</td></tr></tfoot></table>`;
@@ -10809,7 +10824,7 @@ function showReportDetail(userId) {
   const upcountry   = canUpcountryRpt ? days.filter(d => d.upcountry && d.status !== 'company-trip').length : 0;
   const _rdSA=APP_SETTINGS.allowances; let earlyCount=0; if (canEarlyLateRpt) { const hwDates=new Set(DATA_LEAVES.filter(l=>l.userId===u.id&&l.type==='holiday-work'&&l.status==='approved').map(l=>l.dateFrom)); days.filter(d=>deviceScanQualifiesForEarlyMorning(d,hwDates)).forEach(d=>{const[h,m]=d.checkIn.split(':').map(Number);const mins=h*60+m;const p=mins<=(_rdSA.earlyThreshold2Min||390)?2:mins<=(_rdSA.earlyThreshold1Min||450)?1:0;earlyCount+=p;}); }
   const _cardLn2=APP_SETTINGS.allowances.lateNightThreshold2Hour||APP_SETTINGS.allowances.lateNightThresholdHour||20;
-  let lateNightCount=0; if (canEarlyLateRpt) { const hwDates=new Set(DATA_LEAVES.filter(l=>l.userId===u.id&&l.type==='holiday-work'&&l.status==='approved').map(l=>l.dateFrom)); days.filter(d=>deviceScanQualifiesForLateNight(d,hwDates)).forEach(d=>{lateNightCount+=parseInt(d.lateOut)>=_cardLn2?2:1;}); }
+  let lateNightCount=0; if (canEarlyLateRpt) { const hwDates=new Set(DATA_LEAVES.filter(l=>l.userId===u.id&&l.type==='holiday-work'&&l.status==='approved').map(l=>l.dateFrom)); days.filter(d=>deviceScanQualifiesForLateNight(d,hwDates)).forEach(d=>{lateNightCount+=lateNightPoints(d.lateOut,_cardLn2);}); }
   const pad2=(n)=>String(n).padStart(2,'0');
   const startStr=`${start.getFullYear()}-${pad2(start.getMonth()+1)}-${pad2(start.getDate())}`;
   const endStr  =`${end.getFullYear()}-${pad2(end.getMonth()+1)}-${pad2(end.getDate())}`;
@@ -11077,12 +11092,12 @@ function computePayroll(user, start, end, periodIndex) {
         else if (mins <= S.allowances.earlyThreshold1Min) { earlyCount += 1; earlyLateBonus += S.allowances.earlyMorning1; early1Count++; early1Amount += S.allowances.earlyMorning1; earlyScanPaidDates.add(d.date); }
       }
       if (deviceScanQualifiesForLateNight(d, holidayWorkDates)) {
-        const lnHr = parseInt(d.lateOut);
+        const lnPts = lateNightPoints(d.lateOut, _ln2Thr);
         // 2026-08-16 (Opus audit M-8 + user confirmation): count matches Reports/Dashboard's
         // definition (crossed the ×2 threshold counts as 2, since it also crossed the ×1
         // threshold on the way) rather than a flat +1 per day -- display-only, does not affect
         // earlyLateBonus/any paid amount either way.
-        if (lnHr >= _ln2Thr) { lateNightCount += 2; earlyLateBonus += S.allowances.lateNight2; lateNight2Count++; lateNight2Amount += S.allowances.lateNight2; }
+        if (lnPts === 2) { lateNightCount += 2; earlyLateBonus += S.allowances.lateNight2; lateNight2Count++; lateNight2Amount += S.allowances.lateNight2; }
         else { lateNightCount += 1; earlyLateBonus += S.allowances.lateNight1; lateNight1Count++; lateNight1Amount += S.allowances.lateNight1; }
       }
     });
@@ -11886,7 +11901,8 @@ function formatTimePart(l) {
           `${hs}–${he} (${h > 0 ? h+'ชม.' : ''}${m > 0 ? m+'น.' : ''})`);
   }
   if (l.type === 'late-out' && l.lateOutTime) {
-    const allowance = lateOutAllowanceForHour(parseInt(l.lateOutTime));
+    // 2026-09-24: before-05:00 counts as after midnight (+24h), like lateNightPoints.
+    const allowance = lateOutAllowanceForHour(Math.floor(lateNightCheckoutMins(l.lateOutTime) / 60));
     // SECURITY FIX 2026-08-09 (Opus audit finding 1.4): lateOutTime is client-controlled and this
     // return value is interpolated into innerHTML by every caller (approval cards, leave detail) --
     // unescaped here was a stored-XSS sink, same class as the hourlyStart/hourlyEnd fix above.
@@ -15362,6 +15378,10 @@ async function submitHolidayWork() {
     showToast(L('⚠️ End time must be after start time (before 05:00 = after midnight)', '⚠️ เวลาเลิกงานต้องหลังเวลาเริ่มงาน (ก่อน 05:00 = หลังเที่ยงคืน)'), 'warning');
     return;
   }
+  if (holidayWorkTooLong(workStartTime, workEndTime)) {
+    showToast(L('⚠️ Holiday Work cannot be longer than 20 hours', '⚠️ ทำงานวันหยุดได้ไม่เกิน 20 ชั่วโมง'), 'warning');
+    return;
+  }
   const hwScanErr = scanWindowError(date, workStartTime, workEndTime);
   if (hwScanErr) { showToast(hwScanErr, 'warning'); return; }
   if (!['annual-leave', 'paid'].includes(compensationMode)) {
@@ -16439,9 +16459,8 @@ function showAttendanceDetail(date) {
   if (row.lateOut && row.status !== 'company-trip' && isAllowanceEligible(APP_SETTINGS.allowanceEligibility, targetRole, 'earlyLate')
       && lateNightCheckoutOk(row)
       && (!isRestAttendanceDay(row) || hasHolidayWorkClaimOnDate(row.date, targetUserId, false))) {
-    const [h] = row.lateOut.split(':').map(Number);
     const _ln2Thr = _dA.lateNightThreshold2Hour || _dA.lateNightThresholdHour || 20;
-    const bonus = `฿${h >= _ln2Thr ? (_dA.lateNight2 || 480) : (_dA.lateNight1 || 240)}`;
+    const bonus = `฿${lateNightPoints(row.lateOut, _ln2Thr) === 2 ? (_dA.lateNight2 || 480) : (_dA.lateNight1 || 240)}`;
     const approved = row.lateApproved;
     tagsEl.innerHTML += `<span class="badge ${approved?'badge-success':'badge-warning'}">🌙 ${L('Late Night', 'ทำงานดึก')} ${escapeHtml(row.lateOut)} (+${bonus}) ${approved?L('✓ Approved','✓ อนุมัติแล้ว'):L('⏳ Pending','⏳ รออนุมัติ')}</span>`;
   }
