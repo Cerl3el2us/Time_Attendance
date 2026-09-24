@@ -45,7 +45,7 @@ function test(name, fn) {
 
 const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 const S = { allowances: { lateNightThreshold1Hour: 19, lateNightThreshold2Hour: 20, earlyThreshold1Min: 450, earlyThreshold2Min: 390 } };
-const DEP_FNS = ['timeCorrectionDependents', 'lateNightCheckoutMins', 'lateNightThresholdMins', 'lateNightCheckoutOk', 'isDeviceScanSource', 'parseHHMMToMins'];
+const DEP_FNS = ['timeCorrectionDependents', 'lateNightCheckoutMins', 'lateNightThresholdMins', 'lateNightThresholdHourOf', 'lateNightCheckoutOk', 'isDeviceScanSource', 'parseHHMMToMins'];
 const sides = () => [['client', sandbox(APP_SRC, DEP_FNS, { HHMM_RE })], ['server', sandbox(SERVER_SRC, DEP_FNS, { HHMM_RE })]];
 
 console.log('Fix 4: time-correction revoke -- dependent detection (both sides)');

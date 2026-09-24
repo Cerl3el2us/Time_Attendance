@@ -50,7 +50,7 @@ const SETTINGS = {
     sickLeaveDays: 30, businessLeaveDays: 3 },
 };
 
-const SHARED = ['isVoidLeaveStatus', 'round2HalfUp', 'round1HalfUp', 'lateNightCheckoutMins', 'lateNightThresholdMins', 'parseHHMMToMins',
+const SHARED = ['isVoidLeaveStatus', 'round2HalfUp', 'round1HalfUp', 'lateNightCheckoutMins', 'lateNightThresholdMins', 'lateNightThresholdHourOf', 'parseHHMMToMins',
   'isHolidayWorkDay', 'isNonWorkDayForComp', 'isHolidayWorkOtRecord', 'isFullDayPersonalLeaveStatus',
   'isRestAttendanceDay', 'isDeviceScanSource', 'isEarlyMorningDayStatus', 'deviceScanQualifiesForEarlyMorning',
   'deviceScanQualifiesForLateNight', 'lateNightCheckoutOk', 'addOtHours', 'accumulateApprovedOtHours', 'otPayFromHourBuckets', 'effectiveOtMultiplier',

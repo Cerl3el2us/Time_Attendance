@@ -969,7 +969,13 @@ table tbody tr:last-child td { border-bottom: none; }
   text-align: center;
   position: relative;
   overflow: hidden;
+  /* 2026-09-24 (owner): the three cards hold different amounts of detail, so their progress bars
+     used to stop at three different heights. A column flex box plus the .leave-card-spacer that
+     renderLeaveBalanceSummary() inserts before the bar pushes every bar onto the same line. */
+  display: flex;
+  flex-direction: column;
 }
+.leave-card-spacer { flex: 1 1 auto; min-height: 0; }
 
 .leave-card::before {
   content: '';

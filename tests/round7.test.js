@@ -185,7 +185,7 @@ test('GET / POST routes: own items only, 503 on read failure, write lock (static
 });
 
 console.log('T1 notification inbox (client renderers)');
-const RENDER_FNS = ['notificationText', 'notifDateRange', 'notifTypeLabel', 'notifRecordsText', 'notifReasonText', 'minToStrFull'];
+const RENDER_FNS = ['notificationText', 'notifDateRange', 'notifTypeLabel', 'notifRecordsText', 'notifReasonText', 'minToStr'];
 function clientRenderer(lang) {
   const ctx = {
     currentLang: lang, window: {},
@@ -217,7 +217,7 @@ test('every server kind has a client renderer; texts differ per language; unknow
     assert.strictEqual(new Set(t).size, 3, `${k}: TH/EN/JA must differ`);
   }
   assert.strictEqual(en.notificationText({ kind: 'cf-expiry-reminder', params: SAMPLE['cf-expiry-reminder'] }).text,
-    'You have 1.63 carry-forward day(s) (1d 5h 0m) that expire on 2027-11-30 — use them before then');
+    'You have 1.63 carry-forward day(s) (1d 5h) that expire on 2027-11-30 — use them before then');
   assert.ok(en.notificationText({ kind: 'request-revoked', params: SAMPLE['request-revoked'] }).text.includes('together with: 🌙 Late Night (2027-11-06) — reason: wrong day'));
   assert.strictEqual(en.notificationText({ kind: 'nope', params: {} }).text, 'You have a new notification');
   assert.strictEqual(ja.notificationText({ kind: 'nope' }).text, '新しい通知があります');
@@ -323,9 +323,9 @@ test('at-risk list: FIFO (leave on/before expiry incl. pending uses carry-forwar
 });
 test('amount text "X day(s) (Xd Yh Zm)" in the email language', () => {
   const S = cfServer(W);
-  assert.strictEqual(S.cfAmountText(780, 'en'), '1.63 day(s) (1d 5h 0m)');
-  assert.strictEqual(S.cfAmountText(780, 'th'), '1.63 วัน (1 วัน 5 ชม. 0 นาที)');
-  assert.strictEqual(S.cfAmountText(780, 'ja'), '1.63日（1日5時間0分）');
+  assert.strictEqual(S.cfAmountText(780, 'en'), '1.63 day(s) (1d 5h)');
+  assert.strictEqual(S.cfAmountText(780, 'th'), '1.63 วัน (1 วัน 5 ชม.)');
+  assert.strictEqual(S.cfAmountText(780, 'ja'), '1.63日（1日5時間）');
 });
 test('reminder job: this year and next year candidates, notifyDays from Settings, Bangkok hour (static)', () => {
   const fn = extractFunction(SERVER_SRC, 'runCfExpiryReminders');
@@ -337,7 +337,16 @@ test('reminder job: this year and next year candidates, notifyDays from Settings
 test('reminder job + settings keys are server-owned (static)', () => {
   assert.ok(/cron\.schedule\('7 \* \* \* \*', runHourlyLeaveJobs/.test(SERVER_SRC));
   const put = SERVER_SRC.slice(SERVER_SRC.indexOf("app.put('/api/settings'"));
-  assert.ok(put.slice(0, 5000).includes("['cfExpiryRemindersSent', 'cfRunOverdueRemindersSent']"));
+  // 2026-09-24: was an exact match on the literal array, which broke the moment a THIRD server-owned
+  // key was added (leaveCarryForwardEdits, the manual-override audit). Assert what actually matters
+  // -- each key appears inside the refusal loop -- so adding another one does not fail this test
+  // while still failing if a key is dropped from the guard.
+  const head = put.slice(0, 5000);
+  const guard = head.slice(head.indexOf('for (const k of ['), head.indexOf('for (const k of [') + 400);
+  for (const k of ['cfExpiryRemindersSent', 'cfRunOverdueRemindersSent', 'leaveCarryForwardEdits']) {
+    assert.ok(guard.includes(`'${k}'`), `${k} must be refused by PUT /api/settings`);
+  }
+  assert.ok(/is set by the server only/.test(guard));
   const fn = extractFunction(SERVER_SRC, 'runCfExpiryReminders');
   assert.ok(fn.indexOf('writeJSON') < fn.indexOf('sendPushToUser'), 'the day is recorded before anything is sent');
   assert.ok(/emailNotifyOnResult/.test(extractFunction(SERVER_SRC, 'sendCfExpiryEmail')));
@@ -523,7 +532,7 @@ test('navigateTo(approval) shows the queue; only openVoidHistoryForDate keeps th
 });
 test('lateNightThresholdMins / lateNightPoints identical both sides; a threshold before 05 is after midnight', () => {
   ['lateNightThresholdMins', 'lateNightPoints', 'checkoutReviewTrigger'].forEach(sameSource);
-  const names = ['lateNightCheckoutMins', 'lateNightThresholdMins', 'lateNightPoints'];
+  const names = ['lateNightCheckoutMins', 'lateNightThresholdMins', 'lateNightThresholdHourOf', 'lateNightPoints'];
   for (const [side, X] of [['client', sandbox(APP_SRC, names, {})], ['server', sandbox(SERVER_SRC, names, {})]]) {
     assert.strictEqual(X.lateNightThresholdMins(19), 19 * 60, side);
     assert.strictEqual(X.lateNightThresholdMins(1), 25 * 60, side);
@@ -542,7 +551,7 @@ test('lateNightThresholdMins / lateNightPoints identical both sides; a threshold
     assert.strictEqual(X.lateNightPoints('04:59', 1), 2, side);
   }
   const trig = ['client', 'server'].map(side => sandbox(side === 'client' ? APP_SRC : SERVER_SRC,
-    ['lateNightCheckoutMins', 'lateNightThresholdMins', 'checkoutReviewTrigger'], {
+    ['lateNightCheckoutMins', 'lateNightThresholdMins', 'lateNightThresholdHourOf', 'checkoutReviewTrigger'], {
       isFullDayPersonalLeaveStatus: () => false, isAllowanceEligible: () => true }));
   const S1 = thr => ({ allowances: { lateNightThreshold1Hour: thr }, allowanceEligibility: {} });
   const day = out => ({ checkIn: '08:30', checkOut: out, checkOutSource: 'web', status: 'present' });

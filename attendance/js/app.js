@@ -463,6 +463,18 @@ function namePrefixLabel(val) {
   const pair = map[val];
   return pair ? L(pair[0], pair[1]) : '';
 }
+// 2026-09-24: sentences that name a specific person (the web check-out hint, the payslip
+// approval card) now carry a prefix. The prefix stays ENGLISH in every language because it is
+// always paired with `u.name`, which is the English/romanised name -- namePrefixLabel()'s
+// language-aware form would put "นาย" in front of a Latin-script name. A user with no
+// namePrefix set still renders as a bare name.
+const NAME_PREFIX_EN = { mr: 'Mr.', mrs: 'Mrs.', ms: 'Miss' };
+function nameWithPrefix(u) {
+  if (!u) return '';
+  const prefix = NAME_PREFIX_EN[u.namePrefix] || '';
+  const name = u.name || '';
+  return prefix ? (name ? prefix + ' ' + name : prefix) : name;
+}
 // 2026-08-17: #emp-name-prefix (always-English options, paired with the English name row) and
 // #emp-name-prefix-th (always-Thai options, paired with the Thai name row) are two separate
 // <select> controls for the SAME underlying `namePrefix` value, shown twice by user request
@@ -1255,6 +1267,9 @@ let LEAVE_CARRY_FORWARD = {};
 // 2026-09-24: { '<source year>': { at, by, byId } } -- server-owned run log of the year-end
 // carry-forward (md/accounting only; stripped for everyone else by GET /api/settings).
 let LEAVE_CARRY_FORWARD_RUNS = {};
+// 2026-09-24: { '<year>_<userId>': { at, by, byId, days, prevDays } } -- audit of manual
+// per-employee carry-forward overrides (PUT /api/leave-carry-forward). md/accounting only.
+let LEAVE_CARRY_FORWARD_EDITS = {};
 // 2026-09-24 (round 7): notification inbox state (declared up here, before any caller -- TDZ).
 let NOTIFICATIONS = [];
 let NOTIFICATIONS_UNREAD = 0;
@@ -1300,8 +1315,38 @@ function isAllowanceEligible(allowanceEligibilityConfig, role, key) {
 // 2026-08-27: Early Morning / Late Night money is tied to a face-scanner event, not a web
 // Check In / Check Out button. Missing source (time-correction overlay with no scan) must not
 // count as a device scan. Must stay identical in app.js and server.js.
+// 2026-09-24 (owner): a Late Night threshold of midnight (hour 0) saved fine -- the settings
+// validator accepts 0 -- but every reader resolved it with `x || 19`, and 0 is falsy, so the hour
+// snapped straight back to 19 and the save looked like it had failed. One helper now resolves the
+// tier's hour for all of them; an absent/blank/garbage value still falls back to 19 / 20.
+// STANDING RULE (payroll dual-sync): this function exists in BOTH app.js and server.js.
+function lateNightThresholdHourOf(allowances, tier) {
+  const a = allowances || {};
+  const candidates = tier === 2
+    ? [a.lateNightThreshold2Hour, a.lateNightThresholdHour]
+    : [a.lateNightThreshold1Hour, a.lateNightThresholdHour];
+  for (const v of candidates) {
+    if (v === null || v === undefined || v === '') continue;
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return tier === 2 ? 20 : 19;
+}
 function isDeviceScanSource(source) {
   return source === 'device';
+}
+// 2026-09-24 (owner): the attendance log table already marked HOW a time was recorded; the scan
+// list and the Check-in Status modal showed a bare time. Same two symbols everywhere so they
+// mean one thing app-wide. An unknown source (e.g. a time that only exists because of an
+// approved time correction) renders nothing rather than claiming a face scan that never happened.
+function scanSourceIconHtml(source) {
+  if (source === 'web') {
+    return `<span class="log-source web" style="font-size:10px;margin-left:4px" title="${L('Recorded via Web App','บันทึกผ่าน Web App')}">🌐</span>`;
+  }
+  if (source === 'device') {
+    return `<span class="log-source device" style="font-size:10px;margin-left:4px" title="${L('Face scanner device','สแกนหน้าอุปกรณ์')}">📷</span>`;
+  }
+  return '';
 }
 // Weekends/public holidays keep status 'weekend'/'holiday' even with a real scan.
 // Early morning still applies on those days and may be paid with holiday work (user 2026-08-31).
@@ -1367,7 +1412,7 @@ function checkoutReviewTrigger(day, user, S) {
       day.status === 'abroad' || day.status === 'future') return false;
   if (!isAllowanceEligible(S.allowanceEligibility, user.role, 'earlyLate')) return false;
   const a = S.allowances || {};
-  const thr1 = a.lateNightThreshold1Hour || a.lateNightThresholdHour || 19;
+  const thr1 = lateNightThresholdHourOf(a, 1);
   const mins = lateNightCheckoutMins(day.checkOut);
   return Number.isFinite(mins) && mins >= lateNightThresholdMins(thr1);
 }
@@ -1792,7 +1837,7 @@ function timeCorrectionDependents(corr, leaves, dayWith, dayWithout, S) {
     if (l.type === 'late-out') {
       if (!checkIn || !d.checkOut) return true;
       const out = lateNightCheckoutMins(d.checkOut);
-      const thr1 = a.lateNightThreshold1Hour || a.lateNightThresholdHour || 19;
+      const thr1 = lateNightThresholdHourOf(a, 1);
       if (!Number.isFinite(out) || out < lateNightThresholdMins(thr1) || !lateNightCheckoutOk(d)) return true;
       return !!l.lateOutTime && !(lateNightCheckoutMins(l.lateOutTime) <= out);
     }
@@ -2502,6 +2547,9 @@ async function loadSettingsFromBackend() {
     if (data.periodLocks)       PERIOD_LOCKS        = data.periodLocks;
     if (data.leaveCarryForward) LEAVE_CARRY_FORWARD = data.leaveCarryForward;
     LEAVE_CARRY_FORWARD_RUNS = (data.leaveCarryForwardRuns && typeof data.leaveCarryForwardRuns === 'object' && !Array.isArray(data.leaveCarryForwardRuns)) ? data.leaveCarryForwardRuns : {};
+    // Who last overrode each employee's carry-forward by hand (md/accounting only -- the server
+    // strips this for everyone else, so it is simply absent for a normal user).
+    LEAVE_CARRY_FORWARD_EDITS = (data.leaveCarryForwardEdits && typeof data.leaveCarryForwardEdits === 'object' && !Array.isArray(data.leaveCarryForwardEdits)) ? data.leaveCarryForwardEdits : {};
     if (data.leaveOpeningUsed)  LEAVE_OPENING_USED  = data.leaveOpeningUsed;
     if (data.tawi50Overrides)   TAWI50_OVERRIDES    = data.tawi50Overrides;
     if (data.appSettings) {
@@ -2796,8 +2844,15 @@ function openingLeaveRemainingDhm(u, type, year) {
   return minutesToLeaveDhm(bal.remMin);
 }
 
+// 2026-09-24 (owner): opening balances describe the leave already spent when the system went live,
+// so they only ever apply to the go-live year. The section reads bangkokYear(), so from 1 Jan of the
+// NEXT year it would silently offer a fresh, empty set of inputs for a year that must never have
+// any -- and saving those would deduct that leave from everyone. Locked read-only outside the
+// go-live year; PUT /api/settings enforces the same rule, this is only the visible half.
+function openingBalancesEditableYear() { return APP_FIRST_PERIOD_START.getFullYear(); }
 function openingLeaveBalancesSectionHtml() {
   const year = bangkokYear();
+  const locked = year !== openingBalancesEditableYear();
   const employees = leaveSummaryEmployees();
   const headCell = (label) => `<th style="padding:7px 8px;text-align:center;font-size:11px;color:#64748b;font-weight:600;border-bottom:2px solid #e2e8f0;white-space:nowrap">${label}</th>`;
   const unitLbl = (th, en) => `<span style="display:block;font-size:9px;color:#94a3b8;margin-top:2px">${L(en, th)}</span>`;
@@ -2820,11 +2875,11 @@ function openingLeaveBalancesSectionHtml() {
       const rem = openingLeaveRemainingDhm(u, type, year);
       const inp = (unit, val, max, w) =>
         `<label style="display:flex;flex-direction:column;align-items:center;margin:0">
-           <input type="number" min="0" max="${max}" step="1" inputmode="numeric"
+           <input type="number" min="0" max="${max}" step="1" inputmode="numeric"${locked ? ' disabled' : ''}
              data-ou-user="${u.id}" data-ou-type="${type}" data-ou-unit="${unit}"
              data-ou-initial="${escapeHtml(String(val))}"
              value="${escapeHtml(String(val))}"
-             style="width:${w}px;padding:5px 4px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;text-align:center;box-sizing:border-box">
+             style="width:${w}px;padding:5px 4px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;text-align:center;box-sizing:border-box${locked ? ';background:#f1f5f9;color:#94a3b8;cursor:not-allowed' : ''}">
            ${unitLbl(unit === 'd' ? 'วัน' : unit === 'h' ? 'ชม.' : 'นาที', unit === 'd' ? 'd' : unit === 'h' ? 'h' : 'm')}
          </label>`;
       // This row is calibrated against the approved-only balance (days come off on approval), so
@@ -2845,6 +2900,24 @@ function openingLeaveBalancesSectionHtml() {
     const creditNote = (cr) => cr > 0
       ? `<div style="font-size:10px;color:#0d9488;font-weight:500" title="${L('carried in at go-live', 'ยกมาตอนเปิดระบบ')}">⊕ +${fmtDays(cr)}</div>`
       : '';
+    // 2026-09-24 (owner): editable carry-forward, one box per employee. Days, not d/h/m -- the
+    // year-end run stores days too, and the server caps it at leave.carryForwardMax. Unlike the
+    // opening columns beside it this stays editable every year: carry-forward is not a one-off
+    // go-live figure. `step` allows the 3 dp the server rounds to (1 minute = 1/480 day).
+    const cfEdit = (() => {
+      const audit = LEAVE_CARRY_FORWARD_EDITS[getCarryForwardKey(year, u.id)];
+      const tip = audit
+        ? L(`Last edited by ${audit.by} on ${String(audit.at).slice(0, 10)}`,
+            `แก้ล่าสุดโดย ${audit.by} เมื่อ ${String(audit.at).slice(0, 10)}`)
+        : L('Carried forward from last year', 'ยกยอดมาจากปีที่แล้ว');
+      return `<div style="display:flex;flex-direction:column;align-items:center;gap:2px">
+        <input type="number" min="0" step="0.001" inputmode="decimal"
+          data-cf-user="${u.id}" data-cf-initial="${escapeHtml(String(aCf))}"
+          value="${escapeHtml(String(aCf))}" title="${escapeHtml(tip)}"
+          style="width:72px;padding:5px 4px;border:1px solid ${audit ? '#f59e0b' : '#e2e8f0'};border-radius:6px;font-size:12px;text-align:center;box-sizing:border-box">
+        ${audit ? `<span style="font-size:9px;color:#d97706;white-space:nowrap">✎ ${escapeHtml(String(audit.by).split(' ')[0])}</span>` : unitLbl('วัน', 'days')}
+      </div>`;
+    })();
     const alPoolLabel = (aCf > 0 || aCredit > 0)
       ? `<div>${fmtDays(aPool)}</div>${aCf > 0 ? `<div style="font-size:10px;color:#7c3aed;font-weight:500">↩ +${fmtDays(aCf)}</div>` : ''}${creditNote(aCredit)}`
       : fmtDays(aPool);
@@ -2853,6 +2926,7 @@ function openingLeaveBalancesSectionHtml() {
         <div style="font-weight:600">${escapeHtml(u.name)}</div>
         <div style="font-size:10px;color:#94a3b8">${u.employeeNo ? '#' + escapeHtml(String(u.employeeNo)) : ''}</div>
       </td>
+      <td style="padding:7px 4px;text-align:center">${cfEdit}</td>
       <td style="padding:7px 4px;text-align:center;font-size:11px;color:#64748b">${alPoolLabel}</td>
       <td style="padding:7px 4px;text-align:center">${inpRem('annual')}</td>
       <td style="padding:7px 4px;text-align:center;font-size:11px;color:#64748b">${fmtDays(sE)}${creditNote(sCredit)}</td>
@@ -2876,6 +2950,7 @@ function openingLeaveBalancesSectionHtml() {
         <table style="width:100%;border-collapse:collapse;font-size:12px;min-width:760px">
           <thead><tr style="background:#f8fafc">
             <th style="padding:7px 8px;text-align:left;font-size:11px;color:#64748b;font-weight:600;border-bottom:2px solid #e2e8f0">${L('Employee','พนักงาน')}</th>
+            ${headCell(currentLang === 'ja' ? `${year - 1}年からの繰越` : L(`Carried from ${year - 1}`, `ยกยอดจากปี ${year - 1}`))}
             ${headCell(L('AL pool','พักร้อนรวม'))}
             ${headCell(L('AL remaining','เหลือพักร้อน'))}
             ${headCell(L('Sick quota','โควตาป่วย'))}
@@ -2883,24 +2958,146 @@ function openingLeaveBalancesSectionHtml() {
             ${headCell(L('Biz quota','โควตากิจ'))}
             ${headCell(L('Biz remaining','เหลือกิจ'))}
           </tr></thead>
-          <tbody>${rows || `<tr><td colspan="7" style="padding:16px;text-align:center;color:#94a3b8">${L('No employees','ไม่มีพนักงาน')}</td></tr>`}</tbody>
+          <tbody>${rows || `<tr><td colspan="8" style="padding:16px;text-align:center;color:#94a3b8">${L('No employees','ไม่มีพนักงาน')}</td></tr>`}</tbody>
         </table>
       </div>
       <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-        <button type="button" class="btn btn-primary btn-sm" onclick="saveOpeningLeaveBalancesFromUI(${year})">💾 ${L('Save opening balances','บันทึกยอดเปิดระบบ')}</button>
-        <span style="font-size:11px;color:#94a3b8">${L('Does not use the main Settings Save button.', 'ไม่ใช้ปุ่มบันทึก Settings หลัก')}</span>
+        <button type="button" class="btn btn-primary btn-sm" onclick="saveOpeningPanel(${year})">💾 ${L('Save','บันทึก')}</button>
+        <span style="font-size:11px;color:#94a3b8">${L('Saves both columns. Does not use the main Settings Save button.', 'บันทึกทั้งสองคอลัมน์ ไม่ใช้ปุ่มบันทึก Settings หลัก')}</span>
+        ${locked
+          ? `<span style="font-size:11px;color:#64748b;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:6px;padding:7px 10px">🔒 ${currentLang === 'ja'
+              ? `開通残高は開通年（${openingBalancesEditableYear()}年）のみ編集可。繰越は毎年編集できます。`
+              : L(`Opening balances are editable only in the go-live year (${openingBalancesEditableYear()}); carry-forward stays editable.`,
+                  `ยอดเปิดระบบแก้ได้เฉพาะปี ${openingBalancesEditableYear()} ส่วนยกยอดยังแก้ได้ทุกปี`)}</span>`
+          : ''}
       </div>
     </div>
   </details>`;
 }
 
-async function saveOpeningLeaveBalancesFromUI(year) {
+// 2026-09-24 (owner): manual per-employee carry-forward. Sends ONLY the rows whose value actually
+// changed, one PUT each (the endpoint takes a single employee on purpose -- it is a correction, not
+// a bulk rewrite), so a row another admin edited after this page rendered is left alone.
+async function saveCarryForwardFromUI(year, opts) {
+  const combined = !!(opts && opts.combined);
+  if (blockIfObserver()) return 'cancelled';
+  year = year || bangkokYear();
+  const inputs = [...document.querySelectorAll('[data-cf-user]')];
+  const changed = [];
+  for (const el of inputs) {
+    const before = Number(el.getAttribute('data-cf-initial'));
+    const raw = (el.value || '').trim();
+    const after = Number(raw);
+    if (raw === '' || !Number.isFinite(after) || after < 0) {
+      showToast(L('Carry-forward must be 0 or more', 'ยกยอดต้องเป็น 0 หรือมากกว่า'), 'warning');
+      el.focus();
+      return 'invalid';
+    }
+    // Compare rounded to the same 3 dp the server stores, so re-saving an untouched row is a no-op
+    // rather than a spurious audit entry.
+    if (Math.round(after * 1000) !== Math.round((Number.isFinite(before) ? before : 0) * 1000)) {
+      changed.push({ userId: Number(el.getAttribute('data-cf-user')), days: after, before });
+    }
+  }
+  if (!changed.length) {
+    if (!combined) showToast(L('Nothing changed', 'ไม่มีการเปลี่ยนแปลง'), 'info');
+    return 'none';
+  }
+  // Local formatter on purpose: the table's own fmtDays is a const inside its row .map(), not a
+  // module-level helper, so it is not in scope here.
+  const d2 = (n) => String(Math.round((Number(n) || 0) * 100) / 100);
+  const names = changed.map(c => {
+    const u = (DATA_USERS || []).find(x => x && x.id === c.userId);
+    return `• ${u ? u.name : c.userId}: ${d2(Number.isFinite(c.before) ? c.before : 0)} → ${d2(c.days)}`;
+  }).join('\n');
+  // This edits a real leave balance, so it is never silent -- the expiry consequence is spelled out
+  // because a figure moved into carry-forward starts expiring, which a plain number box does not say.
+  const expiry = carryForwardExpiryEnabled && carryForwardExpiryEnabled()
+    ? '\n\n' + L(`Carried-forward days expire on ${fmtDate(carryForwardExpiryDateStr(year))}.`,
+                 `วันยกยอดจะหมดอายุ ${fmtDate(carryForwardExpiryDateStr(year))}`)
+    : '';
+  if (!confirm(L(`Change carry-forward for ${year}?\n\n${names}${expiry}`,
+                 `เปลี่ยนวันยกยอดของปี ${year} ใช่ไหม?\n\n${names}${expiry}`))) return 'cancelled';
+
+  const failed = [];
+  for (const c of changed) {
+    try {
+      const res = await apiFetch('/api/leave-carry-forward', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ year, userId: c.userId, days: c.days }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.success === false) throw new Error(data.message || `HTTP ${res.status}`);
+      // Keep the in-memory copy in step with what the server just stored. The opening-balance save
+      // that may run straight after this one derives "used before go-live" from
+      // openingLeavePoolDays(), which reads exactly this map -- with the stale value it would size
+      // the pool against the OLD carry-forward and write a wrong prior-used figure.
+      LEAVE_CARRY_FORWARD[getCarryForwardKey(year, c.userId)] = Number(data.days);
+    } catch (e) {
+      failed.push(`${c.userId}: ${e.message}`);
+    }
+  }
+  if (combined) return failed.length ? 'error' : 'saved';
+  // No argument: renderSettingsPage() re-fetches settings itself before rendering, so the boxes and
+  // the ✎ audit marks below them show what the SERVER stored (rounded to 3 dp), not what was typed.
+  if (currentPage === 'settings') renderSettingsPage();
+  if (failed.length) {
+    showToast(L(`Saved with errors: ${failed.join('; ')}`, `บันทึกแล้วแต่มีข้อผิดพลาด: ${failed.join('; ')}`), 'error');
+  } else {
+    showToast(L(`Carry-forward updated for ${changed.length} employee(s)`,
+                `อัปเดตวันยกยอด ${changed.length} คนแล้ว`), 'success');
+  }
+}
+
+// 2026-09-24 (owner): one Save for the whole panel. The two columns are stored and gated
+// differently (carry-forward is server-owned and editable every year; opening balances are
+// go-live-year-only), but that is the app's problem, not the admin's.
+// Order matters and is the real reason this exists: the opening figure is derived from
+// pool - used - typed remaining, and the pool INCLUDES carry-forward. Saving carry-forward first
+// (and refreshing the in-memory copy) means a single click leaves both columns consistent; doing it
+// in the other order silently wrote an opening figure calibrated against the old carry-forward.
+async function saveOpeningPanel(year) {
   if (blockIfObserver()) return;
   year = year || bangkokYear();
+  const cf = await saveCarryForwardFromUI(year, { combined: true });
+  if (cf === 'invalid' || cf === 'cancelled') return;
+  const openingEditable = year === openingBalancesEditableYear();
+  const opening = openingEditable
+    ? await saveOpeningLeaveBalancesFromUI(year, { combined: true })
+    : 'locked';
+
+  if (cf === 'none' && (opening === 'none' || opening === 'locked')) {
+    showToast(currentLang === 'ja' ? 'ℹ️ 変更はありません'
+      : L('ℹ️ No changes to save', 'ℹ️ ไม่มีการเปลี่ยนแปลงให้บันทึก'), 'info');
+    return;
+  }
+  if (currentPage === 'settings') renderSettingsPage();
+  const bits = [];
+  if (cf === 'saved') bits.push(L('carry-forward', 'ยกยอด'));
+  if (opening === 'saved') bits.push(L('opening balances', 'ยอดเปิดระบบ'));
+  if (cf === 'error' || opening === 'error') {
+    showToast(L('❌ Some rows failed to save — check the values and try again',
+                '❌ บางรายการบันทึกไม่สำเร็จ — ตรวจค่าแล้วลองใหม่'), 'danger');
+  } else {
+    showToast(currentLang === 'ja' ? '✅ 保存しました' : L(`✅ Saved: ${bits.join(' + ')}`, `✅ บันทึกแล้ว: ${bits.join(' + ')}`), 'success');
+  }
+}
+
+async function saveOpeningLeaveBalancesFromUI(year, opts) {
+  const combined = !!(opts && opts.combined);
+  if (blockIfObserver()) return 'cancelled';
+  year = year || bangkokYear();
+  // The button is not rendered outside the go-live year; this guards the stale-page case (the tab
+  // was opened on 31 Dec and the button clicked after midnight) so it cannot write next year's keys.
+  if (year !== openingBalancesEditableYear()) {
+    showToast(L(`Opening balances can only be edited in ${openingBalancesEditableYear()}`,
+                `แก้ยอดเปิดระบบได้เฉพาะปี ${openingBalancesEditableYear()} เท่านั้น`), 'warning');
+    return 'locked';
+  }
   const inputs = document.querySelectorAll('[data-ou-user][data-ou-type][data-ou-unit]');
   if (!inputs.length) {
-    showToast(L('Nothing to save', 'ไม่มีข้อมูลให้บันทึก'), 'warning');
-    return;
+    if (!combined) showToast(L('Nothing to save', 'ไม่มีข้อมูลให้บันทึก'), 'warning');
+    return 'none';
   }
   const groups = new Map();
   inputs.forEach(el => {
@@ -2959,19 +3156,25 @@ async function saveOpeningLeaveBalancesFromUI(year) {
     updated++;
   });
   if (!updated) {
-    showToast(currentLang === 'ja'
-      ? 'ℹ️ 変更はありません'
-      : L('ℹ️ No changes to save', 'ℹ️ ไม่มีการเปลี่ยนแปลงให้บันทึก'), 'info');
-    return;
+    if (!combined) {
+      showToast(currentLang === 'ja'
+        ? 'ℹ️ 変更はありません'
+        : L('ℹ️ No changes to save', 'ℹ️ ไม่มีการเปลี่ยนแปลงให้บันทึก'), 'info');
+    }
+    return 'none';
   }
   try {
     await saveLeaveOpeningUsed(patch);
+    if (combined) return 'saved';
     showToast(currentLang === 'ja'
       ? `✅ 開通残高を保存しました（${updated}件）`
       : L(`✅ Opening balances saved (${updated} rows)`, `✅ บันทึกยอดเปิดระบบแล้ว (${updated} รายการ)`), 'success');
     if (currentPage === 'settings') renderSettingsPage(true);
+    return 'saved';
   } catch (e) {
+    if (combined) return 'error';
     showToast(L('❌ Save failed: ', '❌ บันทึกไม่สำเร็จ: ') + (e.message || e), 'danger');
+    return 'error';
   }
 }
 
@@ -3466,7 +3669,7 @@ function cfNotifyDaysText(lang) {
 }
 function cfDaysAndFull(min) {
   const days = Math.round(Math.max(0, min) / 480 * 100) / 100;
-  return currentLang === 'ja' ? `${days}日（${minToStrFull(min)}）` : L(`${days} day(s) (${minToStrFull(min)})`, `${days} วัน (${minToStrFull(min)})`);
+  return currentLang === 'ja' ? `${days}日（${minToStr(min)}）` : L(`${days} day(s) (${minToStr(min)})`, `${days} วัน (${minToStr(min)})`);
 }
 // Settings -> Leave Policy (md/accounting page): table of employees with carry-forward at risk.
 function cfAtRiskReportHtml() {
@@ -4123,8 +4326,8 @@ function renderSettingsPage(_skipRefresh) {
         field('', '')
       )}
       ${row2(
-        field(L('Check-out from (×1 rate)','เช็กเอาท์ตั้งแต่กี่โมงได้ ×1'), `<input id="set-late-thr1" type="time" value="${String(s.allowances.lateNightThreshold1Hour||19).padStart(2,'0')}:00" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 19:00','เช่น 19:00')),
-        field(L('Check-out from (×2 rate)','เช็กเอาท์ตั้งแต่กี่โมงได้ ×2'), `<input id="set-late-thr2" type="time" value="${String(s.allowances.lateNightThreshold2Hour||s.allowances.lateNightThresholdHour||20).padStart(2,'0')}:00" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 20:00','เช่น 20:00'))
+        field(L('Check-out from (×1 rate)','เช็กเอาท์ตั้งแต่กี่โมงได้ ×1'), `<input id="set-late-thr1" type="time" value="${String(lateNightThresholdHourOf(s.allowances, 1)).padStart(2,'0')}:00" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 19:00','เช่น 19:00')),
+        field(L('Check-out from (×2 rate)','เช็กเอาท์ตั้งแต่กี่โมงได้ ×2'), `<input id="set-late-thr2" type="time" value="${String(lateNightThresholdHourOf(s.allowances, 2)).padStart(2,'0')}:00" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 20:00','เช่น 20:00'))
       )}
       <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Diligence / Personal Car','เบี้ยขยัน / ค่าใช้รถส่วนตัว')}</div>
       ${row2(
@@ -4666,9 +4869,10 @@ function removeLateDeductTier(idx) {
 }
 
 function minToStr(min) {
-  const d = Math.floor(min / 480);
-  const h = Math.floor((min % 480) / 60);
-  const m = min % 60;
+  const n = Math.max(0, Math.round(Number(min) || 0));
+  const d = Math.floor(n / 480);
+  const h = Math.floor((n % 480) / 60);
+  const m = n % 60;
   const parts = [];
   const ja = currentLang === 'ja';
   if (d > 0) parts.push(ja ? `${d}日` : L(`${d}d`, `${d} วัน`));
@@ -4677,16 +4881,27 @@ function minToStr(min) {
   return parts.length ? parts.join(' ') : (ja ? '0日' : L('0d', '0 วัน'));
 }
 
-// 2026-09-24 (owner): a REMAINING leave balance always shows all three units, zeros included
-// ("11 วัน 3 ชั่วโมง 0 นาที" / "11d 3h 0m" / "11日 3時間 0分"). minToStr() above stays as-is for
-// used/pending/deducted amounts and messages.
-function minToStrFull(min) {
+// 2026-09-24 (owner): a unit that is zero is never printed -- "11 วัน 3 ชม." not
+// "11 วัน 3 ชั่วโมง 0 นาที" -- but a real remainder of minutes still shows. This reverses the
+// same-day earlier rule that spelled out all three units for a REMAINING balance (the old
+// minToStr(), now removed): every leave figure in the app goes through minToStr() above.
+function daysToStr(days) {
+  return minToStr(Math.round((Number(days) || 0) * 480));
+}
+// The big number on a leave card only: same figure as minToStr(), with the short unit ("ชม.") set
+// at half the digit size so the number itself is what the eye lands on first. Everywhere else,
+// including the small lines on the same card, keeps the full word.
+function leaveAmountHtml(min) {
   const n = Math.max(0, Math.round(Number(min) || 0));
-  const d = Math.floor(n / 480);
-  const h = Math.floor((n % 480) / 60);
-  const m = n % 60;
-  if (currentLang === 'ja') return `${d}日 ${h}時間 ${m}分`;
-  return L(`${d}d ${h}h ${m}m`, `${d} วัน ${h} ชั่วโมง ${m} นาที`);
+  const d = Math.floor(n / 480), h = Math.floor((n % 480) / 60), m = n % 60;
+  const unit = txt => `<span style="font-size:.5em;font-weight:700;opacity:.8;margin-left:3px">${txt}</span>`;
+  const piece = (v, ja, en, th) => `${v}${unit(currentLang === 'ja' ? ja : L(en, th))}`;
+  const out = [];
+  if (d > 0) out.push(piece(d, '日', 'd', 'วัน'));
+  if (h > 0) out.push(piece(h, '時間', 'h', 'ชม.'));
+  if (m > 0) out.push(piece(m, '分', 'm', 'นาที'));
+  if (!out.length) out.push(piece(0, '日', 'd', 'วัน'));
+  return out.join(' ');
 }
 
 function computeLateDeductMinutes(userId, year) {
@@ -4827,8 +5042,12 @@ async function saveSettingsPage() {
   APP_SETTINGS.allowances.earlyThreshold2Min   = timeToMins(document.getElementById('set-early-thr2')?.value);
   APP_SETTINGS.allowances.lateNight1            = fi('set-late1-amt');
   APP_SETTINGS.allowances.lateNight2            = fi('set-late2-amt');
-  APP_SETTINGS.allowances.lateNightThreshold1Hour = parseInt((document.getElementById('set-late-thr1')?.value || '19:00').split(':')[0]) || 19;
-  APP_SETTINGS.allowances.lateNightThreshold2Hour = parseInt((document.getElementById('set-late-thr2')?.value || '20:00').split(':')[0]) || 20;
+  // 2026-09-24 (owner): `parseInt(...) || 19` discarded a midnight (0) threshold at the moment of
+  // saving, which is what made 00:00 look unsavable. Only a non-numeric field falls back now.
+  const _thr1Raw = parseInt((document.getElementById('set-late-thr1')?.value || '19:00').split(':')[0], 10);
+  const _thr2Raw = parseInt((document.getElementById('set-late-thr2')?.value || '20:00').split(':')[0], 10);
+  APP_SETTINGS.allowances.lateNightThreshold1Hour = Number.isFinite(_thr1Raw) ? _thr1Raw : 19;
+  APP_SETTINGS.allowances.lateNightThreshold2Hour = Number.isFinite(_thr2Raw) ? _thr2Raw : 20;
   APP_SETTINGS.allowances.holidayTransport       = fi('set-holiday-transport');
   APP_SETTINGS.allowances.diligence               = fi('set-diligence-amt');
   APP_SETTINGS.allowances.personalCar             = fi('set-personalcar-amt');
@@ -8259,7 +8478,7 @@ function renderAttendanceTable() {
       l.userId === targetUserId && l.type === 'holiday-work' && l.status === 'approved'
     ).map(l => l.dateFrom));
     if (canEarlyLateTarget && deviceScanQualifiesForLateNight(row, _lnHwDates)) {
-      const _ln2Thr = _ATallowances.lateNightThreshold2Hour || _ATallowances.lateNightThresholdHour || 20;
+      const _ln2Thr = lateNightThresholdHourOf(_ATallowances, 2);
       const bonus = lateNightPoints(row.lateOut, _ln2Thr) === 2 ? `฿${_ATallowances.lateNight2 || 480}` : `฿${_ATallowances.lateNight1 || 240}`;
       lateBadge = attAllowIcon('🌙', `${L('Late Night', 'Late Night')} ${row.lateOut} (${bonus})`);
     }
@@ -8301,12 +8520,8 @@ function renderAttendanceTable() {
       ? `<span class="att-allow-icons">${allowIcons}</span>`
       : '<span style="color:#cbd5e1">—</span>';
 
-    const inSrc  = row.checkInSource  === 'web'
-      ? `<span class="log-source web"    style="font-size:10px;margin-left:4px" title="${L('Recorded via Web App','บันทึกผ่าน Web App')}">🌐</span>`
-      : `<span class="log-source device" style="font-size:10px;margin-left:4px" title="${L('Face scanner device','สแกนหน้าอุปกรณ์')}">📷</span>`;
-    const outSrc = row.checkOutSource === 'web'
-      ? `<span class="log-source web"    style="font-size:10px;margin-left:4px" title="${L('Recorded via Web App','บันทึกผ่าน Web App')}">🌐</span>`
-      : `<span class="log-source device" style="font-size:10px;margin-left:4px" title="${L('Face scanner device','สแกนหน้าอุปกรณ์')}">📷</span>`;
+    const inSrc  = scanSourceIconHtml(row.checkInSource  || 'device');
+    const outSrc = scanSourceIconHtml(row.checkOutSource || 'device');
     const checkoutReviewHtml = buildCheckoutReviewHtml(row, targetUser, true);
 
     // SECURITY FIX 2026-08-04 (Opus audit, C2): this used to escape only the single quote
@@ -8617,7 +8832,7 @@ function renderDashboard() {
 
   // Early/Late — นับครั้ง
   const _S = APP_SETTINGS.allowances;
-  const _ln2Thr = _S.lateNightThreshold2Hour || _S.lateNightThresholdHour || 20;
+  const _ln2Thr = lateNightThresholdHourOf(_S, 2);
   let earlyCount = 0, lateNightCount = 0;
   const _dashHwDates = new Set(DATA_LEAVES.filter(l =>
     l.userId === currentUser.id && l.type === 'holiday-work' && l.status === 'approved'
@@ -9062,7 +9277,7 @@ function showDashPeriodDetail(kind) {
     if (rows.length) foot = `<tfoot><tr style="background:#fffbeb"><td colspan="2" style="padding:8px 14px;font-weight:700;color:#92400e">${L('Total', 'รวม')}</td><td style="padding:8px 14px;text-align:center;font-weight:700;color:#d97706">${tot} ${L('times', 'ครั้ง')}</td></tr></tfoot>`;
   } else if (kind === 'latenight') {
     headers = TH(L('Date', 'วันที่'), c) + THC(L('Check Out', 'เวลาออก'), c) + THC(L('Count', 'จำนวนครั้ง'), c);
-    const ln2 = _S.lateNightThreshold2Hour || _S.lateNightThresholdHour || 20;
+    const ln2 = lateNightThresholdHourOf(_S, 2);
     let tot = 0;
     rows = days.filter(d => deviceScanQualifiesForLateNight(d, _dashHwDates)).map(d => {
       const pts = lateNightPoints(d.lateOut, ln2);
@@ -9914,9 +10129,9 @@ function openEmployeeProfile(id) {
           ${u.endDate ? `<div class="profile-field"><label>${L('End Date', 'วันที่สิ้นสุดการทำงาน')}</label><p style="color:#dc2626;font-weight:600">${fmtDate(new Date(u.endDate + 'T12:00:00'))}</p></div>` : ''}
           <div class="profile-field"><label>${L('Annual Leave Balance', 'ลาพักร้อนคงเหลือ')}</label><p style="color:#2563eb;font-weight:700">${(!canUseAnnualLeave(u) && !isMdAccountingView())
             ? (currentLang === 'ja' ? `🔒 ${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'}まで利用不可` : L(`🔒 Locked until ${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'}`, `🔒 ยังไม่เปิดสิทธิ์ (ใช้ได้ ${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'})`))
-            : `${minToStrFull(profileLeaveBal.annual.remMin)}${!isAnnualLeaveUnlocked(u) ? (currentLang === 'ja' ? `（${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'}から）` : L(` (unlocks ${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'})`, ` (เปิดสิทธิ์ ${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'})`)) : (nextAnnualLeaveTier(u) ? (currentLang === 'ja' ? `（次は${nextAnnualLeaveTier(u).date}から${nextAnnualLeaveTier(u).days}日）` : L(` (next ${nextAnnualLeaveTier(u).days}d from ${nextAnnualLeaveTier(u).date})`, ` (ขั้นถัดไป ${nextAnnualLeaveTier(u).days} วัน ตั้งแต่ ${nextAnnualLeaveTier(u).date})`)) : '')}`}</p></div>
-          <div class="profile-field"><label>${L('Sick Leave Balance', 'ลาป่วยคงเหลือ')}</label><p style="color:#ef4444;font-weight:700">${minToStrFull(profileLeaveBal.sick.remMin)}</p></div>
-          <div class="profile-field"><label>${L('Business Leave Balance', 'ลากิจคงเหลือ')}</label><p style="color:#8b5cf6;font-weight:700">${minToStrFull(profileLeaveBal.business.remMin)}</p></div>
+            : `${minToStr(profileLeaveBal.annual.remMin)}${!isAnnualLeaveUnlocked(u) ? (currentLang === 'ja' ? `（${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'}から）` : L(` (unlocks ${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'})`, ` (เปิดสิทธิ์ ${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'})`)) : (nextAnnualLeaveTier(u) ? (currentLang === 'ja' ? `（次は${nextAnnualLeaveTier(u).date}から${nextAnnualLeaveTier(u).days}日）` : L(` (next ${nextAnnualLeaveTier(u).days}d from ${nextAnnualLeaveTier(u).date})`, ` (ขั้นถัดไป ${nextAnnualLeaveTier(u).days} วัน ตั้งแต่ ${nextAnnualLeaveTier(u).date})`)) : '')}`}</p></div>
+          <div class="profile-field"><label>${L('Sick Leave Balance', 'ลาป่วยคงเหลือ')}</label><p style="color:#ef4444;font-weight:700">${minToStr(profileLeaveBal.sick.remMin)}</p></div>
+          <div class="profile-field"><label>${L('Business Leave Balance', 'ลากิจคงเหลือ')}</label><p style="color:#8b5cf6;font-weight:700">${minToStr(profileLeaveBal.business.remMin)}</p></div>
           <div class="profile-field"><label>${L('Status', 'สถานะ')}</label><p><span class="badge ${u.active ? 'badge-success':'badge-danger'}">${u.active ? L('● Active', '● ปกติ') : L('● Suspended', '● ระงับ')}</span></p></div>
         </div>
       </div>
@@ -10645,7 +10860,7 @@ function computeReportPeriodStats(u, start, end, periodIndex) {
     else if (mins <= (_SA.earlyThreshold1Min || 450)) earlyCount += 1;
   });
 
-  const _ln2 = _SA.lateNightThreshold2Hour || _SA.lateNightThresholdHour || 20;
+  const _ln2 = lateNightThresholdHourOf(_SA, 2);
   let lateNightCount = 0;
   days.filter(d => deviceScanQualifiesForLateNight(d, _rptHwDates)).forEach(d => {
     lateNightCount += lateNightPoints(d.lateOut, _ln2);
@@ -10721,7 +10936,7 @@ function leaveSummaryBalances(u, year) {
 
 function leaveSummaryUsedRemCell(bal, color) {
   const used = minToStr(bal.usedMin);
-  const rem = minToStrFull(bal.remMin);
+  const rem = minToStr(bal.remMin);
   const pct = bal.totalMin > 0 ? Math.min(100, Math.round((bal.remMin / bal.totalMin) * 100)) : 0;
   return `<div class="ls-balance-cell" style="line-height:1.35">
     <div style="font-size:12px;font-weight:700;color:${color}">${used} <span style="color:#94a3b8;font-weight:500">/</span> ${rem}</div>
@@ -10735,7 +10950,7 @@ function leaveSummaryMobileStack(bal) {
   const line = (emoji, b, color) =>
     `<div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;font-size:11px;line-height:1.45;margin-top:2px">
       <span style="flex-shrink:0">${emoji}</span>
-      <span style="text-align:right;font-weight:700;color:${color}">${minToStr(b.usedMin)} <span style="color:#94a3b8;font-weight:500">/</span> ${minToStrFull(b.remMin)}</span>
+      <span style="text-align:right;font-weight:700;color:${color}">${minToStr(b.usedMin)} <span style="color:#94a3b8;font-weight:500">/</span> ${minToStr(b.remMin)}</span>
     </div>`;
   return `<div style="min-width:0">
     ${line('🏖️', bal.annual, '#2563eb')}
@@ -10855,9 +11070,9 @@ function showLeaveSummaryDetail(userId) {
   body.innerHTML = `
     <div style="font-size:12px;color:#64748b;margin-bottom:12px">${L('Year', 'ปี')} <strong>${year}</strong>
       · ${L('Used / remaining', 'ใช้ / เหลือ')}:
-      <span style="color:#2563eb;font-weight:600">${minToStr(bal.annual.usedMin)} / ${minToStrFull(bal.annual.remMin)}</span> ·
-      <span style="color:#ef4444;font-weight:600">${minToStr(bal.sick.usedMin)} / ${minToStrFull(bal.sick.remMin)}</span> ·
-      <span style="color:#8b5cf6;font-weight:600">${minToStr(bal.business.usedMin)} / ${minToStrFull(bal.business.remMin)}</span>
+      <span style="color:#2563eb;font-weight:600">${minToStr(bal.annual.usedMin)} / ${minToStr(bal.annual.remMin)}</span> ·
+      <span style="color:#ef4444;font-weight:600">${minToStr(bal.sick.usedMin)} / ${minToStr(bal.sick.remMin)}</span> ·
+      <span style="color:#8b5cf6;font-weight:600">${minToStr(bal.business.usedMin)} / ${minToStr(bal.business.remMin)}</span>
     </div>
     ${(bal.annual.openingUsedDays > 0 || bal.sick.openingUsedDays > 0 || bal.business.openingUsedDays > 0)
       ? `<div style="font-size:11px;color:#64748b;margin:-4px 0 12px;line-height:1.5">📋 ${L('Includes time used before go-live', 'รวมยอดที่ใช้ก่อนเปิดระบบ')}:
@@ -11131,7 +11346,7 @@ function buildReportDetailTables(u, days, startStr, endStr) {
   const _rdA = APP_SETTINGS.allowances || {};
   const earlyThr1 = _rdA.earlyThreshold1Min || 450;
   const earlyThr2 = _rdA.earlyThreshold2Min || 390;
-  const lnThr2 = _rdA.lateNightThreshold2Hour || _rdA.lateNightThresholdHour || 20;
+  const lnThr2 = lateNightThresholdHourOf(_rdA, 2);
   const earlyDays=canEarlyLateRpt?days.filter(d=>{const hwDates=new Set(DATA_LEAVES.filter(l=>l.userId===u.id&&l.type==='holiday-work'&&l.status==='approved').map(l=>l.dateFrom));if(!deviceScanQualifiesForEarlyMorning(d,hwDates))return false;const[h,m]=d.checkIn.split(':').map(Number);return h*60+m<=earlyThr1;}):[];
   if (earlyDays.length>0) {
     let tot=0;
@@ -11454,8 +11669,8 @@ function computePayroll(user, start, end, periodIndex) {
   let lateNight2Count = 0, lateNight2Amount = 0, lateNight1Count = 0, lateNight1Amount = 0;
   const earlyScanPaidDates = new Set();
   if (canEarlyLate) {
-    const _ln1Thr = S.allowances.lateNightThreshold1Hour || S.allowances.lateNightThresholdHour || 19;
-    const _ln2Thr = S.allowances.lateNightThreshold2Hour || S.allowances.lateNightThresholdHour || 20;
+    const _ln1Thr = lateNightThresholdHourOf(S.allowances, 1);
+    const _ln2Thr = lateNightThresholdHourOf(S.allowances, 2);
     pDays.forEach(d => {
       // Auto early: Hikvision only. Rest days require approved holiday-work, then both pay.
       if (deviceScanQualifiesForEarlyMorning(d, holidayWorkDates)) {
@@ -12693,7 +12908,7 @@ function checkoutReviewPendingBoxHtml(pending, reviewed) {
   // Time comes from Settings and the MD's name from the current active MD account, so the hint
   // follows either change without a code edit.
   const lateTime = String(lateOutThresholdHour(1)).padStart(2, '0') + '.00';
-  const mdName = DATA_USERS.find(u => u.role === 'md' && u.active !== false)?.name || 'Managing Director';
+  const mdName = nameWithPrefix(DATA_USERS.find(u => u.role === 'md' && u.active !== false)) || 'Managing Director';
   const hint = L('A web Check Out after {time}. Allowing it lets the employee request the Late Night allowance (it must first be approved by {md}).',
     'กด Check Out บนเว็บหลังเวลา {time} — การอนุญาตเป็นการเปิดสิทธิ์ให้ยื่นขอ Allowance กลับดึกได้ (ต้องได้รับการยินยอมจากทาง {md} ก่อน)')
     .replace(/\{time\}/g, () => lateTime).replace(/\{md\}/g, () => mdName);
@@ -13610,9 +13825,9 @@ const NOTIFICATION_RENDERERS = {
     const days = Math.round(min / 480 * 100) / 100;
     const date = notifDateRange(p.expiryDate);
     return { icon: '⏳', text: currentLang === 'ja'
-      ? `繰越有給休暇${days}日（${minToStrFull(min)}）が${date}に失効します — それまでにご利用ください`
-      : L(`You have ${days} carry-forward day(s) (${minToStrFull(min)}) that expire on ${date} — use them before then`,
-          `คุณมีวันลาพักร้อนยกยอด ${days} วัน (${minToStrFull(min)}) ที่จะหมดอายุวันที่ ${date} — ใช้ให้ทันก่อนวันดังกล่าว`) };
+      ? `繰越有給休暇${days}日（${minToStr(min)}）が${date}に失効します — それまでにご利用ください`
+      : L(`You have ${days} carry-forward day(s) (${minToStr(min)}) that expire on ${date} — use them before then`,
+          `คุณมีวันลาพักร้อนยกยอด ${days} วัน (${minToStr(min)}) ที่จะหมดอายุวันที่ ${date} — ใช้ให้ทันก่อนวันดังกล่าว`) };
   },
   'cf-run-overdue': p => {
     const y = Number(p.year) || 0;
@@ -14599,12 +14814,12 @@ async function submitLeave() {
       const heldMin = pendingLeaveMinutes(u.id, type, thisYear, editingLeaveId);
       showToast(heldMin > 0
         ? (currentLang === 'ja'
-          ? `⚠️ 有給残日数が不足しています — 申請可能: ${minToStrFull(remMin)}（残り ${minToStrFull(remMin + heldMin)}、うち承認待ち ${minToStr(heldMin)} を確保済み）`
-          : L(`⚠️ Insufficient leave balance — ${minToStrFull(remMin)} available (${minToStrFull(remMin + heldMin)} remaining, ${minToStr(heldMin)} held for pending approval)`,
-              `⚠️ วันลาไม่พอ — ยื่นได้อีก ${minToStrFull(remMin)} (คงเหลือ ${minToStrFull(remMin + heldMin)} โดยกันไว้สำหรับใบที่รออนุมัติ ${minToStr(heldMin)})`))
+          ? `⚠️ 有給残日数が不足しています — 申請可能: ${minToStr(remMin)}（残り ${minToStr(remMin + heldMin)}、うち承認待ち ${minToStr(heldMin)} を確保済み）`
+          : L(`⚠️ Insufficient leave balance — ${minToStr(remMin)} available (${minToStr(remMin + heldMin)} remaining, ${minToStr(heldMin)} held for pending approval)`,
+              `⚠️ วันลาไม่พอ — ยื่นได้อีก ${minToStr(remMin)} (คงเหลือ ${minToStr(remMin + heldMin)} โดยกันไว้สำหรับใบที่รออนุมัติ ${minToStr(heldMin)})`))
         : (currentLang === 'ja'
-          ? `⚠️ 有給残日数が不足しています — 残り: ${minToStrFull(remMin)}`
-          : L(`⚠️ Insufficient leave balance — remaining: ${minToStrFull(remMin)}`, `⚠️ วันลาไม่พอ — คงเหลือ: ${minToStrFull(remMin)}`)), 'warning');
+          ? `⚠️ 有給残日数が不足しています — 残り: ${minToStr(remMin)}`
+          : L(`⚠️ Insufficient leave balance — remaining: ${minToStr(remMin)}`, `⚠️ วันลาไม่พอ — คงเหลือ: ${minToStr(remMin)}`)), 'warning');
       return;
     }
   }
@@ -15089,11 +15304,11 @@ async function submitClearAttachments() {
 // late-out feature in sync with Settings -> Late Night Allowance thresholds.
 function lateOutThresholdHour(tier) {
   const S = APP_SETTINGS.allowances;
-  return tier === 2 ? (S.lateNightThreshold2Hour || S.lateNightThresholdHour || 20) : (S.lateNightThreshold1Hour || 19);
+  return lateNightThresholdHourOf(S, tier);
 }
 function lateOutAllowanceForHour(hour) {
   const S = APP_SETTINGS.allowances;
-  const thr2 = S.lateNightThreshold2Hour || S.lateNightThresholdHour || 20;
+  const thr2 = lateNightThresholdHourOf(S, 2);
   return lateNightThresholdMins(hour) >= lateNightThresholdMins(thr2) ? (S.lateNight2 || 480) : (S.lateNight1 || 240);
 }
 
@@ -16657,41 +16872,76 @@ function renderLeaveBalanceSummary() {
         <div class="type">${cfg.label}</div>
         <div class="amount">🔒</div>
         <div class="detail" style="font-size:12px;color:#64748b;margin-top:2px">${lockDetail}</div>
+        <div class="leave-card-spacer"></div>
         <div class="leave-bar"><div class="leave-bar-fill" style="width:0%"></div></div>
       </div>`;
     }
     const bal = computeLeaveBalance(u, cfg.type, cfg.max, thisYear);
-    const { cfDays, compDays, effectiveMax, usedMin, lateDeduct, totalMin, remMin, remDays, openingUsedDays } = bal;
+    const { cfDays, compDays, effectiveMax, usedMin, lateDeduct, totalMin, remMin, openingUsedDays } = bal;
     const pct     = totalMin > 0 ? Math.round((remMin / totalMin) * 100) : 0;
     const usedStr = usedMin > 0 ? minToStr(usedMin) : L('0d', '0 วัน');
-    const remStr  = minToStrFull(remMin);
 
-    const cfBadge = cfDays > 0
-      ? `<div style="margin-top:3px;font-size:11px;color:#7c3aed">↩ ${currentLang === 'ja' ? `繰越+${cfDays}日` : L(`+${cfDays}d carry-forward`,`+${cfDays} วันยกยอด`)}</div>` : '';
-    const compBadge = compDays > 0
-      ? `<div style="margin-top:3px;font-size:11px;color:#059669">🔄 ${currentLang === 'ja' ? `獲得休暇+${compDays}日（休日出勤・海外移動日）` : L(`+${compDays}d earned (holiday work / abroad travel days)`,`+${compDays} วันที่ได้เพิ่ม (ทำงานวันหยุด / วันเดินทางต่างประเทศ)`)}</div>` : '';
+    // 2026-09-24 (owner): the card used to put the year's quota and the remaining balance in two
+    // lines that contradicted each other at a glance ("11" big, "10 วัน/ปี" small). The quota, the
+    // carry-forward and their total now sit in one right-aligned column under the balance, so the
+    // arithmetic is visible instead of implied. Carry-forward is an annual-leave concept only, so
+    // sick/business cards show the year's quota alone. Replaces the old cf/comp badges.
+    const entRow = (label, value, strong) => `
+      <div style="display:flex;justify-content:space-between;gap:10px;font-size:11.5px;margin-top:3px;${strong ? 'font-weight:700;color:var(--text)' : 'color:var(--text-muted)'}">
+        <span>${label}</span><span style="font-variant-numeric:tabular-nums;white-space:nowrap">${value}</span>
+      </div>`;
+    const entLabels = currentLang === 'ja'
+      ? { year: `${thisYear}年の付与`, cf: `${thisYear - 1}年からの繰越`, earned: '獲得日数', total: `${thisYear}年 合計` }
+      : {
+          year:   L(`${thisYear} entitlement`,        `สิทธิ์ปี ${thisYear}`),
+          cf:     L(`Carried from ${thisYear - 1}`,   `ยกยอดจากปี ${thisYear - 1}`),
+          earned: L('Earned days',                    'วันที่ได้เพิ่ม'),
+          total:  L(`Total for ${thisYear}`,          `รวมสิทธิ์ปี ${thisYear}`),
+        };
+    const entitlementHtml = cfg.type === 'annual'
+      ? `<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border);text-align:left">
+           ${entRow(entLabels.year, daysToStr(cfg.max))}
+           ${entRow(entLabels.cf, daysToStr(cfDays))}
+           ${compDays > 0 ? entRow(entLabels.earned, daysToStr(compDays)) : ''}
+           <div style="border-top:1px solid var(--border);margin-top:6px;padding-top:4px">
+             ${entRow(entLabels.total, daysToStr(effectiveMax), true)}
+           </div>
+         </div>`
+      : `<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border);text-align:left">
+           ${entRow(entLabels.year, daysToStr(cfg.max))}
+         </div>`;
+    // 2026-09-24 (owner): "รวมยอดก่อนเปิดระบบ" read like spare days the employee had gained. It is
+    // the opposite -- leave already SPENT before the system went live, counted inside the used
+    // figure below it -- so every language now says "used" explicitly.
+    // A NEGATIVE opening figure means the opposite -- days handed to the employee rather than spent
+    // (Sirintorn carried 1d 3h from 2025 this way before carry-forward existed; moved to
+    // leaveCarryForward 2026-09-24). Such a row used to render nothing at all, so the extra days
+    // appeared in the balance out of thin air and the card's own arithmetic did not add up.
     const openingBadge = openingUsedDays > 0
-      ? `<div style="margin-top:3px;font-size:11px;color:#64748b">📋 ${currentLang === 'ja' ? `開通前使用 ${minToStr(openingUsedDays * 480)}含む` : L(`Includes ${minToStr(openingUsedDays * 480)} used before go-live`, `รวมยอดก่อนเปิดระบบ ${minToStr(openingUsedDays * 480)}`)}</div>` : '';
+      ? `<div style="margin-top:3px;font-size:11px;color:var(--text-muted)">📋 ${currentLang === 'ja' ? `開通前に使用した休暇 ${minToStr(openingUsedDays * 480)} を含む` : L(`Includes ${minToStr(openingUsedDays * 480)} of leave used before go-live`, `รวมวันลาที่ใช้ก่อนเปิดระบบ ${minToStr(openingUsedDays * 480)}`)}</div>`
+      : openingUsedDays < 0
+      ? `<div style="margin-top:3px;font-size:11px;color:var(--text-muted)">📋 ${currentLang === 'ja' ? `開通前調整 +${minToStr(-openingUsedDays * 480)}` : L(`Pre-go-live adjustment +${minToStr(-openingUsedDays * 480)}`, `ปรับเพิ่มก่อนเปิดระบบ +${minToStr(-openingUsedDays * 480)}`)}</div>`
+      : '';
     const lateDeductBadge = lateDeduct.count > 0
       ? `<div style="margin-top:3px;font-size:11px;color:#dc2626">⏰ ${currentLang === 'ja'
           ? `遅刻 ${lateDeduct.count}回、控除 ${minToStr(lateDeduct.deductMin)}`
           : (currentLang === 'ja' ? `遅刻${lateDeduct.count}回、${minToStr(lateDeduct.deductMin)}控除` : L(`Late ${lateDeduct.count}×, deducted ${minToStr(lateDeduct.deductMin)}`, `มาสาย ${lateDeduct.count} ครั้ง หัก ${minToStr(lateDeduct.deductMin)}`))
         }</div>` : '';
     const usedLabel = usedMin > 0
-      ? (currentLang === 'ja' ? `年間${effectiveMax}日中 <strong>${usedStr}</strong> 使用済み` : L(`Used <strong>${usedStr}</strong> of ${effectiveMax} days/year`, `ใช้ไปแล้ว <strong>${usedStr}</strong> จากสิทธิ์ ${effectiveMax} วัน/ปี`))
-      : (currentLang === 'ja' ? `未使用 — 年間${effectiveMax}日` : L(`Unused — ${effectiveMax} days/year`, `ยังไม่ได้ใช้สิทธิ์ ${effectiveMax} วัน/ปี`));
+      ? (currentLang === 'ja' ? `<strong>${usedStr}</strong> 使用済み` : L(`Used <strong>${usedStr}</strong>`, `ใช้ไปแล้ว <strong>${usedStr}</strong>`))
+      : (currentLang === 'ja' ? '未使用' : L('Not used yet', 'ยังไม่ได้ใช้สิทธิ์'));
 
     return `<div class="leave-card ${cfg.cls}">
       <div class="emoji">${cfg.emoji}</div>
       <div class="type">${cfg.label}</div>
-      <div class="amount">${remDays}</div>
-      <div class="detail" style="font-size:12px;color:#64748b;margin-top:2px">${L('Remaining', 'คงเหลือ')} <strong>${remStr}</strong></div>
-      ${cfBadge}
-      ${compBadge}
+      <div class="amount">${leaveAmountHtml(remMin)}</div>
+      <div class="detail" style="font-size:12px;margin-top:2px">${L('Remaining', 'คงเหลือ')}</div>
+      ${entitlementHtml}
       ${openingBadge}
       ${lateDeductBadge}
       ${cfg.type === 'annual' ? annualLeaveCardNotesHtml(u, bal) : ''}
       <div class="detail" style="margin-top:5px;color:${usedMin > 0 ? cfg.color : '#10b981'};font-size:11px">${usedLabel}</div>
+      <div class="leave-card-spacer"></div>
       <div class="leave-bar"><div class="leave-bar-fill" style="width:${pct}%"></div></div>
     </div>`;
   }).join('');
@@ -17282,7 +17532,7 @@ function showAttendanceDetail(date) {
   if (row.lateOut && row.status !== 'company-trip' && isAllowanceEligible(APP_SETTINGS.allowanceEligibility, targetRole, 'earlyLate')
       && lateNightCheckoutOk(row)
       && (!isRestAttendanceDay(row) || hasHolidayWorkClaimOnDate(row.date, targetUserId, false))) {
-    const _ln2Thr = _dA.lateNightThreshold2Hour || _dA.lateNightThresholdHour || 20;
+    const _ln2Thr = lateNightThresholdHourOf(_dA, 2);
     const bonus = `฿${lateNightPoints(row.lateOut, _ln2Thr) === 2 ? (_dA.lateNight2 || 480) : (_dA.lateNight1 || 240)}`;
     const approved = row.lateApproved;
     tagsEl.innerHTML += `<span class="badge ${approved?'badge-success':'badge-warning'}">🌙 ${L('Late Night', 'ทำงานดึก')} ${escapeHtml(row.lateOut)} (+${bonus}) ${approved?L('✓ Approved','✓ อนุมัติแล้ว'):L('⏳ Pending','⏳ รออนุมัติ')}</span>`;
@@ -17330,7 +17580,7 @@ function getCheckinStatusLists() {
     const rec = attendanceLog[attKey(u.id, todayStr)];
     if (rec && rec.checkIn) {
       // 2026-09-24 (owner): an approved Abroad day is never shown as late.
-      checkedIn.push({ user: u, time: rec.checkIn, checkOut: rec.checkOut || null, isLate: rec.status === 'late' && !isApprovedAbroadDate(todayStr, u.id) });
+      checkedIn.push({ user: u, time: rec.checkIn, checkOut: rec.checkOut || null, checkInSource: rec.checkInSource || null, checkOutSource: rec.checkOutSource || null, isLate: rec.status === 'late' && !isApprovedAbroadDate(todayStr, u.id) });
     } else {
       notChecked.push(u);
     }
@@ -17355,9 +17605,9 @@ function showCheckinStatusModal() {
         <div style="font-size:11px;color:#64748b">${escapeHtml(item.user.position || '')}</div>
       </div>
       <div style="text-align:right">
-        <div style="font-weight:800;font-size:14px;color:${item.isLate ? '#d97706' : '#059669'}">${item.isLate ? '🟡' : '🟢'} ${escapeHtml(item.time)}</div>
+        <div style="font-weight:800;font-size:14px;color:${item.isLate ? '#d97706' : '#059669'}">${item.isLate ? '🟡' : '🟢'} ${escapeHtml(item.time)}${scanSourceIconHtml(item.checkInSource)}</div>
         ${item.isLate ? `<div style="font-size:11px;color:#d97706;font-weight:600">⏰ ${L('Late', 'มาสาย')}</div>` : ''}
-        ${item.checkOut ? `<div style="font-size:11px;color:#94a3b8">${L('Out', 'ออก')} ${escapeHtml(item.checkOut)}</div>` : `<div style="font-size:11px;color:#f59e0b">${L('Not out', 'ยังไม่ออก')}</div>`}
+        ${item.checkOut ? `<div style="font-size:11px;color:#94a3b8">${L('Out', 'ออก')} ${escapeHtml(item.checkOut)}${scanSourceIconHtml(item.checkOutSource)}</div>` : `<div style="font-size:11px;color:#f59e0b">${L('Not out', 'ยังไม่ออก')}</div>`}
       </div>
     </div>`).join('');
 
@@ -19217,6 +19467,7 @@ async function loadDoorEvents(dateStr, targetEmpNo) {
       const isLast  = i === allEvents.length - 1 && allEvents.length > 1;
       const icon    = isFirst ? '🟢' : isLast ? '🔴' : '🚪';
       const label   = isFirst ? L('Check In (first)', 'เข้างาน (ครั้งแรก)') : isLast ? L('Check Out (latest)', 'ออกงาน (ล่าสุด)') : L('Door Pass', 'ผ่านประตู');
+      const srcIcon = (isFirst || isLast) ? scanSourceIconHtml(ev.eventType === 'WebScan' ? 'web' : 'device') : '';
       const bg      = isFirst ? '#f0fdf4' : isLast ? '#fff1f2' : '#f8fafc';
       const border  = isFirst ? '#22c55e'  : isLast ? '#ef4444'  : '#e2e8f0';
       return `
@@ -19224,7 +19475,7 @@ async function loadDoorEvents(dateStr, targetEmpNo) {
           <span style="font-size:22px;flex-shrink:0">${icon}</span>
           <div style="flex:1">
             <div style="font-size:20px;font-weight:800;color:#1e293b;letter-spacing:.5px">${time}</div>
-            <div style="font-size:12px;color:#64748b;margin-top:2px">${label}</div>
+            <div style="font-size:12px;color:#64748b;margin-top:2px">${label}${srcIcon}</div>
           </div>
           <div style="font-size:11px;color:#94a3b8">${L('No.', 'ครั้งที่')} ${i + 1}</div>
         </div>`;
@@ -19273,13 +19524,14 @@ async function loadDoorEvents(dateStr, targetEmpNo) {
       const isLast  = i === evList.length - 1 && evList.length > 1;
       const icon    = isFirst ? '🟢' : isLast ? '🔴' : '🚪';
       const label   = isFirst ? L('In (first)', 'เข้า (ครั้งแรก)') : isLast ? L('Out (latest)', 'ออก (ล่าสุด)') : L('Door Pass', 'ผ่านประตู');
+      const srcIcon = (isFirst || isLast) ? scanSourceIconHtml(ev.eventType === 'WebScan' ? 'web' : 'device') : '';
       const bg      = isFirst ? '#f0fdf4' : isLast ? '#fff1f2' : '#f8fafc';
       const border  = isFirst ? '#22c55e'  : isLast ? '#ef4444'  : '#e2e8f0';
       return `
         <div style="display:flex;align-items:center;gap:12px;padding:10px 16px;background:${bg};border-left:3px solid ${border};border-bottom:1px solid #f1f5f9">
           <span style="font-size:18px">${icon}</span>
           <span style="font-size:17px;font-weight:800;color:#1e293b;font-family:monospace">${time}</span>
-          <span style="font-size:11px;color:#64748b;flex:1">${label}</span>
+          <span style="font-size:11px;color:#64748b;flex:1">${label}${srcIcon}</span>
           <span style="font-size:10px;color:#94a3b8">${L('No.', 'ครั้งที่')} ${i + 1}</span>
         </div>`;
     }).join('');
@@ -19479,7 +19731,7 @@ async function renderPayslipApprovalCard() {
               // review it) instead of the employee (already shown elsewhere on this same card),
               // and says "Managing Director clicks Approve" as the explicit next step.
               : '📝 ' + (() => {
-                  const mdName = escapeHtml(DATA_USERS.find(u => u.role === 'md' && u.active !== false)?.name || L('Managing Director', 'Managing Director'));
+                  const mdName = escapeHtml(nameWithPrefix(DATA_USERS.find(u => u.role === 'md' && u.active !== false)) || L('Managing Director', 'Managing Director'));
                   return currentLang === 'ja'
                     ? `Finalize PayrollでPITを入力し✓確認をクリックして${mdName}が確認できるようにしてください — その後Managing Directorが承認をクリックします`
                     : L(`Enter PIT and click ✓ Confirm in Finalize Payroll so ${mdName} can review — then Managing Director clicks Approve`, `กรอก PIT และกด ✓ ยืนยัน ในหน้า Finalize Payroll เพื่อให้ ${mdName} ตรวจสอบ — จากนั้นให้ Managing Director กดอนุมัติ`);

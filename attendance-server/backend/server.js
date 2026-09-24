@@ -3498,6 +3498,10 @@ function stripSensitiveSettingsForRole(settings, live) {
   // 2026-09-24: run log of the year-end carry-forward (who/when) -- only the md/accounting
   // Settings page reads it.
   delete out.leaveCarryForwardRuns;
+  // 2026-09-24: audit of per-employee carry-forward overrides (PUT /api/leave-carry-forward).
+  // Stripped for everyone below admin: it names who edited whose balance, for every employee.
+  // Admins still get it (isAdmin returns above) -- that is what the Settings page renders.
+  delete out.leaveCarryForwardEdits;
   // 2026-09-24 (round 7): server-owned reminder logs (T2 / T4) -- md/accounting only too.
   delete out.cfExpiryRemindersSent;
   delete out.cfRunOverdueRemindersSent;
@@ -3599,8 +3603,10 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
   if (Object.prototype.hasOwnProperty.call(body, 'leaveCarryForwardRuns')) {
     return res.status(403).json({ success: false, message: 'leaveCarryForwardRuns is set by the server only' });
   }
-  // 2026-09-24 (round 7): same for the reminder "sent on day X" logs.
-  for (const k of ['cfExpiryRemindersSent', 'cfRunOverdueRemindersSent']) {
+  // 2026-09-24 (round 7): same for the reminder "sent on day X" logs, and for the override audit
+  // -- an editor who could rewrite leaveCarryForwardEdits could erase the record of their own edit,
+  // which is the one thing that audit exists to prevent.
+  for (const k of ['cfExpiryRemindersSent', 'cfRunOverdueRemindersSent', 'leaveCarryForwardEdits']) {
     if (Object.prototype.hasOwnProperty.call(body, k)) {
       return res.status(403).json({ success: false, message: `${k} is set by the server only` });
     }
@@ -3800,9 +3806,19 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
     if (!ou || typeof ou !== 'object' || Array.isArray(ou) || Object.keys(ou).length > 500) {
       return res.status(400).json({ success: false, message: 'leaveOpeningUsed must be an object of 500 or fewer entries' });
     }
+    // 2026-09-24 (owner): opening balances belong to the go-live year alone -- they record leave
+    // already spent when the system started. app.js locks the inputs outside that year, but the
+    // client gate is cosmetic: without this a direct PUT could write e.g. "2027_5_annual" and
+    // deduct that leave from someone for a year that should never have an opening figure at all.
+    // Existing go-live-year rows stay editable; only a foreign year is refused.
+    const openingYear = APP_FIRST_PERIOD_START.getFullYear();
     for (const [k, v] of Object.entries(ou)) {
       if (!LEAVE_OPENING_KEY_RE.test(k)) {
         return res.status(400).json({ success: false, message: `invalid leaveOpeningUsed key "${k}"` });
+      }
+      if (Number(k.split('_')[0]) !== openingYear) {
+        return res.status(403).json({ success: false, code: 'opening-go-live-year-only',
+          message: `leaveOpeningUsed can only be set for the go-live year ${openingYear}` });
       }
       // 2026-09-21: negative is legal and means a CREDIT -- days carried in on top of this year's
       // pool, for an employee whose real go-live balance exceeds the current-year quota. Dual-sync
@@ -7217,9 +7233,26 @@ function cfAmountText(minutes, lang) {
   const m = Math.max(0, Math.round(Number(minutes) || 0));
   const days = Math.round(m / 480 * 100) / 100;
   const d = Math.floor(m / 480), h = Math.floor((m % 480) / 60), mm = m % 60;
-  if (lang === 'ja') return `${days}日（${d}日${h}時間${mm}分）`;
-  if (lang === 'en') return `${days} day(s) (${d}d ${h}h ${mm}m)`;
-  return `${days} วัน (${d} วัน ${h} ชม. ${mm} นาที)`;
+  // 2026-09-24 (owner): a unit that is zero is never printed -- "1d 5h", not "1d 5h 0m". Dual-sync
+  // with app.js minToStr(): this email text and the notification inbox render the same minutes, so
+  // they have to agree. round7.test.js compares both sides.
+  const parts = [];
+  if (lang === 'ja') {
+    if (d > 0) parts.push(`${d}日`);
+    if (h > 0) parts.push(`${h}時間`);
+    if (mm > 0) parts.push(`${mm}分`);
+    return `${days}日（${parts.length ? parts.join('') : '0日'}）`;
+  }
+  if (lang === 'en') {
+    if (d > 0) parts.push(`${d}d`);
+    if (h > 0) parts.push(`${h}h`);
+    if (mm > 0) parts.push(`${mm}m`);
+    return `${days} day(s) (${parts.length ? parts.join(' ') : '0d'})`;
+  }
+  if (d > 0) parts.push(`${d} วัน`);
+  if (h > 0) parts.push(`${h} ชม.`);
+  if (mm > 0) parts.push(`${mm} นาที`);
+  return `${days} วัน (${parts.length ? parts.join(' ') : '0 วัน'})`;
 }
 function runCfExpiryReminders() {
   if (!carryForwardExpiryEnabled()) return;
@@ -7287,6 +7320,80 @@ app.post('/api/leave-carry-forward/run', requireRole('md', 'accounting'), withLe
   const r = runYearEndCarryForward(year, live);
   if (!r.ok) return res.status(r.status).json({ success: false, code: r.code, message: r.message, run: r.run });
   res.json({ success: true, year, run: r.run, count: r.count });
+}));
+
+// 2026-09-24 (owner): a per-employee carry-forward override, MD + Accounting.
+// `leaveCarryForward` became server-owned earlier the same day (PUT /api/settings answers 403
+// cf-server-only) because a client that could write it could hand itself leave days. That left NO
+// way to correct a single wrong figure -- Sirintorn's 1.375 days had to be edited straight into
+// settings.json by hand, which is exactly the kind of change that should be reviewable. This route
+// is the narrow, validated replacement: one employee, one year, a bounded number of days.
+// Deliberately NOT a general settings write -- it only ever touches `${year}_${userId}`.
+// The edited value is ordinary carry-forward afterwards: it expires on the configured month/day
+// like any other (owner's decision), and a later year-end run for that year overwrites it, the
+// same as the run's own confirm dialog already warns.
+// Held under the LEAVES lock so it cannot interleave with runYearEndCarryForward's whole-file
+// settings read-modify-write, which is the only other writer of this key.
+app.put('/api/leave-carry-forward', requireRole('md', 'accounting'), withLeavesLock((req, res) => {
+  const body = parseBody(req) || {};
+  const year = Number(body.year);
+  const userId = Number(body.userId);
+  const days = Number(body.days);
+
+  const firstYear = carryForwardFirstSourceYear();
+  const thisYear = Number(bangkokDateStr().slice(0, 4));
+  // 2026-09-24: first written as firstYear + 1, which made the range [2027, 2027] and refused every
+  // real request -- the live data's only carry-forward row is 2026_4 (1.375 days carried in from
+  // 2025, i.e. from BEFORE the system existed, which is precisely the case this route is for).
+  // The go-live year itself must be editable. Next year is allowed too: the January run writes it
+  // and a correction may follow immediately.
+  if (!Number.isInteger(year) || year < firstYear || year > thisYear + 1) {
+    return res.status(400).json({ success: false, code: 'cf-bad-year',
+      message: `year must be between ${firstYear} and ${thisYear + 1}` });
+  }
+  const users = readUsers();
+  if (users === null) return res.status(503).json({ success: false, message: 'Service temporarily unavailable' });
+  const target = users.find(u => u && u.id === userId);
+  if (!target || target.isSystemAccount) {
+    return res.status(404).json({ success: false, code: 'cf-no-such-user', message: 'No such employee' });
+  }
+  // Same ceiling the year-end run applies, so a manual figure can never exceed what a run could
+  // have produced. `??` not `||` so a configured 0 means zero, not the 5-day default.
+  const rawMax = Number(getAppSettings().leave?.carryForwardMax ?? 5);
+  const maxCF = Math.max(0, Math.min(60, Number.isFinite(rawMax) ? rawMax : 5));
+  if (!Number.isFinite(days) || days < 0 || days > maxCF) {
+    return res.status(400).json({ success: false, code: 'cf-bad-days',
+      message: `days must be a number between 0 and ${maxCF}` });
+  }
+  // 3 dp = 1 minute at 480 min/day (1/480 = 0.00208...). Keeps a hand-typed 1.375 exact and stops
+  // a float with 15 decimals from being stored.
+  const value = Math.round(days * 1000) / 1000;
+
+  const settings = readJSON('settings.json', {});
+  if (settings === null || typeof settings !== 'object' || Array.isArray(settings)) {
+    return res.status(503).json({ success: false, message: 'Service temporarily unavailable' });
+  }
+  const cf = plainObj(settings.leaveCarryForward);
+  const key = `${year}_${userId}`;
+  const prev = Number(cf[key]);
+  const actor = users.find(u => u && u.id === req.user.sub);
+
+  settings.leaveCarryForward = { ...cf, [key]: value };
+  // No audit trail existed for this key -- a manual change to someone's leave balance left no
+  // record of who made it. Kept inside settings.json so it travels with the value it describes.
+  settings.leaveCarryForwardEdits = {
+    ...plainObj(settings.leaveCarryForwardEdits),
+    [key]: {
+      at: new Date().toISOString(),
+      by: actor ? String(actor.name || actor.username || actor.id) : String(req.user.sub),
+      byId: req.user.sub,
+      days: value,
+      prevDays: Number.isFinite(prev) ? prev : null,
+    },
+  };
+  writeJSON('settings.json', settings);
+  console.log(`[CF] ${key} carry-forward set to ${value} day(s) (was ${Number.isFinite(prev) ? prev : 'unset'}) by user ${req.user.sub}`);
+  res.json({ success: true, year, userId, days: value, prevDays: Number.isFinite(prev) ? prev : null });
 }));
 
 app.delete('/api/leaves/:id', withLeavesLock((req, res) => {
@@ -7522,7 +7629,7 @@ function timeCorrectionDependents(corr, leaves, dayWith, dayWithout, S) {
     if (l.type === 'late-out') {
       if (!checkIn || !d.checkOut) return true;
       const out = lateNightCheckoutMins(d.checkOut);
-      const thr1 = a.lateNightThreshold1Hour || a.lateNightThresholdHour || 19;
+      const thr1 = lateNightThresholdHourOf(a, 1);
       if (!Number.isFinite(out) || out < lateNightThresholdMins(thr1) || !lateNightCheckoutOk(d)) return true;
       return !!l.lateOutTime && !(lateNightCheckoutMins(l.lateOutTime) <= out);
     }
@@ -7795,7 +7902,11 @@ function fetchMizuhoResonaRates() {
     // python3` on the NAS) so this can't be shadowed by anything earlier in PATH.
     execFile('/usr/bin/python3', [path.join(__dirname, 'fetch_rates.py')], {
       timeout: 20000,
-      env: { ...process.env, PYTHONPATH: '/volume1/web/.local/lib/python3.8/site-packages' },
+      // 2026-09-24 (owner): moved out of /volume1/web/.local into the project folder -- the web
+      // share root is shared with a second project (Company_Website), and a bare ~/.local there
+      // gave no clue it belonged to this app. curl_cffi is the only reason it exists: the bank
+      // rate pages sit behind Akamai Bot Manager and need its TLS impersonation.
+      env: { ...process.env, PYTHONPATH: '/volume1/web/Time_Attendance/.python-packages/lib/python3.8/site-packages' },
     }, (err, stdout) => {
       // HYGIENE FIX 2026-08-13 (E-4, Opus audit): was `err.message` verbatim -- execFile formats
       // that as the full command line (the server's absolute filesystem path) plus the child's
@@ -8465,6 +8576,23 @@ function lateNightCheckoutMins(hhmm) {
 // 2026-09-24 (review LOW, final round): a threshold HOUR before 05 (e.g. 01 = 01:00 after
 // midnight) is normalised with the same +24h rule as the check-out, so ×2 from 01:00 means 25:00
 // on that clock, not 01:00 of the evening before (which paid ×2 for every Late Night). Pure.
+// 2026-09-24 (owner): a Late Night threshold of midnight (hour 0) saved fine -- the settings
+// validator accepts 0 -- but every reader resolved it with `x || 19`, and 0 is falsy, so the hour
+// snapped straight back to 19 and the save looked like it had failed. One helper now resolves the
+// tier's hour for all of them; an absent/blank/garbage value still falls back to 19 / 20.
+// STANDING RULE (payroll dual-sync): this function exists in BOTH app.js and server.js.
+function lateNightThresholdHourOf(allowances, tier) {
+  const a = allowances || {};
+  const candidates = tier === 2
+    ? [a.lateNightThreshold2Hour, a.lateNightThresholdHour]
+    : [a.lateNightThreshold1Hour, a.lateNightThresholdHour];
+  for (const v of candidates) {
+    if (v === null || v === undefined || v === '') continue;
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return tier === 2 ? 20 : 19;
+}
 function lateNightThresholdMins(hour) {
   const h = Number(hour);
   if (!Number.isFinite(h)) return NaN;
@@ -8495,7 +8623,7 @@ function checkoutReviewTrigger(day, user, S) {
       day.status === 'abroad' || day.status === 'future') return false;
   if (!isAllowanceEligible(S.allowanceEligibility, user.role, 'earlyLate')) return false;
   const a = S.allowances || {};
-  const thr1 = a.lateNightThreshold1Hour || a.lateNightThresholdHour || 19;
+  const thr1 = lateNightThresholdHourOf(a, 1);
   const mins = lateNightCheckoutMins(day.checkOut);
   return Number.isFinite(mins) && mins >= lateNightThresholdMins(thr1);
 }
@@ -9001,7 +9129,7 @@ function lateOutSubmitBlockReason(user, dateStr, lateOutTime) {
   if (!day.checkOut) {
     return 'Late Night Out requires a check-out first';
   }
-  const thr1 = S.allowances.lateNightThreshold1Hour || S.allowances.lateNightThresholdHour || 19;
+  const thr1 = lateNightThresholdHourOf(S.allowances, 1);
   const outMins = lateNightCheckoutMins(day.checkOut);
   if (!Number.isFinite(outMins) || outMins < lateNightThresholdMins(thr1)) {
     return `Late Night Out requires a check-out at or after ${String(thr1).padStart(2, '0')}:00`;
@@ -9120,8 +9248,8 @@ function computePayroll(user, start, end, periodIndex) {
   let earlyCount = 0, earlyLateBonus = 0, lateNightCount = 0;
   const earlyScanPaidDates = new Set();
   if (canEarlyLate) {
-    const _ln1Thr = S.allowances.lateNightThreshold1Hour || S.allowances.lateNightThresholdHour || 19;
-    const _ln2Thr = S.allowances.lateNightThreshold2Hour || S.allowances.lateNightThresholdHour || 20;
+    const _ln1Thr = lateNightThresholdHourOf(S.allowances, 1);
+    const _ln2Thr = lateNightThresholdHourOf(S.allowances, 2);
     pDays.forEach(d => {
       // Auto early: Hikvision only. Rest days require approved holiday-work, then both pay.
       if (deviceScanQualifiesForEarlyMorning(d, holidayWorkDates)) {

@@ -1,5 +1,10 @@
 # Dependencies
 **/node_modules/
+# Python packages for fetch_rates.py (curl_cffi + certifi), installed with pip --user and moved here
+# from /volume1/web/.local on 2026-09-24. Third-party code, ~31 MB, referenced by server.js's
+# PYTHONPATH -- it lives on the NAS, not in git. Reinstall with:
+#   pip install --user --target .python-packages/lib/python3.8/site-packages curl_cffi
+.python-packages/
 
 # Live server data (PII, secrets, runtime state)
 attendance-server/backend/data/
