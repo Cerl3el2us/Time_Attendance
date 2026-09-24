@@ -115,8 +115,34 @@ test('a manual override survives the snapshot refresher (Opus review HIGH)', () 
   // The once-a-year run is deliberately NOT guarded: it is the authoritative recomputation and its
   // confirm dialog already says existing values are overwritten.
   const run = SERVER_SRC.slice(SERVER_SRC.indexOf('function runYearEndCarryForward'));
-  assert.ok(!/leaveCarryForwardEdits/.test(run.slice(0, run.indexOf('\n}') + 2)),
-    'the year-end run must keep overwriting -- only the per-leave refresher is guarded');
+  const runBody = run.slice(0, run.indexOf('\n}') + 2);
+  assert.ok(/settings\.leaveCarryForward = \{ \.\.\.cf, \.\.\.computed \};/.test(runBody),
+    'the run must overwrite values unconditionally -- only the per-leave refresher is guarded');
+  assert.ok(!/leaveCarryForwardEdits\)\[/.test(runBody) && !/if \(.*leaveCarryForwardEdits.*\) return/.test(runBody),
+    'the run must not skip or return early on an edited key');
+  // 2026-09-25: but it MUST drop the audit entries for the keys it just recomputed. Leaving them
+  // behind froze refreshSnapshottedCarryForward() for that employee for the rest of the year, while
+  // the Settings box still credited the edit to whoever made it, beside a number they never set.
+  assert.ok(/settings\.leaveCarryForwardEdits = editsAfter;/.test(runBody),
+    'the run must clear the audit entries for keys it overwrote');
+  assert.ok(/hasOwnProperty\.call\(computed, k\)/.test(runBody),
+    'only the recomputed keys lose their entry -- an override for another year must survive');
+});
+
+test('earnedDayUsedError does not predict a drop the refresher will never make (ripple HIGH)', () => {
+  const fn = SERVER_SRC.slice(SERVER_SRC.indexOf('function earnedDayUsedError'));
+  const body = fn.slice(0, fn.indexOf('\n}\n') + 3);
+  assert.ok(/leaveCarryForwardEdits/.test(body),
+    'it must skip the same keys refreshSnapshottedCarryForward skips, or a cancel/revoke is refused ' +
+    'with "earned day already used" over a carry-forward drop that will never happen');
+  assert.ok(/cf\[nextKey\] !== undefined && !cfEditedNext/.test(body),
+    'the guard belongs on the same condition that opens the prediction block');
+  // Both this and the refresher read the map defensively rather than through plainObj(): these
+  // functions are extracted into test sandboxes with an explicit helper list, and a call to a
+  // helper that is not in that list fails every sandboxed test with "plainObj is not defined".
+  // Comments are stripped first -- the note explaining WHY mentions plainObj() by name.
+  const code = body.split('\n').map(l => l.replace(/\/\/.*$/, '')).join('\n');
+  assert.ok(!/plainObj\s*\(/.test(code), 'keep this function free of sandbox-unavailable helpers');
 });
 
 test('carry-forward cannot be edited after it has expired (owner: block)', () => {

@@ -2639,6 +2639,10 @@ const photoUploadLimiter = rateLimit({
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
+  // Keyed per account, like every other authenticated limiter here: the whole office reaches the
+  // backend through one public IP, so an IP-keyed budget would let one person's uploads lock out
+  // everybody else. Falls back to the IP only for a request with no verified user.
+  keyGenerator: (req) => req.user ? `photo:${req.user.sub}` : ipKeyGenerator(req.ip),
   message: { success: false, message: 'Too many photo uploads -- try again in a minute' }
 });
 app.post('/api/users/id/:id/photo', photoUploadLimiter, withUsersLock((req, res) => {
@@ -2730,6 +2734,11 @@ app.delete('/api/users/id/:id/photo', photoUploadLimiter, withUsersLock((req, re
   const isAdmin = !!actor && (actor.role === 'md' || actor.role === 'accounting');
   if (!isSelf && !isAdmin) {
     return res.status(403).json({ success: false, message: 'Forbidden: you can only change your own photo' });
+  }
+  // Same deactivated-actor check the POST does -- it was missing here, so someone deactivated while
+  // still holding a valid token could clear their own photo.
+  if (actor && actor.active === false) {
+    return res.status(403).json({ success: false, message: 'Forbidden' });
   }
   users[idx].facePhoto = '';
   writeJSON('users.json', users);
@@ -5072,7 +5081,20 @@ function earnedDayUsedError(leaves, owner, leave) {
     const remWith = leaveBalanceRemainingMinutes(leaves, owner, 'annual', undefined, earnedDayBalanceAsOf(year, today));
     let dropMin = 0, nextRem = 0;
     const nextKey = `${year + 1}_${owner.id}`;
-    if (cf[nextKey] !== undefined) {
+    // 2026-09-25 (Opus ripple review, HIGH): this block predicts how much next year's snapshot will
+    // DROP when the earned day is taken back -- a prediction that is only meaningful if
+    // refreshSnapshottedCarryForward() is actually going to recompute that key. Since a
+    // hand-set figure is now left alone (same guard, same key), the drop would never land: the
+    // cancel/revoke was refused with "the annual-leave day earned from this record has already been
+    // used", naming unrelated leave, and the record became uncancellable until the override was
+    // deleted. Skip the prediction for exactly the keys the refresher skips, so the two agree.
+    // Written out rather than via plainObj() on purpose: the test suites extract this function
+    // into a sandbox with an explicit list of helpers, so a new dependency here would have to be
+    // added to three of them -- and that sandbox catching it is precisely the point.
+    const cfEditsRaw = readSettings().leaveCarryForwardEdits;
+    const cfEditedNext = (cfEditsRaw && typeof cfEditsRaw === 'object' && !Array.isArray(cfEditsRaw))
+      ? cfEditsRaw[nextKey] : undefined;
+    if (cf[nextKey] !== undefined && !cfEditedNext) {
       const cfNew = carryForwardAfterCreditLoss(annualLeaveRemainingMinutes(leaves, owner, year, cf), creditMin, maxCF);
       const cfOld = (Number(cf[nextKey]) || 0) + (Number(cf[`comp_${year + 1}_${owner.id}`]) || 0);
       dropMin = Math.max(0, cfOld - cfNew) * 480;
@@ -7210,6 +7232,21 @@ function runYearEndCarryForward(fromYear, actor) {
   const computed = computeYearEndCarryForward(leaves, users, fromYear, cf, getAppSettings().leave?.carryForwardMax);
   const run = { at: new Date().toISOString(), by: actor ? String(actor.name || actor.username || actor.id) : 'auto', byId: actor ? actor.id : null };
   settings.leaveCarryForward = { ...cf, ...computed };
+  // 2026-09-25 (Opus ripple review, HIGH): the run overwrites the VALUE of a hand-set key but used
+  // to leave its audit entry behind -- and refreshSnapshottedCarryForward() skips on the entry's
+  // PRESENCE. The result was an employee whose snapshot froze at the January figure for the rest of
+  // the year while the Settings box still credited the edit to whoever made it, next to a number
+  // they never set. Once the run has recomputed a key, the earlier manual decision about that key
+  // no longer describes anything, so it goes with it.
+  // Same reason as earnedDayUsedError above: runYearEndCarryForward is extracted into a test
+  // sandbox with an explicit helper list, so this stays self-contained.
+  const editsRaw = settings.leaveCarryForwardEdits;
+  const editsBefore = (editsRaw && typeof editsRaw === 'object' && !Array.isArray(editsRaw)) ? editsRaw : {};
+  const editsAfter = {};
+  for (const [k, v] of Object.entries(editsBefore)) {
+    if (!Object.prototype.hasOwnProperty.call(computed, k)) editsAfter[k] = v;
+  }
+  settings.leaveCarryForwardEdits = editsAfter;
   settings.leaveCarryForwardRuns = { ...runs, [String(fromYear)]: run };
   writeJSON('settings.json', settings);
   return { ok: true, run, count: Object.keys(computed).length / 2 };

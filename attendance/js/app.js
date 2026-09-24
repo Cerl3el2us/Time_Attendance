@@ -9902,6 +9902,7 @@ function renderLeaveBalanceCard(type, emoji, label, u, maxDays) {
       <div class="type">${label}</div>
       <div class="amount">${canSeeDays ? leaveAmountHtml(bal.remMin) : '🔒'}</div>
       <div class="detail">${lockDetail}${canSeeDays ? ` · / ${bal.effectiveMax} ${L('days', 'วัน')}` : ''}</div>
+      <div class="leave-card-spacer"></div>
       <div class="leave-bar"><div class="leave-bar-fill" style="width:0%"></div></div>
     </div>`;
   }
@@ -9931,6 +9932,17 @@ function renderLeaveBalanceCard(type, emoji, label, u, maxDays) {
     <div class="amount">${remaining}</div>
     <div class="detail" style="font-size:12px;margin-top:2px">${L('Remaining', 'คงเหลือ')}</div>
     ${leaveEntitlementBreakdownHtml(type, maxDays, bal, bangkokYear())}
+    ${/* 2026-09-25 (Opus ripple review): the breakdown above now states a total and a used figure,
+          which invites subtracting one from the other -- but computeLeaveBalance also takes out the
+          late-arrival deduction, so the remaining number came up short with nothing on the card
+          explaining the gap. The leave-page card has always shown this line; the profile one did not
+          (its old "/ 11.375 วัน (ใช้ไป 2)" never asked to be added up). */''}
+    ${bal.lateDeduct && bal.lateDeduct.count > 0
+      ? `<div style="margin-top:3px;font-size:11px;color:#dc2626">⏰ ${currentLang === 'ja'
+          ? `遅刻${bal.lateDeduct.count}回、${minToStr(bal.lateDeduct.deductMin)}控除`
+          : L(`Late ${bal.lateDeduct.count}×, deducted ${minToStr(bal.lateDeduct.deductMin)}`,
+              `มาสาย ${bal.lateDeduct.count} ครั้ง หัก ${minToStr(bal.lateDeduct.deductMin)}`)}</div>`
+      : ''}
     ${pendingNote}
     ${type === 'annual' ? annualLeaveCardNotesHtml(u, bal) : ''}
     <div class="detail" style="margin-top:5px;font-size:11px;color:${usedDays > 0 ? '#dc2626' : '#10b981'}">${usedDays > 0

@@ -8,8 +8,8 @@
 // are served from cache, but anything that WRITES (check-in, leave request, approval) is never
 // queued or replayed -- a time record invented from a phone's clock hours after the fact is worse
 // than an error message. Non-GET requests simply fail while offline and the UI says so.
-const SHELL_CACHE = 'ta-shell-v6';   // app shell: html/js/css/images, cache-first
-const DATA_CACHE  = 'ta-data-v6';    // GET /api responses, network-first
+const SHELL_CACHE = 'ta-shell-v7';   // app shell: html/js/css/images, cache-first
+const DATA_CACHE  = 'ta-data-v7';    // GET /api responses, network-first
 
 // Query strings are part of the key, so a `?v=` bump is a cache miss and fetches the new file --
 // the existing cache-buster keeps working unchanged. Old entries are dropped on activate.
@@ -41,9 +41,34 @@ self.addEventListener('activate', e =>
       .then(keys => Promise.all(
         keys.filter(k => k !== SHELL_CACHE && k !== DATA_CACHE).map(k => caches.delete(k))
       ))
+      .then(pruneVersionedShellEntries)
       .then(() => clients.claim())
   )
 );
+
+// 2026-09-25 (Opus ripple review): `app.js?v=...` and `style.css?v=...` are a different cache key
+// on every deploy, and nothing ever removed the previous one -- each release left another ~1 MB
+// copy of app.js in the cache forever. Keep only the newest entry per path. Runs on activate, i.e.
+// once per worker version, which is exactly when a new `?v=` has just appeared.
+async function pruneVersionedShellEntries() {
+  try {
+    const cache = await caches.open(SHELL_CACHE);
+    const reqs = await cache.keys();
+    const byPath = new Map();
+    for (const r of reqs) {
+      const u = new URL(r.url);
+      if (!u.search) continue;                       // unversioned entries are one-per-path already
+      if (!/\.(js|css)$/.test(u.pathname)) continue; // only the versioned code assets
+      if (!byPath.has(u.pathname)) byPath.set(u.pathname, []);
+      byPath.get(u.pathname).push(r);
+    }
+    for (const list of byPath.values()) {
+      // The freshest copy is the one the current index.html asked for, which is also the most
+      // recently written -- cache.keys() returns insertion order, so keep the last.
+      for (const r of list.slice(0, -1)) await cache.delete(r);
+    }
+  } catch (_) { /* quota/private mode -- nothing to prune there anyway */ }
+}
 
 // Only same-origin GETs are touched. Anything else -- POST/PUT/DELETE, and every cross-origin
 // request (jsDelivr, Google Fonts, map tiles) -- goes straight to the network untouched, so a bug
@@ -117,6 +142,13 @@ self.addEventListener('fetch', e => {
     );
     return;
   }
+
+  // 2026-09-25 (Opus ripple review): employee photos are NOT shell. The app requests them as
+  // `…jpg?t=<Date.now()>` to defeat browser caching after an upload, which makes every single view
+  // a brand-new cache key -- opening 40 employee records wrote 40 entries, and again next week.
+  // They are also per-person data sitting in a cache that logout does not clear (only ta-data-* is).
+  // Straight to the network, never stored.
+  if (url.pathname.includes('/images/employees/')) return;
 
   // Everything else (js, css, images) is versioned or immutable in practice, so cache-first is safe
   // and fast: a `?v=` bump is a different key and misses the cache. The background refresh keeps an
