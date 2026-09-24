@@ -61,9 +61,45 @@ SUPERADMIN_PASSWORD = os.environ.get('SUPERADMIN_PASSWORD', '')
 #   setx NAS_USER "admin"   (CMD, not PowerShell; takes effect on next terminal open)
 NAS_USER = os.environ.get('NAS_USER') or 'Teerawat'
 
+# 2026-09-25: was AutoAddPolicy() -- any machine answering on 192.168.100.100:22 was trusted, and
+# the NAS password was handed to it. On a LAN that is a low-probability attack, but the cost of
+# closing it is one pinned key file. Trust-on-first-use: the first run records the NAS host key
+# next to this script (on the NAS itself, so every deploy machine shares one file), and every run
+# after that REFUSES to connect if the key changes -- before the password is sent.
+# A genuine key change (DSM reinstall, SSH host-key regeneration) needs the line removed by hand;
+# that is the point, it should be a deliberate act.
+KNOWN_HOSTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nas_known_hosts')
+
 client = paramiko.SSHClient()
-client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-client.connect('192.168.100.100', port=22, username=NAS_USER, password=NAS_PASSWORD, timeout=10)
+if os.path.exists(KNOWN_HOSTS):
+    client.load_host_keys(KNOWN_HOSTS)
+    client.set_missing_host_key_policy(paramiko.RejectPolicy())
+    pinned = True
+else:
+    # First run on a fresh checkout: record the key, then pin from the next run on.
+    print(f'[SSH] no pinned host key yet -- trusting this first connection and recording it in\n'
+          f'      {KNOWN_HOSTS}\n'
+          f'      (do this once from a machine you trust on the office LAN)')
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    pinned = False
+
+try:
+    client.connect('192.168.100.100', port=22, username=NAS_USER, password=NAS_PASSWORD, timeout=10)
+except paramiko.BadHostKeyException as e:
+    raise SystemExit(
+        f'[ABORT] the NAS presented a DIFFERENT SSH host key than the one pinned in\n'
+        f'        {KNOWN_HOSTS}\n'
+        f'        expected: {e.expected_key.get_base64()[:32]}...\n'
+        f'        got     : {e.key.get_base64()[:32]}...\n'
+        f'        NOTHING was sent. Either something is impersonating the NAS, or the NAS really\n'
+        f'        did get a new host key (DSM reinstall / regenerated keys). If you are certain it\n'
+        f'        is the latter, delete that file and re-run to re-pin.')
+except paramiko.SSHException as e:
+    raise SystemExit(f'[ABORT] SSH refused the connection: {e}')
+
+if not pinned:
+    client.save_host_keys(KNOWN_HOSTS)
+    print(f'[SSH] host key pinned -- future runs will refuse a changed key')
 print(f'[SSH] connected as {NAS_USER}')
 
 def run(cmd, timeout=20):

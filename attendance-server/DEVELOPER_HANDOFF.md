@@ -84,8 +84,14 @@ If `NAS_PASSWORD` is missing the script stops immediately and prints the exact
 - The app code directories themselves (`attendance`, `attendance-server`) are
   deliberately `777` (world-writable) on the NAS so any account with NAS
   access can edit without friction — this was an intentional tradeoff, not an
-  oversight. The one exception is `.local/lib/python3.8/site-packages` (used
-  by the exchange-rate fetch script) — it sat on Python's import search path,
+  oversight. The one exception is
+  `Time_Attendance/.python-packages/lib/python3.8/site-packages` (used
+  by the exchange-rate fetch script; **moved here from `/volume1/web/.local`
+  on 2026-09-24** — the web share root is shared with a second project, and a
+  bare `~/.local` there gave no clue which project owned it. `server.js`'s
+  `PYTHONPATH` points at the new path; the move used `cp -a`, so the hardened
+  permissions below came across intact — verified `drwxrwxr-x` /
+  `Teerawat:administrators` afterwards) — it sits on Python's import search path,
   so being world-writable there was a real code-execution risk, unlike the
   app code itself. As of 2026-08-13 the whole subtree (not just the top
   directory — the first pass only fixed that and missed the packages inside
