@@ -278,4 +278,50 @@ test('the stored event carries the accuracy, and it is not public', () => {
   assert.ok(!/gpsAcc/.test(pub), 'gpsAcc must stay out of the public projection, like gps itself');
 });
 
+console.log('Geofence: the client');
+
+const JA_SRC = fs.readFileSync(path.join(ROOT, 'attendance/lang/ja.js'), 'utf8');
+const INDEX_SRC = fs.readFileSync(path.join(ROOT, 'attendance/index.html'), 'utf8');
+
+test('the check-in POST sends the accuracy', () => {
+  const fn = extractFunction(APP_SRC, 'doScan');
+  assert.ok(/gpsAccuracy:/.test(fn), 'doScan must send gpsAccuracy or the server refuses every check-in');
+});
+
+test('the client refuses before posting, using the same shared function', () => {
+  const fn = extractFunction(APP_SRC, 'doScan');
+  assert.ok(/geofenceCheckinReason\(/.test(fn), 'doScan must pre-check');
+  const preIdx = fn.indexOf('geofenceCheckinReason');
+  const postIdx = fn.indexOf('/api/hikvision/event');
+  assert.ok(preIdx > 0 && preIdx < postIdx, 'the pre-check must run before the request');
+});
+
+test('every new message exists in all three languages', () => {
+  const EN = [
+    'Company policy: check-in must be made with the face scanner at the office.',
+    'Web check-in requires your location',
+    'not precise enough',
+  ];
+  for (const en of EN) assert.ok(APP_SRC.includes(en), `English string missing: ${en}`);
+  for (const th of ['กรุณาสแกนที่เครื่อง', 'กรุณาอนุญาตให้เข้าถึงตำแหน่ง', 'ยังไม่แม่นพอ']) {
+    assert.ok(APP_SRC.includes(th), `Thai string missing: ${th}`);
+  }
+  for (const ja of ['顔認証端末', '位置情報が必要', '精度が不足']) {
+    assert.ok(JA_SRC.includes(ja), `Japanese string missing: ${ja}`);
+  }
+});
+
+test('the standing policy note is on the check-in screen, not only in the error', () => {
+  assert.ok(/id="scan-policy-note"/.test(INDEX_SRC), 'the policy note element must exist');
+  assert.ok(/data-en=/.test(INDEX_SRC.slice(INDEX_SRC.indexOf('scan-policy-note') - 300, INDEX_SRC.indexOf('scan-policy-note') + 300)),
+    'the note must carry data-en so fixStaticText() can translate it');
+});
+
+test('the button state function never reads currentUser at load time', () => {
+  // fixStaticText() runs before login; anything it touches must not assume a logged-in user.
+  const fn = extractFunction(APP_SRC, 'geofenceUiState');
+  assert.ok(/currentUser/.test(fn) === false || /currentUser\s*&&/.test(fn) || /currentUser\?\./.test(fn),
+    'guard every currentUser read in geofenceUiState');
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ', 0 failed'}`);

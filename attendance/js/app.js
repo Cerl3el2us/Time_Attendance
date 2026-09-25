@@ -2664,6 +2664,7 @@ async function loadSettingsFromBackend() {
     if (data.emailConfig)        APP_SETTINGS.emailConfig        = data.emailConfig;
     if (data.emailNotification)  APP_SETTINGS.emailNotification  = data.emailNotification;
     if (data.payslipEmailEnabled !== undefined) APP_SETTINGS.payslipEmailEnabled = data.payslipEmailEnabled;
+    applyGeofenceToScanButton();
   } catch(e) {
     showToast(L('⚠️ Could not load settings — using defaults', '⚠️ โหลดการตั้งค่าไม่สำเร็จ — ใช้ค่าเริ่มต้นไปก่อน'), 'warning');
   }
@@ -7042,7 +7043,7 @@ function requestGPS() {
 
   gpsWatchId = navigator.geolocation.watchPosition(
     pos => onGPSSuccess(pos),
-    err => updateGPSError(gpsErrorMsg(err)),
+    err => { updateGPSError(gpsErrorMsg(err)); applyGeofenceToScanButton(); },
     {
       enableHighAccuracy: true,   // use device GPS chip (Android/iOS)
       maximumAge: 10000,          // accept cached position up to 10s
@@ -7058,6 +7059,47 @@ function gpsErrorMsg(err) {
     3: L('Location request timed out', 'หมดเวลาการระบุตำแหน่ง'),
   };
   return msgs[err.code] || L('GPS error', 'เกิดข้อผิดพลาด GPS');
+}
+
+// 2026-09-25: web check-in geofence -- localized copy of the server's 403 reason codes (the
+// server's own `message` is English-only by design, see server.js's WebScan gate). Called both
+// as a live preview before posting (doScan()) and to render the 403's reason if one slips through.
+function geofenceMessage(reason, acc) {
+  if (reason === 'geofence-inside') {
+    return L('Company policy: check-in must be made with the face scanner at the office. You are within the office area — please scan at the device.',
+             'นโยบายบริษัท: การลงเวลาเข้างานต้องสแกนใบหน้าที่เครื่องในออฟฟิศ — ขณะนี้คุณอยู่ในบริเวณออฟฟิศ กรุณาสแกนที่เครื่อง');
+  }
+  if (reason === 'geofence-no-position') {
+    return L('Web check-in requires your location — please allow location access, or use the face scanner at the office.',
+             'เช็คอินผ่านเว็บต้องระบุตำแหน่ง — กรุณาอนุญาตให้เข้าถึงตำแหน่งในเบราว์เซอร์ หรือสแกนใบหน้าที่เครื่องในออฟฟิศ');
+  }
+  // The accuracy number is appended OUTSIDE the strings passed to L() -- ja.js keys on the whole
+  // English string, and a value that varies per scan (±23 m, ±41 m, ...) would never match a
+  // fixed key, silently falling back to English in Japanese mode. Sandwiching a fixed prefix and
+  // suffix around the number keeps both halves matchable while keeping the original phrasing.
+  const a = Number.isFinite(Number(acc)) ? ` (±${Math.round(Number(acc))} m)` : '';
+  return L('Your location is not precise enough yet', 'ตำแหน่งยังไม่แม่นพอ') + a +
+         L(' — please wait a moment or move to an open area.', ' — กรุณารอสักครู่หรือขยับไปที่โล่ง');
+}
+// fixStaticText() runs before login -- currentUser is always null then. Guard every read.
+function geofenceUiState() {
+  const role = currentUser && currentUser.role;
+  const reason = geofenceCheckinReason(
+    APP_SETTINGS.geofence, role,
+    currentGPS ? Number(currentGPS.latRaw) : NaN,
+    currentGPS ? Number(currentGPS.lngRaw) : NaN,
+    currentGPS ? Number(currentGPS.accuracy) : null
+  );
+  return { blocked: !!reason, reason, text: reason ? geofenceMessage(reason, currentGPS && currentGPS.accuracy) : '' };
+}
+function applyGeofenceToScanButton() {
+  const btn = document.getElementById('scan-btn');
+  const hint = document.getElementById('scan-geofence-hint');
+  if (!btn) return;
+  const st = geofenceUiState();
+  btn.disabled = st.blocked;
+  btn.classList.toggle('scan-blocked', st.blocked);
+  if (hint) { hint.textContent = st.text; hint.style.display = st.blocked ? 'block' : 'none'; }
 }
 
 function onGPSSuccess(pos) {
@@ -7095,6 +7137,7 @@ function onGPSSuccess(pos) {
   // Render or update map
   initGpsMap(lat, lng, acc);
   scheduleServerClockFromGps();
+  applyGeofenceToScanButton();
 }
 
 function updateGPSError(msg) {
@@ -7816,6 +7859,7 @@ async function doScan(source) {
   const bk      = scanYmd();
   const p2      = n => String(n).padStart(2, '0');
   const gpsInfo = currentGPS ? `${currentGPS.lat}, ${currentGPS.lng}` : 'ไม่ทราบตำแหน่ง';
+  const gpsAcc  = currentGPS && Number.isFinite(Number(currentGPS.accuracy)) ? Number(currentGPS.accuracy) : null;
   const timeStr = `${p2(bk.h)}:${p2(bk.min)}`;
   const dateStr = businessDateFromYmd(bk);
   const key     = attKey(currentUser.id, dateStr);
@@ -7834,6 +7878,20 @@ async function doScan(source) {
       : L(`No morning check-in was recorded today. This will be saved as a CHECK-OUT time (${timeStr}), not a check-in. Continue?`,
           `วันนี้ยังไม่มีการลงเวลาเข้างานช่วงเช้า ระบบจะบันทึกเวลานี้ (${timeStr}) เป็นเวลาออกงาน ไม่ใช่เวลาเข้างาน ต้องการดำเนินการต่อหรือไม่?`));
     if (!ok) return;
+  }
+
+  // 2026-09-25: web check-in geofence -- a preview of the server's decision (the server decides
+  // for real, see server.js's WebScan gate) so the employee gets an immediate, localized reason
+  // instead of a round-trip 403. Only a real check-in is gated, same rule as isAfterCutoff above.
+  const isFirstScan = !isPreDawn && !attendanceLog[key]?.checkIn && timeStr < CHECKIN_CUTOFF;
+  if (isFirstScan) {
+    const reason = geofenceCheckinReason(
+      APP_SETTINGS.geofence, currentUser && currentUser.role,
+      currentGPS ? Number(currentGPS.latRaw) : NaN,
+      currentGPS ? Number(currentGPS.lngRaw) : NaN,
+      gpsAcc
+    );
+    if (reason) { showToast(geofenceMessage(reason, gpsAcc), 'warning'); return; }
   }
 
   _scanInFlight = true;
@@ -7888,12 +7946,16 @@ async function doScan(source) {
         AccessControllerEvent: { employeeNoString: String(currentUser.employeeNo), cardholderName: currentUser.name },
         dateTime: isoStr,
         eventType: 'WebScan',
-        gps: gpsInfo
+        gps: gpsInfo,
+        gpsAccuracy: gpsAcc
       })
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.success === false) {
-      throw new Error(data.message || (res.status === 400 ? 'Could not save scan' : 'Server error'));
+      // A geofence 403's `message` is English-only by design (see server.js's WebScan gate) --
+      // the client localizes it from `reason` instead of showing the raw English text.
+      const localizedGeofence = res.status === 403 && data.reason ? geofenceMessage(data.reason, gpsAcc) : null;
+      throw new Error(localizedGeofence || data.message || (res.status === 400 ? 'Could not save scan' : 'Server error'));
     }
     const stamped = String(data.event_time || '');
     if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(stamped) && attendanceLog[key]) {

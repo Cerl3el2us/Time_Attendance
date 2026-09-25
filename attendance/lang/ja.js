@@ -1435,4 +1435,17 @@ window.LANG_JA = {
     "JPG・PNG・WebP — 大きな画像は自動で縮小されます。このアプリ内の表示専用で、顔認証端末に登録された写真は変更されません。",
   "JPG, PNG or WebP — large photos are resized automatically. Shown in this app only; the door scanner keeps its own photo.":
     "JPG・PNG・WebP — 大きな画像は自動で縮小されます。このアプリ内の表示専用で、入退室端末の写真は変更されません。",
+  // 2026-09-25: web check-in geofence -- the standing policy note on the check-in screen, and
+  // the three localized refusal reasons (geofenceMessage() in app.js). The "not precise enough"
+  // message is built from two fixed halves sandwiching the ±N m accuracy value, which is
+  // appended OUTSIDE these strings at runtime -- keeping both halves here matchable by L()'s
+  // whole-string lookup instead of a value that changes on every scan.
+  "Company policy: check in with the face scanner at the office. Web check-in is for working away from the office.":
+    "会社規定により、出勤打刻はオフィスの顔認証端末で行ってください。Web打刻は社外勤務用です。",
+  "Company policy: check-in must be made with the face scanner at the office. You are within the office area — please scan at the device.":
+    "会社規定により、出勤打刻はオフィスの顔認証端末で行ってください。現在オフィス周辺にいるため、Webでの出勤打刻はできません。",
+  "Web check-in requires your location — please allow location access, or use the face scanner at the office.":
+    "Web出勤打刻には位置情報が必要です。ブラウザで位置情報を許可するか、オフィスの顔認証端末をご利用ください。",
+  "Your location is not precise enough yet": "位置情報の精度が不足しています",
+  " — please wait a moment or move to an open area.": " — しばらくお待ちいただくか、開けた場所へ移動してください。",
 };
