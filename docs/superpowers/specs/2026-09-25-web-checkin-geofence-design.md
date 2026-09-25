@@ -191,9 +191,25 @@ is safe rather than silently permissive.
   existing time-correction request, approved by MD.
 - **Recording blocked attempts.** The owner decided against it.
 
-## Known limits
+## Known limits — and the owner's decision about them
 
 A browser's position is supplied by the device and can be faked with a phone app in a few minutes.
-This gate raises the effort from "press a button" to "install and configure a spoofing app", and a
-faked position leaves a contradiction in the record — a check-in claiming to be kilometres away
-minutes before a face scan at the door. It is a policy control, not a security boundary.
+The owner has weighed this and accepted it (2026-09-25): "if someone can fake it, let them" — the
+company rule is unchanged either way, which is that attendance is recorded by face scan at the
+office.
+
+Two properties make that a reasonable position to take:
+
+1. **Faking a position *into* the zone cannot help anyone.** The gate reads the reported position
+   and nothing else, so a spoofed pin on Paso Tower is refused exactly like a real one. The only
+   useful lie is a position far from the office.
+2. **Every check-in that passes leaves its claimed position on the record**, reviewable on a map
+   from the attendance row (`app.js`, the GPS button on web check-ins). A check-in claiming to be
+   kilometres away, minutes before a face scan at the office door, contradicts itself in a way that
+   is visible to anyone who looks.
+
+Storing the accuracy improves that review: a genuinely poor phone fix and a spoofed one look
+different, because spoofing apps typically report an implausibly precise value. The GPS popup should
+show the stored accuracy alongside the coordinates for this reason.
+
+It is a policy control, not a security boundary, and it is meant as one.
