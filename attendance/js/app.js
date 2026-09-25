@@ -5940,6 +5940,36 @@ function rerenderAfterCheckoutReviews() {
 // this file (app.js:9125, 11942) -- not wired into Settings in this change, see project memory.
 const CHECKIN_CUTOFF = '13:00';
 
+// 2026-09-25: web check-in geofence. DUAL-SYNC twin of app.js -- both copies must stay identical
+// 2026-09-25: web check-in geofence. DUAL-SYNC twin of app.js -- both copies must stay identical
+// or tests/geofence.test.js fails. Pure: no I/O, no globals, safe to extract into a test sandbox.
+function geofenceDistanceM(lat1, lng1, lat2, lng2) {
+  const R = 6371000;
+  const toRad = d => d * Math.PI / 180;
+  const p1 = toRad(lat1), p2 = toRad(lat2);
+  const dp = toRad(lat2 - lat1), dl = toRad(lng2 - lng1);
+  const a = Math.sin(dp / 2) * Math.sin(dp / 2) + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) * Math.sin(dl / 2);
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+}
+// Returns '' to allow, or the reason code to refuse. Order matters: the caller must already have
+// established that this scan would become a CHECK-IN -- check-out is never gated.
+function geofenceCheckinReason(G, role, lat, lng, accuracy) {
+  if (!G || typeof G !== 'object' || G.enabled !== true) return '';
+  const exempt = Array.isArray(G.exemptRoles) ? G.exemptRoles : [];
+  if (exempt.includes(role)) return '';
+  if (lat == null || lng == null) return 'geofence-no-position';
+  const la = Number(lat), ln = Number(lng);
+  if (!Number.isFinite(la) || !Number.isFinite(ln)) return 'geofence-no-position';
+  // Number.isFinite, never `||`: a configured 0 is a real value and must not fall back to a default.
+  const maxAcc = Number.isFinite(Number(G.maxAccuracyM)) ? Number(G.maxAccuracyM) : 50;
+  if (accuracy == null) return 'geofence-accuracy';
+  const acc = Number(accuracy);
+  if (!Number.isFinite(acc) || acc < 0 || acc > maxAcc) return 'geofence-accuracy';
+  let radius = 150;
+  if (Number.isFinite(Number(G.radiusM))) radius = Number(G.radiusM);
+  if (radius === 0) return '';
+  return geofenceDistanceM(la, ln, Number(G.lat), Number(G.lng)) <= radius ? 'geofence-inside' : '';
+}
 // Dual-sync with server.js eventInstantMs / compareEventsByInstant — mixed offsets
 // (+07:00 vs +09:00) must sort by instant, not ISO string.
 function eventInstantMs(raw) {
