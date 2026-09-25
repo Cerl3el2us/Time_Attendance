@@ -1789,15 +1789,10 @@ app.post('/api/hikvision/event', hikAuth, webScanLimiter, withEventsLock((req, r
 
     // 2026-09-25 (owner): attendance at the office is recorded by the face scanner. A web check-in
     // from inside the office radius is refused; a check-out is not gated at all, and the physical
-    // device never reaches this code.
-    if (req.hikSource === 'webscan' && webScanWouldBeCheckIn(req.hikUser, eventTime)) {
-      const G = getAppSettings().geofence;
-      const coords = gps ? parseGpsCoords(gps) : null;
-      const reason = geofenceCheckinReason(
-        G, req.hikUser.role,
-        coords ? coords.lat : NaN, coords ? coords.lng : NaN,
-        gpsAccuracy
-      );
+    // device never reaches this code. webScanGateReason() owns the whole decision (check-in test +
+    // geofence check); this block only turns a non-empty reason into the 403.
+    if (req.hikSource === 'webscan') {
+      const reason = webScanGateReason(req.hikUser, eventTime, gps, gpsAccuracy);
       if (reason) {
         const messages = {
           'geofence-inside': 'Company policy: check-in must be made with the face scanner at the office.',
@@ -9172,6 +9167,18 @@ function webScanWouldBeCheckIn(user, eventTimeIso) {
   if (timePart >= CHECKIN_CUTOFF) return false;           // first scan after the cutoff = check-out
   const log = buildAttendanceLogForUser(user);
   return !(log[datePart] && log[datePart].checkIn);
+}
+
+// 2026-09-25: the whole WebScan geofence decision in one call. Returns '' to allow, or the reason
+// code to refuse. webScanWouldBeCheckIn() gates the geofence check itself -- a check-out never
+// reaches geofenceCheckinReason(), so it is never asked for GPS. The route below does nothing but
+// call this once with req.hikUser (never body) and, on a non-empty result, send that 403 and
+// return before saveEvent -- see tests/geofence.test.js for the wiring test that exercises that.
+function webScanGateReason(hikUser, eventTimeIso, gps, gpsAccuracy) {
+  if (!webScanWouldBeCheckIn(hikUser, eventTimeIso)) return '';
+  const G = getAppSettings().geofence;
+  const coords = gps ? parseGpsCoords(gps) : null;
+  return geofenceCheckinReason(G, hikUser.role, coords ? coords.lat : NaN, coords ? coords.lng : NaN, gpsAccuracy);
 }
 
 // Port of app.js generatePeriodDays() (~line 2206) — day-by-day status derivation. Takes

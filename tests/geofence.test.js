@@ -170,20 +170,105 @@ test('an employee who already checked in today is not gated again', () => {
   assert.strictEqual(ctx.webScanWouldBeCheckIn({ employeeNo: '1' }, '2026-09-25T09:00:00'), false);
 });
 
+// 2026-09-25 (review round 1): the two tests below replace a version that only compared
+// indexOf() positions of source substrings. That version would still have passed if the `return`
+// on the 403 line were dropped (403 sent AND the event still saved), or if the check-in test were
+// bypassed so a check-out got asked for GPS too -- nothing actually ran. These execute the real
+// extracted code instead: one drives webScanGateReason() itself with stubbed dependencies, the
+// other simulates the route's own dispatch (a stub req/res, a sentinel standing in for "reached
+// saveEvent") so a dropped `return` or a bypassed check-in test makes an assertion fail, not just
+// a text pattern go missing.
+
+test('webScanGateReason: a check-out is never asked for GPS', () => {
+  let geofenceCalls = 0;
+  const ctx = {
+    webScanWouldBeCheckIn: () => false,
+    getAppSettings: () => { throw new Error('getAppSettings must not run for a check-out'); },
+    parseGpsCoords: () => { throw new Error('parseGpsCoords must not run for a check-out'); },
+    geofenceCheckinReason: () => { geofenceCalls++; return 'geofence-inside'; },
+  };
+  vm.createContext(ctx);
+  vm.runInContext(extractFunction(SERVER_SRC, 'webScanGateReason'), ctx);
+  const result = ctx.webScanGateReason({ role: 'user' }, '2026-09-25T17:40:00', '13.7,100.5', 20);
+  assert.strictEqual(result, '', 'a check-out must never be gated');
+  assert.strictEqual(geofenceCalls, 0, 'geofenceCheckinReason must not run when the check-in test says no');
+});
+
+test('webScanGateReason: a check-in defers entirely to geofenceCheckinReason, with the live role and parsed coords', () => {
+  const G = { enabled: true };
+  const calls = [];
+  const ctx = {
+    webScanWouldBeCheckIn: () => true,
+    getAppSettings: () => ({ geofence: G }),
+    parseGpsCoords: raw => raw === '13.7,100.5' ? { lat: 13.7, lng: 100.5 } : null,
+    geofenceCheckinReason: (...args) => { calls.push(args); return 'geofence-inside'; },
+  };
+  vm.createContext(ctx);
+  vm.runInContext(extractFunction(SERVER_SRC, 'webScanGateReason'), ctx);
+
+  const result = ctx.webScanGateReason({ role: 'manager' }, '2026-09-25T08:25:00', '13.7,100.5', 20);
+  assert.strictEqual(result, 'geofence-inside');
+  assert.strictEqual(calls.length, 1);
+  assert.deepStrictEqual(calls[0], [G, 'manager', 13.7, 100.5, 20],
+    'must pass the settings object, hikUser.role, the parsed coords and the sanitised accuracy through unchanged');
+
+  // No gps at all: coords stay null, and NaN/NaN reach geofenceCheckinReason (its own
+  // "lat == null" check does not apply to NaN, so this must be NaN, not null or undefined).
+  ctx.webScanGateReason({ role: 'user' }, '2026-09-25T08:25:00', '', null);
+  assert.deepStrictEqual(calls[1], [G, 'user', NaN, NaN, null]);
+});
+
+function extractWebscanGateWiring(routeBody) {
+  const anchorIdx = routeBody.indexOf('webScanGateReason(req.hikUser');
+  assert.ok(anchorIdx > 0, 'the route must call webScanGateReason(req.hikUser, ...) -- role must come from the live record, never the request body');
+  const ifIdx = routeBody.lastIndexOf("if (req.hikSource === 'webscan') {", anchorIdx);
+  assert.ok(ifIdx > 0, 'webScanGateReason must be called inside the webscan branch -- the physical device is never gated');
+  const openIdx = routeBody.indexOf('{', ifIdx);
+  return extractBraced(routeBody, ifIdx, openIdx, 'webscan gate wiring');
+}
+
 test('the gate is wired into the WebScan branch, before the event is saved', () => {
   const route = SERVER_SRC.slice(SERVER_SRC.indexOf("app.post('/api/hikvision/event'"));
   const body = route.slice(0, route.indexOf('\napp.'));
-  const gateAt = body.indexOf('geofenceCheckinReason');
+  const gateBlock = extractWebscanGateWiring(body);
+  const gateAt = body.indexOf(gateBlock);
   const saveAt = body.indexOf('saveEvent({');
-  assert.ok(gateAt > 0, 'the route must call geofenceCheckinReason');
-  assert.ok(gateAt < saveAt, 'the gate must run BEFORE saveEvent, or a refused check-in is still recorded');
-  assert.ok(/hikSource === 'webscan'/.test(body.slice(0, gateAt)),
-    'the gate must be inside the webscan branch -- the physical device is never gated');
-  assert.ok(/webScanWouldBeCheckIn\(/.test(body.slice(0, gateAt)),
-    'the check-in test must run before the gate, so check-outs are never gated');
-  assert.ok(/req\.hikUser\.role/.test(body.slice(0, gateAt + 400)),
-    'the role must come from the live record, never from the request body');
-  assert.ok(/status\(403\)/.test(body.slice(gateAt, gateAt + 600)), 'refusal must be a 403');
+  assert.ok(gateAt > 0 && gateAt < saveAt, 'the gate wiring must run BEFORE saveEvent, or a refused check-in is still recorded');
+
+  // Simulate the route's own dispatch: wrap the extracted wiring block in a function that takes
+  // the same req/res/eventTime/gps/gpsAccuracy the route passes, stub webScanGateReason's return
+  // value, and put a sentinel right where the route's next statement (const tz = ...) begins. If
+  // the `return` on the 403 line were ever dropped, execution would fall through into the
+  // sentinel even on a refusal -- this is what makes that regression a failing assertion, not a
+  // silent pass.
+  function runWiring(gateReason) {
+    const ctx = { webScanGateReason: () => gateReason, sentinel: () => { ctx.reached = true; }, reached: false };
+    vm.createContext(ctx);
+    vm.runInContext(`function wiring(req, res, eventTime, gps, gpsAccuracy) {\n${gateBlock}\n  sentinel();\n}`, ctx);
+    const calls = {};
+    const res = {
+      status(code) { calls.status = code; return this; },
+      json(payload) { calls.json = payload; return this; },
+    };
+    const req = { hikSource: 'webscan', hikUser: { role: 'user', employeeNo: '1' } };
+    ctx.wiring(req, res, '2026-09-25T08:25:00', '13.7,100.5', 20);
+    return { reached: ctx.reached, calls };
+  }
+
+  const refused = runWiring('geofence-inside');
+  assert.strictEqual(refused.reached, false,
+    'a refusal must return before reaching the next statement (saveEvent) -- would wrongly be true if `return` were dropped');
+  assert.strictEqual(refused.calls.status, 403);
+  // Field-by-field, not deepStrictEqual: the json payload literal is constructed by code running
+  // INSIDE the vm sandbox, so it carries that realm's Object.prototype -- deepStrictEqual across
+  // realms fails on prototype identity even when every value matches.
+  assert.strictEqual(refused.calls.json.success, false);
+  assert.strictEqual(refused.calls.json.reason, 'geofence-inside');
+  assert.strictEqual(refused.calls.json.message, 'Company policy: check-in must be made with the face scanner at the office.');
+
+  const allowed = runWiring('');
+  assert.strictEqual(allowed.reached, true, 'an allowed scan must fall through to saveEvent');
+  assert.strictEqual(allowed.calls.status, undefined, 'an allowed scan must never send a response in this block');
 });
 
 test('the stored event carries the accuracy, and it is not public', () => {
