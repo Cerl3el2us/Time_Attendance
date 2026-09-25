@@ -4346,7 +4346,7 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
   // Hoisted out of the `if (body.appSettings)` block below (4th re-audit, Finding B) so the
   // deep-merge further down can filter `current.appSettings` through the same whitelist -- see
   // that comment for why.
-  const ALLOWED_APPSETTINGS_KEYS = ['company', 'payroll', 'sso', 'allowances', 'workSchedule', 'leave', 'allowanceTypes', 'lateDeductPolicy', 'tax', 'allowanceEligibility', 'map', 'updatedAt'];
+  const ALLOWED_APPSETTINGS_KEYS = ['company', 'payroll', 'sso', 'allowances', 'workSchedule', 'geofence', 'leave', 'allowanceTypes', 'lateDeductPolicy', 'tax', 'allowanceEligibility', 'map', 'updatedAt'];
   if (body.appSettings) {
     const A = body.appSettings;
     if (Object.keys(A).length > 30) {
@@ -4363,7 +4363,7 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
     // further below) only guards `incoming`/`existing` being non-array objects at the point it
     // decides whether to merge -- a scalar `incoming` still gets stored verbatim as that key's new
     // value, corrupting every downstream reader that expects an object.
-    for (const sub of ['company', 'payroll', 'sso', 'allowances', 'workSchedule', 'leave', 'allowanceEligibility', 'lateDeductPolicy', 'tax', 'map']) {
+    for (const sub of ['company', 'payroll', 'sso', 'allowances', 'workSchedule', 'geofence', 'leave', 'allowanceEligibility', 'lateDeductPolicy', 'tax', 'map']) {
       if (A[sub] !== undefined && (!A[sub] || typeof A[sub] !== 'object' || Array.isArray(A[sub]))) {
         return res.status(400).json({ success: false, message: `appSettings.${sub} must be an object` });
       }
@@ -4392,6 +4392,33 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
     }
     if (A.sso && A.sso.maxAmount !== undefined && (typeof A.sso.maxAmount !== 'number' || !Number.isFinite(A.sso.maxAmount) || A.sso.maxAmount < 0)) {
       return res.status(400).json({ success: false, message: 'appSettings.sso.maxAmount must be a non-negative number' });
+    }
+    if (A.geofence) {
+      const g = A.geofence;
+      const num = (v, lo, hi) => typeof v === 'number' && Number.isFinite(v) && v >= lo && v <= hi;
+      if (g.enabled !== undefined && typeof g.enabled !== 'boolean') {
+        return res.status(400).json({ success: false, message: 'appSettings.geofence.enabled must be true or false' });
+      }
+      if (g.lat !== undefined && !num(g.lat, -90, 90)) {
+        return res.status(400).json({ success: false, message: 'appSettings.geofence.lat must be a number between -90 and 90' });
+      }
+      if (g.lng !== undefined && !num(g.lng, -180, 180)) {
+        return res.status(400).json({ success: false, message: 'appSettings.geofence.lng must be a number between -180 and 180' });
+      }
+      // Lower bounds are not cosmetic: a radius under ~80 m lets GPS noise walk people out of the
+      // zone, and an accuracy threshold that is too tight refuses everyone indoors.
+      if (g.radiusM !== undefined && !num(g.radiusM, 10, 5000)) {
+        return res.status(400).json({ success: false, message: 'appSettings.geofence.radiusM must be a number between 10 and 5000' });
+      }
+      if (g.maxAccuracyM !== undefined && !num(g.maxAccuracyM, 5, 1000)) {
+        return res.status(400).json({ success: false, message: 'appSettings.geofence.maxAccuracyM must be a number between 5 and 1000' });
+      }
+      if (g.exemptRoles !== undefined) {
+        const known = ['md', 'manager', 'accounting', 'user', 'driver', 'marketing'];
+        if (!Array.isArray(g.exemptRoles) || g.exemptRoles.length > 6 || !g.exemptRoles.every(r => known.includes(r))) {
+          return res.status(400).json({ success: false, message: 'appSettings.geofence.exemptRoles must be an array of known roles' });
+        }
+      }
     }
     if (A.tax && A.tax.brackets !== undefined) {
       const validBrackets = Array.isArray(A.tax.brackets) && A.tax.brackets.length <= 20 && A.tax.brackets.every(b =>
@@ -8685,6 +8712,9 @@ const DEFAULT_APP_SETTINGS = {
     diligence: 200, longDistance: 150, longDistanceThresholdKm: 250, personalCar: 1000, phone: 1000
   },
   workSchedule: { standardStartHour: 8, standardStartMinute: 30 },
+  // 2026-09-25: web check-in geofence (Paso Tower). Editable in Settings; `enabled:false` restores
+  // the pre-geofence behaviour exactly.
+  geofence: { enabled: true, lat: 13.7268315, lng: 100.52847, radiusM: 150, maxAccuracyM: 50, exemptRoles: ['driver'] },
   leave: { carryForwardMax: 5, carryForwardExpiryEnabled: true, carryForwardExpiryMonth: 3, carryForwardExpiryDay: 31, carryForwardNotifyDays: 30, annualLeaveMinMonths: 6, annualLeaveTiers: DEFAULT_ANNUAL_LEAVE_TIERS.map(t => ({ ...t })), sickLeaveDays: DEFAULT_SICK_LEAVE_DAYS, businessLeaveDays: DEFAULT_BUSINESS_LEAVE_DAYS },
   map: { cartoApiKey: '' },
   allowanceTypes: [],
@@ -8848,6 +8878,7 @@ function getAppSettings() {
     sso:          { ...DEFAULT_APP_SETTINGS.sso,          ...(raw.sso          || {}) },
     allowances:   { ...DEFAULT_APP_SETTINGS.allowances,   ...(raw.allowances   || {}) },
     workSchedule: { ...DEFAULT_APP_SETTINGS.workSchedule, ...(raw.workSchedule || {}) },
+    geofence:     { ...DEFAULT_APP_SETTINGS.geofence,     ...(raw.geofence     || {}) },
     leave:        { ...DEFAULT_APP_SETTINGS.leave,        ...(raw.leave       || {}) },
     allowanceTypes:   raw.allowanceTypes   || DEFAULT_APP_SETTINGS.allowanceTypes,
     lateDeductPolicy: raw.lateDeductPolicy || DEFAULT_APP_SETTINGS.lateDeductPolicy,

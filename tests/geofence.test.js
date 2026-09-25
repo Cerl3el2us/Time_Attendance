@@ -101,4 +101,42 @@ test('a radius or threshold of 0 is honoured, not replaced by a default', () => 
   assert.strictEqual(S.geofenceCheckinReason({ ...G, maxAccuracyM: 0 }, 'user', AMARA.lat, AMARA.lng, 1), 'geofence-accuracy');
 });
 
+console.log('Geofence: settings');
+
+test('both files default to Paso Tower, 150 m, 50 m, driver exempt', () => {
+  for (const [label, src, name] of [['server', SERVER_SRC, 'DEFAULT_APP_SETTINGS'], ['app', APP_SRC, 'APP_SETTINGS']]) {
+    const m = new RegExp(`geofence:\\s*\\{[^}]*\\}`).exec(src);
+    assert.ok(m, `${label}: no geofence defaults in ${name}`);
+    const g = m[0];
+    assert.ok(/enabled:\s*true/.test(g), `${label}: geofence must default to enabled`);
+    assert.ok(/13\.7268315/.test(g) && /100\.52847/.test(g), `${label}: office centre must be Paso Tower`);
+    assert.ok(/radiusM:\s*150/.test(g), `${label}: radius must default to 150`);
+    assert.ok(/maxAccuracyM:\s*50/.test(g), `${label}: accuracy threshold must default to 50`);
+    assert.ok(/exemptRoles:\s*\['driver'\]/.test(g), `${label}: driver must be exempt by default`);
+  }
+});
+
+test('getAppSettings merges geofence over the defaults', () => {
+  const fn = extractFunction(SERVER_SRC, 'getAppSettings');
+  assert.ok(/geofence:\s*\{\s*\.\.\.DEFAULT_APP_SETTINGS\.geofence,\s*\.\.\.\(raw\.geofence\s*\|\|\s*\{\}\)\s*\}/.test(fn),
+    'geofence must be merged like workSchedule, or a partial stored value loses its other fields');
+});
+
+test('PUT /api/settings accepts geofence and validates it', () => {
+  const allowed = /const ALLOWED_APPSETTINGS_KEYS = \[[^\]]*\]/.exec(SERVER_SRC)[0];
+  assert.ok(/'geofence'/.test(allowed), 'geofence must be in the appSettings whitelist or every save is rejected');
+  const objLoop = /for \(const sub of \['company'[^\]]*\]\)/.exec(SERVER_SRC)[0];
+  assert.ok(/'geofence'/.test(objLoop), 'geofence must be type-checked like the other sub-objects');
+  for (const needle of [
+    'appSettings.geofence.lat must be a number between -90 and 90',
+    'appSettings.geofence.lng must be a number between -180 and 180',
+    'appSettings.geofence.radiusM must be a number between 10 and 5000',
+    'appSettings.geofence.maxAccuracyM must be a number between 5 and 1000',
+    'appSettings.geofence.exemptRoles must be an array of known roles',
+    'appSettings.geofence.enabled must be true or false',
+  ]) {
+    assert.ok(SERVER_SRC.includes(needle), `missing validation: ${needle}`);
+  }
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ', 0 failed'}`);

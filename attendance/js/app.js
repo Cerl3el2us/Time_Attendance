@@ -1292,6 +1292,9 @@ let APP_SETTINGS = {
     diligence: 200, longDistance: 150, longDistanceThresholdKm: 250, personalCar: 1000, phone: 1000
   },
   workSchedule: { standardStartHour: 8, standardStartMinute: 30 },
+  // 2026-09-25: web check-in geofence (Paso Tower). Editable in Settings; `enabled:false` restores
+  // the pre-geofence behaviour exactly.
+  geofence: { enabled: true, lat: 13.7268315, lng: 100.52847, radiusM: 150, maxAccuracyM: 50, exemptRoles: ['driver'] },
   leave: { carryForwardMax: 5, carryForwardExpiryEnabled: true, carryForwardExpiryMonth: 3, carryForwardExpiryDay: 31, carryForwardNotifyDays: 30, annualLeaveMinMonths: 6, annualLeaveTiers: DEFAULT_ANNUAL_LEAVE_TIERS.map(t => ({ ...t })), sickLeaveDays: DEFAULT_SICK_LEAVE_DAYS, businessLeaveDays: DEFAULT_BUSINESS_LEAVE_DAYS },
   allowanceTypes: [],
   lateDeductPolicy: {
@@ -2633,6 +2636,7 @@ async function loadSettingsFromBackend() {
       if (s.sso)          Object.assign(APP_SETTINGS.sso, s.sso);
       if (s.allowances)   Object.assign(APP_SETTINGS.allowances, s.allowances);
       if (s.workSchedule) Object.assign(APP_SETTINGS.workSchedule, s.workSchedule);
+      if (s.geofence)     Object.assign(APP_SETTINGS.geofence, s.geofence);
       if (s.leave)        Object.assign(APP_SETTINGS.leave, s.leave);
       APP_SETTINGS.leave.annualLeaveTiers = normalizeAnnualLeaveTiers(APP_SETTINGS.leave.annualLeaveTiers);
       APP_SETTINGS.leave.sickLeaveDays = sickLeaveEntitlementDays();
