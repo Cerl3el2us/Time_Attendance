@@ -139,4 +139,58 @@ test('PUT /api/settings accepts geofence and validates it', () => {
   }
 });
 
+console.log('Geofence: the server gate');
+
+test('accuracy is sanitised to a bounded number or null', () => {
+  const A = sandbox(SERVER_SRC, ['sanitizeGpsAccuracy']);
+  assert.strictEqual(A.sanitizeGpsAccuracy(23.4), 23);
+  assert.strictEqual(A.sanitizeGpsAccuracy('12'), 12);
+  assert.strictEqual(A.sanitizeGpsAccuracy(0), 0);
+  assert.strictEqual(A.sanitizeGpsAccuracy(-1), null);
+  assert.strictEqual(A.sanitizeGpsAccuracy('abc'), null);
+  assert.strictEqual(A.sanitizeGpsAccuracy(undefined), null);
+  assert.strictEqual(A.sanitizeGpsAccuracy(1e9), null);
+});
+
+test('only a real check-in is gated: pre-dawn and post-cutoff scans are check-outs', () => {
+  const ctx = { CHECKIN_CUTOFF: '13:00', buildAttendanceLogForUser: () => ({}) };
+  vm.createContext(ctx);
+  vm.runInContext(extractFunction(SERVER_SRC, 'webScanWouldBeCheckIn'), ctx);
+  const U = { employeeNo: '1' };
+  assert.strictEqual(ctx.webScanWouldBeCheckIn(U, '2026-09-25T08:25:00'), true);
+  assert.strictEqual(ctx.webScanWouldBeCheckIn(U, '2026-09-25T02:10:00'), false, 'before 05:00 is a late-night check-out');
+  assert.strictEqual(ctx.webScanWouldBeCheckIn(U, '2026-09-25T13:00:00'), false, 'at the cutoff is a check-out');
+  assert.strictEqual(ctx.webScanWouldBeCheckIn(U, '2026-09-25T17:40:00'), false);
+});
+
+test('an employee who already checked in today is not gated again', () => {
+  const ctx = { CHECKIN_CUTOFF: '13:00', buildAttendanceLogForUser: () => ({ '2026-09-25': { checkIn: '08:20' } }) };
+  vm.createContext(ctx);
+  vm.runInContext(extractFunction(SERVER_SRC, 'webScanWouldBeCheckIn'), ctx);
+  assert.strictEqual(ctx.webScanWouldBeCheckIn({ employeeNo: '1' }, '2026-09-25T09:00:00'), false);
+});
+
+test('the gate is wired into the WebScan branch, before the event is saved', () => {
+  const route = SERVER_SRC.slice(SERVER_SRC.indexOf("app.post('/api/hikvision/event'"));
+  const body = route.slice(0, route.indexOf('\napp.'));
+  const gateAt = body.indexOf('geofenceCheckinReason');
+  const saveAt = body.indexOf('saveEvent({');
+  assert.ok(gateAt > 0, 'the route must call geofenceCheckinReason');
+  assert.ok(gateAt < saveAt, 'the gate must run BEFORE saveEvent, or a refused check-in is still recorded');
+  assert.ok(/hikSource === 'webscan'/.test(body.slice(0, gateAt)),
+    'the gate must be inside the webscan branch -- the physical device is never gated');
+  assert.ok(/webScanWouldBeCheckIn\(/.test(body.slice(0, gateAt)),
+    'the check-in test must run before the gate, so check-outs are never gated');
+  assert.ok(/req\.hikUser\.role/.test(body.slice(0, gateAt + 400)),
+    'the role must come from the live record, never from the request body');
+  assert.ok(/status\(403\)/.test(body.slice(gateAt, gateAt + 600)), 'refusal must be a 403');
+});
+
+test('the stored event carries the accuracy, and it is not public', () => {
+  const route = SERVER_SRC.slice(SERVER_SRC.indexOf("app.post('/api/hikvision/event'"));
+  assert.ok(/gpsAcc/.test(route.slice(0, route.indexOf('\napp.'))), 'the event must store gpsAcc');
+  const pub = /const EVENT_PUBLIC_FIELDS = \[[^\]]*\]/.exec(SERVER_SRC)[0];
+  assert.ok(!/gpsAcc/.test(pub), 'gpsAcc must stay out of the public projection, like gps itself');
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ', 0 failed'}`);

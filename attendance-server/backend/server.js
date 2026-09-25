@@ -1454,6 +1454,12 @@ function sanitizeGps(raw) {
   if (s === 'ไม่ทราบตำแหน่ง') return s;
   return /^-?\d{1,3}(\.\d+)?\s*,\s*-?\d{1,3}(\.\d+)?$/.test(s) ? s : '';
 }
+// 2026-09-25: the browser's reported accuracy in metres, for the geofence gate and for reviewing a
+// stored position afterwards. Bounded like every other client-supplied number here.
+function sanitizeGpsAccuracy(raw) {
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 && n <= 100000 ? Math.round(n) : null;
+}
 // 2026-08-06 (user request): badge numbers enrolled on the physical Hikvision device that are
 // deliberately NOT real employees (e.g. a shared emergency-access badge, employeeNo "6344") --
 // `POST /api/users/sync-hikvision`'s new-employee auto-detection must never create a login/
@@ -1743,6 +1749,7 @@ app.post('/api/hikvision/event', hikAuth, webScanLimiter, withEventsLock((req, r
 
     let employeeNo, holderName, eventTime, eventType;
     const gps = sanitizeGps(body.gps);
+    const gpsAccuracy = sanitizeGpsAccuracy(body.gpsAccuracy);
     if (req.hikSource === 'webscan') {
       // Every field the client could otherwise forge is derived from the authenticated user's
       // own live record instead -- see the CRITICAL fix comment above hikAuth().
@@ -1780,6 +1787,27 @@ app.post('/api/hikvision/event', hikAuth, webScanLimiter, withEventsLock((req, r
       return res.json({ success: false, message: 'no employee number' });
     }
 
+    // 2026-09-25 (owner): attendance at the office is recorded by the face scanner. A web check-in
+    // from inside the office radius is refused; a check-out is not gated at all, and the physical
+    // device never reaches this code.
+    if (req.hikSource === 'webscan' && webScanWouldBeCheckIn(req.hikUser, eventTime)) {
+      const G = getAppSettings().geofence;
+      const coords = gps ? parseGpsCoords(gps) : null;
+      const reason = geofenceCheckinReason(
+        G, req.hikUser.role,
+        coords ? coords.lat : NaN, coords ? coords.lng : NaN,
+        gpsAccuracy
+      );
+      if (reason) {
+        const messages = {
+          'geofence-inside': 'Company policy: check-in must be made with the face scanner at the office.',
+          'geofence-no-position': 'Web check-in requires your location.',
+          'geofence-accuracy': 'Your location is not precise enough yet.',
+        };
+        return res.status(403).json({ success: false, reason, message: messages[reason] });
+      }
+    }
+
     const tz = req.hikSource === 'webscan' ? (req.hikTimezone || DEFAULT_TZ) : '';
     // 2026-09-24 (owner): DISPLAY-ONLY zone of the GPS position (Abroad days show the local time
     // there). Never touches event_time/timezone above. Like `gps`, it is not in
@@ -1793,6 +1821,7 @@ app.post('/api/hikvision/event', hikAuth, webScanLimiter, withEventsLock((req, r
       employeeNo, holderName, event_time: eventTime, eventType,
       ...(gps ? { gps } : {}),
       ...(gpsTz ? { gpsTz } : {}),
+      ...(gpsAccuracy !== null ? { gpsAcc: gpsAccuracy } : {}),
       ...(tz ? { timezone: tz } : {})
     });
     // Per-viewer SCAN_EVENT: owner and privileged admins get gps/holderName; everyone else
@@ -9130,6 +9159,19 @@ function buildAttendanceLogForUser(user, start, end) {
     }
   });
   return log;
+}
+
+// 2026-09-25: would this WebScan become the day's CHECK-IN? Mirrors buildAttendanceLogForUser()'s
+// own rules so the gate and the attendance log can never disagree. Check-out is never gated.
+function webScanWouldBeCheckIn(user, eventTimeIso) {
+  const raw = String(eventTimeIso || '');
+  const datePart = raw.substring(0, 10);
+  const timePart = raw.substring(11, 16);
+  const hour = parseInt(timePart.substring(0, 2), 10);
+  if (!Number.isFinite(hour) || hour < 5) return false;   // late-night return = check-out
+  if (timePart >= CHECKIN_CUTOFF) return false;           // first scan after the cutoff = check-out
+  const log = buildAttendanceLogForUser(user);
+  return !(log[datePart] && log[datePart].checkIn);
 }
 
 // Port of app.js generatePeriodDays() (~line 2206) — day-by-day status derivation. Takes
