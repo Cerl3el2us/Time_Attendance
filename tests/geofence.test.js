@@ -150,6 +150,17 @@ test('accuracy is sanitised to a bounded number or null', () => {
   assert.strictEqual(A.sanitizeGpsAccuracy('abc'), null);
   assert.strictEqual(A.sanitizeGpsAccuracy(undefined), null);
   assert.strictEqual(A.sanitizeGpsAccuracy(1e9), null);
+  // I1 fix (2026-09-25 review): Number(null) === 0 and Number('') === 0, so these used to
+  // sanitise to a perfect 0 m fix instead of "no accuracy reported" -- the shipped client sends
+  // gpsAccuracy: null whenever currentGPS is absent, so this is a real, frequent input, not a
+  // theoretical one.
+  assert.strictEqual(A.sanitizeGpsAccuracy(null), null, 'null must never become a fabricated 0 m fix');
+  assert.strictEqual(A.sanitizeGpsAccuracy(''), null, 'an empty string must never become a fabricated 0 m fix');
+  // A non-number/non-string value (e.g. a stray boolean or array in the request body) must be
+  // rejected outright rather than coerced -- Number(true) === 1 and Number([7]) === 7 would
+  // otherwise fabricate a plausible-looking accuracy from garbage input.
+  assert.strictEqual(A.sanitizeGpsAccuracy(true), null);
+  assert.strictEqual(A.sanitizeGpsAccuracy([7]), null);
 });
 
 test('only a real check-in is gated: pre-dawn and post-cutoff scans are check-outs', () => {
@@ -180,10 +191,13 @@ test('an employee who already checked in today is not gated again', () => {
 // a text pattern go missing.
 
 test('webScanGateReason: a check-out is never asked for GPS', () => {
+  // M2 (2026-09-25 review) moved getAppSettings() to run first (to short-circuit on the master
+  // switch before the expensive log build) -- it now legitimately runs for a check-out too, so
+  // this stub returns a normal enabled settings object instead of throwing on any call.
   let geofenceCalls = 0;
   const ctx = {
     webScanWouldBeCheckIn: () => false,
-    getAppSettings: () => { throw new Error('getAppSettings must not run for a check-out'); },
+    getAppSettings: () => ({ geofence: { enabled: true } }),
     parseGpsCoords: () => { throw new Error('parseGpsCoords must not run for a check-out'); },
     geofenceCheckinReason: () => { geofenceCalls++; return 'geofence-inside'; },
   };
@@ -192,6 +206,25 @@ test('webScanGateReason: a check-out is never asked for GPS', () => {
   const result = ctx.webScanGateReason({ role: 'user' }, '2026-09-25T17:40:00', '13.7,100.5', 20);
   assert.strictEqual(result, '', 'a check-out must never be gated');
   assert.strictEqual(geofenceCalls, 0, 'geofenceCheckinReason must not run when the check-in test says no');
+});
+
+// M2 fix (2026-09-25 review): webScanGateReason() used to call webScanWouldBeCheckIn() --
+// buildAttendanceLogForUser() -> a full readEvents() + log build -- unconditionally, even when
+// geofence.enabled is false and the answer can never be anything but ''. It now reads the master
+// switch first and returns immediately, skipping that work entirely. This test proves the skip
+// actually happens (not just that the final answer is still ''), by making every downstream
+// collaborator throw if it is ever reached.
+test('webScanGateReason: the master switch is checked first, without running the expensive log build', () => {
+  const ctx = {
+    webScanWouldBeCheckIn: () => { throw new Error('webScanWouldBeCheckIn (and its readEvents() log build) must not run when geofence.enabled is false'); },
+    getAppSettings: () => ({ geofence: { enabled: false } }),
+    parseGpsCoords: () => { throw new Error('parseGpsCoords must not run when disabled'); },
+    geofenceCheckinReason: () => { throw new Error('geofenceCheckinReason must not run when disabled'); },
+  };
+  vm.createContext(ctx);
+  vm.runInContext(extractFunction(SERVER_SRC, 'webScanGateReason'), ctx);
+  const result = ctx.webScanGateReason({ role: 'user' }, '2026-09-25T08:25:00', '13.7,100.5', 20);
+  assert.strictEqual(result, '', 'a disabled geofence must always allow the scan');
 });
 
 test('webScanGateReason: a check-in defers entirely to geofenceCheckinReason, with the live role and parsed coords', () => {
@@ -294,6 +327,32 @@ test('the client refuses before posting, using the same shared function', () => 
   const preIdx = fn.indexOf('geofenceCheckinReason');
   const postIdx = fn.indexOf('/api/hikvision/event');
   assert.ok(preIdx > 0 && preIdx < postIdx, 'the pre-check must run before the request');
+});
+
+// 2026-09-25 (review round 4): webCheckinWouldBeCheckIn() is the client half of the "would this
+// scan become a CHECK-IN" rule (webScanWouldBeCheckIn() in server.js is the other) and is shared
+// by doScan()'s pre-check and geofenceUiState()'s button state -- but until now it had no executed
+// test of its own; every existing test stubbed it out. This drives the real, extracted function
+// against a controllable clock/log so a regression in any one of its four branches fails here.
+test('webCheckinWouldBeCheckIn (executed): already checked in, pre-dawn, at/after the cutoff, and the ordinary case', () => {
+  function run(bk, existingCheckIn) {
+    const ctx = {
+      currentUser: { id: 'u1' },
+      CHECKIN_CUTOFF: '13:00',
+      attendanceLog: existingCheckIn ? { 'u1|2026-09-25': { checkIn: existingCheckIn } } : {},
+      scanYmd: () => bk,
+      businessDateFromYmd: () => '2026-09-25',
+      attKey: (userId, dateStr) => `${userId}|${dateStr}`,
+    };
+    vm.createContext(ctx);
+    vm.runInContext(extractFunction(APP_SRC, 'webCheckinWouldBeCheckIn'), ctx);
+    return ctx.webCheckinWouldBeCheckIn();
+  }
+  assert.strictEqual(run({ h: 8, min: 25 }, '08:00'), false, 'already checked in today -- the next press is a check-out');
+  assert.strictEqual(run({ h: 2, min: 10 }, null), false, 'before 05:00 is a late-night check-out');
+  assert.strictEqual(run({ h: 13, min: 0 }, null), false, 'at the cutoff is a check-out');
+  assert.strictEqual(run({ h: 14, min: 30 }, null), false, 'after the cutoff is a check-out');
+  assert.strictEqual(run({ h: 8, min: 25 }, null), true, 'the ordinary case: no check-in yet, before the cutoff, not pre-dawn');
 });
 
 test('the Settings page exposes all five geofence fields and saves them safely', () => {
@@ -419,18 +478,48 @@ test('geofence save (executed): a blank, garbage or missing numeric field keeps 
   assert.strictEqual(result.maxAccuracyM, 50, 'missing accuracy element must keep the stored value');
 });
 
-test('every new message exists in all three languages', () => {
-  const EN = [
-    'Company policy: check-in must be made with the face scanner at the office.',
-    'Web check-in requires your location',
-    'not precise enough',
-  ];
-  for (const en of EN) assert.ok(APP_SRC.includes(en), `English string missing: ${en}`);
-  for (const th of ['กรุณาสแกนที่เครื่อง', 'กรุณาอนุญาตให้เข้าถึงตำแหน่ง', 'ยังไม่แม่นพอ']) {
-    assert.ok(APP_SRC.includes(th), `Thai string missing: ${th}`);
-  }
-  for (const ja of ['顔認証端末', '位置情報が必要', '精度が不足']) {
-    assert.ok(JA_SRC.includes(ja), `Japanese string missing: ${ja}`);
+// 2026-09-25 (review round 4): the version above only grepped independently for an EN substring in
+// app.js and an unrelated-looking JA substring in ja.js -- it could never prove the two were the
+// SAME string, i.e. that ja.js's key is the exact L() English argument. All 13 keys introduced by
+// this feature were checked by hand instead. Replaced with an assertion that extracts the real
+// L('English', 'Thai') arguments from the actual call sites (geofenceMessage() and the Settings
+// card) plus the static policy note's data-en attribute, and requires ja.js to carry an EXACT
+// '"<that English string>":' key for every one of them -- so the next string added is caught
+// automatically instead of depending on someone checking by hand.
+function extractLArgPairs(snippet) {
+  // Matches L('EN', 'TH') / L("EN", "TH") -- both quote styles appear elsewhere in app.js, though
+  // every geofence call site happens to use single quotes.
+  const out = [];
+  const re = /\bL\(\s*(['"])((?:\\.|(?!\1)[^\\])*)\1\s*,\s*(['"])((?:\\.|(?!\3)[^\\])*)\3/g;
+  let m;
+  while ((m = re.exec(snippet))) out.push({ en: m[2].replace(/\\(.)/g, '$1'), th: m[4].replace(/\\(.)/g, '$1') });
+  return out;
+}
+
+test('every new message exists in all three languages, with ja.js keyed on the exact English argument', () => {
+  const msgFn = extractFunction(APP_SRC, 'geofenceMessage');
+  const settingsStart = APP_SRC.indexOf("adminSection('📍', L('Web check-in area");
+  assert.ok(settingsStart >= 0, 'geofence Settings card not found (adminSection anchor)');
+  const settingsEnd = APP_SRC.indexOf("adminSection('🏖️'", settingsStart);
+  assert.ok(settingsEnd > settingsStart, 'end of geofence Settings card not found (next adminSection anchor)');
+  const settingsSnippet = APP_SRC.slice(settingsStart, settingsEnd);
+
+  const pairs = [...extractLArgPairs(msgFn), ...extractLArgPairs(settingsSnippet)];
+  assert.strictEqual(pairs.length, 12, `expected 12 L(en, th) calls across geofenceMessage + the Settings card, found ${pairs.length}`);
+
+  // The static policy note is translated by fixStaticText()/applyStaticI18n() via data-en (which
+  // also keys into window.LANG_JA, see applyStaticI18n()), not via L() -- it is the 13th string.
+  const noteMatch = /id="scan-policy-note"[^>]*data-en="((?:[^"\\]|\\.)*)"/.exec(INDEX_SRC);
+  assert.ok(noteMatch, 'scan-policy-note data-en attribute not found');
+  pairs.push({ en: noteMatch[1], th: null });
+
+  assert.strictEqual(pairs.length, 13, `expected 13 total strings (12 L() + the static note), found ${pairs.length}`);
+
+  for (const { en, th } of pairs) {
+    assert.ok(en.length > 0, 'an L() English argument must not be empty');
+    if (th !== null) assert.ok(th.length > 0, `Thai argument must not be empty for: ${en}`);
+    const key = `"${en}":`;
+    assert.ok(JA_SRC.includes(key), `ja.js is missing an exact key for the English string: ${en}`);
   }
 });
 
@@ -491,6 +580,60 @@ test('geofenceUiState still blocks an actual check-in standing at the office', (
   const st = ctx.geofenceUiState();
   assert.strictEqual(st.blocked, true);
   assert.strictEqual(st.reason, 'geofence-inside');
+});
+
+// 2026-09-25 (review round 4, I2): geofenceUiState()'s button-blocked state (and, per M5, the
+// standing policy note's visibility) used to be recomputed only from GPS or settings events, never
+// when attendanceLog itself changed -- e.g. login after a door scan (settings resolves before
+// attendance, so the button is first drawn against an empty log and nothing later corrects it), or
+// a door-scan WebSocket event arriving on a stationary tab with no fresh watchPosition fix for
+// hours, silently blocking a check-out. Fix: updateScanButton() -- the one function every one of
+// those paths already calls -- now calls applyGeofenceToScanButton() at its end. This is a plain
+// text/wiring check (a full DOM+attendanceLog simulation of every call site would be its own
+// project); the function-level tests below cover applyGeofenceToScanButton()'s own logic directly.
+test('updateScanButton recomputes the geofence-blocked button state on every render (I2)', () => {
+  const fn = extractFunction(APP_SRC, 'updateScanButton');
+  assert.ok(/applyGeofenceToScanButton\(\)/.test(fn),
+    'updateScanButton must call applyGeofenceToScanButton(), or a change to attendanceLog (login after a door scan, a live WS event, doScan) leaves the button/note stale');
+});
+
+// M5 fix (2026-09-25 review): the standing policy note ("check in with the face scanner") is
+// static markup shown to everyone, including a role in exemptRoles (e.g. driver) who the gate
+// never actually applies to. applyGeofenceToScanButton() now hides it for them. These tests drive
+// the real, extracted function against a stubbed document/currentUser/APP_SETTINGS (geofenceUiState
+// itself is stubbed out -- it has its own tests above) so a regression in the note-hiding logic, or
+// a currentUser read that isn't guarded for the pre-login case, fails here.
+function runApplyGeofenceToScanButton({ currentUser, exemptRoles, blocked }) {
+  const elements = {
+    'scan-policy-note': { style: {} },
+    'scan-btn': { disabled: false, classList: { toggle(cls, on) { this[cls] = on; } } },
+    'scan-geofence-hint': { style: {}, textContent: '' },
+  };
+  const ctx = {
+    document: { getElementById: id => (Object.prototype.hasOwnProperty.call(elements, id) ? elements[id] : null) },
+    currentUser,
+    APP_SETTINGS: { geofence: { exemptRoles } },
+    geofenceUiState: () => ({ blocked, reason: blocked ? 'geofence-inside' : '', text: blocked ? 'blocked-text' : '' }),
+  };
+  vm.createContext(ctx);
+  vm.runInContext(extractFunction(APP_SRC, 'applyGeofenceToScanButton'), ctx);
+  ctx.applyGeofenceToScanButton();
+  return elements;
+}
+
+test('applyGeofenceToScanButton (executed): hides the standing policy note for a role in exemptRoles', () => {
+  const driver = runApplyGeofenceToScanButton({ currentUser: { role: 'driver' }, exemptRoles: ['driver'], blocked: false });
+  assert.strictEqual(driver['scan-policy-note'].style.display, 'none', 'an exempt role must not see the standing policy note');
+
+  const user = runApplyGeofenceToScanButton({ currentUser: { role: 'user' }, exemptRoles: ['driver'], blocked: false });
+  assert.strictEqual(user['scan-policy-note'].style.display, '', 'a non-exempt role must still see the standing policy note');
+});
+
+test('applyGeofenceToScanButton (executed): never throws before login, and leaves the note visible', () => {
+  // fixStaticText() can run with currentUser still null -- this must not throw, and must default
+  // to showing the note (role undefined is never in exemptRoles).
+  const result = runApplyGeofenceToScanButton({ currentUser: null, exemptRoles: ['driver'], blocked: false });
+  assert.strictEqual(result['scan-policy-note'].style.display, '');
 });
 
 console.log('Geofence: reviewing the stored accuracy (Task 6)');

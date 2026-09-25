@@ -5987,8 +5987,7 @@ function rerenderAfterCheckoutReviews() {
 // this file (app.js:9125, 11942) -- not wired into Settings in this change, see project memory.
 const CHECKIN_CUTOFF = '13:00';
 
-// 2026-09-25: web check-in geofence. DUAL-SYNC twin of app.js -- both copies must stay identical
-// 2026-09-25: web check-in geofence. DUAL-SYNC twin of app.js -- both copies must stay identical
+// 2026-09-25: web check-in geofence. DUAL-SYNC twin of server.js -- both copies must stay identical
 // or tests/geofence.test.js fails. Pure: no I/O, no globals, safe to extract into a test sandbox.
 function geofenceDistanceM(lat1, lng1, lat2, lng2) {
   const R = 6371000;
@@ -7162,7 +7161,18 @@ function geofenceUiState() {
   );
   return { blocked: !!reason, reason, text: reason ? geofenceMessage(reason, currentGPS && currentGPS.accuracy) : '' };
 }
+// fixStaticText() can run before login (currentUser null) -- guard every currentUser read here too.
 function applyGeofenceToScanButton() {
+  // M5 fix (2026-09-25 review): the standing policy note ("check in with the face scanner") is
+  // static markup that renders for everyone, including a role in exemptRoles (e.g. driver) who is
+  // never actually subject to the gate -- hide it for them. currentUser is null pre-login, so
+  // includes(undefined) just leaves the note visible; it never throws.
+  const note = document.getElementById('scan-policy-note');
+  if (note) {
+    const role = currentUser && currentUser.role;
+    const exemptRoles = Array.isArray(APP_SETTINGS.geofence?.exemptRoles) ? APP_SETTINGS.geofence.exemptRoles : [];
+    note.style.display = exemptRoles.includes(role) ? 'none' : '';
+  }
   const btn = document.getElementById('scan-btn');
   const hint = document.getElementById('scan-geofence-hint');
   if (!btn) return;
@@ -8141,6 +8151,15 @@ function updateScanButton() {
     if (txtEl) txtEl.textContent = rec.checkOut ? L('Checked out', 'ออกงานแล้ว') : L('Checked in', 'เข้างานแล้ว');
     checkedIn = true;
   }
+
+  // I2 fix (2026-09-25 review): the button's geofence-blocked state was only ever recomputed from
+  // GPS or settings events, never when attendanceLog itself changed -- e.g. login after a door
+  // scan (settings resolves before attendance, so the button is first drawn against an empty log
+  // and never corrected), or a door-scan WebSocket event arriving while a web tab sits open on a
+  // stationary device with no fresh watchPosition fix for hours (breaking "check-out is never
+  // gated" in the UI). updateScanButton() is the one function every one of those paths already
+  // calls, so recomputing here covers all of them without touching each call site individually.
+  applyGeofenceToScanButton();
 }
 
 function appendLog(type, now, gpsInfo, source) {

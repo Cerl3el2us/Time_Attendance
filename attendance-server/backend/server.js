@@ -1456,7 +1456,13 @@ function sanitizeGps(raw) {
 }
 // 2026-09-25: the browser's reported accuracy in metres, for the geofence gate and for reviewing a
 // stored position afterwards. Bounded like every other client-supplied number here.
+// I1 fix (2026-09-25 review): Number(null) === 0, so null/''/[] used to sanitise to a perfect 0 m
+// fix instead of "no accuracy reported" -- reject anything that isn't a number or string before
+// coercing (a boolean or array is never a legitimate accuracy value), plus an explicit '' guard
+// since an empty string is a string and would otherwise slip past that check and coerce to 0.
 function sanitizeGpsAccuracy(raw) {
+  if (typeof raw !== 'number' && typeof raw !== 'string') return null;
+  if (typeof raw === 'string' && raw.trim() === '') return null;
   const n = Number(raw);
   return Number.isFinite(n) && n >= 0 && n <= 100000 ? Math.round(n) : null;
 }
@@ -9065,7 +9071,6 @@ function getMdApprovalKey(periodStart, userId) {
 const CHECKIN_CUTOFF = '13:00';
 
 // 2026-09-25: web check-in geofence. DUAL-SYNC twin of app.js -- both copies must stay identical
-// 2026-09-25: web check-in geofence. DUAL-SYNC twin of app.js -- both copies must stay identical
 // or tests/geofence.test.js fails. Pure: no I/O, no globals, safe to extract into a test sandbox.
 function geofenceDistanceM(lat1, lng1, lat2, lng2) {
   const R = 6371000;
@@ -9175,8 +9180,14 @@ function webScanWouldBeCheckIn(user, eventTimeIso) {
 // call this once with req.hikUser (never body) and, on a non-empty result, send that 403 and
 // return before saveEvent -- see tests/geofence.test.js for the wiring test that exercises that.
 function webScanGateReason(hikUser, eventTimeIso, gps, gpsAccuracy) {
-  if (!webScanWouldBeCheckIn(hikUser, eventTimeIso)) return '';
+  // M2 fix (2026-09-25 review): read the master switch first and return '' immediately when
+  // disabled -- geofenceCheckinReason() would return '' anyway once it gets there, but
+  // webScanWouldBeCheckIn() -> buildAttendanceLogForUser() does a full readEvents() + log build on
+  // every single web scan (check-outs included), which is wasted work when the answer can never
+  // be anything but ''. Observable behaviour is unchanged.
   const G = getAppSettings().geofence;
+  if (!G || typeof G !== 'object' || G.enabled !== true) return '';
+  if (!webScanWouldBeCheckIn(hikUser, eventTimeIso)) return '';
   const coords = gps ? parseGpsCoords(gps) : null;
   return geofenceCheckinReason(G, hikUser.role, coords ? coords.lat : NaN, coords ? coords.lng : NaN, gpsAccuracy);
 }
