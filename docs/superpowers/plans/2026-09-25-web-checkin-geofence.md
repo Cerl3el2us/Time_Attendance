@@ -20,7 +20,10 @@
 - **Check-out is never gated.** The "is this a check-in" test runs before any GPS requirement.
 - `node --check` both edited files before bumping cache-busters. Run `npm run lint && npm test` before every commit.
 
-**Open decision to confirm before Task 5:** the spec says MD edits these values. This plan stores them in `appSettings`, which `SETTINGS_KEY_ROLES` already grants to **md + accounting** — the same pair that can already change `standardStartHour`, the setting that decides who is late. If the owner wants MD alone, `geofence` becomes its own top-level settings key with `['md']` instead, which adds a separate load/save path on both sides.
+**Settled 2026-09-25:** who may edit these values — **md + accounting**, confirmed by the owner. The
+`geofence` group therefore lives inside `appSettings`, whose `SETTINGS_KEY_ROLES` entry already
+grants exactly that pair — the same two roles that can change `standardStartHour`, the setting that
+decides who counts as late. No separate settings key, no separate load/save path.
 
 ---
 
@@ -812,5 +815,5 @@ Log in as a `user` account and as the `driver` account (QA credentials are in me
 ## Self-review notes
 
 - Spec coverage: gate order (T3), radius/accuracy/exempt/centre defaults (T2), settings editing (T5), payload + storage (T3), messages in three languages (T4), standing policy note (T4), accuracy in the review popup (T6), tests for every property the spec names (T1–T6), cache-buster window (T7). The spec's "no logging of blocked attempts" is satisfied by absence — no task adds one.
-- The spec says MD edits the settings; this plan gives MD + Accounting by storing them in `appSettings`. Flagged at the top; change to a `['md']` top-level key if the owner prefers.
+- Settings editing is md + accounting, confirmed by the owner 2026-09-25 (see Global Constraints).
 - `parseGpsCoords()` and `buildAttendanceLogForUser()` already exist and are reused rather than reimplemented. `buildAttendanceLogForUser()` is a hoisted function declaration, so calling it from the route above its definition is safe — unlike a `const`, which would be a TDZ crash at boot.
