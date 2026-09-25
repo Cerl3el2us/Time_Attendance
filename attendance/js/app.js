@@ -5694,6 +5694,10 @@ function generatePeriodDays(start, end, isCurrent, userId) {
     let longDistance = false, longDistanceKm = 0, longDistanceAllowance = 0;
     let checkInSource = null, checkOutSource = null;
     let checkInGPS = null, checkOutGPS = null;
+    // 2026-09-25 (geofence T6): the stored accuracy (metres) beside each position, for reviewing a
+    // web check-in. Number.isFinite (not `||`) -- a real 0 m fix must survive, and an old record
+    // with no accuracy at all must stay null rather than becoming a made-up value.
+    let checkInGpsAcc = null, checkOutGpsAcc = null;
     let firstScanAfterCutoff = null, partialLeave = null;
 
     if (isCompanyTrip) {
@@ -5710,6 +5714,8 @@ function generatePeriodDays(start, end, isCurrent, userId) {
         checkOutSource = realRecord.checkOutSource || null;
         checkInGPS  = realRecord.checkInGPS  || null;
         checkOutGPS = realRecord.checkOutGPS || null;
+        checkInGpsAcc  = Number.isFinite(realRecord.checkInGpsAcc)  ? realRecord.checkInGpsAcc  : null;
+        checkOutGpsAcc = Number.isFinite(realRecord.checkOutGpsAcc) ? realRecord.checkOutGpsAcc : null;
       }
     } else if (isWeekend) {
       status = 'weekend';
@@ -5722,6 +5728,8 @@ function generatePeriodDays(start, end, isCurrent, userId) {
         checkOutSource = weekendRec.checkOutSource || null;
         checkInGPS  = weekendRec.checkInGPS  || null;
         checkOutGPS = weekendRec.checkOutGPS || null;
+        checkInGpsAcc  = Number.isFinite(weekendRec.checkInGpsAcc)  ? weekendRec.checkInGpsAcc  : null;
+        checkOutGpsAcc = Number.isFinite(weekendRec.checkOutGpsAcc) ? weekendRec.checkOutGpsAcc : null;
       }
     } else if (isPubHoliday && isFuture) {
       status = 'holiday';
@@ -5742,6 +5750,8 @@ function generatePeriodDays(start, end, isCurrent, userId) {
           checkOutSource = realRecord.checkOutSource || null;
           checkInGPS  = realRecord.checkInGPS  || null;
           checkOutGPS = realRecord.checkOutGPS || null;
+          checkInGpsAcc  = Number.isFinite(realRecord.checkInGpsAcc)  ? realRecord.checkInGpsAcc  : null;
+          checkOutGpsAcc = Number.isFinite(realRecord.checkOutGpsAcc) ? realRecord.checkOutGpsAcc : null;
           firstScanAfterCutoff = realRecord.firstScanAfterCutoff || null;
           earlyIn = realRecord.earlyIn || null;
           lateOut = realRecord.lateOut || null;
@@ -5884,7 +5894,7 @@ function generatePeriodDays(start, end, isCurrent, userId) {
     // 2026-09-24 (owner): scan instants + GPS zone, for the display-only local time on Abroad days.
     const _abroadRec = (status === 'abroad' && uid) ? attendanceLog[attKey(uid, dateStr)] : null;
     const abroadScan = _abroadRec ? { inAt: _abroadRec.checkInAt || null, inTz: _abroadRec.checkInGpsTz || null, outAt: _abroadRec.checkOutAt || null, outTz: _abroadRec.checkOutGpsTz || null } : null;
-    days.push({ date: dateStr, dayName: dayNamesEn[d.getDay()], isWeekend, isPubHoliday, isFuture, isToday, status, checkIn, checkOut, earlyIn, lateOut, upcountry, longDistance, longDistanceKm, longDistanceAllowance, checkInSource, checkOutSource, earlyApproved, lateApproved, checkInGPS, checkOutGPS, holidayName, firstScanAfterCutoff, partialLeave, checkOutReview, rawCheckOut, abroadScan });
+    days.push({ date: dateStr, dayName: dayNamesEn[d.getDay()], isWeekend, isPubHoliday, isFuture, isToday, status, checkIn, checkOut, earlyIn, lateOut, upcountry, longDistance, longDistanceKm, longDistanceAllowance, checkInSource, checkOutSource, earlyApproved, lateApproved, checkInGPS, checkOutGPS, checkInGpsAcc, checkOutGpsAcc, holidayName, firstScanAfterCutoff, partialLeave, checkOutReview, rawCheckOut, abroadScan });
     d.setDate(d.getDate() + 1);
   }
   return days;
@@ -6061,6 +6071,11 @@ async function loadAttendanceFromBackend() {
 
       const source = ev.eventType === 'WebScan' ? 'web' : 'device';
       const gps    = ev.gps || '';
+      // 2026-09-25 (geofence T6): the accuracy the phone reported at scan time, in metres, for
+      // reviewing a web check-in's claimed position. Old events have none at all -- Number.isFinite
+      // (not `!= null` or falsy) so a genuine 0 m fix is kept but a missing/non-numeric field
+      // stays undefined rather than becoming 0.
+      const gpsAcc = Number.isFinite(ev.gpsAcc) ? ev.gpsAcc : undefined;
 
       if (hour < 5) {
         // 2026-09-23: always overwrite -- events are sorted by instant, so an after-midnight scan
@@ -6070,6 +6085,7 @@ async function loadAttendanceFromBackend() {
         rec.checkOut = timePart;
         rec.checkOutSource = source;
         if (gps) rec.checkOutGPS = gps;
+        if (gpsAcc !== undefined) rec.checkOutGpsAcc = gpsAcc;
         stampAbroadScan(rec, 'out', raw, ev.gpsTz);
       } else if (!rec.checkIn && timePart >= CHECKIN_CUTOFF) {
         // No morning check-in on record and it's already past the cutoff — this scan can't be
@@ -6084,12 +6100,14 @@ async function loadAttendanceFromBackend() {
           rec.checkOut = timePart;
           rec.checkOutSource = source;
           if (gps) rec.checkOutGPS = gps;
+          if (gpsAcc !== undefined) rec.checkOutGpsAcc = gpsAcc;
           stampAbroadScan(rec, 'out', raw, ev.gpsTz);
         }
       } else if (!rec.checkIn) {
         rec.checkIn = timePart;
         rec.checkInSource = source;
         if (gps) rec.checkInGPS = gps;
+        if (gpsAcc !== undefined) rec.checkInGpsAcc = gpsAcc;
         stampAbroadScan(rec, 'in', raw, ev.gpsTz);
         // 2026-08-09 (2nd-pass audit finding 4.2 follow-up): hardcoded '08:30' even though this is
         // the site that decides 'late' vs 'present' in the first place -- every downstream late-
@@ -6108,6 +6126,7 @@ async function loadAttendanceFromBackend() {
           rec.checkOut = timePart;
           rec.checkOutSource = source;
           if (gps) rec.checkOutGPS = gps;
+          if (gpsAcc !== undefined) rec.checkOutGpsAcc = gpsAcc;
           stampAbroadScan(rec, 'out', raw, ev.gpsTz);
         }
         // 2026-09-23: latest scan after check-in, morning ones included. Not a check-out (see
@@ -7512,6 +7531,16 @@ function gpsPopupHtml(lat, lng, accuracy) {
     `;
 }
 
+// 2026-09-25 (geofence T6): the stored accuracy alongside a REVIEWED (past) web check-in's
+// position -- distinct from gpsPopupHtml() above, which always has a live browser reading to
+// show. A past event may carry no accuracy at all (recorded before this feature existed), and
+// must render nothing rather than a fabricated figure; Number.isFinite so a genuine 0 m fix
+// still renders "±0m" instead of being treated the same as "absent". Pure, no `±` prefix baked
+// in beyond the returned string so callers can append it directly after existing text.
+function gpsAccuracyText(accuracy) {
+  return Number.isFinite(accuracy) ? ` ±${accuracy}m` : '';
+}
+
 function upsertGpsMarker() {
   const ML = window.maplibregl;
   if (!ML || !gpsMap || !gpsMapPos) return;
@@ -8803,12 +8832,17 @@ function renderAttendanceTable() {
     // character and letting ", <, > through untouched. escapeHtml() covers all of them correctly.
     const safeGpsIn  = row.checkInGPS  ? escapeHtml(row.checkInGPS)  : '';
     const safeGpsOut = row.checkOutGPS ? escapeHtml(row.checkOutGPS) : '';
+    // 2026-09-25 (geofence T6): stored accuracy for this row's position, if any -- carried onto
+    // the button so the reviewer sees it without waiting on the async reverse-geocode below.
+    // Number.isFinite: a real 0 m fix must show "±0m", an old record with none must show nothing.
+    const gpsAccIn  = Number.isFinite(row.checkInGpsAcc)  ? row.checkInGpsAcc  : null;
+    const gpsAccOut = Number.isFinite(row.checkOutGpsAcc) ? row.checkOutGpsAcc : null;
     const gpsInBtn  = (canSeeGPS && row.checkInSource  === 'web' && row.checkInGPS  && row.checkInGPS  !== 'ไม่ทราบตำแหน่ง')
-      ? `<a href="#" target="_blank" rel="noopener" class="gps-map-link" data-gps="${safeGpsIn}" title="${safeGpsIn}"
+      ? `<a href="#" target="_blank" rel="noopener" class="gps-map-link" data-gps="${safeGpsIn}" data-gps-acc="${gpsAccIn === null ? '' : gpsAccIn}" title="${safeGpsIn}${gpsAccuracyText(gpsAccIn)}"
            style="display:block;font-size:11px;color:#2563eb;text-decoration:none;margin-top:3px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
            📍 <span>${L('Loading...', 'กำลังโหลด...')}</span></a>` : '';
     const gpsOutBtn = (canSeeGPS && row.checkOutSource === 'web' && row.checkOutGPS && row.checkOutGPS !== 'ไม่ทราบตำแหน่ง')
-      ? `<a href="#" target="_blank" rel="noopener" class="gps-map-link" data-gps="${safeGpsOut}" title="${safeGpsOut}"
+      ? `<a href="#" target="_blank" rel="noopener" class="gps-map-link" data-gps="${safeGpsOut}" data-gps-acc="${gpsAccOut === null ? '' : gpsAccOut}" title="${safeGpsOut}${gpsAccuracyText(gpsAccOut)}"
            style="display:block;font-size:11px;color:#2563eb;text-decoration:none;margin-top:3px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
            📍 <span>${L('Loading...', 'กำลังโหลด...')}</span></a>` : '';
 
@@ -9027,6 +9061,10 @@ function geocodeTableGpsLinks() {
     if (!m) return;
     const lat = parseFloat(m[1]), lng = parseFloat(m[2]);
     el.href = `https://www.google.com/maps?q=${lat},${lng}`;
+    // 2026-09-25 (geofence T6): the accuracy stamped on the button by renderAttendanceTable() via
+    // data-gps-acc -- carried through so the reverse-geocode below doesn't overwrite it away.
+    // '' means "no stored accuracy" (old record), not 0.
+    const acc = el.dataset.gpsAcc === '' || el.dataset.gpsAcc === undefined ? null : Number(el.dataset.gpsAcc);
     const key = `${lat.toFixed(4)},${lng.toFixed(4)}`;
     if (!groups.has(key)) groups.set(key, { lat, lng, els: [] });
     // 2026-08-17 (review fix): keep each element's OWN parsed lat/lng alongside it -- the group's
@@ -9034,15 +9072,15 @@ function geocodeTableGpsLinks() {
     // FROM, not what to print in each element's own tooltip. Two elements can share a geocode
     // group (rounded to 4 decimals, ~11m) while still differing at the 6-decimal display
     // precision below.
-    groups.get(key).els.push({ el, lat, lng });
+    groups.get(key).els.push({ el, lat, lng, acc });
   });
   let i = 0;
   groups.forEach(({ lat, lng, els }) => {
     setTimeout(() => {
       reverseGeocode(lat, lng, name => {
         const short = name.split(',').slice(0, 2).join(',').trim();
-        els.forEach(({ el, lat: ownLat, lng: ownLng }) => {
-          const title = name + '\n(' + ownLat.toFixed(6) + ', ' + ownLng.toFixed(6) + ')\n' + L('Click to open Google Maps', 'คลิกเพื่อเปิด Google Maps');
+        els.forEach(({ el, lat: ownLat, lng: ownLng, acc }) => {
+          const title = name + '\n(' + ownLat.toFixed(6) + ', ' + ownLng.toFixed(6) + ')' + gpsAccuracyText(acc) + '\n' + L('Click to open Google Maps', 'คลิกเพื่อเปิด Google Maps');
           const span = el.querySelector('span');
           if (span) span.textContent = short;
           el.title = title;
@@ -17935,7 +17973,7 @@ function showAttendanceDetail(date) {
   const realKey = targetUserId ? attKey(targetUserId, date) : null;
   const realRecord = realKey ? attendanceLog[realKey] : null;
 
-  function renderGpsEntry(elId, gpsStr, prefix) {
+  function renderGpsEntry(elId, gpsStr, prefix, acc) {
     const el = document.getElementById(elId);
     if (!el) return;
     if (!gpsStr || gpsStr === 'ไม่ทราบตำแหน่ง') {
@@ -17957,7 +17995,9 @@ function showAttendanceDetail(date) {
       const span = document.getElementById(uid);
       if (span) {
         span.textContent = name.split(',').slice(0, 3).join(',').trim();
-        span.parentElement.title = name + '\n(' + lat.toFixed(6) + ', ' + lng.toFixed(6) + ')';
+        // 2026-09-25 (geofence T6): the stored accuracy, alongside the coordinates, when the
+        // event has one -- gpsAccuracyText() returns '' for an old record with none.
+        span.parentElement.title = name + '\n(' + lat.toFixed(6) + ', ' + lng.toFixed(6) + ')' + gpsAccuracyText(acc);
       }
     });
   }
@@ -17967,9 +18007,9 @@ function showAttendanceDetail(date) {
   const showGpsIn  = realRecord && realRecord.checkInSource  === 'web';
   const showGpsOut = realRecord && realRecord.checkOutSource === 'web';
   if (showGpsIn || showGpsOut) {
-    if (showGpsIn)  renderGpsEntry('att-detail-gps-in',  realRecord.checkInGPS,  L('⬆️ In: ', '⬆️ เข้า: '));
+    if (showGpsIn)  renderGpsEntry('att-detail-gps-in',  realRecord.checkInGPS,  L('⬆️ In: ', '⬆️ เข้า: '), realRecord.checkInGpsAcc);
     else document.getElementById('att-detail-gps-in').innerHTML = '';
-    if (showGpsOut) renderGpsEntry('att-detail-gps-out', realRecord.checkOutGPS, L('⬇️ Out: ', '⬇️ ออก: '));
+    if (showGpsOut) renderGpsEntry('att-detail-gps-out', realRecord.checkOutGPS, L('⬇️ Out: ', '⬇️ ออก: '), realRecord.checkOutGpsAcc);
     else document.getElementById('att-detail-gps-out').innerHTML = '';
     // 2026-09-24 (owner): local time at the scan location on an approved Abroad day.
     if (showGpsIn)  document.getElementById('att-detail-gps-in').insertAdjacentHTML('beforeend', abroadLocalTimeHtml(row, 'in'));
@@ -19434,6 +19474,9 @@ function processLiveScanEvent(ev) {
 
   const source = ev.eventType === 'WebScan' ? 'web' : 'device';
   const gps    = ev.gps || '';
+  // 2026-09-25 (geofence T6): mirrors loadAttendanceFromBackend()'s copy -- the full-access WS
+  // SCAN_EVENT payload carries gpsAcc the same way the REST event does.
+  const gpsAcc = Number.isFinite(ev.gpsAcc) ? ev.gpsAcc : undefined;
   if (!rec.scans) rec.scans = [];
   const pushScan = (entry) => {
     if (rec.scans.some(s => s.time === entry.time && s.type === entry.type && (s.source || '') === (entry.source || ''))) return;
@@ -19458,6 +19501,7 @@ function processLiveScanEvent(ev) {
       rec.checkOut = timePart;
       rec.checkOutSource = source;
       if (gps) rec.checkOutGPS = gps;
+      if (gpsAcc !== undefined) rec.checkOutGpsAcc = gpsAcc;
       stampAbroadScan(rec, 'out', raw, ev.gpsTz);
     }
     pushScan({ time: timePart, type: 'out', source, gps: gps || '—', at: raw, gpsTz: ev.gpsTz || null });
@@ -19471,6 +19515,7 @@ function processLiveScanEvent(ev) {
       rec.checkOut = timePart;
       rec.checkOutSource = source;
       if (gps) rec.checkOutGPS = gps;
+      if (gpsAcc !== undefined) rec.checkOutGpsAcc = gpsAcc;
       stampAbroadScan(rec, 'out', raw, ev.gpsTz);
     }
     pushScan({ time: timePart, type: 'out', source, gps: gps || '—', at: raw, gpsTz: ev.gpsTz || null });
@@ -19478,6 +19523,7 @@ function processLiveScanEvent(ev) {
     rec.checkIn = timePart;
     rec.checkInSource = source;
     if (gps) rec.checkInGPS = gps;
+    if (gpsAcc !== undefined) rec.checkInGpsAcc = gpsAcc;
     stampAbroadScan(rec, 'in', raw, ev.gpsTz);
     // 2026-08-09 (2nd-pass audit finding 4.2 follow-up): same configurable-standard-start fix as
     // loadAttendanceFromBackend()'s copy above; this site was ALSO missing that sibling's
@@ -19494,6 +19540,7 @@ function processLiveScanEvent(ev) {
       rec.checkOut = timePart;
       rec.checkOutSource = source;
       if (gps) rec.checkOutGPS = gps;
+      if (gpsAcc !== undefined) rec.checkOutGpsAcc = gpsAcc;
       stampAbroadScan(rec, 'out', raw, ev.gpsTz);
     }
     if (acceptOut) {

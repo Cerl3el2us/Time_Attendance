@@ -493,4 +493,74 @@ test('geofenceUiState still blocks an actual check-in standing at the office', (
   assert.strictEqual(st.reason, 'geofence-inside');
 });
 
+console.log('Geofence: reviewing the stored accuracy (Task 6)');
+
+// The brief's own test: a coarse guard that the row-building code near gpsInBtn/gpsOutBtn
+// mentions the accuracy field at all, and that gpsPopupHtml() renders a '±' figure somewhere.
+// Kept for the TDD record, but it is string/regex-only -- it would still pass if `gpsAccIn`
+// were declared and never actually used. The executed tests below are what actually prove the
+// value reaches the reviewer: 2026-09-25 review history on this same plan (progress.md, T3-T5)
+// found this exact class of gap more than once.
+test('the review popup shows the accuracy that was stored with the position', () => {
+  const rows = APP_SRC.slice(APP_SRC.indexOf('const gpsInBtn'), APP_SRC.indexOf('const gpsInBtn') + 1200);
+  assert.ok(/checkInGpsAcc|gpsAcc/.test(rows), 'the row must pass the stored accuracy to the popup');
+  const fn = extractFunction(APP_SRC, 'gpsPopupHtml');
+  assert.ok(/±/.test(fn), 'the popup must render the accuracy');
+});
+
+test('gpsAccuracyText (executed): renders ±Nm for a finite number, including a real 0, and nothing when absent', () => {
+  const A = sandbox(APP_SRC, ['gpsAccuracyText']);
+  assert.strictEqual(A.gpsAccuracyText(23), ' ±23m');
+  assert.strictEqual(A.gpsAccuracyText(0), ' ±0m', 'a real 0 m fix is a legitimate value, not "absent"');
+  assert.strictEqual(A.gpsAccuracyText(null), '', 'no stored accuracy (old record) must render nothing');
+  assert.strictEqual(A.gpsAccuracyText(undefined), '');
+  assert.strictEqual(A.gpsAccuracyText(NaN), '');
+});
+
+// 2026-09-25 (T6): extracts and RUNS the real gpsInBtn/gpsOutBtn construction from
+// renderAttendanceTable() against a stubbed `row`, instead of only grepping the source -- this is
+// what makes a regression that stops threading row.checkIn/checkOutGpsAcc through to the button
+// (e.g. the variable declared but never interpolated, or interpolated but not carried into
+// data-gps-acc/title) fail an assertion here, not just go unnoticed.
+function extractGpsRowButtonsSnippet(appSrc) {
+  const startAnchor = 'const safeGpsIn  = row.checkInGPS';
+  const startIdx = appSrc.indexOf(startAnchor);
+  assert.ok(startIdx >= 0, 'gpsInBtn/gpsOutBtn row-building block not found (safeGpsIn anchor)');
+  const endAnchor = 'tr.innerHTML = `';
+  const endIdx = appSrc.indexOf(endAnchor, startIdx);
+  assert.ok(endIdx > startIdx, 'end anchor (tr.innerHTML) not found after safeGpsIn');
+  return appSrc.slice(startIdx, endIdx);
+}
+function runGpsRowButtons(row, canSeeGPS) {
+  const snippet = extractGpsRowButtonsSnippet(APP_SRC);
+  const accFn = extractFunction(APP_SRC, 'gpsAccuracyText');
+  const ctx = {
+    row, canSeeGPS,
+    escapeHtml: s => s,
+    L: en => en,
+  };
+  vm.createContext(ctx);
+  vm.runInContext(`${accFn}\nfunction run() {\n${snippet}\n  return { gpsInBtn, gpsOutBtn };\n}`, ctx);
+  return ctx.run();
+}
+
+test('gpsInBtn/gpsOutBtn (executed): the stored accuracy reaches the button, a real 0 renders, absence renders nothing', () => {
+  const withAcc = runGpsRowButtons({
+    checkInSource: 'web', checkInGPS: '13.7,100.5', checkInGpsAcc: 7,
+    checkOutSource: 'web', checkOutGPS: '13.8,100.6', checkOutGpsAcc: 0,
+  }, true);
+  assert.ok(/data-gps-acc="7"/.test(withAcc.gpsInBtn), 'the check-in button must carry the stored accuracy');
+  assert.ok(/±7m/.test(withAcc.gpsInBtn), 'the check-in button must render ±7m for the reviewer');
+  assert.ok(/data-gps-acc="0"/.test(withAcc.gpsOutBtn), 'a real 0 m accuracy must be carried, never treated as absent');
+  assert.ok(/±0m/.test(withAcc.gpsOutBtn), 'a real 0 m accuracy must render ±0m, not vanish');
+
+  const noAcc = runGpsRowButtons({
+    checkInSource: 'web', checkInGPS: '13.7,100.5',
+    checkOutSource: 'web', checkOutGPS: '13.8,100.6',
+  }, true);
+  assert.ok(/data-gps-acc=""/.test(noAcc.gpsInBtn), 'an old record with no accuracy must carry nothing, not a fabricated value');
+  assert.ok(!/±/.test(noAcc.gpsInBtn), 'no stored accuracy must render no ± figure at all (check-in)');
+  assert.ok(!/±/.test(noAcc.gpsOutBtn), 'no stored accuracy must render no ± figure at all (check-out)');
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ', 0 failed'}`);
