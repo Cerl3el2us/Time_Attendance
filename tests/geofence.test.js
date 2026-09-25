@@ -314,6 +314,111 @@ test('the Settings page exposes all five geofence fields and saves them safely',
   assert.ok(/geofenceNum\(/.test(save), 'a strict numeric reader must be used for the geofence fields');
 });
 
+// 2026-09-25 (review round 3, Important): the test above is purely string/regex-based -- it would
+// still pass if `geofenceNum` were rewritten as `parseFloat(v) || fallback` (breaking a real 0),
+// or if the `set-geo-enabled` checkbox read lost its existence guard (silently disabling the
+// geofence company-wide when the element is absent, since `null?.checked` -> undefined ->
+// `!!undefined` -> false). These tests execute the REAL extracted read-back logic in a vm sandbox
+// with a stubbed `document`/`APP_SETTINGS`, the way the webScanGateReason/geofenceUiState tests
+// above do, so a regression in either direction fails an assertion, not just a text pattern.
+function extractGeofenceSaveSnippet(appSrc) {
+  const save = extractFunction(appSrc, 'saveSettingsPage');
+  const numFn = /const geofenceNum = \(id, fallback\) => \{[\s\S]*?\n  \};/.exec(save);
+  assert.ok(numFn, 'geofenceNum definition not found in saveSettingsPage');
+
+  // Anchor on the stable, unrelated line immediately BEFORE the geofence writes (not on any
+  // particular guard implementation for `enabled`), so a regression that changes how `enabled`
+  // is read -- guarded or not -- is still captured verbatim instead of breaking extraction.
+  const anchor = "APP_SETTINGS.workSchedule.standardStartMinute";
+  const anchorIdx = save.indexOf(anchor);
+  assert.ok(anchorIdx >= 0, 'workSchedule anchor not found (used to bound the geofence write block)');
+  const blockStart = save.indexOf('\n', anchorIdx) + 1;
+
+  const maxAccIdx = save.indexOf('APP_SETTINGS.geofence.maxAccuracyM', blockStart);
+  assert.ok(maxAccIdx >= 0, 'geofence.maxAccuracyM write not found in saveSettingsPage');
+  const blockEnd = save.indexOf('\n', maxAccIdx);
+  const writes = save.slice(blockStart, blockEnd >= 0 ? blockEnd : save.length);
+
+  return `${numFn[0]}\n${writes}`;
+}
+function runGeofenceSave(existingGeofence, elements) {
+  const snippet = extractGeofenceSaveSnippet(APP_SRC);
+  const ctx = {
+    document: {
+      getElementById(id) {
+        return Object.prototype.hasOwnProperty.call(elements, id) ? elements[id] : null;
+      },
+    },
+    APP_SETTINGS: { geofence: { ...existingGeofence } },
+  };
+  vm.createContext(ctx);
+  vm.runInContext(`function run() {\n${snippet}\n}`, ctx);
+  ctx.run();
+  return ctx.APP_SETTINGS.geofence;
+}
+
+test('geofence save (executed): all five fields read correctly when every element is present', () => {
+  const existing = { enabled: false, lat: 1, lng: 2, radiusM: 3, maxAccuracyM: 4 };
+  const elements = {
+    'set-geo-enabled': { checked: true },
+    'set-geo-lat': { value: '13.7268315' },
+    'set-geo-lng': { value: '100.52847' },
+    'set-geo-radius': { value: '200' },
+    'set-geo-acc': { value: '60' },
+  };
+  const result = runGeofenceSave(existing, elements);
+  assert.strictEqual(result.enabled, true);
+  assert.strictEqual(result.lat, 13.7268315);
+  assert.strictEqual(result.lng, 100.52847);
+  assert.strictEqual(result.radiusM, 200);
+  assert.strictEqual(result.maxAccuracyM, 60);
+});
+
+test('geofence save (executed): a missing enabled checkbox keeps the stored value, never writes false', () => {
+  // Risk 1 (review round 3): `!!document.getElementById(id)?.checked` with no existence guard
+  // turns an absent element into `false`, silently disabling the geofence company-wide.
+  const existing = { enabled: true, lat: 1, lng: 2, radiusM: 3, maxAccuracyM: 4 };
+  const elements = {
+    // set-geo-enabled deliberately absent -- simulates the element missing from the DOM
+    'set-geo-lat': { value: '1' },
+    'set-geo-lng': { value: '2' },
+    'set-geo-radius': { value: '3' },
+    'set-geo-acc': { value: '4' },
+  };
+  const result = runGeofenceSave(existing, elements);
+  assert.strictEqual(result.enabled, true, 'a missing checkbox must not silently disable the geofence');
+});
+
+test('geofence save (executed): a real 0 is kept, not replaced by the fallback', () => {
+  // Mutation guard: would fail if geofenceNum were rewritten as `parseFloat(v) || fallback`
+  // instead of the Number.isFinite check -- 0 is a valid latitude (the equator) but falsy.
+  const existing = { enabled: true, lat: 13.7, lng: 100.5, radiusM: 150, maxAccuracyM: 50 };
+  const elements = {
+    'set-geo-enabled': { checked: true },
+    'set-geo-lat': { value: '0' },
+    'set-geo-lng': { value: '100.5' },
+    'set-geo-radius': { value: '150' },
+    'set-geo-acc': { value: '50' },
+  };
+  const result = runGeofenceSave(existing, elements);
+  assert.strictEqual(result.lat, 0, 'a real 0 must be kept, not silently replaced by the fallback');
+});
+
+test('geofence save (executed): a blank, garbage or missing numeric field keeps the stored value', () => {
+  const existing = { enabled: true, lat: 13.7, lng: 100.5, radiusM: 150, maxAccuracyM: 50 };
+  const elements = {
+    'set-geo-enabled': { checked: true },
+    'set-geo-lat': { value: '' },
+    'set-geo-lng': { value: 'abc' },
+    // set-geo-radius / set-geo-acc elements deliberately absent entirely
+  };
+  const result = runGeofenceSave(existing, elements);
+  assert.strictEqual(result.lat, 13.7, 'blank latitude must keep the stored value');
+  assert.strictEqual(result.lng, 100.5, 'unreadable longitude must keep the stored value');
+  assert.strictEqual(result.radiusM, 150, 'missing radius element must keep the stored value');
+  assert.strictEqual(result.maxAccuracyM, 50, 'missing accuracy element must keep the stored value');
+});
+
 test('every new message exists in all three languages', () => {
   const EN = [
     'Company policy: check-in must be made with the face scanner at the office.',

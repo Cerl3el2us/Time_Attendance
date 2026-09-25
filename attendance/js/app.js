@@ -5273,7 +5273,10 @@ async function saveSettingsPage() {
   APP_SETTINGS.workSchedule.standardStartHour   = fi('set-std-hour');
   APP_SETTINGS.workSchedule.standardStartMinute  = fi('set-std-min');
 
-  APP_SETTINGS.geofence.enabled      = !!document.getElementById('set-geo-enabled')?.checked;
+  // Guarded like set-cf-expiry-enabled below: an absent element must leave the stored value
+  // alone, not silently write false (`?.checked` on null -> undefined -> !!undefined -> false).
+  const geoEnabledToggle = document.getElementById('set-geo-enabled');
+  if (geoEnabledToggle) APP_SETTINGS.geofence.enabled = !!geoEnabledToggle.checked;
   APP_SETTINGS.geofence.lat          = geofenceNum('set-geo-lat',    APP_SETTINGS.geofence.lat);
   APP_SETTINGS.geofence.lng          = geofenceNum('set-geo-lng',    APP_SETTINGS.geofence.lng);
   APP_SETTINGS.geofence.radiusM      = geofenceNum('set-geo-radius', APP_SETTINGS.geofence.radiusM);
