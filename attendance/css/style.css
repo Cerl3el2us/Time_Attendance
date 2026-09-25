@@ -751,6 +751,9 @@ body {
   position: relative;
 }
 .scan-btn:active { transform: scale(0.92); }
+/* 2026-09-25: web check-in geofence -- blocked by location (btn.disabled + .scan-blocked, set
+   together in applyGeofenceToScanButton()). Same opacity/cursor convention as .notif-markall:disabled. */
+.scan-btn:disabled, .scan-btn.scan-blocked { opacity: .5; cursor: not-allowed; }
 
 .scan-ready {
   background: linear-gradient(145deg, #3b82f6, #1d4ed8);

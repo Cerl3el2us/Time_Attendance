@@ -324,4 +324,50 @@ test('the button state function never reads currentUser at load time', () => {
     'guard every currentUser read in geofenceUiState');
 });
 
+// 2026-09-25 (review round 2, Critical): geofenceUiState() disables the single shared #scan-btn
+// purely from location/role, with no awareness of whether the next press would be a check-in or
+// a check-out. Scenario: checked in via the face scanner in the morning, then in the evening --
+// still on site -- opens the web app to check OUT. The server never gates a check-out, but the
+// old code would disable the button anyway, so the click (and doScan()'s own correctly-scoped
+// pre-check) never even fires. Fixed by making geofenceUiState() defer to the same
+// webCheckinWouldBeCheckIn() test doScan() uses, so the two paths cannot drift apart. These two
+// tests stub that shared test directly (rather than driving scanYmd()/attendanceLog/etc. through
+// it) so a regression that stops checking it -- and calls geofenceCheckinReason() unconditionally
+// again -- fails loudly instead of silently.
+test('geofenceUiState never blocks a press that would not be a new check-in, even standing at the office', () => {
+  const ctx = {
+    webCheckinWouldBeCheckIn: () => false,
+    geofenceCheckinReason: () => { throw new Error('geofenceCheckinReason must not run -- this press is not a check-in'); },
+    geofenceMessage: () => { throw new Error('geofenceMessage must not run -- this press is not a check-in'); },
+    currentUser: { role: 'user' },
+    currentGPS: { latRaw: PASO.lat, lngRaw: PASO.lng, accuracy: 10 },
+    APP_SETTINGS: { geofence: G },
+  };
+  vm.createContext(ctx);
+  vm.runInContext(extractFunction(APP_SRC, 'geofenceUiState'), ctx);
+  const st = ctx.geofenceUiState();
+  // Field-by-field, not deepStrictEqual: `st` is an object literal built INSIDE the vm sandbox,
+  // so it carries that realm's Object.prototype -- deepStrictEqual across realms fails on
+  // prototype identity even when every value matches (see the wiring test above for the same note).
+  assert.strictEqual(st.blocked, false, 'a check-out (or late-night return, or after-cutoff press) must never be blocked by location');
+  assert.strictEqual(st.reason, '');
+  assert.strictEqual(st.text, '');
+});
+
+test('geofenceUiState still blocks an actual check-in standing at the office', () => {
+  const ctx = {
+    webCheckinWouldBeCheckIn: () => true,
+    geofenceCheckinReason: () => 'geofence-inside',
+    geofenceMessage: reason => `msg:${reason}`,
+    currentUser: { role: 'user' },
+    currentGPS: { latRaw: PASO.lat, lngRaw: PASO.lng, accuracy: 10 },
+    APP_SETTINGS: { geofence: G },
+  };
+  vm.createContext(ctx);
+  vm.runInContext(extractFunction(APP_SRC, 'geofenceUiState'), ctx);
+  const st = ctx.geofenceUiState();
+  assert.strictEqual(st.blocked, true);
+  assert.strictEqual(st.reason, 'geofence-inside');
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ', 0 failed'}`);

@@ -7061,6 +7061,21 @@ function gpsErrorMsg(err) {
   return msgs[err.code] || L('GPS error', 'เกิดข้อผิดพลาด GPS');
 }
 
+// 2026-09-25: web check-in geofence -- shared by doScan() and geofenceUiState() so the two can
+// never drift: the server never gates a check-out, so neither the pre-check toast nor the
+// button's disabled state may treat a press as gated unless it would actually create a NEW
+// check-in. Same rule as isAfterCutoff below: pre-dawn (late-night return), already checked in
+// today, or at/after CHECKIN_CUTOFF (goes through the confirm() detour instead) are all checkouts.
+function webCheckinWouldBeCheckIn() {
+  if (!currentUser || !currentUser.id) return false;
+  const bk      = scanYmd();
+  const p2      = n => String(n).padStart(2, '0');
+  const timeStr = `${p2(bk.h)}:${p2(bk.min)}`;
+  const dateStr = businessDateFromYmd(bk);
+  const key     = attKey(currentUser.id, dateStr);
+  const isPreDawn = bk.h < 5;
+  return !isPreDawn && !attendanceLog[key]?.checkIn && timeStr < CHECKIN_CUTOFF;
+}
 // 2026-09-25: web check-in geofence -- localized copy of the server's 403 reason codes (the
 // server's own `message` is English-only by design, see server.js's WebScan gate). Called both
 // as a live preview before posting (doScan()) and to render the 403's reason if one slips through.
@@ -7083,6 +7098,10 @@ function geofenceMessage(reason, acc) {
 }
 // fixStaticText() runs before login -- currentUser is always null then. Guard every read.
 function geofenceUiState() {
+  // Critical: only a press that would actually be a NEW check-in may ever be gated -- the server
+  // never gates a check-out, so an on-site employee checking out in the evening (or a late-night
+  // return, or a first press after CHECKIN_CUTOFF) must never find the button disabled here.
+  if (!webCheckinWouldBeCheckIn()) return { blocked: false, reason: '', text: '' };
   const role = currentUser && currentUser.role;
   const reason = geofenceCheckinReason(
     APP_SETTINGS.geofence, role,
@@ -7099,7 +7118,8 @@ function applyGeofenceToScanButton() {
   const st = geofenceUiState();
   btn.disabled = st.blocked;
   btn.classList.toggle('scan-blocked', st.blocked);
-  if (hint) { hint.textContent = st.text; hint.style.display = st.blocked ? 'block' : 'none'; }
+  // 'flex' (not 'block') to match the .alert family's own layout (see index.html/style.css).
+  if (hint) { hint.textContent = st.text; hint.style.display = st.blocked ? 'flex' : 'none'; }
 }
 
 function onGPSSuccess(pos) {
@@ -7882,8 +7902,9 @@ async function doScan(source) {
 
   // 2026-09-25: web check-in geofence -- a preview of the server's decision (the server decides
   // for real, see server.js's WebScan gate) so the employee gets an immediate, localized reason
-  // instead of a round-trip 403. Only a real check-in is gated, same rule as isAfterCutoff above.
-  const isFirstScan = !isPreDawn && !attendanceLog[key]?.checkIn && timeStr < CHECKIN_CUTOFF;
+  // instead of a round-trip 403. Only a real check-in is gated -- shared with geofenceUiState()
+  // via webCheckinWouldBeCheckIn() so the two tests can never drift apart.
+  const isFirstScan = webCheckinWouldBeCheckIn();
   if (isFirstScan) {
     const reason = geofenceCheckinReason(
       APP_SETTINGS.geofence, currentUser && currentUser.role,
