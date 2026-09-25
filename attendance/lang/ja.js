@@ -1448,4 +1448,13 @@ window.LANG_JA = {
     "Web出勤打刻には位置情報が必要です。ブラウザで位置情報を許可するか、オフィスの顔認証端末をご利用ください。",
   "Your location is not precise enough yet": "位置情報の精度が不足しています",
   " — please wait a moment or move to an open area.": " — しばらくお待ちいただくか、開けた場所へ移動してください。",
+  // 2026-09-25: Settings page card for the geofence (MD/Accounting can edit the office area).
+  "Web check-in area": "Web打刻の対象エリア",
+  "Enforce the check-in area": "打刻エリアを適用する",
+  "Latitude": "緯度",
+  "Longitude": "経度",
+  "Radius (m)": "半径（メートル）",
+  "Max GPS accuracy (m)": "GPS精度の上限（メートル）",
+  "Inside this radius, check-in must use the face scanner.": "この半径の中では、出勤打刻は顔認証端末をご利用ください。",
+  "Drivers are always exempt from this check.": "運転手は常にこの確認の対象外です。",
 };

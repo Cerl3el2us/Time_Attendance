@@ -4526,6 +4526,23 @@ function renderSettingsPage(_skipRefresh) {
       )}
     `)}
 
+    ${adminSection('📍', L('Web check-in area','พื้นที่เช็คอินผ่านเว็บ'), `
+      <label style="display:flex;align-items:center;gap:8px;margin:0 0 12px;font-size:13px;font-weight:600;color:#374151;cursor:pointer">
+        <input id="set-geo-enabled" type="checkbox" ${s.geofence.enabled ? 'checked' : ''} style="width:18px;height:18px;cursor:pointer">
+        ${L('Enforce the check-in area','บังคับใช้พื้นที่เช็คอิน')}
+      </label>
+      ${row2(
+        field(L('Latitude','ละติจูด'), inp('set-geo-lat', s.geofence.lat, 'number', 'step="0.0000001"')),
+        field(L('Longitude','ลองจิจูด'), inp('set-geo-lng', s.geofence.lng, 'number', 'step="0.0000001"'))
+      )}
+      ${row2(
+        field(L('Radius (m)','รัศมี (เมตร)'), inp('set-geo-radius', s.geofence.radiusM, 'number', 'min="10" max="5000"')),
+        field(L('Max GPS accuracy (m)','ความแม่นยำ GPS สูงสุด (เมตร)'), inp('set-geo-acc', s.geofence.maxAccuracyM, 'number', 'min="5" max="1000"'))
+      )}
+      <div style="font-size:12px;color:#64748b;margin:4px 0 8px">${L('Inside this radius, check-in must use the face scanner.', 'ภายในรัศมีนี้ การลงเวลาเข้างานต้องสแกนใบหน้าที่เครื่อง')}</div>
+      <div style="font-size:11px;color:#94a3b8">${L('Drivers are always exempt from this check.','คนขับได้รับการยกเว้นจากการตรวจสอบนี้เสมอ')}</div>
+    `)}
+
     ${adminSection('🏖️', L('Leave Policy','นโยบายวันลา'), `
       <div style="font-size:12px;font-weight:600;color:#374151;margin-bottom:6px">${L('Annual leave by years of service','สิทธิ์ลาพักร้อนตามอายุงาน')}</div>
       <div style="font-size:12px;color:#64748b;margin-bottom:10px;line-height:1.55">${L('Applies to every employee from Start Date. The first row is when the yearly quota starts (before that, the quota is 0 — only days they earned through Holiday Work or abroad travel days, or carried forward, can be used). When they reach the next row, the yearly quota jumps immediately — even mid-year — remaining = new quota + carry-forward + holiday-work compensation − days already used this calendar year (Jan–Dec).', 'ใช้กับพนักงานทุกคน นับจากวันเริ่มเข้าทำงาน แถวแรกคือเมื่อไหร่โควตารายปีเริ่ม (ก่อนนั้นโควตาเป็น 0 — ใช้ได้เฉพาะวันที่ได้จากการทำงานวันหยุดหรือวันเดินทางต่างประเทศ หรือวันยกยอด) เมื่อครบแถวถัดไป โควตาปีนี้ขยับทันทีแม้กลางปี — คงเหลือ = โควตาใหม่ + ยกยอด + ชดเชยทำงานวันหยุด − วันที่ใช้ไปในปีปฏิทินนี้ (ม.ค.–ธ.ค.)')}</div>
@@ -5135,6 +5152,12 @@ async function saveSettingsPage() {
   const fv = id => (document.getElementById(id)?.value || '').trim();
   const fi = id => parseInt(document.getElementById(id)?.value) || 0;
   const ff = id => parseFloat(document.getElementById(id)?.value) || 0;
+  // Strict: keeps the stored value when a field is blank or unreadable, instead of writing 0.
+  // `ff()` would save latitude 0 for an empty box and silently move the office to the Atlantic.
+  const geofenceNum = (id, fallback) => {
+    const v = parseFloat(document.getElementById(id)?.value);
+    return Number.isFinite(v) ? v : fallback;
+  };
 
   APP_SETTINGS.company.name    = fv('set-company-name');
   APP_SETTINGS.company.taxId   = fv('set-company-taxid');
@@ -5249,6 +5272,12 @@ async function saveSettingsPage() {
 
   APP_SETTINGS.workSchedule.standardStartHour   = fi('set-std-hour');
   APP_SETTINGS.workSchedule.standardStartMinute  = fi('set-std-min');
+
+  APP_SETTINGS.geofence.enabled      = !!document.getElementById('set-geo-enabled')?.checked;
+  APP_SETTINGS.geofence.lat          = geofenceNum('set-geo-lat',    APP_SETTINGS.geofence.lat);
+  APP_SETTINGS.geofence.lng          = geofenceNum('set-geo-lng',    APP_SETTINGS.geofence.lng);
+  APP_SETTINGS.geofence.radiusM      = geofenceNum('set-geo-radius', APP_SETTINGS.geofence.radiusM);
+  APP_SETTINGS.geofence.maxAccuracyM = geofenceNum('set-geo-acc',    APP_SETTINGS.geofence.maxAccuracyM);
 
   // 2026-09-23: 0 now really means "no carry-forward" (`??` in processYearEndCarryForward), so a
   // blanked field must keep the current value instead of silently saving 0 via fi()'s `|| 0`.

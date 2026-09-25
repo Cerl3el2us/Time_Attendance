@@ -296,6 +296,24 @@ test('the client refuses before posting, using the same shared function', () => 
   assert.ok(preIdx > 0 && preIdx < postIdx, 'the pre-check must run before the request');
 });
 
+test('the Settings page exposes all five geofence fields and saves them safely', () => {
+  for (const id of ['set-geo-enabled', 'set-geo-lat', 'set-geo-lng', 'set-geo-radius', 'set-geo-acc']) {
+    assert.ok(APP_SRC.includes(id), `Settings field missing: ${id}`);
+  }
+  const save = extractFunction(APP_SRC, 'saveSettingsPage');
+  for (const key of ['enabled', 'lat', 'lng', 'radiusM', 'maxAccuracyM']) {
+    assert.ok(new RegExp(`geofence\\.${key}\\s*=`).test(save), `save must write geofence.${key}`);
+  }
+  // Falsy-zero guard: `ff()` ends in `|| 0`, which would turn an empty latitude into 0.
+  const geoLines = save.split('\n').filter(l => /geofence\.(lat|lng|radiusM|maxAccuracyM)\s*=/.test(l));
+  assert.ok(geoLines.length === 4, 'all four numeric fields must be assigned');
+  for (const line of geoLines) {
+    assert.ok(!/\bff\(|\bfi\(/.test(line),
+      `use the strict reader, not fi()/ff() -- they coerce an empty field to 0: ${line.trim()}`);
+  }
+  assert.ok(/geofenceNum\(/.test(save), 'a strict numeric reader must be used for the geofence fields');
+});
+
 test('every new message exists in all three languages', () => {
   const EN = [
     'Company policy: check-in must be made with the face scanner at the office.',
