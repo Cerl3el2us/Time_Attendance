@@ -3860,3 +3860,31 @@ tr.finalize-row-confirmed:hover td {
   }
   .settings-savebar-note { display: none; }
 }
+
+/* ===== 2026-09-26 (design round 5) ===== */
+
+/* Payslip page: the controls card spanned the full content width while the payslip document
+   below it is 820px and centred, so their left edges sat about 108px apart. The document's own
+   width is untouched -- its proportions are meant for A4 -- the cards around it are brought to
+   the same width instead. */
+#page-payslip > .card { max-width: 820px; margin-left: auto; margin-right: auto; }
+
+/* Attendance: the month table is 31 rows, so the header scrolls away after about a third of it.
+   Only applied when syncAttendanceStickyHead() has measured that the table fits without
+   horizontal scrolling -- see its comment for why the two cannot both be true. */
+#page-attendance .table-wrap.sticky-head { overflow: visible; }
+/* The card clips to its own radius with overflow:hidden, which silently defeats the sticky
+   header (verified in the browser: the th computed position:sticky and still scrolled away). */
+#page-attendance .card.sticky-head-host { overflow: visible; }
+#page-attendance .table-wrap.sticky-head thead th {
+  position: sticky;
+  top: var(--att-head-top, 64px);
+  z-index: 5;
+}
+/* thead th already carries its own background; this keeps the rows from showing through the
+   1px seam between cells while they scroll underneath. */
+#page-attendance .table-wrap.sticky-head thead tr { box-shadow: inset 0 -1px 0 var(--border); }
+
+/* The holiday form's header is now a toggle. */
+#page-holidays .card-header[onclick] { user-select: none; }
+#page-holidays .card-header[onclick]:hover h3 { color: var(--secondary); }

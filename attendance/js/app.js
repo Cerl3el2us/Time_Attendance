@@ -8949,6 +8949,38 @@ function onAttEmpChange(val) {
   renderAttendanceTable();
 }
 
+// A <thead> can only stick to a scrollport. .table-wrap sets overflow-x:auto, and CSS then
+// computes overflow-y:auto too, which makes the wrap itself the scrollport -- one that never
+// scrolls, because its height always equals its content. So the header can only stick while the
+// table does NOT need horizontal scrolling; then the wrap can be overflow:visible and the page
+// becomes the scrollport. Measured rather than assumed from a breakpoint: the table's width
+// depends on the language and on which columns the role sees.
+function syncAttendanceStickyHead() {
+  const wrap = document.querySelector('#page-attendance .table-wrap');
+  if (!wrap) return;
+  const table = wrap.querySelector('table');
+  if (!table) return;
+  // Measure with the wrap in its scrollable state, otherwise scrollWidth is the page's.
+  wrap.classList.remove('sticky-head');
+  const fits = table.scrollWidth <= wrap.clientWidth + 1;
+  wrap.classList.toggle('sticky-head', fits);
+  // .card sets overflow:hidden (for its rounded corners), and an ancestor with any non-visible
+  // overflow becomes the scrollport the header would stick inside -- one that never scrolls. The
+  // card has to open up too, or `position:sticky` computes correctly and still does nothing.
+  const card = wrap.closest('.card');
+  if (card) card.classList.toggle('sticky-head-host', fits);
+  // Sticks directly under the topbar (64px). An earlier version added the height of
+  // .att-emp-sticky-bar on top, on the assumption that the bar is frozen there -- measured in
+  // the browser, that bar does NOT currently stay at the top (its rect scrolls away with the
+  // page), so the offset left an empty band where rows scrolled past above the header.
+  wrap.style.setProperty('--att-head-top', '64px');
+}
+if (typeof window !== 'undefined') {
+  window.addEventListener('resize', () => {
+    if (typeof currentPage !== 'undefined' && currentPage === 'attendance') syncAttendanceStickyHead();
+  });
+}
+
 function renderAttendanceTable() {
   const tbody = document.getElementById('attendance-tbody');
   if (!tbody) return;
@@ -9269,6 +9301,7 @@ function renderAttendanceTable() {
     workDays, lateDays, annualDays, sickDays,
     canEarlyLateTarget, canOTTarget, canUpcountryTarget, canPersonalCarTarget, canLongDistTarget,
   });
+  syncAttendanceStickyHead();
 }
 
 // สำหรับปุ่ม 🖨 พิมพ์ — เอกสารพิมพ์แยกต่างหาก (แนวนอน, ตัดข้อมูลที่ไม่จำเป็นสำหรับหน้าจอออก
@@ -19257,6 +19290,24 @@ function renderMyRequests() {
 // ===== HOLIDAYS MANAGEMENT PAGE =====
 let _holidayYear = new Date().getFullYear();
 
+// 2026-09-26 (owner): the "Add Holiday" form is collapsed until someone means to add one.
+// State lives outside the render so it survives the re-render that follows every add.
+let _holidayFormOpen = false;
+function toggleHolidayForm() {
+  _holidayFormOpen = !_holidayFormOpen;
+  const body = document.getElementById('hol-form-body');
+  const btn = document.getElementById('hol-form-toggle');
+  if (body) body.style.display = _holidayFormOpen ? '' : 'none';
+  if (btn) {
+    btn.textContent = _holidayFormOpen ? L('Close', 'ปิด') : L('Open', 'เปิด');
+    btn.setAttribute('aria-expanded', String(_holidayFormOpen));
+  }
+  if (_holidayFormOpen) {
+    const d = document.getElementById('hol-date');
+    if (d) d.focus();
+  }
+}
+
 function renderHolidaysPage() {
   const container = document.getElementById('page-holidays');
   if (!container) return;
@@ -19281,10 +19332,16 @@ function renderHolidaysPage() {
         `).join('')}
       </div>
 
-      <!-- Add form -->
+      <!-- Add form: collapsed by default (2026-09-26, owner). Adding a holiday happens a
+           handful of times a year, but the form sat open above the calendar every time anyone
+           opened the page just to look one up. -->
       <div class="card">
-        <div class="card-header"><h3>➕ ${L('Add Holiday', 'เพิ่มวันหยุด')}</h3></div>
-        <div class="card-body">
+        <div class="card-header" style="cursor:pointer" onclick="toggleHolidayForm()">
+          <h3>➕ ${L('Add Holiday', 'เพิ่มวันหยุด')}</h3>
+          <button type="button" class="btn btn-ghost btn-sm" id="hol-form-toggle" aria-expanded="${_holidayFormOpen ? 'true' : 'false'}"
+            aria-controls="hol-form-body" onclick="event.stopPropagation();toggleHolidayForm()">${_holidayFormOpen ? L('Close', 'ปิด') : L('Open', 'เปิด')}</button>
+        </div>
+        <div class="card-body" id="hol-form-body"${_holidayFormOpen ? '' : ' style="display:none"'}>
           <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
             <div class="form-group" style="flex:1;min-width:160px;margin:0">
               <label class="form-label">${L('Date', 'วันที่')}</label>
