@@ -16,7 +16,7 @@
   <meta name="theme-color" content="#2563eb">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/style.css?v=20260925b">
+  <link rel="stylesheet" href="css/style.css?v=20260926c">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css" integrity="sha384-MinO0mNliZ3vwppuPOUnGa+iq619pfMhLVUXfC4LHwSCvF9H+6P/KO4Q7qBOYV5V" crossorigin="anonymous"/>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css" integrity="sha384-RkASv+6KfBMW9eknReJIJ6b3UnjKOKC5bOUaNgIY778NFbQ8MtWq9Lr/khUgqtTt" crossorigin="anonymous">
 </head>
@@ -332,11 +332,6 @@
                 <span id="checkin-status-text">ยังไม่ได้ลงเวลา</span>
               </div>
               <div class="scan-btn-wrap">
-                <div id="scan-policy-note" class="scan-policy-note alert alert-info"
-                     data-en="Company policy: check in with the face scanner at the office. Web check-in is for working away from the office.">
-                  นโยบายบริษัท: การลงเวลาเข้างานให้สแกนใบหน้าที่เครื่องในออฟฟิศ — เช็คอินผ่านเว็บใช้สำหรับการทำงานนอกออฟฟิศ
-                </div>
-                <div id="scan-geofence-hint" class="scan-geofence-hint alert alert-warning" style="display:none"></div>
                 <button class="scan-btn scan-ready" id="scan-btn" onclick="doScan('web')">
                   <span class="scan-btn-icon"  id="scan-btn-icon">⏱</span>
                   <span class="scan-btn-label" id="scan-btn-label">ตอกบัตร</span>
@@ -2658,11 +2653,30 @@
   </div>
 </div>
 
+<!-- 2026-09-26 (owner): the geofence policy text used to sit in a permanently-visible banner
+     (#scan-policy-note, removed) plus an always-on hint under the button while inside the zone
+     (#scan-geofence-hint, removed) -- both were "displayed the whole time" per the owner. The
+     scan button is never disabled by the geofence any more (see geofenceUiState()/doScan()/
+     openGeofenceModal() in app.js); this popup is what a blocked press (or a 403 that slips
+     through) raises instead. -->
+<div class="modal-overlay" id="geofence-modal" onclick="if(event.target===this)closeGeofenceModal()">
+  <div class="modal" style="max-width:420px">
+    <div class="modal-header">
+      <h3 data-en="⚠️ Web Check-in Not Allowed">⚠️ ไม่สามารถลงเวลาผ่านเว็บได้</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeGeofenceModal()">✕</button>
+    </div>
+    <div class="modal-body" id="geofence-modal-body" style="font-size:14px;line-height:1.6"></div>
+    <div class="modal-footer">
+      <button class="btn btn-primary" onclick="closeGeofenceModal()" data-en="OK">ตกลง</button>
+    </div>
+  </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js" integrity="sha384-SYKAG6cglRMN0RVvhNeBY0r3FYKNOJtznwA0v7B5Vp9tr31xAHsZC0DqkQ/pZDmj" crossorigin="anonymous"></script>
-<script src="lang/ja.js?v=20260926b"></script>  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js" integrity="sha384-5JqMv4L/Xa0hfvtF06qboNdhvuYXUku9ZrhZh3bSk8VXF0A/RuSLHpLsSV9Zqhl6" crossorigin="anonymous"></script>
+<script src="lang/ja.js?v=20260926c"></script>  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js" integrity="sha384-5JqMv4L/Xa0hfvtF06qboNdhvuYXUku9ZrhZh3bSk8VXF0A/RuSLHpLsSV9Zqhl6" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ja.js" integrity="sha384-mKor8U8jwukUkfxaFPCsxKF9S62PXq4gG7zcZ5yQ2x3KL1msprJZeFlKFEDeeb5V" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/th.js" integrity="sha384-E6OVFg1zUc/pckGxry0YZ6VeZ1E17l7Jl8ZQx58jbEfxxkz9LqknQhiIrA9zg/8b" crossorigin="anonymous"></script>
 
-<script src="js/app.js?v=20260926b"></script>
+<script src="js/app.js?v=20260926c"></script>
 </body>
 </html>

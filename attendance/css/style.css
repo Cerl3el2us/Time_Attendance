@@ -751,9 +751,11 @@ body {
   position: relative;
 }
 .scan-btn:active { transform: scale(0.92); }
-/* 2026-09-25: web check-in geofence -- blocked by location (btn.disabled + .scan-blocked, set
-   together in applyGeofenceToScanButton()). Same opacity/cursor convention as .notif-markall:disabled. */
-.scan-btn:disabled, .scan-btn.scan-blocked { opacity: .5; cursor: not-allowed; }
+/* Observer accounts / an in-flight scan (doScan()'s own scanBtn.disabled) -- same opacity/cursor
+   convention as .notif-markall:disabled. 2026-09-26: the geofence never disables this button any
+   more (see geofenceUiState()'s own comment in app.js) -- a blocked press opens #geofence-modal
+   instead, so the now-dead .scan-blocked class was removed from here along with it. */
+.scan-btn:disabled { opacity: .5; cursor: not-allowed; }
 
 .scan-ready {
   background: linear-gradient(145deg, #3b82f6, #1d4ed8);

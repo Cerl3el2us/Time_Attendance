@@ -1435,15 +1435,15 @@ window.LANG_JA = {
     "JPG・PNG・WebP — 大きな画像は自動で縮小されます。このアプリ内の表示専用で、顔認証端末に登録された写真は変更されません。",
   "JPG, PNG or WebP — large photos are resized automatically. Shown in this app only; the door scanner keeps its own photo.":
     "JPG・PNG・WebP — 大きな画像は自動で縮小されます。このアプリ内の表示専用で、入退室端末の写真は変更されません。",
-  // 2026-09-25: web check-in geofence -- the standing policy note on the check-in screen, and
-  // the two localized refusal reasons (geofenceMessage() in app.js).
-  // 2026-09-26 (owner): the accuracy ceiling ('geofence-accuracy', "not precise enough") was
-  // removed -- uncertainty now counts against the claim to be elsewhere (distance minus accuracy)
-  // instead of refusing outright, so that reason code and its strings no longer exist.
-  "Company policy: check in with the face scanner at the office. Web check-in is for working away from the office.":
-    "会社規定により、出勤打刻はオフィスの顔認証端末で行ってください。Web打刻は社外勤務用です。",
-  "Company policy: check-in must be made with the face scanner at the office. You are within the office area — please scan at the device.":
-    "会社規定により、出勤打刻はオフィスの顔認証端末で行ってください。現在オフィス周辺にいるため、Webでの出勤打刻はできません。",
+  // 2026-09-25/26: web check-in geofence -- the two localized refusal reasons (geofenceMessage()
+  // in app.js) and the #geofence-modal header in index.html. The standing policy banner and
+  // always-on hint (#scan-policy-note/#scan-geofence-hint) were removed 2026-09-26 -- the geofence
+  // never disables the scan button any more; a blocked press (or a 403 that slips through) opens
+  // this modal instead. The accuracy ceiling ('geofence-accuracy', "not precise enough") was
+  // removed earlier the same day -- that reason code and its strings no longer exist either.
+  "⚠️ Web Check-in Not Allowed": "Web出勤打刻はご利用いただけません",
+  "Company policy: check-in must be made with the face scanner at the office. Please scan at the device, or submit a time-correction request if you cannot.":
+    "会社規定により、出勤打刻はオフィスの顔認証端末でのみ行えます。顔認証端末で打刻してください。打刻できない場合は時刻修正を申請してください。",
   "Web check-in requires your location — please allow location access, or use the face scanner at the office.":
     "Web出勤打刻には位置情報が必要です。ブラウザで位置情報を許可するか、オフィスの顔認証端末をご利用ください。",
   // 2026-09-25: Settings page card for the geofence (MD/Accounting can edit the office area).
