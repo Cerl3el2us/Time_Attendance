@@ -2,12 +2,23 @@
 
 **Date:** 2026-09-25
 **Status:** awaiting user review
-**Amended 2026-09-26 (owner request):** the accuracy ceiling (`maxAccuracyM`, the `geofence-accuracy`
-refusal) is removed. See "2026-09-26 amendment" below — it supersedes every mention of `maxAccuracyM`,
-"±50 m", and "Accuracy too poor" further down in this document; those sections are kept for their
-history (why 150 m was chosen, how the design got here) rather than rewritten.
+**Amended 2026-09-26 (owner request, twice in one day):** first the accuracy ceiling (`maxAccuracyM`,
+the `geofence-accuracy` refusal) was removed and replaced with a distance-minus-accuracy rule — see
+"2026-09-26 amendment" below. A review then found that rule itself defective (Critical 1: an
+unbounded, accuracy-proportional exclusion zone that could refuse a check-in at Amara, the owner's
+one named worry, from a coarse fix). The owner's second decision — **ignore accuracy in the gate
+entirely** — is the rule that actually ships; see "2026-09-26 second amendment" below it. Both
+sections supersede every mention of `maxAccuracyM`, "±50 m", and "Accuracy too poor" further down in
+this document; those sections, and the first amendment itself, are kept for their history rather
+than rewritten (with two factual errors the review also caught corrected in place — see the notes
+inline).
 
 ## 2026-09-26 amendment — the accuracy ceiling is gone
+
+> **Superseded a few hours later the same day.** This section describes the *first* fix (distance
+> minus accuracy), not what ships. See "2026-09-26 second amendment" below for the rule that actually
+> ships and why this one was replaced. Kept as the historical record of that first fix, with two
+> factual errors a review caught (marked inline below) corrected rather than left standing.
 
 The owner's own words, translated: *"I don't need much precision. I only want positions around Paso
 to be unable to web check-in, to stop people claiming they came in to the office — because for a
@@ -37,15 +48,17 @@ Consequences, worked through with the real numbers (Paso ↔ Amara = 268 m, radi
 | Scenario | Old rule (`maxAccuracyM: 50`) | New rule |
 |---|---|---|
 | At the tower, ±20 m fix | refused (`geofence-inside`) | refused (`geofence-inside`) |
-| At the tower, a coarse ±1000 m fix that happens to report a point 800 m away | **allowed** (800 m is outside the old 150 m radius, and the accuracy check never even considered the point's own margin of error) | **refused** — `800 - 1000 = -200 <= 150` |
+| At the tower, a coarse ±1000 m fix that happens to report a point 800 m away | **CORRECTED (review, Important 2):** refused — but **for the wrong reason**. `maxAccuracyM: 50` means accuracy 1000 > 50 is caught by the old step 4 (`geofence-accuracy`) *before distance is even checked* — the point being 800 m away, outside the old 150 m radius, never enters into it. *(Originally, incorrectly, written here as "allowed" — it was not; the old rule refused this case too, just via the accuracy ceiling rather than distance.)* | refused — `800 - 1000 = -200 <= 150` |
 | At Amara Bangkok Hotel (268 m away) | refused if accuracy > 50 m (`geofence-accuracy`), before distance was even checked | refused only once accuracy reaches **118 m** (`268 - 118 = 150`); allowed up to 117 m |
 | 700 km away, any accuracy | refused if accuracy > 50 m — an honest, low-end fix from a legitimate client visit was blocked for being imprecise, nowhere near the office | **always allowed** — there is no ceiling anywhere in the new rule |
 | No accuracy reported at all (an old cached `app.js`) | refused (`geofence-accuracy`) everywhere, including far from the office | correct — accuracy absent counts as 0, so the point is trusted as reported |
 
 The Amara tolerance is wider than before (118 m vs. the old 50 m ceiling) — more tolerant, which is
-what the owner asked for — while the tower itself is, if anything, *harder* to spoof past with a
-coarse fix, because a wide accuracy value now works against the claim instead of exempting it from
-the distance check entirely.
+what the owner asked for. **CORRECTED (review, Important 2):** the claim originally made here — that
+the tower itself became "harder to spoof past with a coarse fix" — was the opposite of true. Crediting
+the device's own margin of error made the *effective refusal radius* `radiusM + accuracy`: a coarse,
+large accuracy value widens the zone a coarse fix is caught in, it does not narrow it. That is exactly
+the defect (Critical 1) that got this rule replaced a few hours later — see the second amendment below.
 
 **What follows from this:**
 - `maxAccuracyM` is removed everywhere: `DEFAULT_APP_SETTINGS.geofence` / `APP_SETTINGS.geofence`
@@ -58,6 +71,71 @@ the distance check entirely.
   and the reviewer's `±N m` display all stay exactly as they were. Only the *gate* stopped using
   accuracy as a ceiling; the owner still wants to see how good a fix was when reviewing a check-in
   after the fact.
+
+## 2026-09-26 second amendment — accuracy removed from the gate entirely
+
+**This is the rule that ships.** A few hours after the amendment above, a review found it defective:
+
+> **Critical 1 — An accuracy-proportional exclusion zone.** The credited accuracy is unbounded, so
+> the effective refusal radius is `radiusM + accuracy`: ±1,000 m → refused within ~1.15 km of Paso;
+> ±5,000 m (iOS "Precise Location: Off") → refused across central Bangkok; ±50,000 m (desktop/IP fix)
+> → refused across greater Bangkok. Concrete scenario: an employee at **Amara** — the owner's one
+> named worry — with iOS Precise Location off, or on a laptop, gets `268 − 5000 = −4732 ≤ 150` →
+> button disabled, text *"You are within the office area — please scan at the device."* They are
+> 268 m away, cannot reach the 14th-floor scanner from the hotel, and on a device with no GPS the
+> accuracy never improves. Attendance is simply not recorded.
+
+The owner's second decision (asked and answered the same day): **trust the reported position; do not
+use accuracy in the gate at all.** Reasoning, in the owner's own words, unchanged from the first
+amendment: *"I don't need much precision. I only want positions around Paso to be unable to web
+check-in... because for a check-in anywhere else I can already look at the position and see where
+they were."* The owner accepts the trade-off this implies: someone standing at the office whose
+device reports a coarse position outside the zone will pass the gate — caught, if at all, by
+reviewing the recorded position afterwards, not by the gate itself.
+
+**The rule is now a plain distance test, with no accuracy term of any kind:**
+
+```
+refuse (as 'geofence-inside') when distance(reported point, office centre) <= radiusM
+```
+
+`geofenceCheckinReason(G, role, lat, lng)` — the `accuracy` parameter is removed from the function
+signature entirely, on both sides, rather than kept and ignored. Its callers changed to match:
+`webScanGateReason()` (server.js) no longer receives or forwards a `gpsAccuracy` argument into the
+gate; `geofenceUiState()` and `doScan()` (app.js) no longer read `currentGPS.accuracy` / `gpsAcc` for
+this purpose. Everything above the distance test is unchanged from before either amendment: the
+disabled switch, the exempt-roles check, and both `geofence-no-position` guards — no position is
+still an outright refusal.
+
+Consequences (superseding the table in the first amendment above):
+
+| Scenario | Result |
+|---|---|
+| At the tower, any fix, any accuracy (including none at all) | refused (`geofence-inside`) |
+| At Amara (268 m away), **any accuracy value at all** — including a desktop/IP fix (±50,000 m) or iOS Precise Location off (±5,000 m) | **always allowed** — this is the case the owner named explicitly, and the whole point of this second amendment |
+| A desktop-style ±50,000 m fix reporting a point 5 km from the tower | allowed — the accuracy-proportional exclusion zone from the first amendment (which would have refused this) no longer exists |
+| Hundreds of km away, any accuracy | allowed, as before |
+| No position at all | still refused (`geofence-no-position`), unchanged |
+
+This also resolves a related inconsistency the same review found (Important 1): under the first
+amendment's rule, the client passed raw, unsanitised `currentGPS.accuracy` into the gate while the
+server passed the sanitised value (`sanitizeGpsAccuracy()`'s output, capped and non-negative) — the
+two could disagree above very large accuracy values. Removing accuracy from the gate on both sides
+removes the disagreement by construction; there is no accuracy value left for the two sides to read
+differently.
+
+**Also fixed in the same pass (from the same review):**
+- **Minor 2:** `PUT /api/settings` now `delete`s a stale `maxAccuracyM` key from the incoming
+  `geofence` payload (not just stops validating it), so a client still holding an old cached settings
+  snapshot — or a `settings.json` on disk saved before the removal — can never make the dead key
+  persist forever through the deep-merge.
+- **Minor 3:** the Settings card's standalone Radius field (it lost its `row2()` partner, and the
+  12 px gap that came with it, when the accuracy field was removed) is re-wrapped in the same
+  `margin-bottom:12px` div this page already uses for other single elements.
+
+**What is still unchanged from both amendments:** `sanitizeGpsAccuracy()`, the `gpsAcc` event field,
+and the `±N m` reviewer display are untouched by either amendment — the owner's audit trail, which
+matters *more* now that the gate trusts the reported point outright, not less.
 
 ## Problem
 
@@ -93,9 +171,9 @@ office, the check-in is refused and they are told the company policy is to use t
 |---|---|
 | Office centre | Paso Tower — `13.7268315, 100.52847` |
 | Radius | **150 m**, editable in Settings |
-| Minimum GPS accuracy to decide anything | ~~±50 m~~ — removed 2026-09-26, see amendment above: accuracy now widens the effective radius instead of gating on its own |
+| Minimum GPS accuracy to decide anything | ~~±50 m~~ — removed 2026-09-26 (first amendment), then accuracy was removed from the decision **entirely** the same day (second amendment): the gate now runs on distance alone |
 | No position / permission denied | **Refuse** the check-in |
-| Accuracy worse than the threshold | ~~Refuse — treated exactly like "no position"~~ — removed 2026-09-26: there is no threshold any more |
+| Accuracy worse than the threshold | ~~Refuse — treated exactly like "no position"~~ — removed 2026-09-26: there is no threshold, and no accuracy term of any kind, any more |
 | Who is exempt | **`driver`** — may check in from the web anywhere, including inside the radius |
 | Check-out | **Not affected at all.** The gate runs on check-in only |
 | Blocked attempts | **Not recorded.** Refuse and move on — no audit trail, no counter |
@@ -134,12 +212,15 @@ the scanner is the behaviour we want.
 | 1 | Employee's live role is in the exempt list (`driver`) | allow |
 | 2 | This scan would **not** become a check-in | allow |
 | 3 | No position, or a malformed one | **refuse** (`geofence-no-position`) |
-| 4 | ~~No accuracy value, or accuracy > `maxAccuracyM`~~ — removed 2026-09-26 | — |
-| 5 | `(distance from the office centre − accuracy, or 0 if missing/unusable) ≤ radiusM` | **refuse** (`geofence-inside`, policy message) |
+| 4 | ~~No accuracy value, or accuracy > `maxAccuracyM`~~ — removed 2026-09-26 (first amendment) | — |
+| 5 | `distance from the office centre ≤ radiusM` — **no accuracy term of any kind** (second amendment) | **refuse** (`geofence-inside`, policy message) |
 | 6 | otherwise | allow |
 
-*(Steps renumbered 2026-09-26: step 4's accuracy ceiling is gone; step 5 now folds accuracy into the
-distance test itself, per the amendment above, instead of gating on it separately beforehand.)*
+*(Steps renumbered 2026-09-26, twice: step 4's accuracy ceiling was removed by the first amendment;
+step 5 briefly folded accuracy into the distance test itself (`distance − accuracy ≤ radiusM`) before
+a review found that defective (an unbounded, accuracy-proportional exclusion zone — see the second
+amendment above) and the owner ruled it out entirely. `geofenceCheckinReason()`'s `accuracy`
+parameter is gone from the function signature, not merely unused.)*
 
 **Step 2 must come before steps 3–5.** Check-out is explicitly out of scope, so it must not start
 demanding GPS. Whether a scan becomes a check-in is derived the same way
@@ -160,21 +241,28 @@ so the client can show the right message and the tests can assert on it.
 
 ## Client behaviour
 
-The check-in button states the reason before it is pressed rather than letting a press fail:
+The check-in button states the reason before it is pressed rather than letting a press fail. **This
+table is as of the second amendment** — accuracy no longer affects the button state at all; the two
+tables originally drafted here for the pre-amendment and first-amendment designs (which both had an
+accuracy-dependent "waiting for a usable fix" / "accuracy good" state) described states that no
+longer exist and were replaced rather than kept for comparison, since a button-state table has no
+useful "what the old wrong table said" reading the way the decision tables above it do:
 
 | State | Button | Text |
 |---|---|---|
-| Waiting for a usable fix | disabled | "Locating… ±120 m" (live) |
-| Inside the radius | disabled | policy message (below) |
-| Outside, accuracy good | normal | — |
+| No position yet (still loading), or permission denied | disabled | "Web check-in requires your location…" |
+| Inside the radius (`geofence-inside`) | disabled | policy message (below) |
+| Outside the radius, position known | normal | — |
 | `driver` | normal | — (no change for drivers) |
 
 A standing note sits on the check-in panel whether or not the button is blocked, so the rule is
 visible before anyone is refused by it: **company policy is to check in with the face scanner at the
 office; web check-in is for working away from the office.**
 
-`watchPosition` with `enableHighAccuracy: true` is already in place (`app.js`), so accuracy improves
-on its own over the first seconds — the disabled state is usually a short wait, not a dead end.
+`watchPosition` with `enableHighAccuracy: true` is still in place (`app.js`) and still improves the
+reported accuracy over the first seconds, but that improvement no longer changes whether the button
+is enabled — only whether a position exists at all does. The disabled-for-no-position state is
+usually a short wait (until any fix arrives, not a *precise* one), not a dead end.
 
 The client mirrors the server's rule. It is a preview only; the server decides. Both copies read the
 same Settings values, and the distance helper must stay identical on both sides — this is the same
@@ -215,42 +303,57 @@ list). As with every other settings group, the UI sends the **complete** object,
 ## Event payload
 
 The client starts sending the accuracy alongside the coordinates, and it is stored on the event.
-Two reasons: the gate needs it, and without it there is no way to review after the fact how good a
-stored position was — the very gap that made the ±20 vs ±96 question unanswerable during design.
+Originally this was for two reasons: the gate needed it, and without it there was no way to review
+after the fact how good a stored position was. **Updated 2026-09-26 (second amendment):** the first
+reason is gone — the gate does not read accuracy at all any more — but the second is unchanged and,
+per the owner, matters *more* now: reviewing the recorded position after the fact is how a coarse fix
+standing at the office (which the gate itself now lets through) gets caught, since the gate no longer
+even tries.
 
-Accuracy is sanitised like the coordinates: a finite non-negative number, bounded, or absent.
+Accuracy is sanitised like the coordinates: a finite non-negative number, bounded, or absent. This is
+still true and unrelated to either amendment — `sanitizeGpsAccuracy()` was never part of the gate's
+own decision, only of what gets stored for review.
 
 The existing `'ไม่ทราบตำแหน่ง'` placeholder stays valid — a check-out with no position is still
 accepted and still stored that way, because the gate never runs on a check-out.
 
-**Backward compatibility (updated 2026-09-26):** a browser holding a cached copy of the old `app.js`
-sends no accuracy at all. Under the original rule this was refused everywhere with the "not precise
-enough" message, including far from the office — a false refusal, not a safe one. Under the current
-rule, a missing accuracy counts as 0 (trust the point as reported), so a stale client now behaves
-*correctly* instead of being refused; there is no longer a "safe by refusal" argument for bumping the
-cache-buster on this account specifically, though it remains routine practice for this project.
+**Backward compatibility (updated 2026-09-26, twice):** a browser holding a cached copy of the old
+`app.js` sends no accuracy at all. Under the pre-amendment rule this was refused everywhere with the
+"not precise enough" message, including far from the office — a false refusal. Under the first
+amendment, a missing accuracy counted as 0 (trust the point as reported), which happened to also
+behave correctly for this specific case. Under the rule that actually ships (the second amendment),
+the question is moot: a stale client's missing accuracy is simply never read by the gate at all, same
+as a fresh client's accuracy value — neither one affects the outcome. Bumping the `?v=` cache-buster
+remains routine practice for this project regardless.
 
 ## Testing
 
-*(Updated 2026-09-26 for the accuracy-ceiling removal; see `tests/geofence.test.js`.)*
+*(Updated 2026-09-26, twice — for the accuracy-ceiling removal, then again for removing accuracy
+from the gate entirely; see `tests/geofence.test.js`, currently 43 tests.)*
 
 - Distance helper against known pairs, including Paso ↔ Amara = 268 m.
-- At the tower, a check-in is refused (with a normal, precise fix).
-- At the hotel: allowed with accuracy up to 117 m, refused from 118 m — the boundary the new rule
-  draws (`268 − 118 = 150`).
-- A coarse fix that reports a point *outside* the zone is still refused once its own margin of error
-  reaches back inside it (e.g. 800 m away, ±1000 m accuracy) — the scenario the old ceiling let through.
-- A position hundreds of kilometres away is allowed with any accuracy, including none at all.
-- A missing/negative/unusable accuracy counts as 0, never as a refusal on its own.
+- At the tower: refused with a good/precise fix, refused with **no accuracy reported at all**, and
+  refused with a coarse one (e.g. ±50,000 m) — accuracy must never change this outcome either way.
+- At Amara (268 m away): **allowed at every accuracy value**, including desktop-style ±5,000 m (iOS
+  Precise Location off) and ±50,000 m (IP/desktop fix) — this is the scenario the owner named
+  explicitly, and the test must fail if anyone reintroduces an accuracy term that reads it.
+- A desktop-style ±50,000 m fix reporting a point 5 km from the tower is allowed — the
+  accuracy-proportional exclusion zone from the first (superseded) amendment would have refused this.
+- A position hundreds of kilometres away is allowed, with or without any accuracy value.
 - `driver` passes every branch, including inside the radius, including with no position at all.
 - A check-out inside the radius is untouched — with a good fix, a poor fix, and no fix at all.
 - No position or a malformed one → refused (`geofence-no-position`); `maxAccuracyM`/
-  `geofence-accuracy` no longer exist to test.
+  `geofence-accuracy` no longer exist to test, and `geofenceCheckinReason()` no longer has an
+  `accuracy` parameter to pass one to.
 - `enabled: false` restores today's behaviour exactly.
 - `radiusM: 0` is honoured, not replaced by the 150 m default (falsy-zero guard).
 - The client's copy of the rule agrees with the server's for the same inputs (dual-sync guard).
 - `maxAccuracyM`/`set-geo-acc`/`geofence-accuracy` are asserted absent from both source files and
-  from `ja.js`, not just untested.
+  from `ja.js`, not just untested; a stale `maxAccuracyM` sent in a `PUT /api/settings` payload is
+  asserted to be stripped (Minor 2), not merely unvalidated.
+- Verified by mutation: reintroducing an accuracy term (as if reverting to either the first amendment
+  or the original ceiling) was confirmed to make the Amara-any-accuracy and 5 km-desktop-fix tests
+  fail for the right reason (a `'geofence-inside'` where `''` is expected), then reverted.
 
 ## Out of scope
 

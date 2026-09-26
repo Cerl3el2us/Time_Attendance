@@ -1798,7 +1798,7 @@ app.post('/api/hikvision/event', hikAuth, webScanLimiter, withEventsLock((req, r
     // device never reaches this code. webScanGateReason() owns the whole decision (check-in test +
     // geofence check); this block only turns a non-empty reason into the 403.
     if (req.hikSource === 'webscan') {
-      const reason = webScanGateReason(req.hikUser, eventTime, gps, gpsAccuracy);
+      const reason = webScanGateReason(req.hikUser, eventTime, gps);
       if (reason) {
         const messages = {
           'geofence-inside': 'Company policy: check-in must be made with the face scanner at the office.',
@@ -4424,6 +4424,11 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
     }
     if (A.geofence) {
       const g = A.geofence;
+      // 2026-09-26: maxAccuracyM is a removed, dead setting -- the gate no longer reads it. Strip it
+      // here (not just stop validating it) so a client still holding an old settings.json snapshot,
+      // or a stray settings.json on disk from before the removal, can never make it persist forever
+      // through the deep-merge below.
+      delete g.maxAccuracyM;
       const num = (v, lo, hi) => typeof v === 'number' && Number.isFinite(v) && v >= lo && v <= hi;
       if (g.enabled !== undefined && typeof g.enabled !== 'boolean') {
         return res.status(400).json({ success: false, message: 'appSettings.geofence.enabled must be true or false' });
@@ -9077,7 +9082,7 @@ function geofenceDistanceM(lat1, lng1, lat2, lng2) {
 }
 // Returns '' to allow, or the reason code to refuse. Order matters: the caller must already have
 // established that this scan would become a CHECK-IN -- check-out is never gated.
-function geofenceCheckinReason(G, role, lat, lng, accuracy) {
+function geofenceCheckinReason(G, role, lat, lng) {
   if (!G || typeof G !== 'object' || G.enabled !== true) return '';
   const exempt = Array.isArray(G.exemptRoles) ? G.exemptRoles : [];
   if (exempt.includes(role)) return '';
@@ -9087,15 +9092,13 @@ function geofenceCheckinReason(G, role, lat, lng, accuracy) {
   let radius = 150;
   if (Number.isFinite(Number(G.radiusM))) radius = Number(G.radiusM);
   if (radius === 0) return '';
-  // The reported accuracy is a radius of uncertainty around the reported point. If the employee
-  // could be inside the zone once their own margin of error is allowed for, treat them as inside.
-  // A missing or unusable accuracy counts as 0 -- trust the point as reported. That is deliberate:
-  // accuracy is not a security control (a spoofed position can claim any accuracy), and treating
-  // its absence as "refuse" is exactly the behaviour being removed here.
-  const accNum = Number(accuracy);
-  const acc = Number.isFinite(accNum) && accNum > 0 ? accNum : 0;
-  const d = geofenceDistanceM(la, ln, Number(G.lat), Number(G.lng));
-  return (d - acc) <= radius ? 'geofence-inside' : '';
+  // The owner's rule (2026-09-26): trust the reported point and ignore the device's own margin of
+  // error. Crediting that margin made the refusal radius grow with it -- an approximate fix (iOS
+  // "Precise Location" off, or any desktop browser positioning by IP) was refused across the whole
+  // city, including at the hotel 268 m away, with a message claiming the employee was at the office.
+  // A coarse fix that reports a point outside the zone is therefore allowed; the owner reviews the
+  // stored position after the fact, which is what the recorded gpsAcc is for.
+  return geofenceDistanceM(la, ln, Number(G.lat), Number(G.lng)) <= radius ? 'geofence-inside' : '';
 }
 function buildAttendanceLogForUser(user, start, end) {
   const loadedEvents = readEvents();
@@ -9177,7 +9180,7 @@ function webScanWouldBeCheckIn(user, eventTimeIso) {
 // reaches geofenceCheckinReason(), so it is never asked for GPS. The route below does nothing but
 // call this once with req.hikUser (never body) and, on a non-empty result, send that 403 and
 // return before saveEvent -- see tests/geofence.test.js for the wiring test that exercises that.
-function webScanGateReason(hikUser, eventTimeIso, gps, gpsAccuracy) {
+function webScanGateReason(hikUser, eventTimeIso, gps) {
   // M2 fix (2026-09-25 review): read the master switch first and return '' immediately when
   // disabled -- geofenceCheckinReason() would return '' anyway once it gets there, but
   // webScanWouldBeCheckIn() -> buildAttendanceLogForUser() does a full readEvents() + log build on
@@ -9187,7 +9190,7 @@ function webScanGateReason(hikUser, eventTimeIso, gps, gpsAccuracy) {
   if (!G || typeof G !== 'object' || G.enabled !== true) return '';
   if (!webScanWouldBeCheckIn(hikUser, eventTimeIso)) return '';
   const coords = gps ? parseGpsCoords(gps) : null;
-  return geofenceCheckinReason(G, hikUser.role, coords ? coords.lat : NaN, coords ? coords.lng : NaN, gpsAccuracy);
+  return geofenceCheckinReason(G, hikUser.role, coords ? coords.lat : NaN, coords ? coords.lng : NaN);
 }
 
 // Port of app.js generatePeriodDays() (~line 2206) — day-by-day status derivation. Takes

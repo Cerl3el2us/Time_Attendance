@@ -4535,7 +4535,7 @@ function renderSettingsPage(_skipRefresh) {
         field(L('Latitude','ละติจูด'), inp('set-geo-lat', s.geofence.lat, 'number', 'step="0.0000001"')),
         field(L('Longitude','ลองจิจูด'), inp('set-geo-lng', s.geofence.lng, 'number', 'step="0.0000001"'))
       )}
-      ${field(L('Radius (m)','รัศมี (เมตร)'), inp('set-geo-radius', s.geofence.radiusM, 'number', 'min="10" max="5000"'))}
+      <div style="margin-bottom:12px">${field(L('Radius (m)','รัศมี (เมตร)'), inp('set-geo-radius', s.geofence.radiusM, 'number', 'min="10" max="5000"'))}</div>
       <div style="font-size:12px;color:#64748b;margin:4px 0 8px">${L('Inside this radius, check-in must use the face scanner.', 'ภายในรัศมีนี้ การลงเวลาเข้างานต้องสแกนใบหน้าที่เครื่อง')}</div>
       <div style="font-size:11px;color:#94a3b8">${L('Drivers are always exempt from this check.','คนขับได้รับการยกเว้นจากการตรวจสอบนี้เสมอ')}</div>
     `)}
@@ -5995,7 +5995,7 @@ function geofenceDistanceM(lat1, lng1, lat2, lng2) {
 }
 // Returns '' to allow, or the reason code to refuse. Order matters: the caller must already have
 // established that this scan would become a CHECK-IN -- check-out is never gated.
-function geofenceCheckinReason(G, role, lat, lng, accuracy) {
+function geofenceCheckinReason(G, role, lat, lng) {
   if (!G || typeof G !== 'object' || G.enabled !== true) return '';
   const exempt = Array.isArray(G.exemptRoles) ? G.exemptRoles : [];
   if (exempt.includes(role)) return '';
@@ -6005,15 +6005,13 @@ function geofenceCheckinReason(G, role, lat, lng, accuracy) {
   let radius = 150;
   if (Number.isFinite(Number(G.radiusM))) radius = Number(G.radiusM);
   if (radius === 0) return '';
-  // The reported accuracy is a radius of uncertainty around the reported point. If the employee
-  // could be inside the zone once their own margin of error is allowed for, treat them as inside.
-  // A missing or unusable accuracy counts as 0 -- trust the point as reported. That is deliberate:
-  // accuracy is not a security control (a spoofed position can claim any accuracy), and treating
-  // its absence as "refuse" is exactly the behaviour being removed here.
-  const accNum = Number(accuracy);
-  const acc = Number.isFinite(accNum) && accNum > 0 ? accNum : 0;
-  const d = geofenceDistanceM(la, ln, Number(G.lat), Number(G.lng));
-  return (d - acc) <= radius ? 'geofence-inside' : '';
+  // The owner's rule (2026-09-26): trust the reported point and ignore the device's own margin of
+  // error. Crediting that margin made the refusal radius grow with it -- an approximate fix (iOS
+  // "Precise Location" off, or any desktop browser positioning by IP) was refused across the whole
+  // city, including at the hotel 268 m away, with a message claiming the employee was at the office.
+  // A coarse fix that reports a point outside the zone is therefore allowed; the owner reviews the
+  // stored position after the fact, which is what the recorded gpsAcc is for.
+  return geofenceDistanceM(la, ln, Number(G.lat), Number(G.lng)) <= radius ? 'geofence-inside' : '';
 }
 // Dual-sync with server.js eventInstantMs / compareEventsByInstant — mixed offsets
 // (+07:00 vs +09:00) must sort by instant, not ISO string.
@@ -7149,8 +7147,7 @@ function geofenceUiState() {
   const reason = geofenceCheckinReason(
     APP_SETTINGS.geofence, role,
     currentGPS ? Number(currentGPS.latRaw) : NaN,
-    currentGPS ? Number(currentGPS.lngRaw) : NaN,
-    currentGPS ? Number(currentGPS.accuracy) : null
+    currentGPS ? Number(currentGPS.lngRaw) : NaN
   );
   return { blocked: !!reason, reason, text: reason ? geofenceMessage(reason) : '' };
 }
@@ -7973,8 +7970,7 @@ async function doScan(source) {
     const reason = geofenceCheckinReason(
       APP_SETTINGS.geofence, currentUser && currentUser.role,
       currentGPS ? Number(currentGPS.latRaw) : NaN,
-      currentGPS ? Number(currentGPS.lngRaw) : NaN,
-      gpsAcc
+      currentGPS ? Number(currentGPS.lngRaw) : NaN
     );
     if (reason) { showToast(geofenceMessage(reason), 'warning'); return; }
   }

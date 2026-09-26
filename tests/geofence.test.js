@@ -60,78 +60,70 @@ test('Paso Tower to Amara Bangkok Hotel is 268 m', () => {
   assert.strictEqual(S.geofenceDistanceM(PASO.lat, PASO.lng, PASO.lat, PASO.lng), 0);
 });
 
-test('at the office: a check-in is refused', () => {
+// 2026-09-26 (owner, 2nd decision): the distance-minus-accuracy rule shipped earlier the same day
+// had a defect the owner then ruled on -- crediting the device's own margin of error made the
+// effective refusal radius grow with it (radiusM + accuracy), so a coarse fix (iOS "Precise
+// Location" off, or any desktop browser positioning by IP) was refused across the whole city,
+// including at Amara -- the owner's one named worry -- with a message claiming the employee was at
+// the office. The owner's decision: trust the reported point and ignore accuracy in the gate
+// entirely. `geofenceCheckinReason()` no longer takes an accuracy parameter at all; the tests below
+// still pass a 5th argument in several places specifically to prove it has NO effect any more --
+// they must fail if anyone reintroduces an accuracy term that reads it.
+
+test('at the tower: refused with a good fix, with no accuracy reported at all, and with a coarse one', () => {
   assert.strictEqual(S.geofenceCheckinReason(G, 'user', PASO.lat, PASO.lng, 20), 'geofence-inside');
+  assert.strictEqual(S.geofenceCheckinReason(G, 'user', PASO.lat, PASO.lng), 'geofence-inside',
+    'no accuracy argument at all must still refuse at the office');
+  assert.strictEqual(S.geofenceCheckinReason(G, 'user', PASO.lat, PASO.lng, 50000), 'geofence-inside',
+    'a coarse/desktop-style accuracy value must never affect the decision -- the rule ignores accuracy entirely');
 });
 
-// 2026-09-26 (owner): the accuracy ceiling is gone. Uncertainty now counts AGAINST the claim to
-// be elsewhere -- the rule is (distance - accuracy) <= radius -- instead of being a reason to
-// refuse outright before distance is even considered. Distance Paso -> Amara is ~268 m (proven
-// above), so the boundary is accuracy == distance - radius == 268 - 150 == 118 m.
-test('at the hotel: allowed up to 117 m of accuracy, refused from 118 m (the new boundary)', () => {
-  for (const acc of [0, 1, 50, 100, 117]) {
+test('at Amara (268 m away): allowed at every accuracy value, including desktop-style ±5,000 m and ±50,000 m fixes -- this is the case the owner cares about', () => {
+  // Under the removed rule, `268 - 5000 <= 150` and `268 - 50000 <= 150` were both refused
+  // ('geofence-inside') with a message claiming the employee was at the office, even though Amara
+  // is 268 m away and unreachable from the 14th-floor scanner. Every value here must allow.
+  for (const acc of [undefined, null, 0, 1, 50, 117, 118, 200, 1000, 5000, 50000, 'garbage', NaN, -50]) {
     assert.strictEqual(S.geofenceCheckinReason(G, 'user', AMARA.lat, AMARA.lng, acc), '',
-      `must be allowed at the hotel with accuracy ${acc} (more tolerant than the old 50 m ceiling)`);
+      `must be allowed at the hotel regardless of any accuracy value (${acc}) -- accuracy must never enter the decision`);
   }
-  for (const acc of [118, 119, 200, 1000]) {
-    assert.strictEqual(S.geofenceCheckinReason(G, 'user', AMARA.lat, AMARA.lng, acc), 'geofence-inside',
-      `must be refused at the hotel once accuracy reaches ${acc} m`);
-  }
+});
+
+test('a desktop-style ±50,000 m fix reporting a point 5 km away is allowed (the removed accuracy-proportional exclusion zone would have refused this)', () => {
+  const FIVE_KM = { lat: PASO.lat + (5000 / 111320), lng: PASO.lng }; // ~5 km due north of the tower
+  const d = S.geofenceDistanceM(PASO.lat, PASO.lng, FIVE_KM.lat, FIVE_KM.lng);
+  assert.ok(Math.abs(d - 5000) < 50, `expected ~5 km, got ${d.toFixed(0)} m`);
+  assert.strictEqual(S.geofenceCheckinReason(G, 'user', FIVE_KM.lat, FIVE_KM.lng, 50000), '',
+    'a coarse desktop/IP fix reporting a point 5 km away must be allowed -- 5000 - 50000 <= 150 would have wrongly refused this under the removed rule');
 });
 
 test('no position, or a position that is not a number, is refused', () => {
-  assert.strictEqual(S.geofenceCheckinReason(G, 'user', null, null, 10), 'geofence-no-position');
-  assert.strictEqual(S.geofenceCheckinReason(G, 'user', NaN, 100.5, 10), 'geofence-no-position');
+  assert.strictEqual(S.geofenceCheckinReason(G, 'user', null, null), 'geofence-no-position');
+  assert.strictEqual(S.geofenceCheckinReason(G, 'user', NaN, 100.5), 'geofence-no-position');
 });
 
-test('a coarse fix reporting a point OUTSIDE the zone is still refused once its own margin of error reaches back inside', () => {
-  // Old rule: a coarse reading past the accuracy ceiling was refused as 'geofence-accuracy' before
-  // distance was even considered -- but whenever it happened to slip under the ceiling, the
-  // (unrelated) distance check could still let it through. New rule: the reported point 800 m from
-  // the tower is well outside the 150 m fence, but a ±1000 m fix means the true position could
-  // still be at the tower -- (800 - 1000) <= 150, so this must be BLOCKED, not allowed.
-  const farLat = PASO.lat + (800 / 111320); // ~800 m due north of the tower
-  const d = S.geofenceDistanceM(farLat, PASO.lng, PASO.lat, PASO.lng);
-  assert.ok(Math.abs(d - 800) < 5, `expected the reported point to be ~800 m away, got ${d.toFixed(1)}`);
-  assert.strictEqual(S.geofenceCheckinReason(G, 'user', farLat, PASO.lng, 1000), 'geofence-inside',
-    'a coarse fix reporting a point outside the zone must still be blocked once its own margin of error reaches back inside');
-});
-
-test('a position 700 km away is allowed with any accuracy, including none at all -- there is no ceiling anywhere', () => {
+test('a position 700 km away is allowed, with or without any accuracy value', () => {
   const FAR = { lat: PASO.lat + (700000 / 111320), lng: PASO.lng }; // ~700 km due north of the tower
   const d = S.geofenceDistanceM(PASO.lat, PASO.lng, FAR.lat, FAR.lng);
   assert.ok(Math.abs(d - 700000) < 2000, `expected ~700 km, got ${(d / 1000).toFixed(0)} km`);
-  for (const acc of [0, 10, 1000, 100000, null, undefined, NaN, 'garbage']) {
-    assert.strictEqual(S.geofenceCheckinReason(G, 'user', FAR.lat, FAR.lng, acc), '',
-      `must be allowed 700 km away regardless of accuracy (${acc})`);
-  }
-});
-
-test('a missing or unusable accuracy counts as 0 -- trusts the reported point instead of refusing on that basis', () => {
-  // This is exactly the case an old cached app.js (never sends accuracy) now hits correctly.
-  assert.strictEqual(S.geofenceCheckinReason(G, 'user', AMARA.lat, AMARA.lng, null), '',
-    'no accuracy reported must not be treated as an accuracy problem any more');
-  assert.strictEqual(S.geofenceCheckinReason(G, 'user', AMARA.lat, AMARA.lng, undefined), '');
-  assert.strictEqual(S.geofenceCheckinReason(G, 'user', AMARA.lat, AMARA.lng, 'garbage'), '');
-  assert.strictEqual(S.geofenceCheckinReason(G, 'user', AMARA.lat, AMARA.lng, -50), '',
-    'a negative accuracy is unusable and must count as 0, never as a bonus margin');
+  assert.strictEqual(S.geofenceCheckinReason(G, 'user', FAR.lat, FAR.lng), '');
+  assert.strictEqual(S.geofenceCheckinReason(G, 'user', FAR.lat, FAR.lng, 100000), '');
 });
 
 test('a driver is allowed everywhere, including with no position at all', () => {
-  assert.strictEqual(S.geofenceCheckinReason(G, 'driver', PASO.lat, PASO.lng, 10), '');
-  assert.strictEqual(S.geofenceCheckinReason(G, 'driver', null, null, null), '');
+  assert.strictEqual(S.geofenceCheckinReason(G, 'driver', PASO.lat, PASO.lng), '');
+  assert.strictEqual(S.geofenceCheckinReason(G, 'driver', null, null), '');
 });
 
 test('the master switch restores the old behaviour exactly', () => {
   const off = { ...G, enabled: false };
-  assert.strictEqual(S.geofenceCheckinReason(off, 'user', PASO.lat, PASO.lng, 10), '');
-  assert.strictEqual(S.geofenceCheckinReason(off, 'user', null, null, null), '');
-  assert.strictEqual(S.geofenceCheckinReason(undefined, 'user', PASO.lat, PASO.lng, 10), '');
+  assert.strictEqual(S.geofenceCheckinReason(off, 'user', PASO.lat, PASO.lng), '');
+  assert.strictEqual(S.geofenceCheckinReason(off, 'user', null, null), '');
+  assert.strictEqual(S.geofenceCheckinReason(undefined, 'user', PASO.lat, PASO.lng), '');
 });
 
 test('a radius of 0 is honoured, not replaced by a default', () => {
   // Falsy-zero guard: `radiusM || 150` would silently restore 150 here.
-  assert.strictEqual(S.geofenceCheckinReason({ ...G, radiusM: 0 }, 'user', PASO.lat, PASO.lng, 10), '');
+  assert.strictEqual(S.geofenceCheckinReason({ ...G, radiusM: 0 }, 'user', PASO.lat, PASO.lng), '');
 });
 
 console.log('Geofence: settings');
@@ -157,7 +149,7 @@ test('getAppSettings merges geofence over the defaults', () => {
     'geofence must be merged like workSchedule, or a partial stored value loses its other fields');
 });
 
-test('PUT /api/settings accepts geofence and validates it', () => {
+test('PUT /api/settings accepts geofence and validates it, with the maxAccuracyM bounds check gone', () => {
   const allowed = /const ALLOWED_APPSETTINGS_KEYS = \[[^\]]*\]/.exec(SERVER_SRC)[0];
   assert.ok(/'geofence'/.test(allowed), 'geofence must be in the appSettings whitelist or every save is rejected');
   const objLoop = /for \(const sub of \['company'[^\]]*\]\)/.exec(SERVER_SRC)[0];
@@ -171,7 +163,23 @@ test('PUT /api/settings accepts geofence and validates it', () => {
   ]) {
     assert.ok(SERVER_SRC.includes(needle), `missing validation: ${needle}`);
   }
-  assert.ok(!SERVER_SRC.includes('maxAccuracyM'), 'maxAccuracyM validation must be fully removed from server.js');
+  assert.ok(!SERVER_SRC.includes('maxAccuracyM must be a number'),
+    'the maxAccuracyM bounds-validation message must be fully removed from server.js');
+});
+
+// Minor 2 (2026-09-26 review): the setting is dead, but a client still holding an old cached
+// payload -- or a settings.json on disk saved before this removal -- can still carry a stale
+// maxAccuracyM value. It must be stripped before the deep-merge persists it forever, not merely
+// left unvalidated (unvalidated + accepted is exactly how a dead field lives on in storage
+// indefinitely, looking meaningful to the next person who reads settings.json).
+test('PUT /api/settings strips a stale maxAccuracyM from the geofence payload rather than letting it persist', () => {
+  const geoBlock = /if \(A\.geofence\) \{[\s\S]*?\n    \}\n/.exec(SERVER_SRC);
+  assert.ok(geoBlock, 'geofence validation block not found');
+  const deleteIdx = geoBlock[0].indexOf('delete g.maxAccuracyM');
+  assert.ok(deleteIdx >= 0, 'the geofence validation block must delete g.maxAccuracyM so it cannot persist through the deep-merge');
+  const constGIdx = geoBlock[0].indexOf('const g = A.geofence');
+  assert.ok(constGIdx >= 0 && constGIdx < deleteIdx,
+    'g must be assigned from A.geofence before the stale key is deleted from it');
 });
 
 console.log('Geofence: the server gate');
@@ -238,7 +246,7 @@ test('webScanGateReason: a check-out is never asked for GPS', () => {
   };
   vm.createContext(ctx);
   vm.runInContext(extractFunction(SERVER_SRC, 'webScanGateReason'), ctx);
-  const result = ctx.webScanGateReason({ role: 'user' }, '2026-09-25T17:40:00', '13.7,100.5', 20);
+  const result = ctx.webScanGateReason({ role: 'user' }, '2026-09-25T17:40:00', '13.7,100.5');
   assert.strictEqual(result, '', 'a check-out must never be gated');
   assert.strictEqual(geofenceCalls, 0, 'geofenceCheckinReason must not run when the check-in test says no');
 });
@@ -258,10 +266,12 @@ test('webScanGateReason: the master switch is checked first, without running the
   };
   vm.createContext(ctx);
   vm.runInContext(extractFunction(SERVER_SRC, 'webScanGateReason'), ctx);
-  const result = ctx.webScanGateReason({ role: 'user' }, '2026-09-25T08:25:00', '13.7,100.5', 20);
+  const result = ctx.webScanGateReason({ role: 'user' }, '2026-09-25T08:25:00', '13.7,100.5');
   assert.strictEqual(result, '', 'a disabled geofence must always allow the scan');
 });
 
+// 2026-09-26: webScanGateReason() no longer receives or forwards a gpsAccuracy argument at all --
+// geofenceCheckinReason() dropped the parameter entirely, so there is nothing left to pass through.
 test('webScanGateReason: a check-in defers entirely to geofenceCheckinReason, with the live role and parsed coords', () => {
   const G = { enabled: true };
   const calls = [];
@@ -274,16 +284,16 @@ test('webScanGateReason: a check-in defers entirely to geofenceCheckinReason, wi
   vm.createContext(ctx);
   vm.runInContext(extractFunction(SERVER_SRC, 'webScanGateReason'), ctx);
 
-  const result = ctx.webScanGateReason({ role: 'manager' }, '2026-09-25T08:25:00', '13.7,100.5', 20);
+  const result = ctx.webScanGateReason({ role: 'manager' }, '2026-09-25T08:25:00', '13.7,100.5');
   assert.strictEqual(result, 'geofence-inside');
   assert.strictEqual(calls.length, 1);
-  assert.deepStrictEqual(calls[0], [G, 'manager', 13.7, 100.5, 20],
-    'must pass the settings object, hikUser.role, the parsed coords and the sanitised accuracy through unchanged');
+  assert.deepStrictEqual(calls[0], [G, 'manager', 13.7, 100.5],
+    'must pass the settings object, hikUser.role and the parsed coords through unchanged, with no accuracy argument');
 
   // No gps at all: coords stay null, and NaN/NaN reach geofenceCheckinReason (its own
   // "lat == null" check does not apply to NaN, so this must be NaN, not null or undefined).
-  ctx.webScanGateReason({ role: 'user' }, '2026-09-25T08:25:00', '', null);
-  assert.deepStrictEqual(calls[1], [G, 'user', NaN, NaN, null]);
+  ctx.webScanGateReason({ role: 'user' }, '2026-09-25T08:25:00', '');
+  assert.deepStrictEqual(calls[1], [G, 'user', NaN, NaN]);
 });
 
 function extractWebscanGateWiring(routeBody) {
@@ -304,22 +314,22 @@ test('the gate is wired into the WebScan branch, before the event is saved', () 
   assert.ok(gateAt > 0 && gateAt < saveAt, 'the gate wiring must run BEFORE saveEvent, or a refused check-in is still recorded');
 
   // Simulate the route's own dispatch: wrap the extracted wiring block in a function that takes
-  // the same req/res/eventTime/gps/gpsAccuracy the route passes, stub webScanGateReason's return
-  // value, and put a sentinel right where the route's next statement (const tz = ...) begins. If
-  // the `return` on the 403 line were ever dropped, execution would fall through into the
-  // sentinel even on a refusal -- this is what makes that regression a failing assertion, not a
-  // silent pass.
+  // the same req/res/eventTime/gps the route passes (gpsAccuracy is no longer forwarded into the
+  // gate at all -- 2026-09-26), stub webScanGateReason's return value, and put a sentinel right
+  // where the route's next statement (const tz = ...) begins. If the `return` on the 403 line
+  // were ever dropped, execution would fall through into the sentinel even on a refusal -- this is
+  // what makes that regression a failing assertion, not a silent pass.
   function runWiring(gateReason) {
     const ctx = { webScanGateReason: () => gateReason, sentinel: () => { ctx.reached = true; }, reached: false };
     vm.createContext(ctx);
-    vm.runInContext(`function wiring(req, res, eventTime, gps, gpsAccuracy) {\n${gateBlock}\n  sentinel();\n}`, ctx);
+    vm.runInContext(`function wiring(req, res, eventTime, gps) {\n${gateBlock}\n  sentinel();\n}`, ctx);
     const calls = {};
     const res = {
       status(code) { calls.status = code; return this; },
       json(payload) { calls.json = payload; return this; },
     };
     const req = { hikSource: 'webscan', hikUser: { role: 'user', employeeNo: '1' } };
-    ctx.wiring(req, res, '2026-09-25T08:25:00', '13.7,100.5', 20);
+    ctx.wiring(req, res, '2026-09-25T08:25:00', '13.7,100.5');
     return { reached: ctx.reached, calls };
   }
 
@@ -408,6 +418,19 @@ test('the Settings page exposes all four geofence fields and saves them safely (
       `use the strict reader, not fi()/ff() -- they coerce an empty field to 0: ${line.trim()}`);
   }
   assert.ok(/geofenceNum\(/.test(save), 'a strict numeric reader must be used for the geofence fields');
+});
+
+// Minor 3 (2026-09-26 review): the Radius field used to share a row2() with the (now-removed)
+// accuracy field, which supplied the 12px gap before the "Inside this radius..." hint line below.
+// Once accuracy was deleted, the standalone field() lost that spacing entirely. Fixed by wrapping
+// it in the same margin-bottom:12px div this Settings page already uses for other single elements.
+test('the standalone Radius field keeps its 12px gap now that its row2() partner is gone', () => {
+  const cardStart = APP_SRC.indexOf("adminSection('📍', L('Web check-in area");
+  assert.ok(cardStart >= 0, 'geofence Settings card not found');
+  const cardEnd = APP_SRC.indexOf("adminSection('🏖️'", cardStart);
+  const card = APP_SRC.slice(cardStart, cardEnd);
+  assert.ok(/margin-bottom:12px">\$\{field\(L\('Radius \(m\)'/.test(card),
+    'the Radius field must be wrapped in a margin-bottom:12px div, matching the rest of this page\'s standalone elements');
 });
 
 // 2026-09-25 (review round 3, Important): the test above is purely string/regex-based -- it would

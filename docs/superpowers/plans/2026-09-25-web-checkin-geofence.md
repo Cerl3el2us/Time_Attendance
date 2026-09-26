@@ -2,18 +2,25 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **Amended 2026-09-26 (owner request):** all 7 tasks below shipped on branch `work/2026-09-25` as
-> originally planned, including the `maxAccuracyM` accuracy ceiling and its `geofence-accuracy`
-> refusal. The owner then clarified the actual requirement — see
-> `docs/superpowers/specs/2026-09-25-web-checkin-geofence-design.md`'s "2026-09-26 amendment" section
-> for the full rationale and the worked-through consequences. In short: `maxAccuracyM` is removed
-> everywhere (defaults, validation, the Settings field, `saveSettingsPage()`, `ja.js`); the
-> `geofence-accuracy` reason code is removed everywhere (server message map, `geofenceMessage()`,
-> TH/EN/JA strings); and `geofenceCheckinReason()`'s rule is now `(distance − accuracy, or 0 if
-> missing/unusable) ≤ radiusM` instead of gating on accuracy before distance is even considered. The
-> task sections below are **kept as originally written** (they are the historical record of what was
-> actually built on 2026-09-25); each place the accuracy ceiling appears is marked below rather than
-> rewritten, so this plan still matches the code that shipped, task by task, plus the amendment.
+> **Amended 2026-09-26 (owner request, twice in one day):** all 7 tasks below shipped on branch
+> `work/2026-09-25` as originally planned, including the `maxAccuracyM` accuracy ceiling and its
+> `geofence-accuracy` refusal. The owner then clarified the actual requirement, which produced two
+> amendments the same day — see
+> `docs/superpowers/specs/2026-09-25-web-checkin-geofence-design.md`'s "2026-09-26 amendment" and
+> "2026-09-26 second amendment" sections for the full rationale and the worked-through consequences.
+> **The rule that actually ships is the second amendment: accuracy plays no part in the gate at all.**
+> In short: `maxAccuracyM` is removed everywhere (defaults, validation — which also now `delete`s a
+> stale `maxAccuracyM` from any incoming payload rather than merely rejecting it — the Settings
+> field, `saveSettingsPage()`, `ja.js`); the `geofence-accuracy` reason code is removed everywhere
+> (server message map, `geofenceMessage()`, TH/EN/JA strings); a first fix made
+> `geofenceCheckinReason()`'s rule `(distance − accuracy, or 0 if missing/unusable) ≤ radiusM`, but a
+> review found that defective (an unbounded, accuracy-proportional exclusion zone that could refuse a
+> legitimate check-in at Amara from a coarse fix — the owner's one named worry) and the owner ruled
+> it out entirely; the rule that ships is the plain `distance ≤ radiusM`, and `geofenceCheckinReason()`
+> no longer takes an `accuracy` parameter at all, on either side, with every caller updated to match.
+> The task sections below are **kept as originally written** (they are the historical record of what
+> was actually built on 2026-09-25); each place the accuracy ceiling appears is marked below rather
+> than rewritten, so this plan still matches the code that shipped, task by task, plus both amendments.
 
 **Goal:** Refuse a web check-in made within 150 m of the office, so attendance at the office is recorded by the face scanner, while web check-in keeps working everywhere else.
 
@@ -53,13 +60,16 @@ decides who counts as late. No separate settings key, no separate load/save path
   - `geofenceDistanceM(lat1, lng1, lat2, lng2) -> number` (metres, haversine)
   - `geofenceCheckinReason(G, role, lat, lng, accuracy) -> '' | 'geofence-no-position' | 'geofence-accuracy' | 'geofence-inside'` where `G` is the `geofence` settings object and `''` means allow.
 
-> **Amended 2026-09-26:** the code and tests below (as originally written and shipped) return
+> **Amended 2026-09-26 (twice):** the code and tests below (as originally written and shipped) return
 > `'geofence-accuracy'` when accuracy is missing or exceeds `G.maxAccuracyM`. That reason code and
-> `maxAccuracyM` are both removed — the current function instead folds accuracy into the distance
-> test (`(distance − accuracy, or 0 if missing/unusable) ≤ radiusM`), so `geofenceCheckinReason` now
-> only ever returns `'' | 'geofence-no-position' | 'geofence-inside'`. See the design spec's
-> "2026-09-26 amendment" for the full rule and rationale; see `attendance/js/app.js` /
-> `attendance-server/backend/server.js` and `tests/geofence.test.js` for the code that actually ships.
+> `maxAccuracyM` are both removed. A first fix folded accuracy into the distance test instead
+> (`(distance − accuracy, or 0 if missing/unusable) ≤ radiusM`); a review found that defective (an
+> unbounded, accuracy-proportional exclusion zone that could refuse Amara from a coarse fix) and the
+> owner ruled it out entirely. **The function that ships takes no `accuracy` parameter at all** —
+> `geofenceCheckinReason(G, role, lat, lng)` — and returns only `'' | 'geofence-no-position' |
+> 'geofence-inside'`. See the design spec's "2026-09-26 amendment" and "2026-09-26 second amendment"
+> for the full rule and rationale; see `attendance/js/app.js` / `attendance-server/backend/server.js`
+> and `tests/geofence.test.js` for the code that actually ships.
 > The steps below are kept as the historical record of Task 1.
 
 - [ ] **Step 1: Write the failing test**
@@ -244,7 +254,11 @@ git commit -m "feat(geofence): shared distance and check-in decision, dual-synce
 > **Amended 2026-09-26:** `maxAccuracyM` is removed from `appSettings.geofence` — from both defaults,
 > from `ALLOWED_APPSETTINGS_KEYS`' validation block (the `5..1000` bounds check and its error
 > message), and from the settings merge. The shape that actually ships is
-> `{ enabled, lat, lng, radiusM, exemptRoles }`. Kept below as the historical record of Task 2.
+> `{ enabled, lat, lng, radiusM, exemptRoles }`. **Second amendment (same day, review Minor 2):** the
+> validation block also now `delete`s a stale `maxAccuracyM` from the incoming payload, not merely
+> rejects out-of-range values — a client (or an on-disk `settings.json`) still carrying the dead key
+> from before the removal must not be able to make it persist forever through the deep-merge. Kept
+> below as the historical record of Task 2.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -382,8 +396,12 @@ git commit -m "feat(geofence): settings group with defaults, whitelist and valid
 > **Amended 2026-09-26:** the 403 message map below (and everywhere else in this task) originally
 > carries an entry for `'geofence-accuracy': 'Your location is not precise enough yet.'`. That entry
 > is removed — the map now only has `geofence-inside` and `geofence-no-position`. `sanitizeGpsAccuracy()`
-> itself, and the `gpsAcc` field stored on the event, are unaffected by this amendment — only the
-> *gate*'s use of the accuracy value changed (Task 1), not the storage of it.
+> itself, and the `gpsAcc` field stored on the event, are unaffected by either amendment — only the
+> *gate*'s use of the accuracy value changed (Task 1), not the storage of it. **Second amendment:**
+> `webScanGateReason(hikUser, eventTimeIso, gps)` also drops the `gpsAccuracy` parameter shown below
+> entirely (it had nothing left to forward once `geofenceCheckinReason()` stopped taking an accuracy
+> argument) — the route's own `gpsAccuracy` variable still exists and is still stored on the event,
+> just no longer passed into the gate.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -627,7 +645,10 @@ In `doScan()` (~7784), beside the existing `gpsInfo`:
 > shipped function drops the `acc` parameter entirely and returns `''` for any other reason, since
 > `geofence-accuracy` can no longer be produced. Its three call sites (here, in `doScan()`, and in
 > `geofenceUiState()`) all call it with one argument now. The "not precise enough" TH/EN/JA strings,
-> and the JA key for `Max GPS accuracy (m)` in Task 5, are deleted from `ja.js`.
+> and the JA key for `Max GPS accuracy (m)` in Task 5, are deleted from `ja.js`. **Second amendment
+> (unrelated to `geofenceMessage()` itself, but in the same two functions):** `doScan()`'s and
+> `geofenceUiState()`'s own calls to `geofenceCheckinReason()` (a different function, see Task 1) also
+> drop their `gpsAcc` / `currentGPS.accuracy` argument, since that function no longer takes one either.
 
 Add next to `gpsErrorMsg()` (~7010):
 
@@ -714,7 +735,11 @@ git commit -m "feat(geofence): client pre-check, blocked button and the policy n
 
 > **Amended 2026-09-26:** `set-geo-acc` (the "Max GPS accuracy (m)" field) is removed, along with its
 > `saveSettingsPage()` read-back line. The Settings card now produces four inputs, not five:
-> `set-geo-enabled`, `set-geo-lat`, `set-geo-lng`, `set-geo-radius`.
+> `set-geo-enabled`, `set-geo-lat`, `set-geo-lng`, `set-geo-radius`. **Same-day review, Minor 3:**
+> removing `set-geo-acc` also removed its `row2()` pairing with the Radius field below, which is
+> where the 12px gap before the "Inside this radius..." hint line actually came from — the Radius
+> field is re-wrapped in a standalone `margin-bottom:12px` div (matching other single elements
+> already on this page) rather than left flush against the hint text below it.
 
 **Two facts about this code path, verified before writing this task:**
 
