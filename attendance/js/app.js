@@ -1121,6 +1121,16 @@ function initLongDistanceDatePicker() {
   initRestrictedCheckInPicker('longdistance-date', 'ld-long-distance-cal', 'ld-day-selectable',
     canSubmitLongDistanceForDate, null);
 }
+// The login card offers all three languages directly (toggleLang cycles, which is fine for the
+// one button in the topbar but makes someone press it twice to reach Japanese). Everything else
+// -- storage key, re-render, date input locale -- is the same path toggleLang() takes.
+function setLang(lang) {
+  if (lang !== 'th' && lang !== 'en' && lang !== 'ja') return;
+  if (currentLang === lang) return;
+  currentLang = lang;
+  localStorage.setItem('ta_lang', currentLang);
+  applyLanguage();
+}
 function toggleLang() {
   currentLang = currentLang === 'th' ? 'en' : currentLang === 'en' ? 'ja' : 'th';
   localStorage.setItem('ta_lang', currentLang);
@@ -18681,7 +18691,15 @@ function fixStaticText() {
   // 2. Rebuild login card entirely — corrupted </h2> </p> tags break DOM structure
   const loginCard = document.querySelector('.login-card');
   if (loginCard) {
+    // This template is what people actually see: it overwrites the copy in index.html on every
+    // load and on every language switch. Keep the two the same -- they had drifted badly (emoji
+    // instead of the icons, no <form>, and the footer silently destroyed).
     loginCard.innerHTML = `
+      <div class="login-lang" role="group" aria-label="Language">
+        <button type="button" class="login-lang-btn${currentLang === 'th' ? ' is-active' : ''}" onclick="setLang('th')"${currentLang === 'th' ? ' aria-current="true"' : ''}>ไทย</button>
+        <button type="button" class="login-lang-btn${currentLang === 'en' ? ' is-active' : ''}" onclick="setLang('en')"${currentLang === 'en' ? ' aria-current="true"' : ''}>EN</button>
+        <button type="button" class="login-lang-btn${currentLang === 'ja' ? ' is-active' : ''}" onclick="setLang('ja')"${currentLang === 'ja' ? ' aria-current="true"' : ''}>日本語</button>
+      </div>
       <div class="login-logo">
         <img src="images/logo-long.png" alt="Tozai Boeki Kaisha" class="login-logo-img">
         <p>${L('Time Attendance System', 'ระบบบันทึกเวลาทำงาน')} &mdash; Tozai Boeki Kaisha (Thailand) Ltd.</p>
@@ -18692,28 +18710,34 @@ function fixStaticText() {
         <div id="login-error" class="alert alert-warning" style="display:none">
           ⚠️ <span></span>
         </div>
-        <div class="form-group">
-          <label>${L('Username', 'ชื่อผู้ใช้ (Username)')}</label>
-          <div class="input-wrap">
-            <span class="icon">👤</span>
-            <input type="text" id="username" placeholder="${L('Username', 'ชื่อผู้ใช้')}" autocomplete="username">
+        <form id="login-form" onsubmit="login(); return false;" action="#">
+          <div class="form-group">
+            <label for="username">${L('Username', 'ชื่อผู้ใช้ (Username)')}</label>
+            <div class="input-wrap">
+              <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></span>
+              <input type="text" id="username" placeholder="${L('Username', 'ชื่อผู้ใช้')}" autocomplete="username">
+            </div>
           </div>
-        </div>
-        <div class="form-group">
-          <label>${L('Password', 'รหัสผ่าน (Password)')}</label>
-          <div class="input-wrap">
-            <span class="icon">🔒</span>
-            <input type="password" id="password" placeholder="${L('Password', 'รหัสผ่าน')}" autocomplete="current-password">
+          <div class="form-group">
+            <label for="password">${L('Password', 'รหัสผ่าน (Password)')}</label>
+            <div class="input-wrap">
+              <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span>
+              <input type="password" id="password" placeholder="${L('Password', 'รหัสผ่าน')}" autocomplete="current-password">
+            </div>
           </div>
-        </div>
-        <div class="form-group" style="display:flex;align-items:center;gap:8px;margin-top:-6px">
-          <input type="checkbox" id="remember-me" style="width:16px;height:16px;cursor:pointer;flex-shrink:0">
-          <label for="remember-me" style="font-size:13px;font-weight:400;cursor:pointer;margin:0">${L('Remember me for 30 days', 'จำฉันไว้ 30 วัน')}</label>
-        </div>
-        <button class="btn btn-primary btn-login" onclick="login()">🔐 ${L('Sign In', 'เข้าสู่ระบบ')}</button>
+          <div class="login-remember">
+            <input type="checkbox" id="remember-me">
+            <label for="remember-me"><span class="login-check" aria-hidden="true"></span><span>${L('Remember me for 30 days', 'จำฉันไว้ 30 วัน')}</span></label>
+          </div>
+          <button type="submit" class="btn-login">${L('Sign In', 'เข้าสู่ระบบ')}</button>
+        </form>
+      </div>
+      <div class="login-footer">
+        <p>Tozai Boeki Kaisha (Thailand) Ltd.</p>
       </div>
     `;
-    // Re-attach Enter key listener on rebuilt inputs
+    // Re-attach Enter key listener on rebuilt inputs. The <form> already submits on Enter, but
+    // the listener is kept for the case where the browser suppresses implicit submission.
     const _loginOnEnter = e => { if (e.key === 'Enter') login(); };
     document.getElementById('username').addEventListener('keydown', _loginOnEnter);
     document.getElementById('password').addEventListener('keydown', _loginOnEnter);

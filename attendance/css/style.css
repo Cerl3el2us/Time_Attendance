@@ -3661,3 +3661,108 @@ tr.finalize-row-confirmed:hover td {
 .rate-arrow.up   { color: #16a34a; }
 .rate-arrow.down { color: #dc2626; }
 .rate-arrow.same { color: #94a3b8; }
+
+/* ===== 2026-09-26 (design round 3): login card =====
+   The language switcher is new -- the app shipped with no way to change language before
+   logging in, so a Japanese speaker had to sign in through a Thai form first. Three explicit
+   choices rather than the topbar's cycling button, each written in its own language, which is
+   why they are not translated. */
+.login-lang {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  background: #f1f5f9;
+  border-radius: var(--radius-pill);
+}
+.login-lang-btn {
+  border: none;
+  background: transparent;
+  padding: 5px 11px;
+  border-radius: var(--radius-pill);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  color: #64748b;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+  min-height: 28px;
+}
+.login-lang-btn:hover { color: var(--primary); }
+.login-lang-btn.is-active {
+  background: var(--bg-card);
+  color: var(--primary);
+  box-shadow: var(--shadow-sm);
+}
+.login-lang-btn:active { transform: scale(0.96); }
+
+/* The checkbox was the browser's own, which on Windows is a flat grey square that matches
+   nothing else on the card. The real input stays in the DOM (keyboard, forms, autofill all
+   keep working) and is drawn by the span next to it. */
+/* Structure matters here. With the input INSIDE a label, a click on the box toggled twice:
+   the label forwarded the click to the input, and the input's own click bubbled back up to the
+   label, which forwarded it again -- so pressing the box appeared to do nothing at all
+   (verified in the browser: label click -> input click -> label click). The input is now a
+   sibling of the label and cannot be clicked directly, so exactly one activation happens. */
+.login-remember {
+  display: flex;
+  align-items: center;
+  margin: -2px 0 18px;
+  position: relative;
+}
+.login-remember > label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  font-weight: 400;
+  cursor: pointer;
+  user-select: none;
+  margin: 0;
+}
+.login-remember input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  pointer-events: none;
+}
+.login-check {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border: 2px solid var(--border);
+  border-radius: 5px;
+  background: #fff;
+  position: relative;
+  transition: background var(--transition), border-color var(--transition);
+}
+.login-check::after {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 1px;
+  width: 4px;
+  height: 9px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg) scale(0);
+  transition: transform 140ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.login-remember input:checked + label .login-check {
+  background: var(--secondary);
+  border-color: var(--secondary);
+}
+.login-remember input:checked + label .login-check::after { transform: rotate(45deg) scale(1); }
+.login-remember input:focus-visible + label .login-check {
+  box-shadow: var(--focus-ring);
+  border-color: var(--secondary);
+}
+
+@media (max-width: 420px) {
+  .login-lang { top: 12px; right: 12px; }
+  .login-lang-btn { padding: 5px 8px; font-size: 11px; }
+}

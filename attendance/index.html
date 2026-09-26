@@ -26,6 +26,11 @@
 <div id="login-page" class="login-page">
   <div class="login-bg-pattern"></div>
   <div class="login-card">
+    <div class="login-lang" role="group" aria-label="Language">
+      <button type="button" class="login-lang-btn is-active" onclick="setLang('th')" aria-current="true">ไทย</button>
+      <button type="button" class="login-lang-btn" onclick="setLang('en')">EN</button>
+      <button type="button" class="login-lang-btn" onclick="setLang('ja')">日本語</button>
+    </div>
     <div class="login-logo">
       <img src="images/logo-long.png" alt="Tozai Boeki Kaisha" class="login-logo-img">
       <p data-en="Time Attendance System">ระบบบันทึกเวลาทำงาน — Time Attendance System</p>
@@ -41,7 +46,7 @@
 
       <form id="login-form" onsubmit="login(); return false;" action="#">
       <div class="form-group">
-        <label data-en="Username">ชื่อผู้ใช้ (Username)</label>
+        <label for="username" data-en="Username">ชื่อผู้ใช้ (Username)</label>
         <div class="input-wrap">
           <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></span>
           <input type="text" id="username" placeholder="กรอกชื่อผู้ใช้" data-en-ph="Enter username" autocomplete="username">
@@ -49,26 +54,24 @@
       </div>
 
       <div class="form-group">
-        <label data-en="Password">รหัสผ่าน (Password)</label>
+        <label for="password" data-en="Password">รหัสผ่าน (Password)</label>
         <div class="input-wrap">
           <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span>
           <input type="password" id="password" placeholder="กรอกรหัสผ่าน" data-en-ph="Enter password" autocomplete="current-password">
         </div>
       </div>
 
-      <div class="form-group" style="display:flex;align-items:center;gap:8px;margin-top:-6px">
-        <input type="checkbox" id="remember-me" style="width:16px;height:16px;cursor:pointer;flex-shrink:0">
-        <label for="remember-me" style="font-size:13px;font-weight:400;cursor:pointer;margin:0" data-en="Remember me for 30 days">จำฉันไว้ 30 วัน</label>
+      <div class="login-remember">
+        <input type="checkbox" id="remember-me">
+        <label for="remember-me"><span class="login-check" aria-hidden="true"></span><span data-en="Remember me for 30 days">จำฉันไว้ 30 วัน</span></label>
       </div>
 
-      <button type="submit" class="btn-login" data-en="Sign In">
-        เข้าสู่ระบบ
-      </button>
+      <button type="submit" class="btn-login" data-en="Sign In">เข้าสู่ระบบ</button>
       </form>
     </div>
 
     <div class="login-footer">
-      <p data-en="Tozai Boeki Kaisha (Thailand) Ltd.">Tozai Boeki Kaisha (Thailand) Ltd.</p>
+      <p>Tozai Boeki Kaisha (Thailand) Ltd.</p>
     </div>
   </div>
 </div>
