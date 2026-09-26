@@ -1294,7 +1294,7 @@ let APP_SETTINGS = {
   workSchedule: { standardStartHour: 8, standardStartMinute: 30 },
   // 2026-09-25: web check-in geofence (Paso Tower). Editable in Settings; `enabled:false` restores
   // the pre-geofence behaviour exactly.
-  geofence: { enabled: true, lat: 13.7268315, lng: 100.52847, radiusM: 150, maxAccuracyM: 50, exemptRoles: ['driver'] },
+  geofence: { enabled: true, lat: 13.7268315, lng: 100.52847, radiusM: 150, exemptRoles: ['driver'] },
   leave: { carryForwardMax: 5, carryForwardExpiryEnabled: true, carryForwardExpiryMonth: 3, carryForwardExpiryDay: 31, carryForwardNotifyDays: 30, annualLeaveMinMonths: 6, annualLeaveTiers: DEFAULT_ANNUAL_LEAVE_TIERS.map(t => ({ ...t })), sickLeaveDays: DEFAULT_SICK_LEAVE_DAYS, businessLeaveDays: DEFAULT_BUSINESS_LEAVE_DAYS },
   allowanceTypes: [],
   lateDeductPolicy: {
@@ -4535,10 +4535,7 @@ function renderSettingsPage(_skipRefresh) {
         field(L('Latitude','ละติจูด'), inp('set-geo-lat', s.geofence.lat, 'number', 'step="0.0000001"')),
         field(L('Longitude','ลองจิจูด'), inp('set-geo-lng', s.geofence.lng, 'number', 'step="0.0000001"'))
       )}
-      ${row2(
-        field(L('Radius (m)','รัศมี (เมตร)'), inp('set-geo-radius', s.geofence.radiusM, 'number', 'min="10" max="5000"')),
-        field(L('Max GPS accuracy (m)','ความแม่นยำ GPS สูงสุด (เมตร)'), inp('set-geo-acc', s.geofence.maxAccuracyM, 'number', 'min="5" max="1000"'))
-      )}
+      ${field(L('Radius (m)','รัศมี (เมตร)'), inp('set-geo-radius', s.geofence.radiusM, 'number', 'min="10" max="5000"'))}
       <div style="font-size:12px;color:#64748b;margin:4px 0 8px">${L('Inside this radius, check-in must use the face scanner.', 'ภายในรัศมีนี้ การลงเวลาเข้างานต้องสแกนใบหน้าที่เครื่อง')}</div>
       <div style="font-size:11px;color:#94a3b8">${L('Drivers are always exempt from this check.','คนขับได้รับการยกเว้นจากการตรวจสอบนี้เสมอ')}</div>
     `)}
@@ -5280,7 +5277,6 @@ async function saveSettingsPage() {
   APP_SETTINGS.geofence.lat          = geofenceNum('set-geo-lat',    APP_SETTINGS.geofence.lat);
   APP_SETTINGS.geofence.lng          = geofenceNum('set-geo-lng',    APP_SETTINGS.geofence.lng);
   APP_SETTINGS.geofence.radiusM      = geofenceNum('set-geo-radius', APP_SETTINGS.geofence.radiusM);
-  APP_SETTINGS.geofence.maxAccuracyM = geofenceNum('set-geo-acc',    APP_SETTINGS.geofence.maxAccuracyM);
 
   // 2026-09-23: 0 now really means "no carry-forward" (`??` in processYearEndCarryForward), so a
   // blanked field must keep the current value instead of silently saving 0 via fi()'s `|| 0`.
@@ -6006,15 +6002,18 @@ function geofenceCheckinReason(G, role, lat, lng, accuracy) {
   if (lat == null || lng == null) return 'geofence-no-position';
   const la = Number(lat), ln = Number(lng);
   if (!Number.isFinite(la) || !Number.isFinite(ln)) return 'geofence-no-position';
-  // Number.isFinite, never `||`: a configured 0 is a real value and must not fall back to a default.
-  const maxAcc = Number.isFinite(Number(G.maxAccuracyM)) ? Number(G.maxAccuracyM) : 50;
-  if (accuracy == null) return 'geofence-accuracy';
-  const acc = Number(accuracy);
-  if (!Number.isFinite(acc) || acc < 0 || acc > maxAcc) return 'geofence-accuracy';
   let radius = 150;
   if (Number.isFinite(Number(G.radiusM))) radius = Number(G.radiusM);
   if (radius === 0) return '';
-  return geofenceDistanceM(la, ln, Number(G.lat), Number(G.lng)) <= radius ? 'geofence-inside' : '';
+  // The reported accuracy is a radius of uncertainty around the reported point. If the employee
+  // could be inside the zone once their own margin of error is allowed for, treat them as inside.
+  // A missing or unusable accuracy counts as 0 -- trust the point as reported. That is deliberate:
+  // accuracy is not a security control (a spoofed position can claim any accuracy), and treating
+  // its absence as "refuse" is exactly the behaviour being removed here.
+  const accNum = Number(accuracy);
+  const acc = Number.isFinite(accNum) && accNum > 0 ? accNum : 0;
+  const d = geofenceDistanceM(la, ln, Number(G.lat), Number(G.lng));
+  return (d - acc) <= radius ? 'geofence-inside' : '';
 }
 // Dual-sync with server.js eventInstantMs / compareEventsByInstant — mixed offsets
 // (+07:00 vs +09:00) must sort by instant, not ISO string.
@@ -7129,7 +7128,7 @@ function webCheckinWouldBeCheckIn() {
 // 2026-09-25: web check-in geofence -- localized copy of the server's 403 reason codes (the
 // server's own `message` is English-only by design, see server.js's WebScan gate). Called both
 // as a live preview before posting (doScan()) and to render the 403's reason if one slips through.
-function geofenceMessage(reason, acc) {
+function geofenceMessage(reason) {
   if (reason === 'geofence-inside') {
     return L('Company policy: check-in must be made with the face scanner at the office. You are within the office area — please scan at the device.',
              'นโยบายบริษัท: การลงเวลาเข้างานต้องสแกนใบหน้าที่เครื่องในออฟฟิศ — ขณะนี้คุณอยู่ในบริเวณออฟฟิศ กรุณาสแกนที่เครื่อง');
@@ -7138,13 +7137,7 @@ function geofenceMessage(reason, acc) {
     return L('Web check-in requires your location — please allow location access, or use the face scanner at the office.',
              'เช็คอินผ่านเว็บต้องระบุตำแหน่ง — กรุณาอนุญาตให้เข้าถึงตำแหน่งในเบราว์เซอร์ หรือสแกนใบหน้าที่เครื่องในออฟฟิศ');
   }
-  // The accuracy number is appended OUTSIDE the strings passed to L() -- ja.js keys on the whole
-  // English string, and a value that varies per scan (±23 m, ±41 m, ...) would never match a
-  // fixed key, silently falling back to English in Japanese mode. Sandwiching a fixed prefix and
-  // suffix around the number keeps both halves matchable while keeping the original phrasing.
-  const a = Number.isFinite(Number(acc)) ? ` (±${Math.round(Number(acc))} m)` : '';
-  return L('Your location is not precise enough yet', 'ตำแหน่งยังไม่แม่นพอ') + a +
-         L(' — please wait a moment or move to an open area.', ' — กรุณารอสักครู่หรือขยับไปที่โล่ง');
+  return '';
 }
 // fixStaticText() runs before login -- currentUser is always null then. Guard every read.
 function geofenceUiState() {
@@ -7159,7 +7152,7 @@ function geofenceUiState() {
     currentGPS ? Number(currentGPS.lngRaw) : NaN,
     currentGPS ? Number(currentGPS.accuracy) : null
   );
-  return { blocked: !!reason, reason, text: reason ? geofenceMessage(reason, currentGPS && currentGPS.accuracy) : '' };
+  return { blocked: !!reason, reason, text: reason ? geofenceMessage(reason) : '' };
 }
 // fixStaticText() can run before login (currentUser null) -- guard every currentUser read here too.
 function applyGeofenceToScanButton() {
@@ -7983,7 +7976,7 @@ async function doScan(source) {
       currentGPS ? Number(currentGPS.lngRaw) : NaN,
       gpsAcc
     );
-    if (reason) { showToast(geofenceMessage(reason, gpsAcc), 'warning'); return; }
+    if (reason) { showToast(geofenceMessage(reason), 'warning'); return; }
   }
 
   _scanInFlight = true;
@@ -8046,7 +8039,7 @@ async function doScan(source) {
     if (!res.ok || data.success === false) {
       // A geofence 403's `message` is English-only by design (see server.js's WebScan gate) --
       // the client localizes it from `reason` instead of showing the raw English text.
-      const localizedGeofence = res.status === 403 && data.reason ? geofenceMessage(data.reason, gpsAcc) : null;
+      const localizedGeofence = res.status === 403 && data.reason ? geofenceMessage(data.reason) : null;
       throw new Error(localizedGeofence || data.message || (res.status === 400 ? 'Could not save scan' : 'Server error'));
     }
     const stamped = String(data.event_time || '');

@@ -43,7 +43,7 @@ function test(name, fn) {
 
 const PASO  = { lat: 13.7268315, lng: 100.52847 };
 const AMARA = { lat: 13.7290317, lng: 100.5274579 };
-const G = { enabled: true, lat: PASO.lat, lng: PASO.lng, radiusM: 150, maxAccuracyM: 50, exemptRoles: ['driver'] };
+const G = { enabled: true, lat: PASO.lat, lng: PASO.lng, radiusM: 150, exemptRoles: ['driver'] };
 
 const S = sandbox(SERVER_SRC, ['geofenceDistanceM', 'geofenceCheckinReason']);
 
@@ -64,11 +64,18 @@ test('at the office: a check-in is refused', () => {
   assert.strictEqual(S.geofenceCheckinReason(G, 'user', PASO.lat, PASO.lng, 20), 'geofence-inside');
 });
 
-test('at the hotel with any accuracy inside the threshold: never refused', () => {
-  // The design rests on this: 268 m - 50 m of error is still outside the 150 m fence.
-  for (let acc = 0; acc <= G.maxAccuracyM; acc += 5) {
+// 2026-09-26 (owner): the accuracy ceiling is gone. Uncertainty now counts AGAINST the claim to
+// be elsewhere -- the rule is (distance - accuracy) <= radius -- instead of being a reason to
+// refuse outright before distance is even considered. Distance Paso -> Amara is ~268 m (proven
+// above), so the boundary is accuracy == distance - radius == 268 - 150 == 118 m.
+test('at the hotel: allowed up to 117 m of accuracy, refused from 118 m (the new boundary)', () => {
+  for (const acc of [0, 1, 50, 100, 117]) {
     assert.strictEqual(S.geofenceCheckinReason(G, 'user', AMARA.lat, AMARA.lng, acc), '',
-      `refused at the hotel with accuracy ${acc}`);
+      `must be allowed at the hotel with accuracy ${acc} (more tolerant than the old 50 m ceiling)`);
+  }
+  for (const acc of [118, 119, 200, 1000]) {
+    assert.strictEqual(S.geofenceCheckinReason(G, 'user', AMARA.lat, AMARA.lng, acc), 'geofence-inside',
+      `must be refused at the hotel once accuracy reaches ${acc} m`);
   }
 });
 
@@ -77,10 +84,37 @@ test('no position, or a position that is not a number, is refused', () => {
   assert.strictEqual(S.geofenceCheckinReason(G, 'user', NaN, 100.5, 10), 'geofence-no-position');
 });
 
-test('a fix worse than the threshold is refused wherever it claims to be', () => {
-  assert.strictEqual(S.geofenceCheckinReason(G, 'user', AMARA.lat, AMARA.lng, 51), 'geofence-accuracy');
-  assert.strictEqual(S.geofenceCheckinReason(G, 'user', 13.9, 100.9, 500), 'geofence-accuracy');
-  assert.strictEqual(S.geofenceCheckinReason(G, 'user', AMARA.lat, AMARA.lng, null), 'geofence-accuracy');
+test('a coarse fix reporting a point OUTSIDE the zone is still refused once its own margin of error reaches back inside', () => {
+  // Old rule: a coarse reading past the accuracy ceiling was refused as 'geofence-accuracy' before
+  // distance was even considered -- but whenever it happened to slip under the ceiling, the
+  // (unrelated) distance check could still let it through. New rule: the reported point 800 m from
+  // the tower is well outside the 150 m fence, but a ±1000 m fix means the true position could
+  // still be at the tower -- (800 - 1000) <= 150, so this must be BLOCKED, not allowed.
+  const farLat = PASO.lat + (800 / 111320); // ~800 m due north of the tower
+  const d = S.geofenceDistanceM(farLat, PASO.lng, PASO.lat, PASO.lng);
+  assert.ok(Math.abs(d - 800) < 5, `expected the reported point to be ~800 m away, got ${d.toFixed(1)}`);
+  assert.strictEqual(S.geofenceCheckinReason(G, 'user', farLat, PASO.lng, 1000), 'geofence-inside',
+    'a coarse fix reporting a point outside the zone must still be blocked once its own margin of error reaches back inside');
+});
+
+test('a position 700 km away is allowed with any accuracy, including none at all -- there is no ceiling anywhere', () => {
+  const FAR = { lat: PASO.lat + (700000 / 111320), lng: PASO.lng }; // ~700 km due north of the tower
+  const d = S.geofenceDistanceM(PASO.lat, PASO.lng, FAR.lat, FAR.lng);
+  assert.ok(Math.abs(d - 700000) < 2000, `expected ~700 km, got ${(d / 1000).toFixed(0)} km`);
+  for (const acc of [0, 10, 1000, 100000, null, undefined, NaN, 'garbage']) {
+    assert.strictEqual(S.geofenceCheckinReason(G, 'user', FAR.lat, FAR.lng, acc), '',
+      `must be allowed 700 km away regardless of accuracy (${acc})`);
+  }
+});
+
+test('a missing or unusable accuracy counts as 0 -- trusts the reported point instead of refusing on that basis', () => {
+  // This is exactly the case an old cached app.js (never sends accuracy) now hits correctly.
+  assert.strictEqual(S.geofenceCheckinReason(G, 'user', AMARA.lat, AMARA.lng, null), '',
+    'no accuracy reported must not be treated as an accuracy problem any more');
+  assert.strictEqual(S.geofenceCheckinReason(G, 'user', AMARA.lat, AMARA.lng, undefined), '');
+  assert.strictEqual(S.geofenceCheckinReason(G, 'user', AMARA.lat, AMARA.lng, 'garbage'), '');
+  assert.strictEqual(S.geofenceCheckinReason(G, 'user', AMARA.lat, AMARA.lng, -50), '',
+    'a negative accuracy is unusable and must count as 0, never as a bonus margin');
 });
 
 test('a driver is allowed everywhere, including with no position at all', () => {
@@ -95,15 +129,14 @@ test('the master switch restores the old behaviour exactly', () => {
   assert.strictEqual(S.geofenceCheckinReason(undefined, 'user', PASO.lat, PASO.lng, 10), '');
 });
 
-test('a radius or threshold of 0 is honoured, not replaced by a default', () => {
+test('a radius of 0 is honoured, not replaced by a default', () => {
   // Falsy-zero guard: `radiusM || 150` would silently restore 150 here.
   assert.strictEqual(S.geofenceCheckinReason({ ...G, radiusM: 0 }, 'user', PASO.lat, PASO.lng, 10), '');
-  assert.strictEqual(S.geofenceCheckinReason({ ...G, maxAccuracyM: 0 }, 'user', AMARA.lat, AMARA.lng, 1), 'geofence-accuracy');
 });
 
 console.log('Geofence: settings');
 
-test('both files default to Paso Tower, 150 m, 50 m, driver exempt', () => {
+test('both files default to Paso Tower, 150 m radius, driver exempt, and no maxAccuracyM', () => {
   for (const [label, src, name] of [['server', SERVER_SRC, 'DEFAULT_APP_SETTINGS'], ['app', APP_SRC, 'APP_SETTINGS']]) {
     const m = new RegExp(`geofence:\\s*\\{[^}]*\\}`).exec(src);
     assert.ok(m, `${label}: no geofence defaults in ${name}`);
@@ -111,8 +144,10 @@ test('both files default to Paso Tower, 150 m, 50 m, driver exempt', () => {
     assert.ok(/enabled:\s*true/.test(g), `${label}: geofence must default to enabled`);
     assert.ok(/13\.7268315/.test(g) && /100\.52847/.test(g), `${label}: office centre must be Paso Tower`);
     assert.ok(/radiusM:\s*150/.test(g), `${label}: radius must default to 150`);
-    assert.ok(/maxAccuracyM:\s*50/.test(g), `${label}: accuracy threshold must default to 50`);
     assert.ok(/exemptRoles:\s*\['driver'\]/.test(g), `${label}: driver must be exempt by default`);
+    // 2026-09-26: maxAccuracyM served the removed accuracy ceiling and is now meaningless --
+    // a dead setting that still looks meaningful is worse than none.
+    assert.ok(!/maxAccuracyM/.test(g), `${label}: maxAccuracyM must be removed from the geofence defaults`);
   }
 });
 
@@ -131,12 +166,12 @@ test('PUT /api/settings accepts geofence and validates it', () => {
     'appSettings.geofence.lat must be a number between -90 and 90',
     'appSettings.geofence.lng must be a number between -180 and 180',
     'appSettings.geofence.radiusM must be a number between 10 and 5000',
-    'appSettings.geofence.maxAccuracyM must be a number between 5 and 1000',
     'appSettings.geofence.exemptRoles must be an array of known roles',
     'appSettings.geofence.enabled must be true or false',
   ]) {
     assert.ok(SERVER_SRC.includes(needle), `missing validation: ${needle}`);
   }
+  assert.ok(!SERVER_SRC.includes('maxAccuracyM'), 'maxAccuracyM validation must be fully removed from server.js');
 });
 
 console.log('Geofence: the server gate');
@@ -355,17 +390,19 @@ test('webCheckinWouldBeCheckIn (executed): already checked in, pre-dawn, at/afte
   assert.strictEqual(run({ h: 8, min: 25 }, null), true, 'the ordinary case: no check-in yet, before the cutoff, not pre-dawn');
 });
 
-test('the Settings page exposes all five geofence fields and saves them safely', () => {
-  for (const id of ['set-geo-enabled', 'set-geo-lat', 'set-geo-lng', 'set-geo-radius', 'set-geo-acc']) {
+test('the Settings page exposes all four geofence fields and saves them safely (set-geo-acc is gone)', () => {
+  for (const id of ['set-geo-enabled', 'set-geo-lat', 'set-geo-lng', 'set-geo-radius']) {
     assert.ok(APP_SRC.includes(id), `Settings field missing: ${id}`);
   }
+  assert.ok(!APP_SRC.includes('set-geo-acc'), 'set-geo-acc must be removed along with maxAccuracyM');
   const save = extractFunction(APP_SRC, 'saveSettingsPage');
-  for (const key of ['enabled', 'lat', 'lng', 'radiusM', 'maxAccuracyM']) {
+  for (const key of ['enabled', 'lat', 'lng', 'radiusM']) {
     assert.ok(new RegExp(`geofence\\.${key}\\s*=`).test(save), `save must write geofence.${key}`);
   }
+  assert.ok(!/geofence\.maxAccuracyM/.test(save), 'save must no longer write geofence.maxAccuracyM');
   // Falsy-zero guard: `ff()` ends in `|| 0`, which would turn an empty latitude into 0.
-  const geoLines = save.split('\n').filter(l => /geofence\.(lat|lng|radiusM|maxAccuracyM)\s*=/.test(l));
-  assert.ok(geoLines.length === 4, 'all four numeric fields must be assigned');
+  const geoLines = save.split('\n').filter(l => /geofence\.(lat|lng|radiusM)\s*=/.test(l));
+  assert.ok(geoLines.length === 3, 'all three numeric fields must be assigned');
   for (const line of geoLines) {
     assert.ok(!/\bff\(|\bfi\(/.test(line),
       `use the strict reader, not fi()/ff() -- they coerce an empty field to 0: ${line.trim()}`);
@@ -393,9 +430,9 @@ function extractGeofenceSaveSnippet(appSrc) {
   assert.ok(anchorIdx >= 0, 'workSchedule anchor not found (used to bound the geofence write block)');
   const blockStart = save.indexOf('\n', anchorIdx) + 1;
 
-  const maxAccIdx = save.indexOf('APP_SETTINGS.geofence.maxAccuracyM', blockStart);
-  assert.ok(maxAccIdx >= 0, 'geofence.maxAccuracyM write not found in saveSettingsPage');
-  const blockEnd = save.indexOf('\n', maxAccIdx);
+  const radiusIdx = save.indexOf('APP_SETTINGS.geofence.radiusM', blockStart);
+  assert.ok(radiusIdx >= 0, 'geofence.radiusM write not found in saveSettingsPage');
+  const blockEnd = save.indexOf('\n', radiusIdx);
   const writes = save.slice(blockStart, blockEnd >= 0 ? blockEnd : save.length);
 
   return `${numFn[0]}\n${writes}`;
@@ -416,33 +453,31 @@ function runGeofenceSave(existingGeofence, elements) {
   return ctx.APP_SETTINGS.geofence;
 }
 
-test('geofence save (executed): all five fields read correctly when every element is present', () => {
-  const existing = { enabled: false, lat: 1, lng: 2, radiusM: 3, maxAccuracyM: 4 };
+test('geofence save (executed): all four fields read correctly when every element is present', () => {
+  const existing = { enabled: false, lat: 1, lng: 2, radiusM: 3 };
   const elements = {
     'set-geo-enabled': { checked: true },
     'set-geo-lat': { value: '13.7268315' },
     'set-geo-lng': { value: '100.52847' },
     'set-geo-radius': { value: '200' },
-    'set-geo-acc': { value: '60' },
   };
   const result = runGeofenceSave(existing, elements);
   assert.strictEqual(result.enabled, true);
   assert.strictEqual(result.lat, 13.7268315);
   assert.strictEqual(result.lng, 100.52847);
   assert.strictEqual(result.radiusM, 200);
-  assert.strictEqual(result.maxAccuracyM, 60);
+  assert.strictEqual(result.maxAccuracyM, undefined, 'maxAccuracyM must never be written back by the save path');
 });
 
 test('geofence save (executed): a missing enabled checkbox keeps the stored value, never writes false', () => {
   // Risk 1 (review round 3): `!!document.getElementById(id)?.checked` with no existence guard
   // turns an absent element into `false`, silently disabling the geofence company-wide.
-  const existing = { enabled: true, lat: 1, lng: 2, radiusM: 3, maxAccuracyM: 4 };
+  const existing = { enabled: true, lat: 1, lng: 2, radiusM: 3 };
   const elements = {
     // set-geo-enabled deliberately absent -- simulates the element missing from the DOM
     'set-geo-lat': { value: '1' },
     'set-geo-lng': { value: '2' },
     'set-geo-radius': { value: '3' },
-    'set-geo-acc': { value: '4' },
   };
   const result = runGeofenceSave(existing, elements);
   assert.strictEqual(result.enabled, true, 'a missing checkbox must not silently disable the geofence');
@@ -451,31 +486,29 @@ test('geofence save (executed): a missing enabled checkbox keeps the stored valu
 test('geofence save (executed): a real 0 is kept, not replaced by the fallback', () => {
   // Mutation guard: would fail if geofenceNum were rewritten as `parseFloat(v) || fallback`
   // instead of the Number.isFinite check -- 0 is a valid latitude (the equator) but falsy.
-  const existing = { enabled: true, lat: 13.7, lng: 100.5, radiusM: 150, maxAccuracyM: 50 };
+  const existing = { enabled: true, lat: 13.7, lng: 100.5, radiusM: 150 };
   const elements = {
     'set-geo-enabled': { checked: true },
     'set-geo-lat': { value: '0' },
     'set-geo-lng': { value: '100.5' },
     'set-geo-radius': { value: '150' },
-    'set-geo-acc': { value: '50' },
   };
   const result = runGeofenceSave(existing, elements);
   assert.strictEqual(result.lat, 0, 'a real 0 must be kept, not silently replaced by the fallback');
 });
 
 test('geofence save (executed): a blank, garbage or missing numeric field keeps the stored value', () => {
-  const existing = { enabled: true, lat: 13.7, lng: 100.5, radiusM: 150, maxAccuracyM: 50 };
+  const existing = { enabled: true, lat: 13.7, lng: 100.5, radiusM: 150 };
   const elements = {
     'set-geo-enabled': { checked: true },
     'set-geo-lat': { value: '' },
     'set-geo-lng': { value: 'abc' },
-    // set-geo-radius / set-geo-acc elements deliberately absent entirely
+    // set-geo-radius element deliberately absent entirely
   };
   const result = runGeofenceSave(existing, elements);
   assert.strictEqual(result.lat, 13.7, 'blank latitude must keep the stored value');
   assert.strictEqual(result.lng, 100.5, 'unreadable longitude must keep the stored value');
   assert.strictEqual(result.radiusM, 150, 'missing radius element must keep the stored value');
-  assert.strictEqual(result.maxAccuracyM, 50, 'missing accuracy element must keep the stored value');
 });
 
 // 2026-09-25 (review round 4): the version above only grepped independently for an EN substring in
@@ -505,21 +538,37 @@ test('every new message exists in all three languages, with ja.js keyed on the e
   const settingsSnippet = APP_SRC.slice(settingsStart, settingsEnd);
 
   const pairs = [...extractLArgPairs(msgFn), ...extractLArgPairs(settingsSnippet)];
-  assert.strictEqual(pairs.length, 12, `expected 12 L(en, th) calls across geofenceMessage + the Settings card, found ${pairs.length}`);
+  // 2026-09-26: was 12 before the accuracy-ceiling removal -- geofenceMessage() lost its 2-string
+  // "not precise enough" fallback (the 'geofence-accuracy' branch no longer exists) and the
+  // Settings card lost "Max GPS accuracy (m)", so 12 - 3 = 9.
+  assert.strictEqual(pairs.length, 9, `expected 9 L(en, th) calls across geofenceMessage + the Settings card, found ${pairs.length}`);
 
   // The static policy note is translated by fixStaticText()/applyStaticI18n() via data-en (which
-  // also keys into window.LANG_JA, see applyStaticI18n()), not via L() -- it is the 13th string.
+  // also keys into window.LANG_JA, see applyStaticI18n()), not via L() -- it is the 10th string.
   const noteMatch = /id="scan-policy-note"[^>]*data-en="((?:[^"\\]|\\.)*)"/.exec(INDEX_SRC);
   assert.ok(noteMatch, 'scan-policy-note data-en attribute not found');
   pairs.push({ en: noteMatch[1], th: null });
 
-  assert.strictEqual(pairs.length, 13, `expected 13 total strings (12 L() + the static note), found ${pairs.length}`);
+  assert.strictEqual(pairs.length, 10, `expected 10 total strings (9 L() + the static note), found ${pairs.length}`);
 
   for (const { en, th } of pairs) {
     assert.ok(en.length > 0, 'an L() English argument must not be empty');
     if (th !== null) assert.ok(th.length > 0, `Thai argument must not be empty for: ${en}`);
     const key = `"${en}":`;
     assert.ok(JA_SRC.includes(key), `ja.js is missing an exact key for the English string: ${en}`);
+  }
+});
+
+// 2026-09-26: the removed 'geofence-accuracy' reason code took its own two ja.js strings, plus
+// the Settings label for the removed field, with it -- an unreachable branch is worse than none,
+// and a leftover ja.js key for a string nothing calls any more is the same problem the other way.
+test('the removed accuracy-ceiling strings are gone from ja.js, not just unreachable', () => {
+  for (const removed of [
+    'Your location is not precise enough yet',
+    ' — please wait a moment or move to an open area.',
+    'Max GPS accuracy (m)',
+  ]) {
+    assert.ok(!JA_SRC.includes(`"${removed}":`), `ja.js still carries the removed key: ${removed}`);
   }
 });
 

@@ -1436,25 +1436,22 @@ window.LANG_JA = {
   "JPG, PNG or WebP — large photos are resized automatically. Shown in this app only; the door scanner keeps its own photo.":
     "JPG・PNG・WebP — 大きな画像は自動で縮小されます。このアプリ内の表示専用で、入退室端末の写真は変更されません。",
   // 2026-09-25: web check-in geofence -- the standing policy note on the check-in screen, and
-  // the three localized refusal reasons (geofenceMessage() in app.js). The "not precise enough"
-  // message is built from two fixed halves sandwiching the ±N m accuracy value, which is
-  // appended OUTSIDE these strings at runtime -- keeping both halves here matchable by L()'s
-  // whole-string lookup instead of a value that changes on every scan.
+  // the two localized refusal reasons (geofenceMessage() in app.js).
+  // 2026-09-26 (owner): the accuracy ceiling ('geofence-accuracy', "not precise enough") was
+  // removed -- uncertainty now counts against the claim to be elsewhere (distance minus accuracy)
+  // instead of refusing outright, so that reason code and its strings no longer exist.
   "Company policy: check in with the face scanner at the office. Web check-in is for working away from the office.":
     "会社規定により、出勤打刻はオフィスの顔認証端末で行ってください。Web打刻は社外勤務用です。",
   "Company policy: check-in must be made with the face scanner at the office. You are within the office area — please scan at the device.":
     "会社規定により、出勤打刻はオフィスの顔認証端末で行ってください。現在オフィス周辺にいるため、Webでの出勤打刻はできません。",
   "Web check-in requires your location — please allow location access, or use the face scanner at the office.":
     "Web出勤打刻には位置情報が必要です。ブラウザで位置情報を許可するか、オフィスの顔認証端末をご利用ください。",
-  "Your location is not precise enough yet": "位置情報の精度が不足しています",
-  " — please wait a moment or move to an open area.": " — しばらくお待ちいただくか、開けた場所へ移動してください。",
   // 2026-09-25: Settings page card for the geofence (MD/Accounting can edit the office area).
   "Web check-in area": "Web打刻の対象エリア",
   "Enforce the check-in area": "打刻エリアを適用する",
   "Latitude": "緯度",
   "Longitude": "経度",
   "Radius (m)": "半径（メートル）",
-  "Max GPS accuracy (m)": "GPS精度の上限（メートル）",
   "Inside this radius, check-in must use the face scanner.": "この半径の中では、出勤打刻は顔認証端末をご利用ください。",
   "Drivers are always exempt from this check.": "運転手は常にこの確認の対象外です。",
 };

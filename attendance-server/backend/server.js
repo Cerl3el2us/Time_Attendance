@@ -1803,7 +1803,6 @@ app.post('/api/hikvision/event', hikAuth, webScanLimiter, withEventsLock((req, r
         const messages = {
           'geofence-inside': 'Company policy: check-in must be made with the face scanner at the office.',
           'geofence-no-position': 'Web check-in requires your location.',
-          'geofence-accuracy': 'Your location is not precise enough yet.',
         };
         return res.status(403).json({ success: false, reason, message: messages[reason] });
       }
@@ -4435,13 +4434,9 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
       if (g.lng !== undefined && !num(g.lng, -180, 180)) {
         return res.status(400).json({ success: false, message: 'appSettings.geofence.lng must be a number between -180 and 180' });
       }
-      // Lower bounds are not cosmetic: a radius under ~80 m lets GPS noise walk people out of the
-      // zone, and an accuracy threshold that is too tight refuses everyone indoors.
+      // Lower bound is not cosmetic: a radius under ~80 m lets GPS noise walk people out of the zone.
       if (g.radiusM !== undefined && !num(g.radiusM, 10, 5000)) {
         return res.status(400).json({ success: false, message: 'appSettings.geofence.radiusM must be a number between 10 and 5000' });
-      }
-      if (g.maxAccuracyM !== undefined && !num(g.maxAccuracyM, 5, 1000)) {
-        return res.status(400).json({ success: false, message: 'appSettings.geofence.maxAccuracyM must be a number between 5 and 1000' });
       }
       if (g.exemptRoles !== undefined) {
         const known = ['md', 'manager', 'accounting', 'user', 'driver', 'marketing'];
@@ -8744,7 +8739,7 @@ const DEFAULT_APP_SETTINGS = {
   workSchedule: { standardStartHour: 8, standardStartMinute: 30 },
   // 2026-09-25: web check-in geofence (Paso Tower). Editable in Settings; `enabled:false` restores
   // the pre-geofence behaviour exactly.
-  geofence: { enabled: true, lat: 13.7268315, lng: 100.52847, radiusM: 150, maxAccuracyM: 50, exemptRoles: ['driver'] },
+  geofence: { enabled: true, lat: 13.7268315, lng: 100.52847, radiusM: 150, exemptRoles: ['driver'] },
   leave: { carryForwardMax: 5, carryForwardExpiryEnabled: true, carryForwardExpiryMonth: 3, carryForwardExpiryDay: 31, carryForwardNotifyDays: 30, annualLeaveMinMonths: 6, annualLeaveTiers: DEFAULT_ANNUAL_LEAVE_TIERS.map(t => ({ ...t })), sickLeaveDays: DEFAULT_SICK_LEAVE_DAYS, businessLeaveDays: DEFAULT_BUSINESS_LEAVE_DAYS },
   map: { cartoApiKey: '' },
   allowanceTypes: [],
@@ -9089,15 +9084,18 @@ function geofenceCheckinReason(G, role, lat, lng, accuracy) {
   if (lat == null || lng == null) return 'geofence-no-position';
   const la = Number(lat), ln = Number(lng);
   if (!Number.isFinite(la) || !Number.isFinite(ln)) return 'geofence-no-position';
-  // Number.isFinite, never `||`: a configured 0 is a real value and must not fall back to a default.
-  const maxAcc = Number.isFinite(Number(G.maxAccuracyM)) ? Number(G.maxAccuracyM) : 50;
-  if (accuracy == null) return 'geofence-accuracy';
-  const acc = Number(accuracy);
-  if (!Number.isFinite(acc) || acc < 0 || acc > maxAcc) return 'geofence-accuracy';
   let radius = 150;
   if (Number.isFinite(Number(G.radiusM))) radius = Number(G.radiusM);
   if (radius === 0) return '';
-  return geofenceDistanceM(la, ln, Number(G.lat), Number(G.lng)) <= radius ? 'geofence-inside' : '';
+  // The reported accuracy is a radius of uncertainty around the reported point. If the employee
+  // could be inside the zone once their own margin of error is allowed for, treat them as inside.
+  // A missing or unusable accuracy counts as 0 -- trust the point as reported. That is deliberate:
+  // accuracy is not a security control (a spoofed position can claim any accuracy), and treating
+  // its absence as "refuse" is exactly the behaviour being removed here.
+  const accNum = Number(accuracy);
+  const acc = Number.isFinite(accNum) && accNum > 0 ? accNum : 0;
+  const d = geofenceDistanceM(la, ln, Number(G.lat), Number(G.lng));
+  return (d - acc) <= radius ? 'geofence-inside' : '';
 }
 function buildAttendanceLogForUser(user, start, end) {
   const loadedEvents = readEvents();
