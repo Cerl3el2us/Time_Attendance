@@ -6930,7 +6930,19 @@ function navigateTo(page) {
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   document.querySelectorAll('.bottom-nav-item').forEach(n => n.classList.remove('active'));
   const pageEl = document.getElementById(`page-${page}`);
-  if (pageEl) pageEl.classList.add('active');
+  if (pageEl) {
+    pageEl.classList.add('active');
+    // The entrance animation hangs off .ta-entering, not .active: .active is also re-added
+    // to the page that is already showing (no restart, since no style recalc happens in
+    // between) and stays on through every re-render, which would animate blocks revealed or
+    // rebuilt long after the navigation. Dropping the class 600ms later -- past the longest
+    // run, 190ms delay + 300ms -- keeps the effect tied to the navigation itself.
+    clearTimeout(pageEl._taEnterTimer);
+    pageEl.classList.remove('ta-entering');
+    void pageEl.offsetWidth;
+    pageEl.classList.add('ta-entering');
+    pageEl._taEnterTimer = setTimeout(() => pageEl.classList.remove('ta-entering'), 600);
+  }
   // payslip has 2 nav items (nav-emp-only for staff, nav-admin for MD/Accounting) — only one is
   // ever visible per role, but querySelector only grabbed the first (possibly hidden) one, so the
   // visible copy never got its .active highlight. querySelectorAll+forEach covers both.
@@ -8257,7 +8269,7 @@ function updateScanButton() {
   const txtEl   = document.getElementById('checkin-status-text');
 
   if (!hasIn && !hasOut) {
-    btn.className = 'scan-btn scan-ready';
+    btn.className = 'scan-btn scan-ready' + (btn.classList.contains('scan-success') ? ' scan-success' : '');
     if (iconEl)  iconEl.textContent  = '⏱';
     if (labelEl) labelEl.textContent = L('Clock In', 'ตอกบัตร');
     if (subEl)   subEl.textContent   = L('Tap to record check-in', 'กดเพื่อบันทึกเข้างาน');
@@ -8270,7 +8282,7 @@ function updateScanButton() {
     // check-OUT with no check-in (CHECKIN_CUTOFF) -- this used to fall into the `!hasIn` branch
     // above, which cleared the just-recorded checkout off the screen entirely and showed "Tap to
     // record check-in" seconds after doScan() toasted a successful check-out.
-    btn.className = 'scan-btn scan-working';
+    btn.className = 'scan-btn scan-working' + (btn.classList.contains('scan-success') ? ' scan-success' : '');
     if (iconEl)  iconEl.textContent  = '✅';
     if (labelEl) labelEl.textContent = L('Clock In', 'ตอกบัตร');
     if (subEl)   subEl.textContent   = L('Tap to update check-out', 'กดเพื่ออัปเดตเวลาออก');
@@ -8282,7 +8294,7 @@ function updateScanButton() {
     if (txtEl) txtEl.textContent = L('Checked out', 'ออกงานแล้ว');
     checkedIn = true;
   } else {
-    btn.className = 'scan-btn scan-working';
+    btn.className = 'scan-btn scan-working' + (btn.classList.contains('scan-success') ? ' scan-success' : '');
     if (iconEl)  iconEl.textContent  = '✅';
     if (labelEl) labelEl.textContent = L('Clock In', 'ตอกบัตร');
     if (subEl)   subEl.textContent   = rec.checkOut ? L('Tap to update check-out', 'กดเพื่ออัปเดตเวลาออก') : L('Tap to record check-out', 'กดเพื่อบันทึกออกงาน');

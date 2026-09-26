@@ -18,7 +18,9 @@ const SHELL_URLS = [
   './index.html',
   './manifest.json',
   './images/logo-short.jpg',
-  './images/logo-long.jpg',
+  // logo-long.jpg (663 KB) was dropped 2026-09-26: the login card now uses the PNG (67 KB)
+  // like every other site, so the JPG is referenced nowhere and was pure install weight.
+  // logo-short.jpg stays -- it is still the favicon and the notification icon.
   './images/logo-long.png',
   './images/icon-192.png',
   './images/icon-512.png',
