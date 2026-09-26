@@ -3892,6 +3892,10 @@ tr.finalize-row-confirmed:hover td {
    Only applied when syncAttendanceStickyHead() has measured that the table fits without
    horizontal scrolling -- see its comment for why the two cannot both be true. */
 #page-attendance .table-wrap.sticky-head { overflow: visible; }
+/* The wrap no longer scrolls in this mode, so a table a few pixels too wide would spill out of
+   the card and push a horizontal scrollbar onto the whole page. Within the slack the header
+   sticks and the table gives up those pixels instead. */
+#page-attendance .table-wrap.sticky-head > table { max-width: 100%; }
 /* The card clips to its own radius with overflow:hidden, which silently defeats the sticky
    header (verified in the browser: the th computed position:sticky and still scrolled away). */
 #page-attendance .card.sticky-head-host { overflow: visible; }

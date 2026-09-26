@@ -8973,7 +8973,13 @@ function syncAttendanceStickyHead() {
   if (!wrap.clientWidth) return;
   // Measure with the wrap in its scrollable state, otherwise scrollWidth is the page's.
   wrap.classList.remove('sticky-head');
-  const fits = table.scrollWidth <= wrap.clientWidth + 1;
+  // Tolerance, not equality: measured on the live site at 1366px the month table wanted 1037px
+  // inside a 1035px box -- two pixels short, so the header silently stopped sticking on exactly
+  // the screen size everyone here uses. Within this margin the table is squeezed to fit instead
+  // (see .sticky-head table { max-width:100% }); beyond it, horizontal scrolling wins and the
+  // header cannot stick at all.
+  const STICKY_HEAD_SLACK = 12;
+  const fits = table.scrollWidth <= wrap.clientWidth + STICKY_HEAD_SLACK;
   wrap.classList.toggle('sticky-head', fits);
   // .card sets overflow:hidden (for its rounded corners), and an ancestor with any non-visible
   // overflow becomes the scrollport the header would stick inside -- one that never scrolls. The
