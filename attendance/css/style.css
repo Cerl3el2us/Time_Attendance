@@ -3685,10 +3685,11 @@ tr.finalize-row-confirmed:hover td {
   font-family: inherit;
   font-size: 12px;
   font-weight: 700;
-  color: #64748b;
+  /* #64748b on #f1f5f9 is 4.34:1 -- short of 4.5:1 at this size. */
+  color: #475569;
   cursor: pointer;
   transition: background var(--transition), color var(--transition);
-  min-height: 28px;
+  min-height: 36px;
 }
 .login-lang-btn:hover { color: var(--primary); }
 .login-lang-btn.is-active {
@@ -3701,11 +3702,12 @@ tr.finalize-row-confirmed:hover td {
 /* The checkbox was the browser's own, which on Windows is a flat grey square that matches
    nothing else on the card. The real input stays in the DOM (keyboard, forms, autofill all
    keep working) and is drawn by the span next to it. */
-/* Structure matters here. With the input INSIDE a label, a click on the box toggled twice:
-   the label forwarded the click to the input, and the input's own click bubbled back up to the
-   label, which forwarded it again -- so pressing the box appeared to do nothing at all
-   (verified in the browser: label click -> input click -> label click). The input is now a
-   sibling of the label and cannot be clicked directly, so exactly one activation happens. */
+/* The input is a SIBLING of the label, not inside it, because `input:checked + label
+   .login-check` is what draws the tick -- nesting it would break that selector. It is
+   pointer-events:none so every click lands on the label, which activates it exactly once.
+   (An earlier comment here blamed a double-toggle from the nested form; re-tested in the
+   browser, the nested form toggles correctly -- the selector is the real reason, so do not
+   "simplify" this back.) */
 .login-remember {
   display: flex;
   align-items: center;
@@ -3759,6 +3761,18 @@ tr.finalize-row-confirmed:hover td {
 .login-remember input:checked + label .login-check::after { transform: rotate(45deg) scale(1); }
 .login-remember input:focus-visible + label .login-check {
   box-shadow: var(--focus-ring);
+  border-color: var(--secondary);
+}
+
+/* Dark theme: .login-card is darkened by an existing rule, so a light pill track and a solid
+   white checkbox sat on top of it. */
+[data-theme="dark"] .login-lang { background: rgba(255,255,255,0.08); }
+[data-theme="dark"] .login-lang-btn { color: #cbd5e1; }
+[data-theme="dark"] .login-lang-btn:hover { color: #fff; }
+[data-theme="dark"] .login-lang-btn.is-active { background: rgba(15,23,42,0.85); color: #fff; }
+[data-theme="dark"] .login-check { background: #0f172a; border-color: #475569; }
+[data-theme="dark"] .login-remember input:checked + label .login-check {
+  background: var(--secondary);
   border-color: var(--secondary);
 }
 
@@ -3839,7 +3853,9 @@ tr.finalize-row-confirmed:hover td {
   min-width: 0;
   font-size: 12px;
   font-weight: 600;
-  color: var(--warning);
+  /* --warning (#ea580c) is 3.5:1 on this near-white bar, and this line is the only indication
+     that work is unsaved. #b45309 clears 4.5:1. */
+  color: #b45309;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3856,7 +3872,7 @@ tr.finalize-row-confirmed:hover td {
      bottom of the viewport, so a bar stuck to bottom:0 would be hidden behind it. */
   .settings-savebar {
     padding: 10px 12px;
-    bottom: calc(62px + env(safe-area-inset-bottom, 0px));
+    bottom: calc(58px + env(safe-area-inset-bottom, 0px));
   }
   .settings-savebar-note { display: none; }
 }
@@ -3867,7 +3883,10 @@ tr.finalize-row-confirmed:hover td {
    below it is 820px and centred, so their left edges sat about 108px apart. The document's own
    width is untouched -- its proportions are meant for A4 -- the cards around it are brought to
    the same width instead. */
-#page-payslip > .card { max-width: 820px; margin-left: auto; margin-right: auto; }
+#page-payslip > .card,
+/* Rendered into #payslip-md-approval, a wrapper div -- so the child selector above misses it,
+   and it is the one card MD and Accounting actually see between the controls and the document. */
+#payslip-md-approval > .card { max-width: 820px; margin-left: auto; margin-right: auto; }
 
 /* Attendance: the month table is 31 rows, so the header scrolls away after about a third of it.
    Only applied when syncAttendanceStickyHead() has measured that the table fits without
@@ -3876,6 +3895,13 @@ tr.finalize-row-confirmed:hover td {
 /* The card clips to its own radius with overflow:hidden, which silently defeats the sticky
    header (verified in the browser: the th computed position:sticky and still scrolled away). */
 #page-attendance .card.sticky-head-host { overflow: visible; }
+/* Opening the card up also stops it clipping its last child (the legend strip, which has its own
+   background and no radius) to the rounded border -- so the corners are given back explicitly. */
+#page-attendance .card.sticky-head-host > :last-child {
+  border-bottom-left-radius: var(--radius-lg);
+  border-bottom-right-radius: var(--radius-lg);
+  overflow: hidden;
+}
 #page-attendance .table-wrap.sticky-head thead th {
   position: sticky;
   top: var(--att-head-top, 64px);

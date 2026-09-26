@@ -4423,7 +4423,7 @@ function initSettingsTabs(isAdmin) {
     savebar.className = 'settings-savebar';
     savebar.innerHTML = `
       <span class="settings-savebar-note" id="settings-dirty-note"></span>
-      <button class="btn btn-ghost btn-sm" onclick="renderSettingsPage()">↩ ${L('Reset', 'รีเซ็ต')}</button>
+      <button class="btn btn-ghost btn-sm" onclick="renderSettingsPage()">${L('↩ Reset', '↩ รีเซ็ต')}</button>
       <button class="btn btn-primary btn-sm" onclick="saveSettingsPage()">💾 ${L('Save Settings', 'บันทึกการตั้งค่า')}</button>`;
     container.appendChild(savebar);
     // One listener on the container rather than per field: the sections are rebuilt on every
@@ -4436,6 +4436,9 @@ function initSettingsTabs(isAdmin) {
 }
 
 function onSettingsFieldTouched(e) {
+  // The listener is attached on an admin render and never detached, so a superadmin previewing a
+  // non-admin role afterwards would otherwise light up dirty dots with no Save button in sight.
+  if (!document.querySelector('.settings-savebar')) return;
   const sec = e.target && e.target.closest ? e.target.closest('[data-stab]') : null;
   if (!sec) return;
   if (_settingsDirtyTabs.has(sec.dataset.stab)) return;
@@ -4909,7 +4912,7 @@ function renderSettingsPage(_skipRefresh) {
       </div>
     `)}
 
-    ${(() => { const installHtml = renderInstallAppButton(); return installHtml ? section('📲', L('Install App','ติดตั้งแอป'), installHtml) : ''; })()}
+    ${(() => { const installHtml = renderInstallAppButton(); return installHtml ? section('system', '📲', L('Install App','ติดตั้งแอป'), installHtml) : ''; })()}
 
     ${section('notify', '🔔', L('Browser Push Notifications','การแจ้งเตือนในเบราว์เซอร์'), (() => {
       const perm = ('Notification' in window) ? Notification.permission : 'unsupported';
@@ -6390,7 +6393,11 @@ async function login() {
   const username = document.getElementById('username').value.trim();
   const password = document.getElementById('password').value;
   const remember = document.getElementById('remember-me').checked;
-  const btn = document.querySelector('#login-page button[onclick="login()"]') || document.querySelector('#login-page button');
+  // 2026-09-26: this used to look for button[onclick="login()"], which the rebuilt login card
+  // no longer has (it is a real <form> with a submit button). The fallback selector then picked
+  // the card's FIRST button -- since the language switcher was added, the 'ไทย' pill -- so the
+  // double-submit guard silently protected the wrong control and stopped protecting this one.
+  const btn = document.getElementById('login-submit-btn');
   if (btn) btn.disabled = true;
   try {
     const res = await fetch(`${NAS_BACKEND}/api/login`, {
@@ -8960,6 +8967,10 @@ function syncAttendanceStickyHead() {
   if (!wrap) return;
   const table = wrap.querySelector('table');
   if (!table) return;
+  // While the page is display:none both widths are 0, and 0 <= 0 + 1 would report "it fits".
+  // Harmless today (navigateTo always re-renders before the page is shown) but it is a
+  // measurement of nothing, so it must not be allowed to set the class.
+  if (!wrap.clientWidth) return;
   // Measure with the wrap in its scrollable state, otherwise scrollWidth is the page's.
   wrap.classList.remove('sticky-head');
   const fits = table.scrollWidth <= wrap.clientWidth + 1;
@@ -9746,7 +9757,15 @@ async function loadAndRenderAnnouncements() {
 // 2026-09-26 (owner): the composer used to sit open on every dashboard load, taking the top
 // of the page to hold nothing. It is collapsed to a button until someone means to write.
 let _announcementComposerOpen = false;
+// The dashboard re-renders on every WS scan event from ANY employee (applyScanEventToLog ->
+// renderDashboard), which rebuilds this textarea from scratch. At 08:30 that is every few
+// seconds, so an announcement being typed used to vanish mid-sentence. The draft is kept here
+// and restored after each render -- same bug class the approvals list fixed a few lines above.
+let _announcementDraft = '';
+function onAnnouncementDraftInput(el) { _announcementDraft = el.value; }
 function toggleAnnouncementComposer(open) {
+  // Closing it deliberately (Cancel) is the one case where the draft is meant to go.
+  if (!open) _announcementDraft = '';
   _announcementComposerOpen = !!open;
   renderAnnouncementsBoard();
   if (_announcementComposerOpen) {
@@ -9789,7 +9808,7 @@ function renderAnnouncementsBoard() {
   const composer = canWrite
     ? (_announcementComposerOpen
         ? `<div class="announcements-composer">
-             <textarea id="ann-new-body" maxlength="1000" placeholder="${L('Write a company announcement…', 'เขียนประกาศบริษัท…')}"></textarea>
+             <textarea id="ann-new-body" maxlength="1000" oninput="onAnnouncementDraftInput(this)" placeholder="${L('Write a company announcement…', 'เขียนประกาศบริษัท…')}">${escapeHtml(_announcementDraft)}</textarea>
              <div class="announcements-composer-actions">
                <button type="button" class="btn btn-primary btn-sm" onclick="createAnnouncement()">${L('Post announcement', 'บันทึกประกาศ')}</button>
                <button type="button" class="btn btn-ghost btn-sm" onclick="toggleAnnouncementComposer(false)">${L('Cancel', 'ยกเลิก')}</button>
@@ -9843,6 +9862,7 @@ async function createAnnouncement() {
     }
     _editingAnnouncementId = null;
     _announcementComposerOpen = false;
+    _announcementDraft = '';
     renderAnnouncementsBoard();
     showToast(L('✅ Announcement posted', '✅ โพสต์ประกาศแล้ว'), 'success');
   } catch (e) {
@@ -18558,7 +18578,8 @@ function closeCheckinStatusModal() {
   document.getElementById('checkin-status-modal').classList.remove('show');
 }
 
-// ===== DASHBOARD LIVE CHECK-IN WIDGET (always-visible, updates via the existing WS SCAN_EVENT pipeline) =====
+// (The dashboard's live check-in widget was removed 2026-09-26 -- it repeated the clickable
+// "Check-in today" stat card. getCheckinStatusLists() below still feeds showCheckinStatusModal().)
 // ===== TOAST =====
 function showToast(msg, type = 'info') {
   const container = document.getElementById('toast-container');
@@ -18867,7 +18888,7 @@ function fixStaticText() {
       </div>
       <div class="login-logo">
         <img src="images/logo-long.png" alt="Tozai Boeki Kaisha" class="login-logo-img">
-        <p>${L('Time Attendance System', 'ระบบบันทึกเวลาทำงาน')} &mdash; Tozai Boeki Kaisha (Thailand) Ltd.</p>
+        <p>${L('Time Attendance System', 'ระบบบันทึกเวลาทำงาน')} &mdash; Time Attendance System</p>
       </div>
       <div class="login-form">
         <h2>${L('Sign In', 'เข้าสู่ระบบ')}</h2>
@@ -18894,18 +18915,17 @@ function fixStaticText() {
             <input type="checkbox" id="remember-me">
             <label for="remember-me"><span class="login-check" aria-hidden="true"></span><span>${L('Remember me for 30 days', 'จำฉันไว้ 30 วัน')}</span></label>
           </div>
-          <button type="submit" class="btn-login">${L('Sign In', 'เข้าสู่ระบบ')}</button>
+          <button type="submit" id="login-submit-btn" class="btn-login">${L('Sign In', 'เข้าสู่ระบบ')}</button>
         </form>
       </div>
       <div class="login-footer">
         <p>Tozai Boeki Kaisha (Thailand) Ltd.</p>
       </div>
     `;
-    // Re-attach Enter key listener on rebuilt inputs. The <form> already submits on Enter, but
-    // the listener is kept for the case where the browser suppresses implicit submission.
-    const _loginOnEnter = e => { if (e.key === 'Enter') login(); };
-    document.getElementById('username').addEventListener('keydown', _loginOnEnter);
-    document.getElementById('password').addEventListener('keydown', _loginOnEnter);
+    // No Enter listener here on purpose. The card is a real <form> with a submit button, so the
+    // browser submits on Enter by itself; keeping the old listener as well made ONE Enter press
+    // call login() twice -- two concurrent POST /api/login, two audit entries, and two attempts
+    // burned against the rate limiter for a single mistyped password.
   }
 
   // 3. Rebuild #page-dashboard — corrupted </div> tags break stat-card DOM structure,
