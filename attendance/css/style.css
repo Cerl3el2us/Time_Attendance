@@ -3766,3 +3766,97 @@ tr.finalize-row-confirmed:hover td {
   .login-lang { top: 12px; right: 12px; }
   .login-lang-btn { padding: 5px 8px; font-size: 11px; }
 }
+
+/* ===== 2026-09-26 (design round 4): Settings tabs =====
+   21 cards / ~7,800px (about 12 screens on a 14" notebook) split into six tabs sharing one
+   Save. Sections stay in the DOM and are only hidden, so nothing typed can be lost by
+   switching tabs -- see the comment on section() in app.js. */
+.settings-tabs {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 4px 4px 10px;
+  margin: 0 -4px 16px;
+  border-bottom: 1px solid var(--border);
+  scrollbar-width: thin;
+}
+.settings-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: 0 0 auto;
+  padding: 9px 14px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  min-height: 40px;
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
+}
+.settings-tab:hover { background: #eef2f7; color: var(--primary); }
+.settings-tab:active { transform: scale(0.98); }
+.settings-tab.is-active {
+  background: var(--bg-card);
+  border-color: var(--border);
+  color: var(--primary);
+  box-shadow: var(--shadow-sm);
+}
+/* The dot is the only way to know that another tab is holding an edit. */
+.settings-tab-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--warning);
+  flex-shrink: 0;
+}
+.settings-tab-dot[hidden] { display: none; }
+
+/* One Save, always reachable: it used to sit at the top of a 12-screen page, so saving meant
+   scrolling back up. */
+.settings-savebar {
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin: 8px -4px 0;
+  padding: 12px 16px;
+  background: rgba(255,255,255,0.94);
+  backdrop-filter: blur(8px);
+  border-top: 1px solid var(--border);
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  box-shadow: 0 -2px 12px rgba(15,39,68,0.06);
+}
+.settings-savebar-note {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--warning);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-field-bad {
+  border-color: var(--danger) !important;
+  box-shadow: 0 0 0 3px rgba(220,38,38,0.14) !important;
+}
+[data-theme="dark"] .settings-tab:hover { background: rgba(255,255,255,0.06); }
+[data-theme="dark"] .settings-savebar { background: rgba(15,23,42,0.94); }
+[data-theme="dark"] .settings-tabs { border-bottom-color: var(--border); }
+@media (max-width: 768px) {
+  /* The fixed bottom nav (62px + the phone's own safe area) sits on top of everything at the
+     bottom of the viewport, so a bar stuck to bottom:0 would be hidden behind it. */
+  .settings-savebar {
+    padding: 10px 12px;
+    bottom: calc(62px + env(safe-area-inset-bottom, 0px));
+  }
+  .settings-savebar-note { display: none; }
+}

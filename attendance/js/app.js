@@ -4366,9 +4366,139 @@ function timeToMins(val) {
 // trigger another fetch. Fixes the stale-tab class of bug from the settings.json incident: a
 // tab left open on Settings (or navigated back to it) now always re-syncs from disk within one
 // round-trip instead of silently saving whatever it loaded at page-init, possibly hours old.
+// ===== 2026-09-26 (owner): Settings tabs =====
+// The page was 21 cards and about 7,800px -- roughly 12 screens on the 14" notebooks everyone
+// here uses -- with one Save button at the very top. It is now six tabs sharing one Save.
+//
+// Deliberately NOT a router: every section stays in the DOM and tabs only toggle visibility, so
+// saveSettingsPage() keeps reading all of its fields from whichever tab is open, and no typed
+// value can be lost by switching tabs. The tab list is derived from the sections that actually
+// rendered, so a staff account (which only sees the two notification sections) gets one tab
+// rather than five empty ones.
+const SETTINGS_TAB_DEFS = [
+  { key: 'company',   icon: '🏢', en: 'Company',            th: 'บริษัท' },
+  { key: 'payroll',   icon: '💰', en: 'Payroll & Tax',      th: 'เงินเดือน & ภาษี' },
+  { key: 'allowance', icon: '🎫', en: 'Allowances',         th: 'เบี้ยเลี้ยง' },
+  { key: 'time',      icon: '⏰', en: 'Work time & leave',  th: 'เวลาทำงาน & วันลา' },
+  { key: 'notify',    icon: '🔔', en: 'Notifications',      th: 'แจ้งเตือน & อีเมล' },
+  { key: 'system',    icon: '⚙️', en: 'System',             th: 'ระบบ' },
+];
+let _settingsTab = null;
+// Which tabs hold an edit that has not been saved yet. Cleared on a successful save and on
+// Reset, which re-reads everything from the server.
+let _settingsDirtyTabs = new Set();
+
+function settingsTabLabel(def) {
+  return currentLang === 'ja' ? (SETTINGS_TAB_JA[def.key] || def.en) : L(def.en, def.th);
+}
+const SETTINGS_TAB_JA = {
+  company: '会社情報', payroll: '給与・税', allowance: '手当',
+  time: '勤務時間・休暇', notify: '通知・メール', system: 'システム',
+};
+
+function initSettingsTabs(isAdmin) {
+  const container = document.getElementById('settings-container');
+  if (!container) return;
+  const sections = [...container.querySelectorAll('[data-stab]')];
+  const present = new Set(sections.map(el => el.dataset.stab));
+  const defs = SETTINGS_TAB_DEFS.filter(d => present.has(d.key));
+  if (!defs.length) return;
+  if (!defs.some(d => d.key === _settingsTab)) _settingsTab = defs[0].key;
+
+  const bar = document.createElement('div');
+  bar.className = 'settings-tabs';
+  bar.setAttribute('role', 'tablist');
+  bar.innerHTML = defs.map(d => `
+    <button type="button" role="tab" class="settings-tab${d.key === _settingsTab ? ' is-active' : ''}"
+      aria-selected="${d.key === _settingsTab}" data-stab-btn="${d.key}" onclick="switchSettingsTab('${d.key}')">
+      <span aria-hidden="true">${d.icon}</span> ${settingsTabLabel(d)}
+      <span class="settings-tab-dot" hidden></span>
+    </button>`).join('');
+  const header = container.querySelector('.settings-sticky-header');
+  if (header && header.nextSibling) container.insertBefore(bar, header.nextSibling);
+  else container.insertBefore(bar, container.firstChild);
+
+  if (isAdmin) {
+    const savebar = document.createElement('div');
+    savebar.className = 'settings-savebar';
+    savebar.innerHTML = `
+      <span class="settings-savebar-note" id="settings-dirty-note"></span>
+      <button class="btn btn-ghost btn-sm" onclick="renderSettingsPage()">↩ ${L('Reset', 'รีเซ็ต')}</button>
+      <button class="btn btn-primary btn-sm" onclick="saveSettingsPage()">💾 ${L('Save Settings', 'บันทึกการตั้งค่า')}</button>`;
+    container.appendChild(savebar);
+    // One listener on the container rather than per field: the sections are rebuilt on every
+    // render and several of them (allowance types, late-deduct policy, extra recipients) build
+    // their own rows afterwards, so per-field listeners would miss exactly those.
+    container.addEventListener('input', onSettingsFieldTouched);
+    container.addEventListener('change', onSettingsFieldTouched);
+  }
+  applySettingsTab();
+}
+
+function onSettingsFieldTouched(e) {
+  const sec = e.target && e.target.closest ? e.target.closest('[data-stab]') : null;
+  if (!sec) return;
+  if (_settingsDirtyTabs.has(sec.dataset.stab)) return;
+  _settingsDirtyTabs.add(sec.dataset.stab);
+  renderSettingsDirtyMarks();
+}
+
+function renderSettingsDirtyMarks() {
+  document.querySelectorAll('.settings-tab').forEach(btn => {
+    const dot = btn.querySelector('.settings-tab-dot');
+    if (dot) dot.hidden = !_settingsDirtyTabs.has(btn.dataset.stabBtn);
+  });
+  const note = document.getElementById('settings-dirty-note');
+  if (note) {
+    const n = _settingsDirtyTabs.size;
+    note.textContent = n ? (currentLang === 'ja' ? `未保存の変更（${n}タブ）`
+      : L(`Unsaved changes in ${n} tab${n > 1 ? 's' : ''}`, `↰ มีการแก้ไขที่ยังไม่ได้บันทึก ${n} แท็บ`)) : '';
+  }
+}
+
+function applySettingsTab() {
+  document.querySelectorAll('#settings-container [data-stab]').forEach(el => {
+    el.style.display = el.dataset.stab === _settingsTab ? '' : 'none';
+  });
+  document.querySelectorAll('.settings-tab').forEach(btn => {
+    const on = btn.dataset.stabBtn === _settingsTab;
+    btn.classList.toggle('is-active', on);
+    btn.setAttribute('aria-selected', String(on));
+  });
+  renderSettingsDirtyMarks();
+}
+
+function switchSettingsTab(key) {
+  _settingsTab = key;
+  applySettingsTab();
+  const c = document.getElementById('settings-container');
+  if (c) c.scrollIntoView({ block: 'start', behavior: 'smooth' });
+}
+
+// A field that failed validation is usually NOT on the tab being looked at. Open its tab, scroll
+// to it and mark it, instead of only showing a toast that names a field the user cannot see.
+function settingsFieldError(id, message) {
+  showToast(message, 'warning');
+  const el = document.getElementById(id);
+  if (!el) return;
+  const sec = el.closest('[data-stab]');
+  if (sec && sec.dataset.stab !== _settingsTab) {
+    _settingsTab = sec.dataset.stab;
+    applySettingsTab();
+  }
+  el.classList.add('settings-field-bad');
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  try { el.focus({ preventScroll: true }); } catch (_) { el.focus(); }
+  const clear = () => { el.classList.remove('settings-field-bad'); el.removeEventListener('input', clear); };
+  el.addEventListener('input', clear);
+}
+
 function renderSettingsPage(_skipRefresh) {
   const container = document.getElementById('settings-container');
   if (!container) return;
+  // Any render rebuilds every field from APP_SETTINGS, so nothing typed survives it -- which
+  // means the "unsaved" marks describe edits that no longer exist. Reset goes through here too.
+  _settingsDirtyTabs = new Set();
   if (!_skipRefresh) {
     loadSettingsFromBackend().then(() => {
       if (currentPage === 'settings') renderSettingsPage(true);
@@ -4383,8 +4513,11 @@ function renderSettingsPage(_skipRefresh) {
   const fi = id => parseInt(document.getElementById(id)?.value) || 0;
   const ff = id => parseFloat(document.getElementById(id)?.value) || 0;
 
-  const section = (icon, title, content) => `
-    <div class="card" style="margin-bottom:20px">
+  // 2026-09-26 (owner): every section now declares which tab it belongs to. The sections all
+  // stay in the DOM -- tabs only change what is visible -- so saveSettingsPage() still reads
+  // every field no matter which tab is open, and switching tabs can never drop a typed value.
+  const section = (tab, icon, title, content) => `
+    <div class="card settings-section" data-stab="${tab}" style="margin-bottom:20px">
       <div class="card-body" style="padding:20px 24px">
         <div style="font-size:15px;font-weight:700;color:#1e3a5f;margin-bottom:16px;padding-bottom:10px;border-bottom:2px solid #e2e8f0">${icon} ${title}</div>
         ${content}
@@ -4408,14 +4541,10 @@ function renderSettingsPage(_skipRefresh) {
         <div style="font-size:18px;font-weight:800;color:#1e3a5f">⚙️ ${L('System Settings','การตั้งค่าระบบ')}</div>
         <div style="font-size:13px;color:#64748b;margin-top:4px">${L('Changes apply immediately and are saved to the NAS.','การเปลี่ยนแปลงมีผลทันทีและบันทึกลงเซิร์ฟเวอร์')}</div>
       </div>
-      ${isAdmin ? `
-      <div style="display:flex;gap:10px">
-        <button class="btn btn-ghost btn-sm" onclick="renderSettingsPage()">${L('↩ Reset','↩ รีเซ็ต')}</button>
-        <button class="btn btn-primary btn-sm" onclick="saveSettingsPage()">💾 ${L('Save Settings','บันทึกการตั้งค่า')}</button>
-      </div>` : ''}
+      <!-- Save/Reset moved to the pinned bar at the bottom of the viewport -->
     </div>
 
-    ${adminSection('🏢', L('Company Information','ข้อมูลบริษัท'), `
+    ${adminSection('company', '🏢', L('Company Information','ข้อมูลบริษัท'), `
       ${row2(
         field(L('Company Name','ชื่อบริษัท'), inp('set-company-name', s.company.name)),
         field(L('Tax ID (เลขผู้เสียภาษี)','เลขผู้เสียภาษี'), inp('set-company-taxid', s.company.taxId))
@@ -4429,21 +4558,21 @@ function renderSettingsPage(_skipRefresh) {
       )}
     `)}
 
-    ${adminSection('📄', L('50 Tawi / Tax Documents','50 ทวิ / เอกสารภาษี'), `
+    ${adminSection('company', '📄', L('50 Tawi / Tax Documents','50 ทวิ / เอกสารภาษี'), `
       ${row2(
         field(L('PVD License No.','เลขที่ใบอนุญาตกองทุนสำรองเลี้ยงชีพ'), inp('set-pvd-license', s.company.pvdLicenseNo)),
         field(L('SSO Employer Account No.','เลขที่บัญชีนายจ้างประกันสังคม'), inp('set-sso-employer-acct', s.company.ssoEmployerAccountNo))
       )}
     `)}
 
-    ${adminSection('📅', L('Payroll Period','รอบเงินเดือน'), `
+    ${adminSection('payroll', '📅', L('Payroll Period','รอบเงินเดือน'), `
       ${row2(
         field(L('Period Start Day','วันเริ่มรอบ (วันที่)'), inp('set-period-start', s.payroll.periodStartDay, 'number', 'min="1" max="28"'), L('Current: every month on this date','ปัจจุบัน: เริ่มทุกเดือนในวันนี้')),
         field(L('End day is auto (Start − 1)','วันสิ้นรอบ = วันเริ่ม − 1 (อัตโนมัติ)'), `<div style="padding:9px 10px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;color:#64748b">${currentLang==='ja'?`翌月${(s.payroll.periodStartDay||21)-1}日`:L(`Day ${(s.payroll.periodStartDay||21)-1} of the following month`,`วันที่ ${(s.payroll.periodStartDay||21)-1} ของเดือนถัดไป`)}</div>`)
       )}
     `)}
 
-    ${adminSection('🏥', L('Social Security (SSO)','ประกันสังคม (สปส.)'), `
+    ${adminSection('payroll', '🏥', L('Social Security (SSO)','ประกันสังคม (สปส.)'), `
       <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:12px;color:#92400e;line-height:1.6">
         ⚠️ ${L('Update these fields when the law changes. Ceiling/max-contribution schedule:', 'อัปเดตค่าด้านล่างเมื่อถึงรอบที่กฎหมายเปลี่ยน ตารางเพดานเงินสมทบ:')}<br>
         • ${L('Phase 1 (2026–2028): ceiling ฿17,500 (max ฿875/mo) — current', 'ระยะที่ 1 (2569–2571): เพดาน ฿17,500 (สมทบสูงสุด ฿875/เดือน) — ปัจจุบัน')}<br>
@@ -4460,7 +4589,7 @@ function renderSettingsPage(_skipRefresh) {
       )}
     `)}
 
-    ${adminSection('💰', L('Allowance Rates','อัตราเบี้ยเลี้ยง'), `
+    ${adminSection('allowance', '💰', L('Allowance Rates','อัตราเบี้ยเลี้ยง'), `
       ${row2(
         field(L('Upcountry (฿/trip)','Upcountry (฿/ครั้ง)'), inp('set-allow-upcountry', s.allowances.upcountry, 'number')),
         field(L('Abroad (฿/day)','ทำงานต่างประเทศ (฿/วัน)'), inp('set-allow-abroad', s.allowances.abroad != null ? s.allowances.abroad : 1100, 'number')),
@@ -4505,7 +4634,7 @@ function renderSettingsPage(_skipRefresh) {
       )}
     `)}
 
-    ${adminSection('🎫', L('Allowance Eligibility by Role','สิทธิ์เบี้ยเลี้ยงตามระดับผู้ใช้'), `
+    ${adminSection('allowance', '🎫', L('Allowance Eligibility by Role','สิทธิ์เบี้ยเลี้ยงตามระดับผู้ใช้'), `
       <div style="font-size:12px;color:#92400e;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 12px;margin-bottom:14px">
         ⚠️ ${L('Changes only apply to periods not yet approved by the Managing Director — once MD approves a period, its payslip is frozen and later eligibility/role/salary/Settings changes no longer affect it.', 'การเปลี่ยนแปลงมีผลเฉพาะรอบเงินเดือนที่ยังไม่ได้รับการอนุมัติจาก MD เท่านั้น — รอบที่ MD อนุมัติแล้วจะถูก freeze ไว้ การเปลี่ยน role/เงินเดือน/Settings ภายหลังจะไม่กระทบรอบที่อนุมัติแล้ว')}
       </div>
@@ -4550,7 +4679,7 @@ function renderSettingsPage(_skipRefresh) {
       </div>
     `)}
 
-    ${adminSection('⏰', L('Work Schedule','เวลาทำงาน'), `
+    ${adminSection('time', '⏰', L('Work Schedule','เวลาทำงาน'), `
       ${row2(
         field(L('Standard Start Time','เวลาเข้างานมาตรฐาน'), `<div style="display:flex;gap:8px;align-items:center">
           ${inp('set-std-hour', s.workSchedule.standardStartHour, 'number', 'min="6" max="10"')}
@@ -4561,7 +4690,7 @@ function renderSettingsPage(_skipRefresh) {
       )}
     `)}
 
-    ${adminSection('📍', L('Web check-in area','พื้นที่เช็คอินผ่านเว็บ'), `
+    ${adminSection('time', '📍', L('Web check-in area','พื้นที่เช็คอินผ่านเว็บ'), `
       <label style="display:flex;align-items:center;gap:8px;margin:0 0 12px;font-size:13px;font-weight:600;color:#374151;cursor:pointer">
         <input id="set-geo-enabled" type="checkbox" ${s.geofence.enabled ? 'checked' : ''} style="width:18px;height:18px;cursor:pointer">
         ${L('Enforce the check-in area','บังคับใช้พื้นที่เช็คอิน')}
@@ -4575,7 +4704,7 @@ function renderSettingsPage(_skipRefresh) {
       <div style="font-size:11px;color:#94a3b8">${L('Drivers are always exempt from this check.','คนขับได้รับการยกเว้นจากการตรวจสอบนี้เสมอ')}</div>
     `)}
 
-    ${adminSection('🏖️', L('Leave Policy','นโยบายวันลา'), `
+    ${adminSection('time', '🏖️', L('Leave Policy','นโยบายวันลา'), `
       <div style="font-size:12px;font-weight:600;color:#374151;margin-bottom:6px">${L('Annual leave by years of service','สิทธิ์ลาพักร้อนตามอายุงาน')}</div>
       <div style="font-size:12px;color:#64748b;margin-bottom:10px;line-height:1.55">${L('Applies to every employee from Start Date. The first row is when the yearly quota starts (before that, the quota is 0 — only days they earned through Holiday Work or abroad travel days, or carried forward, can be used). When they reach the next row, the yearly quota jumps immediately — even mid-year — remaining = new quota + carry-forward + holiday-work compensation − days already used this calendar year (Jan–Dec).', 'ใช้กับพนักงานทุกคน นับจากวันเริ่มเข้าทำงาน แถวแรกคือเมื่อไหร่โควตารายปีเริ่ม (ก่อนนั้นโควตาเป็น 0 — ใช้ได้เฉพาะวันที่ได้จากการทำงานวันหยุดหรือวันเดินทางต่างประเทศ หรือวันยกยอด) เมื่อครบแถวถัดไป โควตาปีนี้ขยับทันทีแม้กลางปี — คงเหลือ = โควตาใหม่ + ยกยอด + ชดเชยทำงานวันหยุด − วันที่ใช้ไปในปีปฏิทินนี้ (ม.ค.–ธ.ค.)')}</div>
       <div id="al-tiers-body">
@@ -4606,7 +4735,7 @@ function renderSettingsPage(_skipRefresh) {
       ${openingLeaveBalancesSectionHtml()}
     `)}
 
-    ${adminSection('↩️', L('Year-End Carry-Forward', 'ยอดวันลายกไปปีหน้า'), `
+    ${adminSection('time', '↩️', L('Year-End Carry-Forward', 'ยอดวันลายกไปปีหน้า'), `
       <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">
         ${L('Runs automatically in January (and still in February if the server was off): each employee’s remaining annual leave for last year (up to max, expired carry-forward excluded) is carried into this year. If it has not run, use the button (any month, once per year). From 15 January, MD and Accounting get a daily notification (from 09:00) until it has run.','ระบบทำให้อัตโนมัติในเดือนมกราคม (และยังทำในเดือนกุมภาพันธ์หากเซิร์ฟเวอร์ปิดอยู่): ยอดวันลาพักร้อนคงเหลือของปีที่แล้ว (ไม่เกินสูงสุด ไม่รวมวันยกยอดที่หมดอายุ) ของพนักงานทุกคนจะถูกยกมาปีนี้ หากระบบยังไม่ได้ทำ ให้ใช้ปุ่มนี้ (เดือนใดก็ได้ ปีละครั้ง) ตั้งแต่ 15 มกราคม MD และ Accounting จะได้รับแจ้งเตือนทุกวัน (ตั้งแต่ 09:00) จนกว่าจะยกยอดเสร็จ')}
       </p>
@@ -4626,7 +4755,7 @@ function renderSettingsPage(_skipRefresh) {
       </div>
     `)}
 
-    ${adminSection('📊', L('Income Tax (Thai Progressive Brackets)','ภาษีเงินได้บุคคลธรรมดา (ขั้นบันได)'), `
+    ${adminSection('payroll', '📊', L('Income Tax (Thai Progressive Brackets)','ภาษีเงินได้บุคคลธรรมดา (ขั้นบันได)'), `
       <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:12px;color:#1d4ed8">
         ℹ️ ${L('Auto PIT is an estimate — Accounting can override in Finalize Payroll.','ภาษีอัตโนมัติเป็นการประมาณ — Accounting ปรับได้ใน Finalize Payroll')}
       </div>
@@ -4658,7 +4787,7 @@ function renderSettingsPage(_skipRefresh) {
       </div>
     `)}
 
-    ${adminSection('📋', L('Manual Allowance Categories','หมวดหมู่ค่าเบี้ยเลี้ยงพิเศษ'), `
+    ${adminSection('allowance', '📋', L('Manual Allowance Categories','หมวดหมู่ค่าเบี้ยเลี้ยงพิเศษ'), `
       <div style="font-size:12px;color:#64748b;margin-bottom:12px">${L('Accounting can record ad-hoc allowances per employee in Finalize Payroll. Add or remove categories here.','บัญชีสามารถกรอกค่าเบี้ยเลี้ยงพิเศษต่อพนักงานได้ในหน้า Finalize Payroll จัดการหมวดหมู่ที่นี่')}</div>
       <div id="allowance-types-list"></div>
       <div style="display:flex;gap:8px;margin-top:10px">
@@ -4667,12 +4796,12 @@ function renderSettingsPage(_skipRefresh) {
       </div>
     `)}
 
-    ${adminSection('⏰', L('Late Arrival Deduction Policy','นโยบายหักวันลาจากการมาสาย'), `
+    ${adminSection('time', '⏰', L('Late Arrival Deduction Policy','นโยบายหักวันลาจากการมาสาย'), `
       <div style="font-size:12px;color:#64748b;margin-bottom:12px">${L('When enabled, late arrivals deduct minutes from the employee\'s annual leave balance. Effective from the selected pay period onwards.','เมื่อเปิดใช้งาน การมาสายจะหักเวลาออกจากวันลาพักร้อนของพนักงาน มีผลตั้งแต่รอบเงินเดือนที่กำหนด')}</div>
       <div id="late-deduct-policy-ui"></div>
     `)}
 
-    ${adminSection('📧', L('Email Configuration (SMTP)', 'ตั้งค่าอีเมล (SMTP)'), `
+    ${adminSection('notify', '📧', L('Email Configuration (SMTP)', 'ตั้งค่าอีเมล (SMTP)'), `
       <div style="margin-bottom:14px">
         <label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px">${currentLang === 'ja' ? 'プロバイダー（自動入力）' : L('Provider (auto-fill)','ผู้ให้บริการ (เติมค่าอัตโนมัติ)')}</label>
         <select id="set-email-provider" onchange="applyEmailProviderPreset(this.value)" style="width:100%;max-width:320px;padding:7px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px">
@@ -4714,7 +4843,7 @@ function renderSettingsPage(_skipRefresh) {
       <p style="font-size:11px;color:#94a3b8">💡 ${currentLang === 'ja' ? 'Resendなど（SMTPユーザー名がメールアドレスではないサービス）を使う場合は、SMTPユーザー名欄に指定のユーザー名（例: resend）を入力してください。' : L('For services like Resend (whose SMTP username isn\'t an email address), fill in SMTP Username above with their required value (e.g. resend).', 'ถ้าใช้บริการอย่าง Resend (ที่ SMTP Username ไม่ใช่อีเมล) ให้กรอกช่อง SMTP Username ด้านบนตามที่ผู้ให้บริการกำหนด (เช่น resend)')}</p>
     `)}
 
-    ${adminSection('🗺️', L('GPS Check-in Map','แผนที่หน้าเช็กอิน'), `
+    ${adminSection('system', '🗺️', L('GPS Check-in Map','แผนที่หน้าเช็กอิน'), `
       ${field(
         L('CARTO basemap API key (free)','CARTO basemap API key (ฟรี)'),
         inp('set-carto-key', s.map?.cartoApiKey || '', 'password', 'autocomplete="off" spellcheck="false"'),
@@ -4723,7 +4852,7 @@ function renderSettingsPage(_skipRefresh) {
       )}
     `)}
 
-    ${adminSection('📧', L('Payslip Email', 'ส่งสลิปเงินเดือนทางอีเมล'), `
+    ${adminSection('notify', '📧', L('Payslip Email', 'ส่งสลิปเงินเดือนทางอีเมล'), `
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
         <label style="font-size:13px;font-weight:600">${L('Enable Payslip Email','เปิดใช้งานส่งสลิปทางอีเมล')}</label>
         <input id="set-payslip-email-enabled" type="checkbox" ${APP_SETTINGS.payslipEmailEnabled !== false ? 'checked' : ''} style="width:18px;height:18px;cursor:pointer">
@@ -4734,7 +4863,7 @@ function renderSettingsPage(_skipRefresh) {
             'เมื่อปิด ปุ่ม 📧 ส่งสลิปทางอีเมลในหน้า Finalize Payroll จะถูกซ่อน และเซิร์ฟเวอร์จะปฏิเสธการส่งจนกว่าจะเปิดใช้งานอีกครั้ง — คนละเรื่องกับ "แจ้งเตือนคำขอค้างอนุมัติ" ด้านล่าง ซึ่งเป็นการแจ้งเตือนเรื่องอนุมัติวันลา/OT')}</p>
     `)}
 
-    ${adminSection('🔔', L('Pending Approval Notifications', 'แจ้งเตือนคำขอค้างอนุมัติ'), `
+    ${adminSection('notify', '🔔', L('Pending Approval Notifications', 'แจ้งเตือนคำขอค้างอนุมัติ'), `
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
         <label style="font-size:13px;font-weight:600">${L('Enable Notifications','เปิดการแจ้งเตือน')}</label>
         <input id="set-notif-enabled" type="checkbox" ${APP_SETTINGS.emailNotification?.enabled ? 'checked' : ''} style="width:18px;height:18px;cursor:pointer">
@@ -4782,7 +4911,7 @@ function renderSettingsPage(_skipRefresh) {
 
     ${(() => { const installHtml = renderInstallAppButton(); return installHtml ? section('📲', L('Install App','ติดตั้งแอป'), installHtml) : ''; })()}
 
-    ${section('🔔', L('Browser Push Notifications','การแจ้งเตือนในเบราว์เซอร์'), (() => {
+    ${section('notify', '🔔', L('Browser Push Notifications','การแจ้งเตือนในเบราว์เซอร์'), (() => {
       const perm = ('Notification' in window) ? Notification.permission : 'unsupported';
       const prefs = getPushPrefs();
       const statusColor = perm === 'granted' ? '#059669' : perm === 'denied' ? '#dc2626' : '#d97706';
@@ -4829,7 +4958,7 @@ function renderSettingsPage(_skipRefresh) {
       `;
     })())}
 
-    ${section('📧', L('Email Notification Preferences','การแจ้งเตือนทางอีเมลส่วนตัว'), (() => {
+    ${section('notify', '📧', L('Email Notification Preferences','การแจ้งเตือนทางอีเมลส่วนตัว'), (() => {
       const lang = currentUser?.notifyLangEmail || 'th';
       const hasEmail = !!currentUser?.email;
       return `
@@ -4855,7 +4984,7 @@ function renderSettingsPage(_skipRefresh) {
       `;
     })())}
 
-    ${adminSection('💾', L('Data Backup', 'สำรองข้อมูล'), `
+    ${adminSection('system', '💾', L('Data Backup', 'สำรองข้อมูล'), `
       <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">
         ${L('Download a JSON snapshot of application data.','ดาวน์โหลดข้อมูลในรูปแบบ JSON')}
       </p>
@@ -4869,6 +4998,7 @@ function renderSettingsPage(_skipRefresh) {
       </div>
     `)}
   `;
+  initSettingsTabs(isAdmin);
   if (isAdmin) {
     _notifExtraDraft = (APP_SETTINGS.emailNotification?.recipients?.extra || []).map(e =>
       typeof e === 'string' ? { email: e, lang: 'th' } : { email: e.email || '', lang: e.lang || 'th' }
@@ -5375,8 +5505,8 @@ async function saveSettingsPage() {
 
   APP_SETTINGS.payslipEmailEnabled = document.getElementById('set-payslip-email-enabled')?.checked || false;
 
-  if (!(APP_SETTINGS.sso.rate > 0)) { showToast(L('⚠️ SSO rate must be greater than 0', '⚠️ อัตรา SSO ต้องมากกว่า 0'), 'warning'); return; }
-  if (!(APP_SETTINGS.sso.maxAmount > 0)) { showToast(L('⚠️ SSO max amount must be greater than 0', '⚠️ จำนวนสูงสุด SSO ต้องมากกว่า 0'), 'warning'); return; }
+  if (!(APP_SETTINGS.sso.rate > 0)) { settingsFieldError('set-sso-rate', L('⚠️ SSO rate must be greater than 0', '⚠️ อัตรา SSO ต้องมากกว่า 0'), 'warning'); return; }
+  if (!(APP_SETTINGS.sso.maxAmount > 0)) { settingsFieldError('set-sso-max', L('⚠️ SSO max amount must be greater than 0', '⚠️ จำนวนสูงสุด SSO ต้องมากกว่า 0'), 'warning'); return; }
 
   const payrollSave = await savePayrollSettings();
   if (!payrollSave || payrollSave.success !== true) {
@@ -5398,6 +5528,8 @@ async function saveSettingsPage() {
     showToast(L('⚠️ Payroll settings saved, but email settings failed to save', '⚠️ บันทึกการตั้งค่าเงินเดือนแล้ว แต่การตั้งค่าอีเมลไม่สำเร็จ'), 'warning');
     return;
   }
+  _settingsDirtyTabs = new Set();
+  renderSettingsDirtyMarks();
   showToast(L('✅ Settings saved', '✅ บันทึกการตั้งค่าแล้ว'), 'success');
   renderSettingsPage();
   applyRolePermissions();
