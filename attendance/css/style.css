@@ -4053,3 +4053,15 @@ tr.finalize-row-confirmed:hover td {
 }
 .announcements-empty-label { font-size: 13px; font-weight: 600; color: var(--text-muted); }
 [data-theme="dark"] .announcements-board-empty { background: var(--bg-card); border-color: var(--border); }
+
+/* 2026-09-26 (owner): the iPhone install steps were text only, and "tap the Share icon" is the
+   step people get stuck on. Schematic drawings, not screenshots of iOS: inline SVG so they work
+   offline and follow the theme, and nothing here copies Apple's artwork. */
+.ios-step-img {
+  display: block;
+  width: 100%;
+  max-width: 260px;
+  height: auto;
+  margin: 8px 0 2px;
+  border-radius: var(--radius-sm);
+}
