@@ -3535,10 +3535,12 @@ tr.finalize-row-confirmed:hover td {
    through re-renders, so anything revealed or rebuilt later would animate at a random
    moment. A class with a lifetime confines the entrance to the navigation itself.
 
-   Opacity only, deliberately: a transform on the page makes it the containing block for
-   the whole page while it runs, which drags .att-emp-sticky-bar and .settings-sticky-header
-   out of place, and promotes very tall pages to a composited layer. The movement lives on
-   the dashboard blocks below instead, where nothing sticks. */
+   The PAGE itself animates opacity only: a transform on it would make it the containing block
+   for everything inside while it runs. 2026-09-26: the rise below was then generalised from the
+   dashboard to every page, which does put a transform one level down -- so a sticky bar inside
+   a page's first wrapper (.att-emp-sticky-bar, .settings-sticky-header, .settings-savebar) does
+   ride it for up to 300ms on navigation. Transient and self-clearing (.ta-entering is dropped at
+   600ms), and accepted deliberately; nothing stays displaced. */
 @keyframes ta-page-in {
   from { opacity: 0; }
   to   { opacity: 1; }
@@ -4015,6 +4017,16 @@ tr.finalize-row-confirmed:hover td {
     margin-right: auto;
     width: 100%;
   }
+  /* The chrome has to follow the content, or the topbar's buttons end up ~300px to the right
+     of the page they belong to. The bar stays full-bleed (its background and border still span
+     the window); only its contents are pulled in to the same 1700px column. */
+  .topbar {
+    padding-left: max(28px, calc((100% - 1700px) / 2));
+    padding-right: max(28px, calc((100% - 1700px) / 2));
+  }
+  /* Same for the panels that anchor to the right edge of the window. */
+  .notif-panel { right: max(20px, calc((100vw - var(--sidebar-w) - 1700px) / 2)); }
+  #toast-container { right: max(24px, calc((100vw - var(--sidebar-w) - 1700px) / 2)) !important; }
 }
 
 /* ===== 2026-09-26 (owner): the dashboard below the stat row is two columns =====
@@ -4022,18 +4034,27 @@ tr.finalize-row-confirmed:hover td {
    them, the dashboard loses roughly the height of the shorter column. */
 .dash-lower {
   display: grid;
-  /* Not 1fr 1fr: measured at 1366, half-and-half makes the period summary wrap into 1.81
-     screens -- worse than the stacked layout it replaced. The panels are short and narrow by
-     nature, the summary is a row of tiles that wants width. 360px + the rest = 1.49 screens. */
+  /* Not 1fr 1fr: measured at 1366 wide, half-and-half wraps the period summary and the page
+     comes out ~1076px tall, worse than the ~1100px stacked layout it replaced; 360px + the
+     rest gives ~848px. (Heights, not "screens" -- how many screens that is depends on the
+     window height.) The panels are short and narrow by nature; the summary is a row of tiles
+     that wants width. */
   grid-template-columns: 360px minmax(0, 1fr);
   gap: 16px;
   align-items: start;
   margin-top: 16px;
 }
+/* Stacked, NOT "column B hidden": an approver stacks so the approvals list keeps full width,
+   and their period summary still has to render underneath it. An MD's summary is already
+   display:none on its own element, so their empty column simply collapses. */
 .dash-lower.one-col { grid-template-columns: 1fr; }
 .dash-lower-col { min-width: 0; display: flex; flex-direction: column; gap: 16px; }
-.dash-lower.one-col #dash-lower-b { display: none; }
-@media (max-width: 1024px) {
+.dash-lower.one-col > .dash-lower-col:empty { display: none; }
+/* 1280, not 1024: measured in a 1100px window the right column is 394px and the three summary
+   tiles compute to 103px each, each holding a 32px number and two labels. Nothing overflows --
+   the text just wraps -- which is why no test caught it. The tiles want width; below this the
+   layout stacks. */
+@media (max-width: 1279px) {
   .dash-lower { grid-template-columns: 1fr; }
 }
 

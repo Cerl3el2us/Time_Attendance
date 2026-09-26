@@ -3,7 +3,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 82;
+const APP_BUILD = 83;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -8375,8 +8375,6 @@ async function doScan(source) {
         const last = scanRec.scans[scanRec.scans.length - 1];
         last.at = stamped;
         last.gpsTz = data.gpsTz || null;
-        // Mark exactly the row this scan appended, so only it slides in.
-        _justScannedAt = last.at;
         renderTodayLog(scanRec.scans);
       }
     }
@@ -8482,6 +8480,10 @@ function updateScanButton() {
   // time inside doScan() instead.
 }
 
+// The scan object appendLog() has just pushed, so renderTodayLog can tell that one row apart
+// from the others it is re-rendering. Identity, not a timestamp: the server rewrites the time
+// a moment later and the row must still be the same row.
+let _justScannedRow = null;
 function appendLog(type, now, gpsInfo, source) {
   const dateStr = businessDateStr();
   const key = currentUser ? attKey(currentUser.id, dateStr) : null;
@@ -8489,9 +8491,11 @@ function appendLog(type, now, gpsInfo, source) {
   if (!attendanceLog[key].scans) attendanceLog[key].scans = [];
   const bk = scanYmd();
   const p2 = n => String(n).padStart(2, '0');
-  attendanceLog[key].scans.push({
-    time: `${p2(bk.h)}:${p2(bk.min)}`, type, source: source || 'web', gps: gpsInfo
-  });
+  const row = { time: `${p2(bk.h)}:${p2(bk.min)}`, type, source: source || 'web', gps: gpsInfo };
+  attendanceLog[key].scans.push(row);
+  // Slide the row in on the render that first puts it on screen. Marking it after the POST
+  // came back instead made it appear silently and then jump a round-trip later.
+  _justScannedRow = row;
   renderTodayLog(attendanceLog[key].scans);
 }
 
@@ -8500,6 +8504,10 @@ const LOG_MAX_VISIBLE = 4;
 function renderTodayLog(scans) {
   const container = document.getElementById('today-log');
   const moreBtn   = document.getElementById('today-log-more-btn');
+  // Cleared on every path, including the ones that return early -- otherwise the mark outlives
+  // the render it was meant for and slides an unrelated row later.
+  const justAdded = _justScannedRow;
+  _justScannedRow = null;
   if (!container) return;
   container.innerHTML = '';
 
@@ -8515,14 +8523,13 @@ function renderTodayLog(scans) {
   // แสดง 4 รายการล่าสุด (scans เรียงจากเก่าไปใหม่ แสดงใหม่ก่อน)
   const visible = scans.slice(-LOG_MAX_VISIBLE).reverse();
   const lateCheckInTime = todaysLateCheckInTime();
-  visible.forEach((e, i) => {
+  visible.forEach(e => {
     const row = buildLogItem(e, lateCheckInTime);
     // Only the row this render just gained, and only once -- a re-render for any other reason
-    // (a colleague's scan, a language switch) must not replay it.
-    if (i === 0 && _justScannedAt && e.at === _justScannedAt) row.classList.add('just-added');
+    // (a colleague's scan, a language switch, the server's corrected time) must not replay it.
+    if (e === justAdded) row.classList.add('just-added');
     container.appendChild(row);
   });
-  _justScannedAt = null;
 
   if (moreBtn) moreBtn.style.display = scans.length > LOG_MAX_VISIBLE ? '' : 'none';
 }
@@ -8532,9 +8539,6 @@ function renderTodayLog(scans) {
 // it is read once per render and matched against the record's own checkIn time (a later 'in'
 // scan on the same day is not the one that was late). An approved Abroad day is never late,
 // the same exemption buildAttendanceLogForUser() applies.
-// Set by doScan() to the timestamp of the scan it just stored, so renderTodayLog can tell that
-// row apart from the four it is re-rendering.
-let _justScannedAt = null;
 function todaysLateCheckInTime() {
   if (!currentUser) return null;
   const dateStr = businessDateStr();
@@ -9505,9 +9509,17 @@ function geocodeTableGpsLinks() {
 function syncDashboardLowerColumns() {
   const lower = document.getElementById('dash-lower');
   const colB = document.getElementById('dash-lower-b');
+  const leftPanel = document.getElementById('dash-left-panel');
   if (!lower || !colB) return;
+  // offsetParent alone is not enough: while the dashboard itself is hidden (a scan event
+  // arriving from another page) every child reports null, so the second clause carries it.
   const bHasContent = [...colB.children].some(el => el.offsetParent !== null || (el.style.display !== 'none' && el.innerHTML.trim()));
-  lower.classList.toggle('one-col', !bHasContent);
+  // An approver's page has no "today / my requests" panels -- the left column holds only the
+  // pending-approvals list, which is names and date ranges and was full width before this
+  // layout existed. 360px is the width the staff panels wanted, not that one, so approver
+  // dashboards stack instead of splitting.
+  const leftIsApprovalsOnly = !!leftPanel && leftPanel.style.display === 'none';
+  lower.classList.toggle('one-col', !bHasContent || leftIsApprovalsOnly);
 }
 
 // ===== DASHBOARD =====

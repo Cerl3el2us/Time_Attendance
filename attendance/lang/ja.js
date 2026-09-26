@@ -261,6 +261,8 @@ window.LANG_JA = {
   "Click to view details": "クリックして詳細を表示",
   "Clock In": "出勤打刻",
   "Clock in now": "今すぐ出勤打刻",
+  "nothing posted": "お知らせはありません",
+  "Company Announcements": "社内お知らせ",
   "Previous": "前回",
   "Write an announcement": "お知らせを作成",
   "Open": "開く",
