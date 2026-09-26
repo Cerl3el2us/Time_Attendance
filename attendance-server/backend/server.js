@@ -1768,7 +1768,6 @@ app.post('/api/hikvision/event', hikAuth, webScanLimiter, withEventsLock((req, r
     let employeeNo, holderName, eventTime, eventType;
     const gps = sanitizeGps(body.gps);
     const gpsAccuracy = sanitizeGpsAccuracy(body.gpsAccuracy);
-    const gpsAgeSec    = sanitizeGpsAge(body.gpsAgeSec);
     if (req.hikSource === 'webscan') {
       // Every field the client could otherwise forge is derived from the authenticated user's
       // own live record instead -- see the CRITICAL fix comment above hikAuth().
@@ -1811,7 +1810,10 @@ app.post('/api/hikvision/event', hikAuth, webScanLimiter, withEventsLock((req, r
     // device never reaches this code. webScanGateReason() owns the whole decision (check-in test +
     // geofence check); this block only turns a non-empty reason into the 403.
     if (req.hikSource === 'webscan') {
-      const reason = webScanGateReason(req.hikUser, eventTime, gps, gpsAgeSec);
+      // gpsAgeSec is forwarded RAW (never pre-sanitized here) -- webScanGateReason() must be able
+      // to tell "the key itself is undefined" from "sanitizeGpsAge() rejected the value", and
+      // sanitizing it to null first would destroy that distinction (see review Important-2).
+      const reason = webScanGateReason(req.hikUser, eventTime, gps, body.gpsAgeSec);
       if (reason) {
         const messages = {
           // 2026-09-26 (owner): the remedy sentence matters -- a refused check-in with no later
@@ -9199,16 +9201,24 @@ function webScanWouldBeCheckIn(user, eventTimeIso) {
 // reaches geofenceCheckinReason(), so it is never asked for GPS. The route below does nothing but
 // call this once with req.hikUser (never body) and, on a non-empty result, send that 403 and
 // return before saveEvent -- see tests/geofence.test.js for the wiring test that exercises that.
-// 2026-09-26 (CRITICAL, stale-GPS review): gpsAgeSec independently enforces the same 60-second
-// staleness bound the client-side twin (app.js's gpsIsFresh()) applies before ever sending a
-// request -- defence in depth for a client that is old (predates this field entirely) or modified
-// to lie about freshness. gpsAgeSec is sanitized to a bounded number or null by sanitizeGpsAge();
-// null means either an invalid value OR an older, not-yet-updated client with no concept of this
-// field at all -- refusing every such scan the instant this deploys would lock out every employee
-// still running a cached app.js, so an ABSENT age falls through to the ordinary distance check
-// unchanged (identical to this function's behaviour before today); only a PRESENT, too-old age is
-// treated as no position at all.
-function webScanGateReason(hikUser, eventTimeIso, gps, gpsAgeSec) {
+// 2026-09-26 (CRITICAL, stale-GPS review): gpsAgeSec enforces the same 60-second staleness bound
+// the client-side twin (app.js's gpsIsFresh()) applies before ever sending a request, so a scan is
+// still refused if the client's own check somehow didn't run. gpsAgeSecRaw is passed RAW (never
+// pre-sanitized by the route) so this function can tell "the key itself is undefined" from
+// "present but unusable" -- sanitizeGpsAge() collapses both a genuinely stale number AND garbage
+// (a negative value, one far too large, a string, a boolean, an array) to the same null, so
+// reading that null back as "absent" would let `gpsAgeSec: -1` (or "x", or true) walk straight
+// past the check that a merely-missing key is allowed through on purpose (2026-09-26 review
+// Important-2: this was a real, wider bypass, not just an omission).
+// 2026-09-26 (review Important-2, honest accounting): an ABSENT key (gpsAgeSecRaw === undefined)
+// falls through to the ordinary distance check unchanged. This is NOT defence in depth -- it adds
+// nothing against a hostile client, which can simply omit the field to get the exact same
+// pass-through a "no age" client gets. It exists ONLY for the one-load compatibility window: an
+// honest client whose cached app.js predates this field entirely must not be locked out of every
+// check-in the instant this deploys, before its next page load picks up the new bundle (see the
+// cache-buster bump in the same commit). Any value that IS present, however malformed, is judged
+// exactly like a genuinely stale fix -- no position at all.
+function webScanGateReason(hikUser, eventTimeIso, gps, gpsAgeSecRaw) {
   // M2 fix (2026-09-25 review): read the master switch first and return '' immediately when
   // disabled -- geofenceCheckinReason() would return '' anyway once it gets there, but
   // webScanWouldBeCheckIn() -> buildAttendanceLogForUser() does a full readEvents() + log build on
@@ -9217,7 +9227,8 @@ function webScanGateReason(hikUser, eventTimeIso, gps, gpsAgeSec) {
   const G = getAppSettings().geofence;
   if (!G || typeof G !== 'object' || G.enabled !== true) return '';
   if (!webScanWouldBeCheckIn(hikUser, eventTimeIso)) return '';
-  const stale = Number.isFinite(gpsAgeSec) && gpsAgeSec > 60;
+  const gpsAgeSec = sanitizeGpsAge(gpsAgeSecRaw);
+  const stale = gpsAgeSecRaw !== undefined && (gpsAgeSec === null || gpsAgeSec > 60);
   const coords = (!stale && gps) ? parseGpsCoords(gps) : null;
   return geofenceCheckinReason(G, hikUser.role, coords ? coords.lat : NaN, coords ? coords.lng : NaN);
 }

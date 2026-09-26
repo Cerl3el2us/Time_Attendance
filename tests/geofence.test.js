@@ -282,8 +282,10 @@ test('webScanGateReason: a check-in defers entirely to geofenceCheckinReason, wi
     geofenceCheckinReason: (...args) => { calls.push(args); return 'geofence-inside'; },
   };
   vm.createContext(ctx);
-  vm.runInContext(extractFunction(SERVER_SRC, 'webScanGateReason'), ctx);
+  vm.runInContext(`${extractFunction(SERVER_SRC, 'sanitizeGpsAge')}\n${extractFunction(SERVER_SRC, 'webScanGateReason')}`, ctx);
 
+  // No 4th argument at all here (same as an older client never sending gpsAgeSec) -- must not
+  // affect this test's own concern (role/coords pass-through), see the dedicated staleness tests.
   const result = ctx.webScanGateReason({ role: 'manager' }, '2026-09-25T08:25:00', '13.7,100.5');
   assert.strictEqual(result, 'geofence-inside');
   assert.strictEqual(calls.length, 1);
@@ -314,22 +316,22 @@ test('the gate is wired into the WebScan branch, before the event is saved', () 
   assert.ok(gateAt > 0 && gateAt < saveAt, 'the gate wiring must run BEFORE saveEvent, or a refused check-in is still recorded');
 
   // Simulate the route's own dispatch: wrap the extracted wiring block in a function that takes
-  // the same req/res/eventTime/gps/gpsAgeSec the route passes, stub webScanGateReason's return
-  // value, and put a sentinel right where the route's next statement (const tz = ...) begins. If
-  // the `return` on the 403 line were ever dropped, execution would fall through into the
-  // sentinel even on a refusal -- this is what makes that regression a failing assertion, not a
-  // silent pass.
+  // the same req/res/eventTime/gps/body the route has in scope (body.gpsAgeSec is read directly
+  // inside the wiring block -- see review Important-2), stub webScanGateReason's return value, and
+  // put a sentinel right where the route's next statement (const tz = ...) begins. If the `return`
+  // on the 403 line were ever dropped, execution would fall through into the sentinel even on a
+  // refusal -- this is what makes that regression a failing assertion, not a silent pass.
   function runWiring(gateReason) {
     const ctx = { webScanGateReason: () => gateReason, sentinel: () => { ctx.reached = true; }, reached: false };
     vm.createContext(ctx);
-    vm.runInContext(`function wiring(req, res, eventTime, gps, gpsAgeSec) {\n${gateBlock}\n  sentinel();\n}`, ctx);
+    vm.runInContext(`function wiring(req, res, eventTime, gps, body) {\n${gateBlock}\n  sentinel();\n}`, ctx);
     const calls = {};
     const res = {
       status(code) { calls.status = code; return this; },
       json(payload) { calls.json = payload; return this; },
     };
     const req = { hikSource: 'webscan', hikUser: { role: 'user', employeeNo: '1' } };
-    ctx.wiring(req, res, '2026-09-25T08:25:00', '13.7,100.5', null);
+    ctx.wiring(req, res, '2026-09-25T08:25:00', '13.7,100.5', { gpsAgeSec: null });
     return { reached: ctx.reached, calls };
   }
 
@@ -373,21 +375,37 @@ test('the GPS fix age is sanitised to a bounded number or null, exactly like acc
   assert.strictEqual(A.sanitizeGpsAge([7]), null);
 });
 
-test('the route sanitises body.gpsAgeSec and forwards it into the gate', () => {
+// 2026-09-26 (review Important-2): the route must forward the RAW body.gpsAgeSec, never a
+// pre-sanitized local -- sanitizing at the route would collapse "the key is undefined" and
+// "present but unusable" to the identical null, which is exactly the bypass the review found
+// (gpsAgeSec: -1/90000/"x"/true/[] all used to escape the staleness check like a merely-absent
+// key). webScanGateReason() now does its own sanitizing internally, where it can still see
+// whether the raw value was there at all.
+test('the route forwards RAW body.gpsAgeSec into the gate, not a pre-sanitized local', () => {
   const route = SERVER_SRC.slice(SERVER_SRC.indexOf("app.post('/api/hikvision/event'"));
   const body = route.slice(0, route.indexOf('\napp.'));
-  assert.ok(/const gpsAgeSec\s*=\s*sanitizeGpsAge\(body\.gpsAgeSec\)/.test(body),
-    'gpsAgeSec must be read through sanitizeGpsAge(), never the raw body value');
-  assert.ok(/webScanGateReason\(req\.hikUser,\s*eventTime,\s*gps,\s*gpsAgeSec\)/.test(body),
-    'gpsAgeSec must be forwarded into webScanGateReason as the 4th argument');
+  assert.ok(!/const gpsAgeSec\s*=\s*sanitizeGpsAge/.test(body),
+    'the route must not pre-sanitize gpsAgeSec -- that would destroy the undefined-vs-unusable distinction');
+  assert.ok(/webScanGateReason\(req\.hikUser,\s*eventTime,\s*gps,\s*body\.gpsAgeSec\)/.test(body),
+    'body.gpsAgeSec must be forwarded into webScanGateReason RAW, as the 4th argument');
 });
 
-// 2026-09-26 (CRITICAL): webScanGateReason() independently enforces the same 60s bound the
-// client-side twin (app.js's gpsIsFresh()) applies before ever sending a request -- defence in
-// depth against an old or modified client. These drive the real, extracted function (stubbing
-// only its collaborators) so a regression in the staleness arithmetic, or in the "absent age must
-// not auto-refuse" decision, fails here rather than only in the wiring test above (which stubs
-// webScanGateReason itself and so never exercises this logic).
+test('webScanGateReason itself calls sanitizeGpsAge on the raw value it receives', () => {
+  const fn = extractFunction(SERVER_SRC, 'webScanGateReason');
+  assert.ok(/sanitizeGpsAge\(/.test(fn), 'webScanGateReason must sanitize the age itself, now that the route no longer does');
+});
+
+// 2026-09-26 (CRITICAL + review Important-2): webScanGateReason() independently enforces the same
+// 60s bound the client-side twin (app.js's gpsIsFresh()) applies before ever sending a request, and
+// must distinguish a genuinely ABSENT key (gpsAgeSecRaw === undefined -- the one-load
+// compatibility window for a client that predates this field, adds nothing against a hostile
+// client) from any value that is PRESENT but unusable (a negative number, one far too large, a
+// string, a boolean, an array, or an explicit null) -- sanitizeGpsAge() collapses all of the
+// latter to the same null a truly-absent key would sanitize to, so reading that null back as
+// "absent" was a real bypass, not just an omission. These drive the real, extracted function
+// (with the real sanitizeGpsAge() alongside it, stubbing only the other collaborators) so a
+// regression in either the staleness arithmetic or the undefined-vs-present distinction fails
+// here, not only in the wiring test above (which stubs webScanGateReason itself).
 function runWebScanGateReasonStaleness({ role, gps, gpsAgeSec, wouldBeCheckIn }) {
   const G = { enabled: true };
   const calls = [];
@@ -398,7 +416,8 @@ function runWebScanGateReasonStaleness({ role, gps, gpsAgeSec, wouldBeCheckIn })
     geofenceCheckinReason: (...args) => { calls.push(args); return 'stub-reason'; },
   };
   vm.createContext(ctx);
-  vm.runInContext(extractFunction(SERVER_SRC, 'webScanGateReason'), ctx);
+  vm.runInContext(`${extractFunction(SERVER_SRC, 'sanitizeGpsAge')}\n${extractFunction(SERVER_SRC, 'webScanGateReason')}`, ctx);
+  // gpsAgeSec here is the RAW value, exactly as the route now forwards body.gpsAgeSec unsanitized.
   ctx.webScanGateReason({ role }, '2026-09-25T08:25:00', gps, gpsAgeSec);
   return { G, calls };
 }
@@ -415,14 +434,26 @@ test('webScanGateReason: a PRESENT, fresh gpsAgeSec (<=60s) still uses the real 
   assert.deepStrictEqual(calls[0], [G, 'user', 13.7268315, 100.52847], 'exactly 60s (the boundary) must still count as fresh');
 });
 
-test('webScanGateReason: an ABSENT gpsAgeSec (older client) falls through to the ordinary distance check, not an automatic refusal', () => {
-  // This is the deliberate, safer-of-two-evils choice for a not-yet-updated client: refusing every
-  // scan with no age field the moment this deploys would lock out every employee still running a
-  // cached app.js. See this function's own comment in server.js for the full reasoning.
+test('webScanGateReason: an ABSENT gpsAgeSec (key never sent -- older client) falls through to the ordinary distance check', () => {
+  // Deliberate, and the reviewer agreed: refusing every scan with no age field the moment this
+  // deploys would lock out every employee still running a cached app.js. Not defence in depth --
+  // see this function's own comment in server.js for the honest accounting (it adds nothing
+  // against a client that lies, which can simply omit the field for the same pass-through).
   const undef = runWebScanGateReasonStaleness({ role: 'user', gps: '13.7268315,100.52847', gpsAgeSec: undefined, wouldBeCheckIn: true });
   assert.deepStrictEqual(undef.calls[0], [undef.G, 'user', 13.7268315, 100.52847]);
-  const nullAge = runWebScanGateReasonStaleness({ role: 'user', gps: '13.7268315,100.52847', gpsAgeSec: null, wouldBeCheckIn: true });
-  assert.deepStrictEqual(nullAge.calls[0], [nullAge.G, 'user', 13.7268315, 100.52847]);
+});
+
+// 2026-09-26 (review Important-2, the bug itself): every one of these IS present in the request
+// body (unlike the test above) -- sanitizeGpsAge() rejects each one to null, exactly the same
+// null an absent key would produce, so before this fix every one of them slipped through as if
+// the key had never been sent at all. Each must now be judged as no position at all (NaN/NaN),
+// same as a genuinely stale fix.
+test('webScanGateReason: a PRESENT-but-unusable gpsAgeSec (negative, absurd, string, boolean, array, explicit null) is treated as no position, never as absent', () => {
+  for (const badValue of [-1, 90000, 'x', true, [], null]) {
+    const { G, calls } = runWebScanGateReasonStaleness({ role: 'user', gps: '13.7268315,100.52847', gpsAgeSec: badValue, wouldBeCheckIn: true });
+    assert.deepStrictEqual(calls[0], [G, 'user', NaN, NaN],
+      `gpsAgeSec: ${JSON.stringify(badValue)} is PRESENT but unusable -- must be treated as no position, not fall through to the real coords`);
+  }
 });
 
 console.log('Geofence: the client');
