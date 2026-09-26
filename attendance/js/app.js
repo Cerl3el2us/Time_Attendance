@@ -1,3 +1,14 @@
+// ===== Build number =====
+// Shown in the sidebar footer. Bumped together with the ?v= cache-buster in index.html, which
+// is already bumped on every deploy that touches the front-end -- so this is the deploy round,
+// not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
+// an element that does not exist in index.html, so no version was ever actually displayed.
+const APP_BUILD = 82;
+function renderBuildLabel() {
+  const el = document.getElementById('sidebar-build');
+  if (el) el.textContent = 'Build ' + APP_BUILD;
+}
+
 // ===== PWA install prompt =====
 // Chrome/Android fires beforeinstallprompt and lets a page defer + replay it later on a real
 // user gesture (a button click) -- must be captured this early (top-level, not inside a
@@ -8201,6 +8212,17 @@ async function doScan(source) {
     if (scanBtn) scanBtn.disabled = false;
     updateScanButton();
   }
+  // A confirmation of the WRITE, not of the press: this runs only after the server has stored
+  // the scan (the catch above returns early). The class is removed and re-added with a forced
+  // reflow in between so a second scan in the same session animates again.
+  const okBtn = document.getElementById('scan-btn');
+  if (okBtn) {
+    okBtn.classList.remove('scan-success');
+    void okBtn.offsetWidth;
+    okBtn.classList.add('scan-success');
+    setTimeout(() => okBtn.classList.remove('scan-success'), 750);
+  }
+
   if (isFirst && !isAfterCutoff) {
     showToast(L('✅ Check-in recorded', '✅ บันทึกเวลาเข้างานเรียบร้อย'), 'success');
   } else if (!isPreDawn && !isAfterCutoff && timeStr < '12:00') {
@@ -18632,7 +18654,7 @@ function fixStaticText() {
   if (loginCard) {
     loginCard.innerHTML = `
       <div class="login-logo">
-        <img src="images/logo-long.jpg" alt="Tozai Boeki Kaisha" class="login-logo-img">
+        <img src="images/logo-long.png" alt="Tozai Boeki Kaisha" class="login-logo-img">
         <p>${L('Time Attendance System', 'ระบบบันทึกเวลาทำงาน')} &mdash; Tozai Boeki Kaisha (Thailand) Ltd.</p>
       </div>
       <div class="login-form">
@@ -18775,8 +18797,7 @@ function fixStaticText() {
   // 4. Fix logout button and sidebar footer
   const logoutBtn = document.querySelector('.btn-logout');
   if (logoutBtn) logoutBtn.innerHTML = L('🔓 Log Out', '🔓 ออกจากระบบ');
-  const sidebarFooter = document.querySelector('.sidebar-footer > div');
-  if (sidebarFooter) sidebarFooter.innerHTML = 'v1.0.0';
+  renderBuildLabel();
 
   // Apply data-en attributes on remaining static HTML (modals, page scaffolding)
   applyStaticI18n();

@@ -519,7 +519,7 @@ body {
   color: white;
   font-size: 10px;
   font-weight: 800;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   border: 2px solid white;
   display: none;
   align-items: center;
@@ -1509,8 +1509,8 @@ table tbody tr:last-child td { border-bottom: none; }
   padding: 3px;
   background: rgba(255,255,255,0.94);
   border: 1px solid rgba(15,23,42,0.08);
-  border-radius: 999px;
-  box-shadow: 0 8px 24px rgba(15,23,42,0.12);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--shadow-md);
   backdrop-filter: blur(8px);
 }
 .gps-map-style-btn {
@@ -1519,7 +1519,7 @@ table tbody tr:last-child td { border-bottom: none; }
   color: #64748b;
   font: 700 12px/1 Sarabun, sans-serif;
   padding: 7px 12px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   cursor: pointer;
 }
 .gps-map-style-btn.is-active {
@@ -1533,8 +1533,8 @@ table tbody tr:last-child td { border-bottom: none; }
 }
 #gps-map-wrap .maplibregl-ctrl-group {
   border: 0;
-  box-shadow: 0 8px 24px rgba(15,23,42,0.12);
-  border-radius: 12px;
+  box-shadow: var(--shadow-md);
+  border-radius: var(--radius-md);
   overflow: hidden;
 }
 #gps-map-wrap .maplibregl-ctrl-group button {
@@ -2108,7 +2108,7 @@ table tbody tr:last-child td { border-bottom: none; }
   height: 28px;
   font-size: 16px;
   line-height: 1;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: #ecfdf5;
 }
 
@@ -3265,7 +3265,7 @@ tr.finalize-row-confirmed:hover td {
   flex: 1;
   padding: 8px;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
@@ -3276,7 +3276,7 @@ tr.finalize-row-confirmed:hover td {
 .leave-mode-btn.is-active {
   background: #fff;
   color: #1e3a5f;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  box-shadow: var(--shadow-sm);
 }
 [data-theme="dark"] .leave-mode-btn {
   color: #94a3b8;
@@ -3427,7 +3427,7 @@ tr.finalize-row-confirmed:hover td {
   width: 380px; max-width: calc(100vw - 24px); max-height: min(70vh, 560px);
   display: flex; flex-direction: column;
   background: var(--bg-card, #fff); color: var(--text);
-  border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 12px 32px rgba(15, 23, 42, 0.18);
+  border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow-lg);
   overflow: hidden;
 }
 .notif-panel[hidden] { display: none; }
@@ -3438,7 +3438,7 @@ tr.finalize-row-confirmed:hover td {
 .notif-panel-head h3 { flex: 1; margin: 0; font-size: 15px; font-weight: 700; color: var(--primary); }
 .notif-markall, .notif-close {
   border: 1px solid var(--border); background: var(--bg, #f8fafc); color: var(--text-muted);
-  border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer; padding: 6px 10px; min-height: 32px;
+  border-radius: var(--radius-sm); font-size: 12px; font-weight: 600; cursor: pointer; padding: 6px 10px; min-height: 32px;
 }
 .notif-markall:disabled { opacity: .5; cursor: default; }
 .notif-close { width: 32px; padding: 0; font-size: 14px; }
@@ -3481,7 +3481,7 @@ tr.finalize-row-confirmed:hover td {
 .void-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 .void-head h3 { margin: 0; font-size: 15px; color: var(--primary); }
 .void-period { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted); }
-.void-period select { padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); color: var(--text); font-size: 13px; max-width: 100%; }
+.void-period select { padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-card); color: var(--text); font-size: 13px; max-width: 100%; }
 .void-intro { font-size: 12px; color: var(--text-muted); margin: 8px 0 12px; }
 .void-card { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; background: var(--bg-card); }
 .void-card-top { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; align-items: baseline; }
@@ -3510,4 +3510,93 @@ tr.finalize-row-confirmed:hover td {
   .topbar-right .btn-icon { width: 40px; height: 40px; }
   #topbar-name { display: none; }
   .topbar-user-btn { padding: 6px 8px !important; }
+}
+
+/* ===== 2026-09-26 (design round 1): shared craft layer =====
+   Only what the app was actually missing. The radius / elevation / motion / focus-ring
+   scales, :focus-visible and the prefers-reduced-motion guard already existed at the top
+   of this file, so nothing here re-invents them -- and the guard above zeroes every
+   animation added below for anyone who asked their OS for less motion. */
+
+/* -- Page entrance -------------------------------------------------------
+   .page.active is the only switch showPage() flips, so re-adding the class restarts this
+   animation on every navigation. 240ms, no fill: once it ends no transform remains, so
+   nothing here can become a containing block for a descendant. */
+@keyframes ta-page-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+.page.active { animation: ta-page-in 240ms cubic-bezier(0.4, 0, 0.2, 1); }
+
+/* The dashboard is the one page built from several top-level blocks, so it gets the
+   stagger instead of a single fade (the parent animation is switched off so the two do
+   not compound). Every other page has a single wrapper child -- staggering there would
+   animate nothing. */
+@keyframes ta-rise-in {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: none; }
+}
+#page-dashboard.active { animation: none; }
+#page-dashboard.active > * {
+  animation: ta-rise-in 300ms cubic-bezier(0.4, 0, 0.2, 1) backwards;
+}
+#page-dashboard.active > *:nth-child(1) { animation-delay: 0ms; }
+#page-dashboard.active > *:nth-child(2) { animation-delay: 45ms; }
+#page-dashboard.active > *:nth-child(3) { animation-delay: 90ms; }
+#page-dashboard.active > *:nth-child(4) { animation-delay: 135ms; }
+#page-dashboard.active > *:nth-child(5) { animation-delay: 165ms; }
+#page-dashboard.active > *:nth-child(n+6) { animation-delay: 190ms; }
+
+/* -- Press feedback ------------------------------------------------------
+   .btn and .scan-btn already had an :active state; these button families never did, so a
+   tap on a phone gave no confirmation at all until the request came back. */
+.btn-login:active    { transform: scale(0.985); }
+.btn-icon:active     { transform: scale(0.93); background: #dde5ee; }
+.btn-logout:active   { transform: scale(0.96); }
+.btn-checkin:active,
+.btn-checkout:active { transform: scale(0.97); }
+.btn-login, .btn-logout, .btn-icon { transition: transform 120ms, background var(--transition), box-shadow var(--transition); }
+[data-theme="dark"] .btn-icon:active { background: rgba(255,255,255,0.12); }
+
+/* -- Success moment on a saved scan --------------------------------------
+   doScan() adds .scan-success for 700ms once the server has actually stored the scan, so
+   the ring is a confirmation of the write, not of the press. */
+@keyframes ta-scan-confirm {
+  0%   { box-shadow: 0 8px 24px rgba(16,185,129,.45), 0 0 0 0 rgba(16,185,129,.55); }
+  100% { box-shadow: 0 8px 24px rgba(16,185,129,.45), 0 0 0 26px rgba(16,185,129,0); }
+}
+.scan-btn.scan-success { animation: ta-scan-confirm 700ms ease-out; }
+
+/* -- Wide tables: make the horizontal scrollbar visible ------------------
+   The global scrollbar is 6px of #cbd5e1 on #f1f5f9, which on a wide table reads as part
+   of the border -- so a table that scrolls sideways looked simply cut off. Inside a scroll
+   wrapper only, the bar is taller and the thumb darker. */
+.table-wrap::-webkit-scrollbar { height: 10px; }
+.table-wrap::-webkit-scrollbar-track { background: #eef2f7; border-radius: var(--radius-pill); }
+.table-wrap::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: var(--radius-pill); }
+.table-wrap::-webkit-scrollbar-thumb:hover { background: #64748b; }
+.table-wrap { scrollbar-color: #94a3b8 #eef2f7; }
+/* The Settings page scrolls its wide tables with an inline style rather than .table-wrap, so
+   the same treatment is matched on the attribute -- otherwise exactly the tables that need the
+   affordance most are the ones that do not get it. */
+[style*="overflow-x"]::-webkit-scrollbar { height: 10px; }
+[style*="overflow-x"]::-webkit-scrollbar-track { background: #eef2f7; border-radius: var(--radius-pill); }
+[style*="overflow-x"]::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: var(--radius-pill); }
+[style*="overflow-x"] { scrollbar-color: #94a3b8 #eef2f7; }
+[data-theme="dark"] [style*="overflow-x"]::-webkit-scrollbar-track { background: #1e293b; }
+[data-theme="dark"] [style*="overflow-x"]::-webkit-scrollbar-thumb { background: #64748b; }
+[data-theme="dark"] [style*="overflow-x"] { scrollbar-color: #64748b #1e293b; }
+[data-theme="dark"] .table-wrap::-webkit-scrollbar-track { background: #1e293b; }
+[data-theme="dark"] .table-wrap::-webkit-scrollbar-thumb { background: #64748b; }
+[data-theme="dark"] .table-wrap { scrollbar-color: #64748b #1e293b; }
+
+/* -- Build label (sidebar footer) ----------------------------------------
+   New element: nothing displayed a version before (see APP_BUILD in app.js). */
+.sidebar-build {
+  margin-top: 10px;
+  text-align: center;
+  font-size: 11px;
+  letter-spacing: .4px;
+  color: rgba(255,255,255,0.38);
+  user-select: none;
 }
