@@ -7155,6 +7155,25 @@ function requestGPS() {
   );
 }
 
+// 2026-09-26 (review Important-1): watchPosition (above) fires exactly once at login and then goes
+// silent on a stationary device -- a desktop, or a phone left on a desk at home -- so gpsIsFresh()
+// timing the fix out after 60s is not proof the employee is out of range, only that nothing has
+// refreshed currentGPS since. doScan() calls this ONE time, at press time, before accepting "no
+// position" as final. maximumAge:0 forces a brand new reading rather than the browser's own
+// cached one -- this OBTAINS a fresh position, it never accepts an old one, so it does not weaken
+// the 60-second rule. Resolves the raw GeolocationPosition on success, or null on any failure
+// (permission denied, unavailable, or another timeout) -- doScan() refuses only if this also fails.
+function requestFreshPosition() {
+  return new Promise(resolve => {
+    if (!navigator.geolocation) { resolve(null); return; }
+    navigator.geolocation.getCurrentPosition(
+      pos => resolve(pos),
+      () => resolve(null),
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }
+    );
+  });
+}
+
 function gpsErrorMsg(err) {
   const msgs = {
     1: L('User denied GPS access — please allow it in your browser settings', 'ผู้ใช้ไม่อนุญาตให้เข้าถึง GPS — กรุณาอนุญาตในการตั้งค่า Browser'),
@@ -8027,13 +8046,6 @@ async function doScan(source) {
   await syncServerClock();
   const bk      = scanYmd();
   const p2      = n => String(n).padStart(2, '0');
-  const gpsInfo = currentGPS ? `${currentGPS.lat}, ${currentGPS.lng}` : 'ไม่ทราบตำแหน่ง';
-  const gpsAcc  = currentGPS && Number.isFinite(Number(currentGPS.accuracy)) ? Number(currentGPS.accuracy) : null;
-  // 2026-09-26 (CRITICAL): the fix's age in seconds, sent alongside gps/gpsAccuracy so the server
-  // can independently enforce the same 60s staleness bound (webScanGateReason()) even against an
-  // old or modified client -- see gpsIsFresh()'s own comment for why this exists at all.
-  const gpsAgeSec = currentGPS && Number.isFinite(Number(currentGPS.epochMs))
-    ? Math.round((Date.now() - Number(currentGPS.epochMs)) / 1000) : null;
   const timeStr = `${p2(bk.h)}:${p2(bk.min)}`;
   const dateStr = businessDateFromYmd(bk);
   const key     = attKey(currentUser.id, dateStr);
@@ -8054,16 +8066,46 @@ async function doScan(source) {
     if (!ok) return;
   }
 
+  const scanBtn = document.getElementById('scan-btn');
+  const labelEl = document.getElementById('scan-btn-label');
+
   // 2026-09-25/26: web check-in geofence -- a preview of the server's decision (the server decides
   // for real, see server.js's WebScan gate) using the exact same shared oracle geofenceUiState()
   // -- fresh position, fresh settings, fresh attendance, actual check-in -- so the two can never
   // drift apart. 2026-09-26 (owner): a blocked press opens #geofence-modal, never a toast, and
   // never disables the button itself -- and sends NO request at all.
-  const gate = geofenceUiState();
+  let gate = geofenceUiState();
+  // 2026-09-26 (review Important-1): 'geofence-no-position' can mean the stored fix simply timed
+  // out (gpsIsFresh()) on a stationary device that watchPosition never refreshed on its own -- get
+  // ONE fresh position before treating that as final. Never retried for 'geofence-inside': a real,
+  // current in-range position is a genuine refusal that a retry cannot change. The button is
+  // disabled and relabelled for the duration so the (now async) press visibly does something;
+  // _scanInFlight guards against a second press racing this same window.
+  if (gate.blocked && gate.reason === 'geofence-no-position') {
+    _scanInFlight = true;
+    if (scanBtn) scanBtn.disabled = true;
+    const prevLabel = labelEl ? labelEl.textContent : null;
+    if (labelEl) labelEl.textContent = L('Locating...', 'กำลังระบุตำแหน่ง...');
+    const freshPos = await requestFreshPosition();
+    if (freshPos) onGPSSuccess(freshPos);
+    gate = geofenceUiState();
+    if (labelEl && prevLabel !== null) labelEl.textContent = prevLabel;
+    if (scanBtn) scanBtn.disabled = false;
+    _scanInFlight = false;
+  }
   if (gate.blocked) { openGeofenceModal(gate.reason); return; }
 
+  // Read AFTER the refresh above, so a press that needed a fresh fix sends that fix, not the
+  // stale/absent one it started with.
+  const gpsInfo = currentGPS ? `${currentGPS.lat}, ${currentGPS.lng}` : 'ไม่ทราบตำแหน่ง';
+  const gpsAcc  = currentGPS && Number.isFinite(Number(currentGPS.accuracy)) ? Number(currentGPS.accuracy) : null;
+  // 2026-09-26 (CRITICAL): the fix's age in seconds, sent alongside gps/gpsAccuracy so the server
+  // can independently enforce the same 60s staleness bound (webScanGateReason()) even against an
+  // old or modified client -- see gpsIsFresh()'s own comment for why this exists at all.
+  const gpsAgeSec = currentGPS && Number.isFinite(Number(currentGPS.epochMs))
+    ? Math.round((Date.now() - Number(currentGPS.epochMs)) / 1000) : null;
+
   _scanInFlight = true;
-  const scanBtn = document.getElementById('scan-btn');
   if (scanBtn) scanBtn.disabled = true;
 
   const prevRec = attendanceLog[key] ? JSON.parse(JSON.stringify(attendanceLog[key])) : null;

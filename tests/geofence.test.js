@@ -36,9 +36,24 @@ function sandbox(src, names) {
 }
 
 let passed = 0;
+// A handful of tests (the doScan press-time GPS refresh) drive a real `await` inside the
+// extracted, vm-wrapped async function -- fn() then returns a Promise instead of running to
+// completion synchronously. Collected here and awaited before the final summary prints, so a
+// failure in one still sets process.exitCode and prints FAIL like every synchronous test, instead
+// of surfacing as an unhandled rejection after the script appears to have already finished.
+const pendingAsync = [];
 function test(name, fn) {
-  try { fn(); passed++; console.log(`  ok  ${name}`); }
-  catch (e) { console.log(`  FAIL ${name}\n       ${e.message}`); process.exitCode = 1; }
+  let result;
+  try { result = fn(); }
+  catch (e) { console.log(`  FAIL ${name}\n       ${e.message}`); process.exitCode = 1; return; }
+  if (result && typeof result.then === 'function') {
+    pendingAsync.push(result.then(
+      () => { passed++; console.log(`  ok  ${name}`); },
+      e => { console.log(`  FAIL ${name}\n       ${e.message}`); process.exitCode = 1; }
+    ));
+    return;
+  }
+  passed++; console.log(`  ok  ${name}`);
 }
 
 const PASO  = { lat: 13.7268315, lng: 100.52847 };
@@ -961,49 +976,92 @@ test('applyLanguage refreshes the geofence modal body while it is open, so a lan
     'applyLanguage must re-render the geofence modal body (via openGeofenceModal) when it is currently shown');
 });
 
-// 2026-09-26 (owner): a press that would be blocked must open the modal and send NO request at
-// all -- not even reach the code that sets _scanInFlight/posts the request. This extracts the
-// real wiring block from doScan() (the same "wrap in a function + sentinel" technique the
-// server-side wiring test above uses) so a dropped `return`, or a call to the wrong function,
-// fails an assertion here instead of only in a live browser. MUTATION-VERIFIED by hand: temporarily
-// removing the `return` after openGeofenceModal() made `reached` become true on a blocked press,
-// and the test failed as expected; the source was then restored (see the report for the transcript).
+// 2026-09-26 (owner + review Important-1): a press that would be blocked must open the modal and
+// send NO request at all -- not even reach the code that sets _scanInFlight/posts the request --
+// UNLESS the block was 'geofence-no-position', in which case ONE fresh getCurrentPosition() must
+// be tried first (a stationary device's watchPosition can go silent forever after login; see
+// requestFreshPosition()'s own comment), and only the SECOND (post-refresh) verdict decides.
+// 'geofence-inside' is never retried -- a real, current in-range position is a genuine refusal a
+// retry cannot change. This extracts the real wiring block from doScan() (the same "wrap in a
+// function + sentinel" technique the server-side wiring test above uses) so a dropped `return`, a
+// retry on the wrong reason, or a call to the wrong function, fails an assertion here instead of
+// only in a live browser. MUTATION-VERIFIED by hand (twice): (1) removing the `return` after
+// openGeofenceModal() made `reached` become true on a blocked press; (2) removing the refresh
+// block entirely made the "stale fix, refresh succeeds -> allowed" case fail. Both failed as
+// expected, then the source was restored (see the report for the transcript).
 function extractDoScanGateWiring(fnBody) {
-  const anchor = 'const gate = geofenceUiState();';
+  // Starts at the scanBtn/labelEl declarations, not `let gate = ...`, because the refresh block
+  // uses both (to show the press is doing something during the await) and they must stay in scope.
+  const anchor = "const scanBtn = document.getElementById('scan-btn');";
   const anchorIdx = fnBody.indexOf(anchor);
-  assert.ok(anchorIdx >= 0, 'doScan must call geofenceUiState() to decide the gate');
-  const endAnchor = '_scanInFlight = true;';
-  const endIdx = fnBody.indexOf(endAnchor, anchorIdx);
-  assert.ok(endIdx > anchorIdx, '_scanInFlight = true must come after the gate check');
-  return fnBody.slice(anchorIdx, endIdx);
+  assert.ok(anchorIdx >= 0, 'doScan must look up scanBtn before the gate check');
+  const gateIdx = fnBody.indexOf('let gate = geofenceUiState();', anchorIdx);
+  assert.ok(gateIdx > anchorIdx, 'doScan must call geofenceUiState() to decide the gate');
+  const endNeedle = 'if (gate.blocked) { openGeofenceModal(gate.reason); return; }';
+  const endIdx = fnBody.indexOf(endNeedle, gateIdx);
+  assert.ok(endIdx > gateIdx, 'the final blocked-check not found after the gate is (re)computed');
+  return fnBody.slice(anchorIdx, endIdx + endNeedle.length);
 }
 test('doScan (executed wiring): a blocked press opens the modal and returns before any request is sent', () => {
   const fn = extractFunction(APP_SRC, 'doScan');
   const block = extractDoScanGateWiring(fn);
-  function runWiring(blocked, reason) {
+  // gateResults: what geofenceUiState() returns on the 1st call, then the 2nd (post-refresh) call,
+  // if a refresh happens at all. freshPos: what requestFreshPosition() resolves to.
+  function runWiring(gateResults, freshPos) {
+    let gateCall = 0;
     const ctx = {
-      geofenceUiState: () => ({ blocked, reason, text: `msg:${reason}` }),
+      geofenceUiState: () => gateResults[Math.min(gateCall++, gateResults.length - 1)],
+      requestFreshPosition: () => { ctx.refreshCalled = true; return Promise.resolve(freshPos); },
+      onGPSSuccess: pos => { ctx.onGPSSuccessCalledWith = pos; },
       openGeofenceModal: r => { ctx.modalReason = r; },
       sentinel: () => { ctx.reached = true; },
-      reached: false, modalReason: null,
+      document: { getElementById: () => ({ disabled: false, textContent: '' }) },
+      L: en => en,
+      _scanInFlight: false,
+      reached: false, modalReason: null, refreshCalled: false, onGPSSuccessCalledWith: null,
     };
     vm.createContext(ctx);
-    vm.runInContext(`function wiring() {\n${block}\n  sentinel();\n}`, ctx);
-    ctx.wiring();
-    return ctx;
+    vm.runInContext(`async function wiring() {\n${block}\n  sentinel();\n}`, ctx);
+    return ctx.wiring().then(() => ctx);
   }
 
-  const insideRun = runWiring(true, 'geofence-inside');
-  assert.strictEqual(insideRun.reached, false, 'a blocked press must return before _scanInFlight is ever set -- i.e. before any request is sent');
-  assert.strictEqual(insideRun.modalReason, 'geofence-inside');
-
-  const noPosRun = runWiring(true, 'geofence-no-position');
-  assert.strictEqual(noPosRun.reached, false, 'no usable position must also open the modal and send no request');
-  assert.strictEqual(noPosRun.modalReason, 'geofence-no-position');
-
-  const allowedRun = runWiring(false, '');
-  assert.strictEqual(allowedRun.reached, true, 'an allowed press must fall through toward sending the request');
-  assert.strictEqual(allowedRun.modalReason, null, 'the modal must never open for an allowed press');
+  return Promise.resolve()
+    .then(() => runWiring([{ blocked: true, reason: 'geofence-inside' }], null))
+    .then(insideRun => {
+      assert.strictEqual(insideRun.refreshCalled, false, 'geofence-inside must never trigger a refresh -- a real in-range position is not something a retry can fix');
+      assert.strictEqual(insideRun.reached, false, 'a blocked press must return before _scanInFlight is ever set -- i.e. before any request is sent');
+      assert.strictEqual(insideRun.modalReason, 'geofence-inside');
+    })
+    .then(() => runWiring([{ blocked: false, reason: '' }], null))
+    .then(allowedRun => {
+      assert.strictEqual(allowedRun.refreshCalled, false, 'an already-allowed press must not trigger a pointless refresh');
+      assert.strictEqual(allowedRun.reached, true, 'an allowed press must fall through toward sending the request');
+      assert.strictEqual(allowedRun.modalReason, null, 'the modal must never open for an allowed press');
+    })
+    // Important-1's own scenario: a stale/absent stored fix (1st verdict blocked), then a fresh
+    // getCurrentPosition() succeeds and the re-evaluated 2nd verdict allows it.
+    .then(() => runWiring(
+      [{ blocked: true, reason: 'geofence-no-position' }, { blocked: false, reason: '' }],
+      { coords: { latitude: 13.7268315, longitude: 100.52847, accuracy: 10 } }
+    ))
+    .then(refreshAllowedRun => {
+      assert.strictEqual(refreshAllowedRun.refreshCalled, true, 'a stale/absent position must trigger exactly one refresh attempt');
+      assert.ok(refreshAllowedRun.onGPSSuccessCalledWith, 'a successful refresh must be fed into onGPSSuccess so currentGPS actually updates');
+      assert.strictEqual(refreshAllowedRun.reached, true, 'a refresh that resolves the block must let the press proceed');
+      assert.strictEqual(refreshAllowedRun.modalReason, null, 'the modal must not open once the refresh clears the block');
+    })
+    // Both stale AND the refresh itself fails (getCurrentPosition errors) -> refused, via the
+    // existing no-position modal, same as the brief asks for.
+    .then(() => runWiring(
+      [{ blocked: true, reason: 'geofence-no-position' }, { blocked: true, reason: 'geofence-no-position' }],
+      null
+    ))
+    .then(bothFailRun => {
+      assert.strictEqual(bothFailRun.refreshCalled, true);
+      assert.strictEqual(bothFailRun.onGPSSuccessCalledWith, null, 'a failed refresh must never call onGPSSuccess');
+      assert.strictEqual(bothFailRun.reached, false, 'refusing must still send no request');
+      assert.strictEqual(bothFailRun.modalReason, 'geofence-no-position', 'a failed refresh must surface the existing no-position modal, not silently do nothing');
+    });
 });
 
 test('doScan: a 403 that slips through from the server also opens the modal, not a toast', () => {
@@ -1121,4 +1179,6 @@ test('gpsInBtn/gpsOutBtn (executed): the stored accuracy reaches the button, a r
   assert.ok(!/±/.test(noAcc.gpsOutBtn), 'no stored accuracy must render no ± figure at all (check-out)');
 });
 
-console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ', 0 failed'}`);
+Promise.all(pendingAsync).then(() => {
+  console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ', 0 failed'}`);
+});
