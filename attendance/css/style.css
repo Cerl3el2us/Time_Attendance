@@ -4086,3 +4086,45 @@ tr.finalize-row-confirmed:hover td {
   margin: 8px 0 2px;
   border-radius: var(--radius-sm);
 }
+
+/* ===== 2026-09-26 (owner): the exchange rate is its own strip =====
+   It used to be a fourth card in the stat row, ~250px wide for three banks -- the densest block
+   on the dashboard, with each bank's update date wrapping onto three lines. Full width it gets
+   a label column and three even bank columns, which is the layout that was agreed. */
+.fx-strip .fx-row {
+  display: grid;
+  grid-template-columns: 230px repeat(3, minmax(0, 1fr));
+  align-items: center;
+  gap: 20px;
+  padding: 16px 22px;
+}
+.fx-label {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  padding-right: 20px;
+  border-right: 1px solid var(--border);
+  line-height: 1.35;
+}
+.fx-label-sub { font-size: 11px; font-weight: 600; color: var(--text-muted); margin-top: 2px; }
+.fx-bank { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; }
+.fx-logo {
+  height: 26px;
+  width: auto;
+  max-width: 132px;
+  object-fit: contain;
+  object-position: left center;
+  margin-bottom: 6px;
+}
+.fx-rate-line { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.fx-rate { font-size: 22px; font-weight: 800; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.fx-updated { font-size: 10.5px; color: var(--text-muted); white-space: nowrap; }
+
+@media (max-width: 900px) {
+  /* Label above, banks in a row underneath -- three columns still fit on a phone at this size. */
+  .fx-strip .fx-row { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; padding: 14px 16px; }
+  .fx-label { grid-column: 1 / -1; border-right: 0; padding-right: 0; }
+  .fx-logo { height: 20px; }
+  .fx-rate { font-size: 18px; }
+  .fx-updated { white-space: normal; }
+}

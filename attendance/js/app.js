@@ -3,7 +3,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 83;
+const APP_BUILD = 84;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -18985,7 +18985,7 @@ function fixStaticText() {
     dashPage.innerHTML = `
       <div id="dash-announcements" class="announcements-board mb-6"></div>
 
-      <div class="grid grid-4 mb-6" id="dash-stats-row">
+      <div class="grid grid-3 mb-6" id="dash-stats-row">
         <div class="stat-card" onclick="showCheckinStatusModal()" style="cursor:pointer" title="${L('Click to view details', 'คลิกเพื่อดูรายละเอียด')}">
           <div class="stat-icon blue">👥</div>
           <div class="stat-info">
@@ -19010,26 +19010,41 @@ function fixStaticText() {
             <div class="sub" id="dash-today-leave-sub"></div>
           </div>
         </div>
-        <div class="stat-card exrate-card" style="flex-direction:column;align-items:flex-start;gap:8px">
-          <div style="font-size:13px;color:#64748b;line-height:1.4;width:100%">${L('Exchange Rate', 'อัตราการแลกเปลี่ยน')} JPY/THB (TTB)</div>
-          <div style="display:flex;gap:12px;width:100%;padding-top:2px">
-            <div style="flex:1;min-width:0">
-              <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/9/9e/Smbc_logo.svg/960px-Smbc_logo.svg.png" alt="SMBC" title="SMBC Trust Bank" style="width:100%;height:auto;max-height:32px;object-fit:contain;object-position:left center;margin-bottom:8px">
-              <div style="display:flex;align-items:baseline;gap:5px;flex-wrap:wrap"><div style="font-size:26px;font-weight:800;color:#16a34a;line-height:1.1" id="dash-rate-smbc">—</div><span class="rate-arrow" id="dash-rate-smbc-arrow"></span></div>
-              <div style="font-size:10px;color:#94a3b8;margin-top:2px" id="dash-rate-smbc-date"></div>
+      </div>
+
+      <!-- 2026-09-26 (owner): the rate is its own full-width strip under the stat row, as in the
+           agreed mockup -- three banks side by side with room for the logo, the rate, the change
+           and each bank's own publication time. Squeezed into a fourth stat card it was the
+           densest thing on the page, with the dates wrapping onto three lines. -->
+      <div class="card fx-strip mb-6">
+        <div class="fx-row">
+          <div class="fx-label">
+            ${L('Exchange rate', 'อัตราแลกเปลี่ยน')} JPY / THB
+            <div class="fx-label-sub">${L('TT buying rate', 'เรตซื้อ (TTB)')}</div>
+          </div>
+          <div class="fx-bank">
+            <img class="fx-logo" src="https://upload.wikimedia.org/wikipedia/commons/thumb/9/9e/Smbc_logo.svg/960px-Smbc_logo.svg.png" alt="SMBC" title="SMBC Trust Bank">
+            <div class="fx-rate-line">
+              <span class="fx-rate" style="color:#16a34a" id="dash-rate-smbc">—</span>
+              <span class="rate-arrow" id="dash-rate-smbc-arrow"></span>
             </div>
-            <div style="width:1px;background:#e2e8f0;align-self:stretch"></div>
-            <div style="flex:1;min-width:0">
-              <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/1/14/Mizuho_Bank_logo.svg/960px-Mizuho_Bank_logo.svg.png" alt="Mizuho" title="Mizuho Bank" style="width:100%;height:auto;max-height:32px;object-fit:contain;object-position:left center;margin-bottom:8px">
-              <div style="display:flex;align-items:baseline;gap:5px;flex-wrap:wrap"><div style="font-size:26px;font-weight:800;color:#2563eb;line-height:1.1" id="dash-rate-mizuho">—</div><span class="rate-arrow" id="dash-rate-mizuho-arrow"></span></div>
-              <div style="font-size:10px;color:#94a3b8;margin-top:2px" id="dash-rate-mizuho-date"></div>
+            <div class="fx-updated" id="dash-rate-smbc-date"></div>
+          </div>
+          <div class="fx-bank">
+            <img class="fx-logo" src="https://upload.wikimedia.org/wikipedia/commons/thumb/1/14/Mizuho_Bank_logo.svg/960px-Mizuho_Bank_logo.svg.png" alt="Mizuho" title="Mizuho Bank">
+            <div class="fx-rate-line">
+              <span class="fx-rate" style="color:#2563eb" id="dash-rate-mizuho">—</span>
+              <span class="rate-arrow" id="dash-rate-mizuho-arrow"></span>
             </div>
-            <div style="width:1px;background:#e2e8f0;align-self:stretch"></div>
-            <div style="flex:1;min-width:0">
-              <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/d/d3/Resona_Bank_logo.svg/960px-Resona_Bank_logo.svg.png" alt="Resona" title="Resona Bank" style="width:100%;height:auto;max-height:32px;object-fit:contain;object-position:left center;margin-bottom:8px">
-              <div style="display:flex;align-items:baseline;gap:5px;flex-wrap:wrap"><div style="font-size:26px;font-weight:800;color:#dc2626;line-height:1.1" id="dash-rate-resona">—</div><span class="rate-arrow" id="dash-rate-resona-arrow"></span></div>
-              <div style="font-size:10px;color:#94a3b8;margin-top:2px" id="dash-rate-resona-date"></div>
+            <div class="fx-updated" id="dash-rate-mizuho-date"></div>
+          </div>
+          <div class="fx-bank">
+            <img class="fx-logo" src="https://upload.wikimedia.org/wikipedia/commons/thumb/d/d3/Resona_Bank_logo.svg/960px-Resona_Bank_logo.svg.png" alt="Resona" title="Resona Bank">
+            <div class="fx-rate-line">
+              <span class="fx-rate" style="color:#dc2626" id="dash-rate-resona">—</span>
+              <span class="rate-arrow" id="dash-rate-resona-arrow"></span>
             </div>
+            <div class="fx-updated" id="dash-rate-resona-date"></div>
           </div>
         </div>
       </div>
