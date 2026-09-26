@@ -5957,7 +5957,23 @@ async function fetchExchangeRate() {
       const bank = data[b];
       const rateEl = document.getElementById(`dash-rate-${b}`);
       const dateEl = document.getElementById(`dash-rate-${b}-date`);
-      if (rateEl) rateEl.textContent = (bank && !bank.error && typeof bank.ttb === 'number') ? bank.ttb.toFixed(2) : 'N/A';
+      const hasRate = bank && !bank.error && typeof bank.ttb === 'number';
+      if (rateEl) {
+        rateEl.textContent = hasRate ? bank.ttb.toFixed(2) : 'N/A';
+        const arrowEl = document.getElementById(`dash-rate-${b}-arrow`);
+        if (arrowEl) {
+          // Only from the second publication onwards -- before that there is nothing to compare
+          // against and an arrow would be a guess. 'same' is rendered too, so a day where the
+          // bank republished an unchanged rate is not mistaken for missing data.
+          const d = hasRate ? bank.dir : null;
+          const delta = (hasRate && typeof bank.prev === 'number') ? bank.ttb - bank.prev : null;
+          arrowEl.className = 'rate-arrow' + (d ? ' ' + d : '');
+          arrowEl.textContent = !d ? ''
+            : d === 'same' ? '='
+            : (d === 'up' ? '▲' : '▼') + ' ' + Math.abs(delta).toFixed(2);
+          arrowEl.title = !d ? '' : `${L('Previous', 'ครั้งก่อน')}: ${bank.prev.toFixed(2)}`;
+        }
+      }
       if (dateEl) {
         const raw = (bank && bank.updatedAt) || '';
         const fmt = raw ? raw.replace(/^(\d{4})\/(\d{2})\/(\d{2})(.*)/, '$3/$2/$1$4') : '';
@@ -18740,19 +18756,19 @@ function fixStaticText() {
           <div style="display:flex;gap:12px;width:100%;padding-top:2px">
             <div style="flex:1;min-width:0">
               <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/9/9e/Smbc_logo.svg/960px-Smbc_logo.svg.png" alt="SMBC" title="SMBC Trust Bank" style="width:100%;height:auto;max-height:32px;object-fit:contain;object-position:left center;margin-bottom:8px">
-              <div style="font-size:26px;font-weight:800;color:#16a34a;line-height:1.1" id="dash-rate-smbc">—</div>
+              <div style="display:flex;align-items:baseline;gap:5px;flex-wrap:wrap"><div style="font-size:26px;font-weight:800;color:#16a34a;line-height:1.1" id="dash-rate-smbc">—</div><span class="rate-arrow" id="dash-rate-smbc-arrow"></span></div>
               <div style="font-size:10px;color:#94a3b8;margin-top:2px" id="dash-rate-smbc-date"></div>
             </div>
             <div style="width:1px;background:#e2e8f0;align-self:stretch"></div>
             <div style="flex:1;min-width:0">
               <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/1/14/Mizuho_Bank_logo.svg/960px-Mizuho_Bank_logo.svg.png" alt="Mizuho" title="Mizuho Bank" style="width:100%;height:auto;max-height:32px;object-fit:contain;object-position:left center;margin-bottom:8px">
-              <div style="font-size:26px;font-weight:800;color:#2563eb;line-height:1.1" id="dash-rate-mizuho">—</div>
+              <div style="display:flex;align-items:baseline;gap:5px;flex-wrap:wrap"><div style="font-size:26px;font-weight:800;color:#2563eb;line-height:1.1" id="dash-rate-mizuho">—</div><span class="rate-arrow" id="dash-rate-mizuho-arrow"></span></div>
               <div style="font-size:10px;color:#94a3b8;margin-top:2px" id="dash-rate-mizuho-date"></div>
             </div>
             <div style="width:1px;background:#e2e8f0;align-self:stretch"></div>
             <div style="flex:1;min-width:0">
               <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/d/d3/Resona_Bank_logo.svg/960px-Resona_Bank_logo.svg.png" alt="Resona" title="Resona Bank" style="width:100%;height:auto;max-height:32px;object-fit:contain;object-position:left center;margin-bottom:8px">
-              <div style="font-size:26px;font-weight:800;color:#dc2626;line-height:1.1" id="dash-rate-resona">—</div>
+              <div style="display:flex;align-items:baseline;gap:5px;flex-wrap:wrap"><div style="font-size:26px;font-weight:800;color:#dc2626;line-height:1.1" id="dash-rate-resona">—</div><span class="rate-arrow" id="dash-rate-resona-arrow"></span></div>
               <div style="font-size:10px;color:#94a3b8;margin-top:2px" id="dash-rate-resona-date"></div>
             </div>
           </div>

@@ -3647,3 +3647,17 @@ tr.finalize-row-confirmed:hover td {
   background: #fbfcfe;
 }
 [data-theme="dark"] .announcements-composer-collapsed { background: rgba(255,255,255,0.03); }
+
+/* 2026-09-26: ▲▼ next to each bank's rate. Green up / red down is the convention for a rate
+   going up or down; it deliberately does not try to say whether that is good news, which
+   depends on which way you are changing money. */
+.rate-arrow {
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+.rate-arrow.up   { color: #16a34a; }
+.rate-arrow.down { color: #dc2626; }
+.rate-arrow.same { color: #94a3b8; }

@@ -8224,6 +8224,55 @@ function fetchMizuhoResonaRates() {
 // guarantee, one hung SMBC connection would have wedged every subsequent request behind a
 // permanently-pending promise instead of just failing its own.
 let _exRateInflight = null;
+
+// 2026-09-26 (owner): the dashboard shows each bank's TT buying rate but never said whether it
+// had moved. The banks publish once a day, so "since last time" has to mean "since the previous
+// publication", not "since the previous fetch" -- a browser refresh must not zero the arrow.
+// The last two publications per bank are kept in a small file next to the other data.
+const EXRATE_STATE_FILE = path.join(DATA_DIR, 'exchange-rate-state.json');
+function readExRateState() {
+  try {
+    const raw = fs.readFileSync(EXRATE_STATE_FILE, 'utf8');
+    const o = JSON.parse(raw);
+    return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {};
+  } catch (_) {
+    return {};
+  }
+}
+// Returns the payload with `prev` and `dir` filled in per bank, and persists the state when a
+// bank has published a new rate. A bank that errored, or whose rate is not a finite number, is
+// left exactly as it was -- it must not overwrite a good stored value with nothing.
+function annotateExRateChange(data) {
+  const state = readExRateState();
+  let dirty = false;
+  for (const bank of ['smbc', 'mizuho', 'resona']) {
+    const node = data[bank];
+    if (!node || node.error || typeof node.ttb !== 'number' || !Number.isFinite(node.ttb)) continue;
+    const prevEntry = state[bank];
+    const stamp = node.updatedAt || '';
+    if (!prevEntry) {
+      state[bank] = { updatedAt: stamp, ttb: node.ttb, prevTtb: null };
+      dirty = true;
+    } else if (prevEntry.updatedAt !== stamp || prevEntry.ttb !== node.ttb) {
+      // a new publication: what was current becomes previous
+      state[bank] = { updatedAt: stamp, ttb: node.ttb, prevTtb: prevEntry.ttb };
+      dirty = true;
+    }
+    const prevTtb = state[bank].prevTtb;
+    node.prev = (typeof prevTtb === 'number' && Number.isFinite(prevTtb)) ? prevTtb : null;
+    node.dir = node.prev === null ? null : (node.ttb > node.prev ? 'up' : (node.ttb < node.prev ? 'down' : 'same'));
+  }
+  if (dirty) {
+    try {
+      atomicWrite(EXRATE_STATE_FILE, JSON.stringify(state, null, 2));
+    } catch (e) {
+      // the arrows are decoration -- a failed write must never fail the rates themselves
+      console.error('[EXRATE] could not persist rate state:', e.message);
+    }
+  }
+  return data;
+}
+
 app.get('/api/exchange-rate', async (req, res) => {
   try {
     const now = Date.now();
@@ -8237,7 +8286,7 @@ app.get('/api/exchange-rate', async (req, res) => {
     const smbcOk = (b) => b && !b.error && typeof b.ttb === 'number';
     const smbc = smbcOk(smbcNode) ? smbcNode : (smbcOk(other.smbc) ? other.smbc : smbcNode);
     if (!smbcOk(smbc)) console.error('[EXRATE] SMBC failed:', smbc && smbc.error);
-    const data = { smbc, mizuho: other.mizuho, resona: other.resona, fetchedAt: new Date().toISOString() };
+    const data = annotateExRateChange({ smbc, mizuho: other.mizuho, resona: other.resona, fetchedAt: new Date().toISOString() });
     // Do not cache a partial/error payload -- one SMBC timeout used to pin N/A on the dashboard
     // for the full 60s even though the next fetch would have succeeded.
     if (smbcOk(smbc) && smbcOk(other.mizuho) && smbcOk(other.resona)) {
