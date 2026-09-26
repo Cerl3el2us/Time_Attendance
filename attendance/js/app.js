@@ -8347,19 +8347,36 @@ function renderTodayLog(scans) {
 
   // แสดง 4 รายการล่าสุด (scans เรียงจากเก่าไปใหม่ แสดงใหม่ก่อน)
   const visible = scans.slice(-LOG_MAX_VISIBLE).reverse();
+  const lateCheckInTime = todaysLateCheckInTime();
   visible.forEach(e => {
-    container.appendChild(buildLogItem(e));
+    container.appendChild(buildLogItem(e, lateCheckInTime));
   });
 
   if (moreBtn) moreBtn.style.display = scans.length > LOG_MAX_VISIBLE ? '' : 'none';
 }
 
-function buildLogItem(e) {
+// 2026-09-26 (owner): the check-in time reads green, and red when that check-in was late.
+// The scan events themselves carry no lateness -- it lives on the day's attendance record, so
+// it is read once per render and matched against the record's own checkIn time (a later 'in'
+// scan on the same day is not the one that was late). An approved Abroad day is never late,
+// the same exemption buildAttendanceLogForUser() applies.
+function todaysLateCheckInTime() {
+  if (!currentUser) return null;
+  const dateStr = businessDateStr();
+  const key = attKey(currentUser.id, dateStr);
+  const rec = attendanceLog[key];
+  if (!rec || rec.status !== 'late' || !rec.checkIn) return null;
+  if (isApprovedAbroadDate(dateStr, currentUser.id)) return null;
+  return rec.checkIn;
+}
+
+function buildLogItem(e, lateCheckInTime) {
   const isDevice = e.source === 'device';
   const isIn     = e.type === 'in';
+  const isLateIn = isIn && !!lateCheckInTime && e.time === lateCheckInTime;
   const label    = isIn ? L('Check In', 'เข้างาน') : L('Check Out (latest)', 'บันทึกออก (ล่าสุด)');
   const el = document.createElement('div');
-  el.className = `log-item ${isIn ? 'in' : 'out'}`;
+  el.className = `log-item ${isIn ? 'in' : 'out'}${isLateIn ? ' late-in' : ''}`;
   el.innerHTML = `
     <div class="log-icon ${isIn ? 'in' : 'out'}">${isIn ? '🟢' : '🔴'}</div>
     <div class="log-info">
@@ -8402,7 +8419,8 @@ function showFullLog() {
   if (scans.length === 0) {
     listEl.innerHTML = `<p style="text-align:center;padding:24px;color:#94a3b8">${L('No data', 'ยังไม่มีข้อมูล')}</p>`;
   } else {
-    [...scans].reverse().forEach(e => listEl.appendChild(buildLogItem(e)));
+    const lateCheckInTime = todaysLateCheckInTime();
+    [...scans].reverse().forEach(e => listEl.appendChild(buildLogItem(e, lateCheckInTime)));
   }
   document.getElementById('full-log-modal').classList.add('show');
 }
@@ -9474,14 +9492,18 @@ function renderDashboard() {
     renderUserTodayPanel(panel);
     renderUserRequestsPanel(rightPanel);
   } else {
-    // "Staff Status Today" (renderAllStaffPanel) removed 2026-07-13 — merged into
-    // renderCheckinStatusWidget() below to avoid showing the same checked-in/late data twice.
+    // "Staff Status Today" (renderAllStaffPanel) removed 2026-07-13, merged into the
+    // who-is-in widget -- which was itself removed 2026-09-26 (see below). Admin roles read
+    // the same data from the clickable "Check-in today" stat card.
     if (panelGrid) panelGrid.style.gridTemplateColumns = '1fr';
     panel.style.display = 'none';
     renderPendingApprovalsPanel(rightPanel);
   }
 
-  renderCheckinStatusWidget();
+  // 2026-09-26 (owner): the "Who is In Right Now" card was removed from the dashboard -- it
+  // repeated the "Check-in today" stat card, which is itself clickable and opens the same
+  // list in full via showCheckinStatusModal(). Nothing was lost, and the dashboard fits one
+  // screen on a 14" notebook again.
   loadAndRenderAnnouncements();
 }
 
@@ -9530,6 +9552,18 @@ async function loadAndRenderAnnouncements() {
   renderAnnouncementsBoard();
 }
 
+// 2026-09-26 (owner): the composer used to sit open on every dashboard load, taking the top
+// of the page to hold nothing. It is collapsed to a button until someone means to write.
+let _announcementComposerOpen = false;
+function toggleAnnouncementComposer(open) {
+  _announcementComposerOpen = !!open;
+  renderAnnouncementsBoard();
+  if (_announcementComposerOpen) {
+    const ta = document.getElementById('ann-new-body');
+    if (ta) ta.focus();
+  }
+}
+
 function renderAnnouncementsBoard() {
   const el = document.getElementById('dash-announcements');
   if (!el) return;
@@ -9562,12 +9596,17 @@ function renderAnnouncementsBoard() {
     : `<div class="announcement-empty">${L('No announcements yet — be the first to post.', 'ยังไม่มีประกาศ — โพสต์แรกได้เลย')}</div>`;
 
   const composer = canWrite
-    ? `<div class="announcements-composer">
-         <textarea id="ann-new-body" maxlength="1000" placeholder="${L('Write a company announcement…', 'เขียนประกาศบริษัท…')}"></textarea>
-         <div class="announcements-composer-actions">
-           <button type="button" class="btn btn-primary btn-sm" onclick="createAnnouncement()">${L('Post announcement', 'บันทึกประกาศ')}</button>
-         </div>
-       </div>`
+    ? (_announcementComposerOpen
+        ? `<div class="announcements-composer">
+             <textarea id="ann-new-body" maxlength="1000" placeholder="${L('Write a company announcement…', 'เขียนประกาศบริษัท…')}"></textarea>
+             <div class="announcements-composer-actions">
+               <button type="button" class="btn btn-primary btn-sm" onclick="createAnnouncement()">${L('Post announcement', 'บันทึกประกาศ')}</button>
+               <button type="button" class="btn btn-ghost btn-sm" onclick="toggleAnnouncementComposer(false)">${L('Cancel', 'ยกเลิก')}</button>
+             </div>
+           </div>`
+        : `<div class="announcements-composer-collapsed">
+             <button type="button" class="btn btn-ghost btn-sm" onclick="toggleAnnouncementComposer(true)">+ ${L('Write an announcement', 'เขียนประกาศ')}</button>
+           </div>`)
     : '';
 
   el.innerHTML = `
@@ -9612,6 +9651,7 @@ async function createAnnouncement() {
       return;
     }
     _editingAnnouncementId = null;
+    _announcementComposerOpen = false;
     renderAnnouncementsBoard();
     showToast(L('✅ Announcement posted', '✅ โพสต์ประกาศแล้ว'), 'success');
   } catch (e) {
@@ -18328,45 +18368,6 @@ function closeCheckinStatusModal() {
 }
 
 // ===== DASHBOARD LIVE CHECK-IN WIDGET (always-visible, updates via the existing WS SCAN_EVENT pipeline) =====
-function renderCheckinStatusWidget() {
-  const widget = document.getElementById('dash-checkin-widget');
-  if (!widget) return;
-
-  const { checkedIn, notChecked } = getCheckinStatusLists();
-  const WIDGET_ROW_CAP = 8;
-
-  const avatar = u => u.facePhoto
-    ? `<img src="${escapeHtml(u.facePhoto)}" style="width:28px;height:28px;border-radius:50%;object-fit:cover;flex-shrink:0">`
-    : `<div style="width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,#2563eb,#06b6d4);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:12px;flex-shrink:0">${escapeHtml(u.name.charAt(0))}</div>`;
-
-  const shownIn = checkedIn.slice(0, WIDGET_ROW_CAP);
-  const inRows = shownIn.map(item => `
-    <div style="display:flex;align-items:center;gap:10px;padding:7px 4px">
-      ${avatar(item.user)}
-      <div style="flex:1;min-width:0">
-        <div style="font-weight:600;color:#1e293b;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(item.user.name)}</div>
-        <div style="font-size:11px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(item.user.position || '')}</div>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
-        ${item.isLate ? `<span class="badge badge-warning">⏰ ${L('Late', 'มาสาย')}</span>` : `<span class="badge badge-success">✅ ${L('Present', 'มาแล้ว')}</span>`}
-        <span style="font-weight:700;font-size:12.5px;color:${item.isLate ? '#d97706' : '#059669'};min-width:44px;text-align:right">${item.isLate ? '🟡' : '🟢'} ${escapeHtml(item.time)}</span>
-      </div>
-    </div>`).join('');
-
-  const remaining = checkedIn.length - shownIn.length;
-
-  widget.innerHTML = `
-    <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-      <h3 style="flex:1">🟢 ${L('Who is In Right Now', 'ใครอยู่ในออฟฟิศตอนนี้')}</h3>
-      <span style="font-size:12px;color:#718096">${currentLang === 'ja' ? `出勤${checkedIn.length}名` : L(`${checkedIn.length} in`, `เข้างานแล้ว ${checkedIn.length}`)} · ${currentLang === 'ja' ? `未出勤${notChecked.length}名` : L(`${notChecked.length} not yet`, `ยังไม่เข้า ${notChecked.length}`)}</span>
-    </div>
-    <div class="card-body" style="padding:8px 16px">
-      ${inRows || `<div style="padding:16px 4px;text-align:center;color:#94a3b8;font-size:13px">${L('No one has checked in yet', 'ยังไม่มีใครเข้างาน')}</div>`}
-      ${remaining > 0 ? `<div style="text-align:center;padding-top:4px"><a href="#" onclick="event.preventDefault();showCheckinStatusModal()" style="font-size:12.5px;color:#2563eb;font-weight:600">${currentLang === 'ja' ? `他${remaining}名 — すべて表示` : L(`+${remaining} more — view all`, `+อีก ${remaining} คน — ดูทั้งหมด`)}</a></div>` : ''}
-      ${remaining <= 0 && (checkedIn.length > 0 || notChecked.length > 0) ? `<div style="text-align:center;padding-top:4px"><a href="#" onclick="event.preventDefault();showCheckinStatusModal()" style="font-size:12.5px;color:#2563eb;font-weight:600">${L('View full status', 'ดูสถานะทั้งหมด')}</a></div>` : ''}
-    </div>`;
-}
-
 // ===== TOAST =====
 function showToast(msg, type = 'info') {
   const container = document.getElementById('toast-container');
@@ -18709,10 +18710,6 @@ function fixStaticText() {
     dashPage.innerHTML = `
       <div id="dash-announcements" class="announcements-board mb-6"></div>
 
-      <div class="alert alert-info mb-6">
-        📡 ${L('Connected to Hikvision DS-K1T342MFX and Synology DS923+', 'ระบบเชื่อมต่อกับ Hikvision DS-K1T342MFX และ Synology DS923+ แล้ว')}
-      </div>
-
       <div class="grid grid-4 mb-6" id="dash-stats-row">
         <div class="stat-card" onclick="showCheckinStatusModal()" style="cursor:pointer" title="${L('Click to view details', 'คลิกเพื่อดูรายละเอียด')}">
           <div class="stat-icon blue">👥</div>
@@ -18766,8 +18763,6 @@ function fixStaticText() {
         <div id="dash-left-panel"></div>
         <div id="dash-right-panel"></div>
       </div>
-
-      <div class="card mt-4" id="dash-checkin-widget"></div>
 
       <div id="dash-period-stats-wrap" class="card mt-4" style="display:none">
         <div class="card-header">

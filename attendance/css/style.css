@@ -873,7 +873,11 @@ body {
 .log-icon.out { background: #fee2e2; }
 
 .log-info { flex: 1; }
-.log-info .time { font-size: 18px; font-weight: 700; color: var(--primary); }
+/* 2026-09-26 (owner): the time itself carries the status -- green for a time that was
+   recorded, red for a check-in that was late. Weight is unchanged; the owner asked for the
+   colour alone, not bold. The check-out time always uses the on-time green. */
+.log-info .time { font-size: 18px; font-weight: 700; color: #059669; }
+.log-item.late-in .log-info .time { color: var(--danger); }
 .log-info .label { font-size: 12px; color: var(--text-muted); }
 
 .log-source {
@@ -2986,6 +2990,10 @@ tr.finalize-row-confirmed:hover td {
 [data-theme="dark"] .req-card-label { color: var(--text) !important; }
 /* Today log items (dashboard check-in/out list) */
 [data-theme="dark"] .log-item { background: #0f172a; }
+/* #059669 / --danger are tuned for a white card; on #0f172a they fall under the contrast
+   minimum for this size, so the dark theme uses the lighter pair already used by .time-chip. */
+[data-theme="dark"] .log-info .time { color: #34d399; }
+[data-theme="dark"] .log-item.late-in .log-info .time { color: #fca5a5; }
 [data-theme="dark"] .log-icon.in { background: rgba(16,185,129,0.18); }
 [data-theme="dark"] .log-icon.out { background: rgba(239,68,68,0.18); }
 /* Today card in attendance page */
@@ -3629,3 +3637,13 @@ tr.finalize-row-confirmed:hover td {
   color: rgba(255,255,255,0.55);
   user-select: none;
 }
+
+/* 2026-09-26: the announcement composer is collapsed to a button until someone means to
+   write one (see toggleAnnouncementComposer). Same padding and top border as the open
+   composer so the card does not change shape when it opens. */
+.announcements-composer-collapsed {
+  padding: 10px 20px;
+  border-top: 1px solid var(--border);
+  background: #fbfcfe;
+}
+[data-theme="dark"] .announcements-composer-collapsed { background: rgba(255,255,255,0.03); }
