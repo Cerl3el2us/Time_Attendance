@@ -3553,16 +3553,28 @@ tr.finalize-row-confirmed:hover td {
   from { opacity: 0; transform: translateY(12px); }
   to   { opacity: 1; transform: none; }
 }
-#page-dashboard.ta-entering { animation: none; }
-#page-dashboard.ta-entering > * {
+/* 2026-09-26 (owner): every page, not only the dashboard. A page built from several blocks
+   (dashboard, attendance, approvals, payslip) gets the stagger; a page that is one wrapper
+   gets a single rise, which still reads better than the flat fade it had. The parent's own
+   fade is switched off wherever the children animate, so the two never compound. */
+.page.ta-entering { animation: none; }
+.page.ta-entering > * {
   animation: ta-rise-in 300ms cubic-bezier(0.4, 0, 0.2, 1) backwards;
 }
-#page-dashboard.ta-entering > *:nth-child(1) { animation-delay: 0ms; }
-#page-dashboard.ta-entering > *:nth-child(2) { animation-delay: 45ms; }
-#page-dashboard.ta-entering > *:nth-child(3) { animation-delay: 90ms; }
-#page-dashboard.ta-entering > *:nth-child(4) { animation-delay: 135ms; }
-#page-dashboard.ta-entering > *:nth-child(5) { animation-delay: 165ms; }
-#page-dashboard.ta-entering > *:nth-child(n+6) { animation-delay: 190ms; }
+.page.ta-entering > *:nth-child(1) { animation-delay: 0ms; }
+.page.ta-entering > *:nth-child(2) { animation-delay: 45ms; }
+.page.ta-entering > *:nth-child(3) { animation-delay: 90ms; }
+.page.ta-entering > *:nth-child(4) { animation-delay: 135ms; }
+.page.ta-entering > *:nth-child(5) { animation-delay: 165ms; }
+.page.ta-entering > *:nth-child(n+6) { animation-delay: 190ms; }
+
+/* A row that has just been written by a scan slides in, so the new line announces itself
+   instead of the list silently growing. */
+@keyframes ta-row-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: none; }
+}
+.log-item.just-added { animation: ta-row-in 260ms cubic-bezier(0.4, 0, 0.2, 1); }
 
 /* -- Press feedback ------------------------------------------------------
    .btn and .scan-btn already had an :active state; these never did, so a tap on a phone
@@ -3982,3 +3994,62 @@ tr.finalize-row-confirmed:hover td {
   white-space: nowrap;
 }
 [data-theme="dark"] .faq-search-clear:hover { background: rgba(255,255,255,0.08); }
+
+/* ===== 2026-09-26: screens wider than the 14" notebooks =====
+   The app had no min-width rule at all, so on a 27"/32" monitor the content simply stretched:
+   at 2560px the stat cards become ~560px wide and body text runs a full line across the desk.
+   Height does not improve from that -- measured at 1920 the dashboard is the same 1027px tall
+   as at 1366 -- so the extra width was buying nothing.
+
+   This is the ONLY min-width rule in the file. Below 1800px nothing here is read at all, so a
+   14" laptop and a phone get exactly the CSS they got before. The FAQ (820px) and Settings
+   (860px) containers already cap and centre themselves, and the payslip document is 820px --
+   this is for the pages that had no cap: dashboard, attendance, employees, approvals, reports.
+
+   1700px was chosen so a 1920-wide window is untouched (its content area is 1646px) -- only
+   genuinely wide monitors are reined in. */
+@media (min-width: 1800px) {
+  .page-content {
+    max-width: 1700px;
+    margin-left: auto;
+    margin-right: auto;
+    width: 100%;
+  }
+}
+
+/* ===== 2026-09-26 (owner): the dashboard below the stat row is two columns =====
+   The period summary is the tallest block on the page; beside the panels rather than under
+   them, the dashboard loses roughly the height of the shorter column. */
+.dash-lower {
+  display: grid;
+  /* Not 1fr 1fr: measured at 1366, half-and-half makes the period summary wrap into 1.81
+     screens -- worse than the stacked layout it replaced. The panels are short and narrow by
+     nature, the summary is a row of tiles that wants width. 360px + the rest = 1.49 screens. */
+  grid-template-columns: 360px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  margin-top: 16px;
+}
+.dash-lower.one-col { grid-template-columns: 1fr; }
+.dash-lower-col { min-width: 0; display: flex; flex-direction: column; gap: 16px; }
+.dash-lower.one-col #dash-lower-b { display: none; }
+@media (max-width: 1024px) {
+  .dash-lower { grid-template-columns: 1fr; }
+}
+
+/* An empty announcements board is one line, not a card holding a sentence that says it is
+   empty. It grows back into the full card as soon as something is posted or the composer opens. */
+.announcements-board-empty {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+.announcements-empty-label { font-size: 13px; font-weight: 600; color: var(--text-muted); }
+[data-theme="dark"] .announcements-board-empty { background: var(--bg-card); border-color: var(--border); }

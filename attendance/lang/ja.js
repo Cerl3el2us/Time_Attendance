@@ -1453,11 +1453,11 @@ window.LANG_JA = {
   "Web check-in requires your location — please allow location access, or use the face scanner at the office.":
     "Web出勤打刻には位置情報が必要です。ブラウザで位置情報を許可するか、オフィスの顔認証端末をご利用ください。",
   // 2026-09-25: Settings page card for the geofence (MD/Accounting can edit the office area).
-  "Web check-in area": "Web打刻の対象エリア",
-  "Enforce the check-in area": "打刻エリアを適用する",
+  "Area where web check-in is blocked": "Web打刻を禁止するエリア",
+  "Block web check-in inside this area": "このエリア内ではWeb打刻を禁止する",
   "Latitude": "緯度",
   "Longitude": "経度",
   "Radius (m)": "半径（メートル）",
-  "Inside this radius, check-in must use the face scanner.": "この半径の中では、出勤打刻は顔認証端末をご利用ください。",
+  "Inside this radius the web check-in button is refused — people must scan their face at the device. Outside it, web check-in works normally.": "この半径の中ではWebからの打刻はできません。顔認証端末で打刻してください。半径の外では通常どおりWeb打刻ができます。",
   "Drivers are always exempt from this check.": "運転手は常にこの確認の対象外です。",
 };

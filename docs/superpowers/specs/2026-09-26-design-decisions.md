@@ -87,3 +87,20 @@ number in the file against `git rev-list --count HEAD` so it cannot silently go 
   document pages exempt.
 - The ▲▼ indicators need the server to store each bank's last published rate and compare on the next
   fetch — roughly 15 lines, and the arrows only appear from the second publication onwards.
+
+## Parked — diligence allowance eligibility (owner, 2026-09-26)
+
+Today the per-employee, per-period toggle in Finalize Payroll is entirely manual: it appears
+for anyone whose role is ticked for `diligence` in Settings and whose configured amount is
+above 0, and it locks once the period is confirmed. Turning another role on in Settings gives
+that role the same toggle automatically — no code change needed.
+
+What accounting actually wants is for a month with lateness or absence to lose the allowance,
+and right now nothing links the two: if accounting forgets to switch it off, the allowance is
+paid with no warning. Three options were put to the owner — (A) show "late 2 · absent 1" next
+to the toggle, (B) also colour it and warn at Confirm, (C) switch it off automatically with an
+override. A and B were recommended; C only once the rule is firm, since it moves money by
+itself.
+
+Blocked on two answers: how many late arrivals disqualify, and what counts as an absence
+(does sick leave count? personal leave? only unexcused?). Parked by the owner until later.

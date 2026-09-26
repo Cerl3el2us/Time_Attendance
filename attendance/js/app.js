@@ -4693,17 +4693,17 @@ function renderSettingsPage(_skipRefresh) {
       )}
     `)}
 
-    ${adminSection('time', '📍', L('Web check-in area','พื้นที่เช็คอินผ่านเว็บ'), `
+    ${adminSection('time', '📍', L('Area where web check-in is blocked','พื้นที่ห้ามเช็คอินผ่านเว็บ'), `
       <label style="display:flex;align-items:center;gap:8px;margin:0 0 12px;font-size:13px;font-weight:600;color:#374151;cursor:pointer">
         <input id="set-geo-enabled" type="checkbox" ${s.geofence.enabled ? 'checked' : ''} style="width:18px;height:18px;cursor:pointer">
-        ${L('Enforce the check-in area','บังคับใช้พื้นที่เช็คอิน')}
+        ${L('Block web check-in inside this area','ห้ามเช็คอินผ่านเว็บภายในพื้นที่นี้')}
       </label>
       ${row2(
         field(L('Latitude','ละติจูด'), inp('set-geo-lat', s.geofence.lat, 'number', 'step="0.0000001"')),
         field(L('Longitude','ลองจิจูด'), inp('set-geo-lng', s.geofence.lng, 'number', 'step="0.0000001"'))
       )}
       <div style="margin-bottom:12px">${field(L('Radius (m)','รัศมี (เมตร)'), inp('set-geo-radius', s.geofence.radiusM, 'number', 'min="10" max="5000"'))}</div>
-      <div style="font-size:12px;color:#64748b;margin:4px 0 8px">${L('Inside this radius, check-in must use the face scanner.', 'ภายในรัศมีนี้ การลงเวลาเข้างานต้องสแกนใบหน้าที่เครื่อง')}</div>
+      <div style="font-size:12px;color:#64748b;margin:4px 0 8px">${L('Inside this radius the web check-in button is refused — people must scan their face at the device. Outside it, web check-in works normally.', 'ภายในรัศมีนี้ กดเช็คอินผ่านเว็บไม่ได้ ต้องสแกนใบหน้าที่เครื่อง นอกรัศมีเช็คอินผ่านเว็บได้ตามปกติ')}</div>
       <div style="font-size:11px;color:#94a3b8">${L('Drivers are always exempt from this check.','คนขับได้รับการยกเว้นจากการตรวจสอบนี้เสมอ')}</div>
     `)}
 
@@ -8375,6 +8375,8 @@ async function doScan(source) {
         const last = scanRec.scans[scanRec.scans.length - 1];
         last.at = stamped;
         last.gpsTz = data.gpsTz || null;
+        // Mark exactly the row this scan appended, so only it slides in.
+        _justScannedAt = last.at;
         renderTodayLog(scanRec.scans);
       }
     }
@@ -8513,9 +8515,14 @@ function renderTodayLog(scans) {
   // แสดง 4 รายการล่าสุด (scans เรียงจากเก่าไปใหม่ แสดงใหม่ก่อน)
   const visible = scans.slice(-LOG_MAX_VISIBLE).reverse();
   const lateCheckInTime = todaysLateCheckInTime();
-  visible.forEach(e => {
-    container.appendChild(buildLogItem(e, lateCheckInTime));
+  visible.forEach((e, i) => {
+    const row = buildLogItem(e, lateCheckInTime);
+    // Only the row this render just gained, and only once -- a re-render for any other reason
+    // (a colleague's scan, a language switch) must not replay it.
+    if (i === 0 && _justScannedAt && e.at === _justScannedAt) row.classList.add('just-added');
+    container.appendChild(row);
   });
+  _justScannedAt = null;
 
   if (moreBtn) moreBtn.style.display = scans.length > LOG_MAX_VISIBLE ? '' : 'none';
 }
@@ -8525,6 +8532,9 @@ function renderTodayLog(scans) {
 // it is read once per render and matched against the record's own checkIn time (a later 'in'
 // scan on the same day is not the one that was late). An approved Abroad day is never late,
 // the same exemption buildAttendanceLogForUser() applies.
+// Set by doScan() to the timestamp of the scan it just stored, so renderTodayLog can tell that
+// row apart from the four it is re-rendering.
+let _justScannedAt = null;
 function todaysLateCheckInTime() {
   if (!currentUser) return null;
   const dateStr = businessDateStr();
@@ -9489,6 +9499,17 @@ function geocodeTableGpsLinks() {
   });
 }
 
+// An MD sees no period summary, so the right column would be an empty half of the page --
+// the left column takes the full width in that case. Called after the panels are rendered, so
+// "empty" means empty of rendered content, not merely of markup.
+function syncDashboardLowerColumns() {
+  const lower = document.getElementById('dash-lower');
+  const colB = document.getElementById('dash-lower-b');
+  if (!lower || !colB) return;
+  const bHasContent = [...colB.children].some(el => el.offsetParent !== null || (el.style.display !== 'none' && el.innerHTML.trim()));
+  lower.classList.toggle('one-col', !bHasContent);
+}
+
 // ===== DASHBOARD =====
 function renderDashboard() {
   const statsWrap = document.getElementById('dash-period-stats-wrap');
@@ -9693,9 +9714,10 @@ function renderDashboard() {
   const panel = document.getElementById('dash-left-panel');
   const rightPanel = document.getElementById('dash-right-panel');
   if (!panel) return;
-  const panelGrid = panel.parentElement;
+  // The two columns live on #dash-lower now; the panels are stacked inside the left one, so the
+  // old per-role gridTemplateColumns juggling on the panels' own parent no longer applies.
+  syncDashboardLowerColumns();
   if (effectiveRole() === 'user' || effectiveRole() === 'marketing') {
-    if (panelGrid) panelGrid.style.gridTemplateColumns = '';
     panel.style.display = '';
     renderUserTodayPanel(panel);
     renderUserRequestsPanel(rightPanel);
@@ -9703,11 +9725,11 @@ function renderDashboard() {
     // "Staff Status Today" (renderAllStaffPanel) removed 2026-07-13, merged into the
     // who-is-in widget -- which was itself removed 2026-09-26 (see below). Admin roles read
     // the same data from the clickable "Check-in today" stat card.
-    if (panelGrid) panelGrid.style.gridTemplateColumns = '1fr';
     panel.style.display = 'none';
     renderPendingApprovalsPanel(rightPanel);
   }
 
+  syncDashboardLowerColumns();
   // 2026-09-26 (owner): the "Who is In Right Now" card was removed from the dashboard -- it
   // repeated the "Check-in today" stat card, which is itself clickable and opens the same
   // list in full via showCheckinStatusModal(). Nothing was lost, and the dashboard fits one
@@ -9825,6 +9847,16 @@ function renderAnnouncementsBoard() {
            </div>`)
     : '';
 
+  // 2026-09-26 (owner): with nothing posted and the composer closed, the whole board is one
+  // slim line instead of a 200px card whose only content is "there is nothing here".
+  if (!items.length && !_announcementComposerOpen) {
+    el.className = 'announcements-board announcements-board-empty mb-6';
+    el.innerHTML = `
+      <span class="announcements-empty-label">📢 ${L('Company Announcements', 'ประกาศบริษัท')} · ${L('nothing posted', 'ยังไม่มีประกาศ')}</span>
+      ${canWrite ? `<button type="button" class="btn btn-ghost btn-sm" onclick="toggleAnnouncementComposer(true)">+ ${L('Write an announcement', 'เขียนประกาศ')}</button>` : ''}`;
+    return;
+  }
+  el.className = 'announcements-board mb-6';
   el.innerHTML = `
     <div class="announcements-board-header">
       <h3>📢 ${L('Company Announcements', 'ประกาศบริษัท')}</h3>
@@ -18990,12 +19022,17 @@ function fixStaticText() {
         </div>
       </div>
 
-      <div class="grid grid-2 gap-4">
-        <div id="dash-left-panel"></div>
-        <div id="dash-right-panel"></div>
-      </div>
-
-      <div id="dash-period-stats-wrap" class="card mt-4" style="display:none">
+      <!-- 2026-09-26 (owner): everything below the stat row is two columns. The panels stack in
+           the left column and the period summary -- by far the tallest block -- sits beside them
+           instead of underneath, which is where the page's remaining height was going. One column
+           on a phone, and the left column goes full width when the right one is empty (MD). -->
+      <div class="dash-lower" id="dash-lower">
+        <div class="dash-lower-col" id="dash-lower-a">
+          <div id="dash-left-panel"></div>
+          <div id="dash-right-panel"></div>
+        </div>
+        <div class="dash-lower-col" id="dash-lower-b">
+      <div id="dash-period-stats-wrap" class="card" style="display:none">
         <div class="card-header">
           <h3>📊 <span id="dash-period-label"></span></h3>
           <div class="filter-bar">
@@ -19023,6 +19060,8 @@ function fixStaticText() {
           <div id="dash-role-stats-row"></div>
         </div>
       </div>
+        </div><!-- /dash-lower-b -->
+      </div><!-- /dash-lower -->
     `;
   }
 
