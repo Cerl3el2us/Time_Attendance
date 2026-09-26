@@ -985,6 +985,21 @@ test('freshness flags: set only after a genuinely successful load, and reset on 
   assert.ok(/currentGPS\s*=\s*null/.test(logoutFn), 'logout must still clear currentGPS');
 });
 
+// 2026-09-26 (review Minor-4): sw.js is network-first for GET /api/* with a cache fallback -- on a
+// failed live fetch it replays the last-cached 200 verbatim, stamped X-TA-From-Cache (apiFetch()
+// already reads this exact header to drive the offline banner). res.ok is true either way, so
+// without this check a settings/attendance response cached from before the owner turned the
+// geofence off (or before a real check-in landed) would count as "fresh" even though it is not.
+test('freshness flags: a stale service-worker-cached response does not count as fresh', () => {
+  const settingsFn = extractFunction(APP_SRC, 'loadSettingsFromBackend');
+  assert.ok(/if \(res\.headers\.get\('X-TA-From-Cache'\) !== '1'\) _geofenceSettingsFresh = true;/.test(settingsFn),
+    'a cache-replayed GET /api/settings (X-TA-From-Cache) must not be treated as a fresh load');
+
+  const attFn = extractFunction(APP_SRC, 'loadAttendanceFromBackend');
+  assert.ok(/if \(res\.headers\.get\('X-TA-From-Cache'\) !== '1'\) _geofenceAttendanceFresh = true;/.test(attFn),
+    'the same guard must apply to attendance -- GET /api/events goes through the exact same sw.js cache-replay path');
+});
+
 console.log('Geofence: reviewing the stored accuracy (Task 6)');
 
 // The brief's own test: a coarse guard that the row-building code near gpsInBtn/gpsOutBtn

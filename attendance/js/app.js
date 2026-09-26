@@ -2672,7 +2672,13 @@ async function loadSettingsFromBackend() {
     if (data.payslipEmailEnabled !== undefined) APP_SETTINGS.payslipEmailEnabled = data.payslipEmailEnabled;
     // 2026-09-26 (Important #2a): only now, after a genuinely successful fetch+parse, does the
     // geofence gate get to trust APP_SETTINGS.geofence at all -- see the flag's own comment above.
-    _geofenceSettingsFresh = true;
+    // 2026-09-26 (review Minor-4): a genuinely SUCCESSFUL fetch is not enough on its own -- sw.js
+    // is network-first for GET /api/settings, but on a failed fetch (offline) it replays the last
+    // cached 200 verbatim, stamped with X-TA-From-Cache (apiFetch() already reads this same header
+    // to drive the offline banner, see OFFLINE_SINCE above). That cached copy can predate the
+    // owner turning the geofence off, so it must not be trusted as "fresh" any more than an
+    // outright failed fetch would be -- res.ok alone cannot tell the two apart.
+    if (res.headers.get('X-TA-From-Cache') !== '1') _geofenceSettingsFresh = true;
   } catch(e) {
     showToast(L('⚠️ Could not load settings — using defaults', '⚠️ โหลดการตั้งค่าไม่สำเร็จ — ใช้ค่าเริ่มต้นไปก่อน'), 'warning');
   }
@@ -5540,14 +5546,16 @@ let currentPage = 'checkin';
 let clockInterval = null;
 let currentGPS = null;
 // 2026-09-26 (Important #2a/#2b, stale-GPS review): the compiled-in default is geofence.enabled:
-// true, and attendanceLog starts empty -- so until THIS session has actually loaded a real
-// GET /api/settings response and a real GET /api/events response, the client cannot tell "the
-// fetch failed / is stuck on a stale pre-off service-worker cache" from "the geofence is
-// genuinely on", and cannot tell "no check-in yet" from "attendance failed to load" (which used to
-// make a real check-out look like an unknown first scan and get wrongly geofenced). Both
-// geofenceUiState() and doScan() must fail OPEN -- never hold the button/press back locally --
-// until both of these are true, and let the server's own 403 decide instead. Reset on logout()
-// so a fresh login starts fail-open again until its own loads succeed.
+// true, and attendanceLog starts empty -- so until THIS session has actually loaded a real,
+// LIVE (never a stale service-worker cache replay -- see the X-TA-From-Cache check at each set
+// site below, added after review Minor-4 caught that res.ok alone cannot tell the two apart)
+// GET /api/settings response and GET /api/events response, the client cannot tell "the fetch
+// failed / is stuck on a stale pre-off cache" from "the geofence is genuinely on", and cannot
+// tell "no check-in yet" from "attendance failed to load" (which used to make a real check-out
+// look like an unknown first scan and get wrongly geofenced). Both geofenceUiState() and doScan()
+// must fail OPEN -- never hold the button/press back locally -- until both of these are true, and
+// let the server's own 403 decide instead. Reset on logout() so a fresh login starts fail-open
+// again until its own loads succeed.
 let _geofenceSettingsFresh = false;
 let _geofenceAttendanceFresh = false;
 let _serverClock = null;
@@ -6180,7 +6188,11 @@ async function loadAttendanceFromBackend() {
     // 2026-09-26 (Important #2b): only now, with a genuinely fresh attendanceLog in hand, may the
     // geofence gate trust "no check-in yet" -- an empty/stale log (fetch never ran, or failed)
     // must never be read as "this press would be a check-in" -- see the flag's own comment above.
-    _geofenceAttendanceFresh = true;
+    // 2026-09-26 (review Minor-4, same reasoning as loadSettingsFromBackend()'s twin above): a
+    // SUCCESSFUL fetch alone is not enough -- sw.js replays a stale cached GET /api/events verbatim
+    // (stamped X-TA-From-Cache) when the network fetch itself fails, and that log can predate a
+    // real check-in made since. res.ok cannot tell that apart from a live answer.
+    if (res.headers.get('X-TA-From-Cache') !== '1') _geofenceAttendanceFresh = true;
     return true;
   } catch(e) {
     console.error('[APP] loadAttendanceFromBackend error:', e);
