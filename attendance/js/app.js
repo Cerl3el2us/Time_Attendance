@@ -21464,11 +21464,56 @@ function _faqSectionHtml(title, items) {
       </summary>
       <div style="margin:10px 0 0 30px;font-size:13px;color:var(--text-muted);line-height:1.6">${it.a}</div>
     </details>`).join('');
+  // 2026-09-26 (owner): the questions were already collapsed -- the page was 4 screens because
+  // there are 42 of them. The sections collapse too now. The count is in the header on purpose:
+  // two bare headings read as an empty page, which is worse than a long one.
+  const count = items.length;
+  const countLabel = currentLang === 'ja' ? `${count}件`
+    : L(`${count} question${count === 1 ? '' : 's'}`, `${count} คำถาม`);
   return `
-    <div class="card mb-4">
-      <div class="card-header"><h3 style="margin:0">${title}</h3></div>
+    <details class="card mb-4 faq-section">
+      <summary class="card-header faq-section-head">
+        <h3 style="margin:0">${title}</h3>
+        <span class="faq-section-count">${countLabel}</span>
+      </summary>
       <div class="card-body" style="padding-top:4px">${rows}</div>
-    </div>`;
+    </details>`;
+}
+
+// Live filter over every question on the page. Matches the question AND its answer, because
+// people search for the thing they are trying to do ("ลาป่วย") more often than for the
+// wording of a heading. A section that holds a match opens itself; with the box cleared,
+// everything returns to collapsed.
+function filterFaq(query) {
+  const q = (query || '').trim().toLowerCase();
+  const sections = [...document.querySelectorAll('#faq-container .faq-section')];
+  let shown = 0;
+  sections.forEach(sec => {
+    const items = [...sec.querySelectorAll('.faq-item')];
+    let hits = 0;
+    items.forEach(it => {
+      const match = !q || it.textContent.toLowerCase().includes(q);
+      it.style.display = match ? '' : 'none';
+      if (match) hits++;
+      // While searching, open the matches so the answer is on screen without another click.
+      if (q) it.open = match;
+      else it.open = false;
+    });
+    sec.style.display = (!q || hits) ? '' : 'none';
+    sec.open = q ? hits > 0 : false;
+    const c = sec.querySelector('.faq-section-count');
+    if (c && q) c.textContent = currentLang === 'ja' ? `${hits}件` : L(`${hits} match${hits === 1 ? '' : 'es'}`, `ตรง ${hits} ข้อ`);
+    else if (c) c.textContent = c.dataset.full || c.textContent;
+    shown += hits;
+  });
+  const empty = document.getElementById('faq-empty');
+  if (empty) empty.hidden = !(q && shown === 0);
+}
+
+function clearFaqSearch() {
+  const box = document.getElementById('faq-search');
+  if (box) { box.value = ''; box.focus(); }
+  filterFaq('');
 }
 
 function renderFAQPage() {
@@ -21487,9 +21532,20 @@ function renderFAQPage() {
   const rulesItems = isFullAccess ? _faqRulesItems() : _faqRulesItems().filter(it =>
     it.roles.includes(role) && (!it.requiresFlag || currentUser?.[it.requiresFlag] === true)
   );
-  el.innerHTML =
+  el.innerHTML = `
+    <div class="faq-search-wrap">
+      <span class="faq-search-icon" aria-hidden="true">🔍</span>
+      <input type="search" id="faq-search" class="faq-search"
+        placeholder="${L('Search the FAQ…', 'ค้นหาคำถาม…')}"
+        oninput="filterFaq(this.value)" autocomplete="off">
+      <button type="button" class="faq-search-clear" onclick="clearFaqSearch()"
+        aria-label="${L('Clear', 'ล้าง')}">✕</button>
+    </div>
+    <div id="faq-empty" class="faq-empty" hidden>${L('No question matches that search.', 'ไม่พบคำถามที่ตรงกับคำค้นหา')}</div>` +
     _faqSectionHtml(_faq('📐 Rules & Calculations', '📐 กฎและการคำนวณ', '📐 ルールと計算方法'), rulesItems) +
     _faqSectionHtml(_faq('📖 How-To Guides', '📖 วิธีใช้งาน', '📖 使い方ガイド'), _faqHowToItems());
+  // Remember each section's own count so a cleared search can put it back.
+  el.querySelectorAll('.faq-section-count').forEach(c => { c.dataset.full = c.textContent; });
 }
 
 // ===== PAYROLL HISTORY =====
