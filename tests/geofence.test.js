@@ -705,9 +705,13 @@ test('every new message exists in all three languages, with ja.js keyed on the e
 
   // The #geofence-modal header is translated by fixStaticText()/applyStaticI18n() via data-en
   // (which also keys into window.LANG_JA, see applyStaticI18n()), not via L() -- it is the 10th
-  // string. (Its "OK" button reuses an existing "OK" ja.js key shared with other modals in this
-  // app, so it needs no check of its own here. The permanent policy banner this used to be is
-  // gone -- see "no permanent policy banner..." above.)
+  // string. (Its dismiss button uses data-en="Close" -- 2026-09-26 review Minor-3: it originally
+  // said data-en="OK", but the only "OK" key in ja.js is "一致" from the unrelated Hikvision
+  // sync-mismatch table, so the button rendered as that word in Japanese; "Close" reuses the
+  // correct, already-widely-used key this app's other btn-primary dismiss buttons share -- see
+  // e.g. closeLeaveDetail()/closeAttDetail() in index.html -- so it needs no check of its own
+  // here. The permanent policy banner this used to be is gone -- see "no permanent policy
+  // banner..." above.)
   const modalStart = INDEX_SRC.indexOf('id="geofence-modal"');
   assert.ok(modalStart >= 0, 'geofence-modal not found');
   const headerMatch = /<h3\s+data-en="((?:[^"\\]|\\.)*)"/.exec(INDEX_SRC.slice(modalStart, modalStart + 400));
@@ -748,6 +752,22 @@ test('the geofence modal exists with the expected structure', () => {
   assert.ok(/id="geofence-modal"/.test(INDEX_SRC), '#geofence-modal must exist');
   assert.ok(/id="geofence-modal-body"/.test(INDEX_SRC), '#geofence-modal-body must exist -- openGeofenceModal() fills it');
   assert.ok(/onclick="closeGeofenceModal\(\)"/.test(INDEX_SRC), 'the modal must be closable, following this app\'s existing modal convention');
+});
+
+// 2026-09-26 (review Minor-3): the dismiss button used to say data-en="OK", but ja.js's only "OK"
+// key ("一致") is the Hikvision sync-mismatch table's "Match" label, not a generic dismiss word --
+// the button rendered as that word in Japanese. Reused "Close" instead, the same key this app's
+// other btn-primary dismiss buttons (closeLeaveDetail(), closeAttDetail(), etc.) already carry
+// correctly.
+test('the modal dismiss button does not reuse the mistranslated "OK" key', () => {
+  const modalStart = INDEX_SRC.indexOf('id="geofence-modal"');
+  const modalEnd = INDEX_SRC.indexOf('</div>\n</div>\n\n<script', modalStart);
+  const modalHtml = INDEX_SRC.slice(modalStart, modalEnd > modalStart ? modalEnd : modalStart + 1000);
+  assert.ok(/closeGeofenceModal\(\)"\s+data-en="Close"/.test(modalHtml),
+    'the dismiss button must use data-en="Close", not "OK" (ja.js\'s only "OK" key is unrelated and wrong here)');
+  const closeJa = /"Close":\s*"((?:[^"\\]|\\.)*)"/.exec(JA_SRC);
+  assert.ok(closeJa, 'ja.js must have a "Close" key');
+  assert.notStrictEqual(closeJa[1], '一致', 'must not collide with the Hikvision sync-mismatch table\'s "Match" label');
 });
 
 // 2026-09-26 (owner): the geofence must NEVER disable #scan-btn any more -- applyGeofenceToScanButton()
