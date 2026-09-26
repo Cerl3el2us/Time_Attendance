@@ -608,7 +608,9 @@ test('the Settings page exposes all four geofence fields and saves them safely (
 // Once accuracy was deleted, the standalone field() lost that spacing entirely. Fixed by wrapping
 // it in the same margin-bottom:12px div this Settings page already uses for other single elements.
 test('the standalone Radius field keeps its 12px gap now that its row2() partner is gone', () => {
-  const cardStart = APP_SRC.indexOf("adminSection('📍', L('Web check-in area");
+  // Anchored on the card's own title rather than on the section() signature: 2026-09-26 added a
+  // tab key as its first argument, which broke this test without anything about the card changing.
+  const cardStart = APP_SRC.indexOf("L('Web check-in area");
   assert.ok(cardStart >= 0, 'geofence Settings card not found');
   const cardEnd = APP_SRC.indexOf("adminSection('🏖️'", cardStart);
   const card = APP_SRC.slice(cardStart, cardEnd);
@@ -737,9 +739,9 @@ function extractLArgPairs(snippet) {
 
 test('every new message exists in all three languages, with ja.js keyed on the exact English argument', () => {
   const msgFn = extractFunction(APP_SRC, 'geofenceMessage');
-  const settingsStart = APP_SRC.indexOf("adminSection('📍', L('Web check-in area");
+  const settingsStart = APP_SRC.indexOf("L('Web check-in area");
   assert.ok(settingsStart >= 0, 'geofence Settings card not found (adminSection anchor)');
-  const settingsEnd = APP_SRC.indexOf("adminSection('🏖️'", settingsStart);
+  const settingsEnd = APP_SRC.indexOf("L('Leave Policy'", settingsStart);
   assert.ok(settingsEnd > settingsStart, 'end of geofence Settings card not found (next adminSection anchor)');
   const settingsSnippet = APP_SRC.slice(settingsStart, settingsEnd);
 
