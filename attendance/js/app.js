@@ -1151,6 +1151,12 @@ function applyLanguage() {
       const newTabs = document.querySelectorAll('#profile-modal-content .profile-tab');
       if (activeIndex > 0 && newTabs[activeIndex]) newTabs[activeIndex].click();
     }
+    // 2026-09-26: the geofence modal's body is plain textContent set by openGeofenceModal() at
+    // press time (not data-en attributes), so it doesn't self-heal like the rest of the static UI
+    // either -- re-render it in place if it's open, or a language switch mid-press leaves the
+    // employee reading the old language until they close and re-trigger it.
+    const _gfModal = document.getElementById('geofence-modal');
+    if (_gfModal && _gfModal.classList.contains('show')) openGeofenceModal(_geofenceModalReason);
   } catch(e) { console.error('[applyLanguage]', e); }
 }
 
@@ -2664,7 +2670,9 @@ async function loadSettingsFromBackend() {
     if (data.emailConfig)        APP_SETTINGS.emailConfig        = data.emailConfig;
     if (data.emailNotification)  APP_SETTINGS.emailNotification  = data.emailNotification;
     if (data.payslipEmailEnabled !== undefined) APP_SETTINGS.payslipEmailEnabled = data.payslipEmailEnabled;
-    applyGeofenceToScanButton();
+    // 2026-09-26 (Important #2a): only now, after a genuinely successful fetch+parse, does the
+    // geofence gate get to trust APP_SETTINGS.geofence at all -- see the flag's own comment above.
+    _geofenceSettingsFresh = true;
   } catch(e) {
     showToast(L('⚠️ Could not load settings — using defaults', '⚠️ โหลดการตั้งค่าไม่สำเร็จ — ใช้ค่าเริ่มต้นไปก่อน'), 'warning');
   }
@@ -5531,6 +5539,17 @@ let currentUser = null;
 let currentPage = 'checkin';
 let clockInterval = null;
 let currentGPS = null;
+// 2026-09-26 (Important #2a/#2b, stale-GPS review): the compiled-in default is geofence.enabled:
+// true, and attendanceLog starts empty -- so until THIS session has actually loaded a real
+// GET /api/settings response and a real GET /api/events response, the client cannot tell "the
+// fetch failed / is stuck on a stale pre-off service-worker cache" from "the geofence is
+// genuinely on", and cannot tell "no check-in yet" from "attendance failed to load" (which used to
+// make a real check-out look like an unknown first scan and get wrongly geofenced). Both
+// geofenceUiState() and doScan() must fail OPEN -- never hold the button/press back locally --
+// until both of these are true, and let the server's own 403 decide instead. Reset on logout()
+// so a fresh login starts fail-open again until its own loads succeed.
+let _geofenceSettingsFresh = false;
+let _geofenceAttendanceFresh = false;
 let _serverClock = null;
 let _clockSyncTimer = null;
 let _clockSyncPromise = null;
@@ -6013,6 +6032,23 @@ function geofenceCheckinReason(G, role, lat, lng) {
   // stored position after the fact, which is what the recorded gpsAcc is for.
   return geofenceDistanceM(la, ln, Number(G.lat), Number(G.lng)) <= radius ? 'geofence-inside' : '';
 }
+// 2026-09-26 (CRITICAL, stale-GPS review): currentGPS is written once by watchPosition's success
+// callback (onGPSSuccess()) and otherwise never re-validated -- a fix from the morning commute
+// would still satisfy the geofence gate as-is, minutes or hours later, exactly as if it were the
+// employee's real current position. Real scenario: a fix is stored on the commute; on arrival,
+// in the lobby/lift/car park, watchPosition times out or reports POSITION_UNAVAILABLE (normal
+// indoors); the stale commute coordinates are still used, the button stays enabled, and a check-in
+// made in the lobby is accepted as if made from home. A position older than this must be treated
+// as no position at all everywhere the client decides (geofenceUiState(), doScan()) -- server-side
+// enforcement of the same bound lives in webScanGateReason() (server.js), which is NOT a dual-sync
+// twin of this function since it takes the reported age directly rather than a timestamp+now pair.
+// Client-only, not part of the geofenceDistanceM/geofenceCheckinReason dual-sync pair. Pure and
+// takes `nowMs` explicitly (never reads Date.now() itself) so it's directly testable.
+function gpsIsFresh(gps, nowMs) {
+  if (!gps) return false;
+  const age = nowMs - Number(gps.epochMs);
+  return Number.isFinite(age) && age >= 0 && age <= 60000;
+}
 // Dual-sync with server.js eventInstantMs / compareEventsByInstant — mixed offsets
 // (+07:00 vs +09:00) must sort by instant, not ISO string.
 function eventInstantMs(raw) {
@@ -6141,6 +6177,10 @@ async function loadAttendanceFromBackend() {
     }
     // Update checkin page scan button to reflect loaded attendance state
     if (currentUser) restoreTodayLog();
+    // 2026-09-26 (Important #2b): only now, with a genuinely fresh attendanceLog in hand, may the
+    // geofence gate trust "no check-in yet" -- an empty/stale log (fetch never ran, or failed)
+    // must never be read as "this press would be a check-in" -- see the flag's own comment above.
+    _geofenceAttendanceFresh = true;
     return true;
   } catch(e) {
     console.error('[APP] loadAttendanceFromBackend error:', e);
@@ -6308,6 +6348,10 @@ async function logout() {
   clearInterval(_pushPollTimer); _pushPollTimer = null; _leaveSnapshot = null;
   if (navigator.clearAppBadge) navigator.clearAppBadge().catch(() => {});
   currentGPS = null;
+  // 2026-09-26: a fresh login re-fetches both -- reset so the geofence gate fails open again
+  // until this new session's own loads actually succeed (see the flags' own comment above).
+  _geofenceSettingsFresh = false;
+  _geofenceAttendanceFresh = false;
   _serverClock = null;
   if (_clockSyncTimer) { clearInterval(_clockSyncTimer); _clockSyncTimer = null; }
   if (_gpsClockTimer) { clearTimeout(_gpsClockTimer); _gpsClockTimer = null; }
@@ -7090,7 +7134,7 @@ function requestGPS() {
 
   gpsWatchId = navigator.geolocation.watchPosition(
     pos => onGPSSuccess(pos),
-    err => { updateGPSError(gpsErrorMsg(err)); applyGeofenceToScanButton(); },
+    err => handleGPSError(err),
     {
       enableHighAccuracy: true,   // use device GPS chip (Android/iOS)
       maximumAge: 10000,          // accept cached position up to 10s
@@ -7108,11 +7152,27 @@ function gpsErrorMsg(err) {
   return msgs[err.code] || L('GPS error', 'เกิดข้อผิดพลาด GPS');
 }
 
+// 2026-09-26 (CRITICAL, stale-GPS review): PERMISSION_DENIED (1) and POSITION_UNAVAILABLE (2) are
+// both definitive -- no further fix is coming without the user changing something (granting the
+// permission, leaving a dead zone) -- so the stale commute position must not go on satisfying the
+// geofence gate indefinitely. TIMEOUT (3) is deliberately NOT cleared here: watchPosition keeps
+// retrying on its own, and a single timeout is often transient (one slow fix; still under a
+// bridge/roof; a brief moment of poor signal) while a still-fresh, still-accurate position from
+// moments ago may already be sitting in currentGPS -- clearing it on every timeout would force a
+// legitimate, still-current remote check-in into the "no position" modal for no real reason.
+// gpsIsFresh()'s 60-second bound (used by geofenceUiState()/doScan()) is what actually neutralises
+// the security bug this fixes, regardless of what happens here; clearing on 1/2 is an extra,
+// belt-and-braces measure for the two terminal, no-more-updates-coming codes specifically.
+function handleGPSError(err) {
+  updateGPSError(gpsErrorMsg(err));
+  if (err && (err.code === 1 || err.code === 2)) currentGPS = null;
+}
+
 // 2026-09-25: web check-in geofence -- shared by doScan() and geofenceUiState() so the two can
-// never drift: the server never gates a check-out, so neither the pre-check toast nor the
-// button's disabled state may treat a press as gated unless it would actually create a NEW
-// check-in. Same rule as isAfterCutoff below: pre-dawn (late-night return), already checked in
-// today, or at/after CHECKIN_CUTOFF (goes through the confirm() detour instead) are all checkouts.
+// never drift: the server never gates a check-out, so the pre-check may never treat a press as
+// gated unless it would actually create a NEW check-in. Same rule as isAfterCutoff below:
+// pre-dawn (late-night return), already checked in today, or at/after CHECKIN_CUTOFF (goes
+// through the confirm() detour instead) are all checkouts.
 function webCheckinWouldBeCheckIn() {
   if (!currentUser || !currentUser.id) return false;
   const bk      = scanYmd();
@@ -7125,52 +7185,66 @@ function webCheckinWouldBeCheckIn() {
 }
 // 2026-09-25: web check-in geofence -- localized copy of the server's 403 reason codes (the
 // server's own `message` is English-only by design, see server.js's WebScan gate). Called both
-// as a live preview before posting (doScan()) and to render the 403's reason if one slips through.
+// as a live preview before posting (doScan()) and to render the reason's text in #geofence-modal
+// (openGeofenceModal()) -- 2026-09-26 (owner): never a toast, never a disabled button any more.
 function geofenceMessage(reason) {
   if (reason === 'geofence-inside') {
-    return L('Company policy: check-in must be made with the face scanner at the office. You are within the office area — please scan at the device.',
-             'นโยบายบริษัท: การลงเวลาเข้างานต้องสแกนใบหน้าที่เครื่องในออฟฟิศ — ขณะนี้คุณอยู่ในบริเวณออฟฟิศ กรุณาสแกนที่เครื่อง');
+    // 2026-09-26 (owner, full wording): the remedy sentence matters -- a refused check-in with no
+    // later device scan costs the employee every claim for that day (OT, Upcountry, Long Distance,
+    // early-morning, late-night and holiday-work all require a recorded check-in server-side), so
+    // the modal must say how to recover, not just state the rule.
+    return L('Company policy: check-in must be made with the face scanner at the office. Please scan at the device, or submit a time-correction request if you cannot.',
+             'นโยบายบริษัท: การลงเวลาเข้างานต้องสแกนใบหน้าที่เครื่องในออฟฟิศเท่านั้น กรุณาสแกนใบหน้าที่เครื่อง หรือยื่นคำขอแก้ไขเวลาย้อนหลังหากสแกนไม่ได้');
   }
   if (reason === 'geofence-no-position') {
+    // Also covers a fix that went stale (GPS went quiet -- see gpsIsFresh()): the remedy reads
+    // the same either way -- allow location access (or wait for a fresh fix), or use the scanner.
     return L('Web check-in requires your location — please allow location access, or use the face scanner at the office.',
              'เช็คอินผ่านเว็บต้องระบุตำแหน่ง — กรุณาอนุญาตให้เข้าถึงตำแหน่งในเบราว์เซอร์ หรือสแกนใบหน้าที่เครื่องในออฟฟิศ');
   }
   return '';
 }
-// fixStaticText() runs before login -- currentUser is always null then. Guard every read.
+// currentUser is still guarded defensively below even though doScan() -- this function's only
+// caller -- is only ever reachable after login (geofenceUiState() has no load-time caller of its
+// own now that applyGeofenceToScanButton() is gone; the guard just costs nothing to keep).
 function geofenceUiState() {
   // Critical: only a press that would actually be a NEW check-in may ever be gated -- the server
   // never gates a check-out, so an on-site employee checking out in the evening (or a late-night
-  // return, or a first press after CHECKIN_CUTOFF) must never find the button disabled here.
+  // return, or a first press after CHECKIN_CUTOFF) must never be refused here.
   if (!webCheckinWouldBeCheckIn()) return { blocked: false, reason: '', text: '' };
+  // Important #2a/#2b (fail OPEN): until this session has genuinely fresh settings AND fresh
+  // attendance, never refuse locally -- let the server's own 403 decide instead. See
+  // _geofenceSettingsFresh/_geofenceAttendanceFresh's own comment above.
+  if (!_geofenceSettingsFresh || !_geofenceAttendanceFresh) return { blocked: false, reason: '', text: '' };
   const role = currentUser && currentUser.role;
+  // Critical #1: a stale fix (see gpsIsFresh()'s own comment) must be treated as no position at
+  // all -- same reason code as never having gotten a fix in the first place.
+  const fresh = currentGPS && gpsIsFresh(currentGPS, Date.now()) ? currentGPS : null;
   const reason = geofenceCheckinReason(
     APP_SETTINGS.geofence, role,
-    currentGPS ? Number(currentGPS.latRaw) : NaN,
-    currentGPS ? Number(currentGPS.lngRaw) : NaN
+    fresh ? Number(fresh.latRaw) : NaN,
+    fresh ? Number(fresh.lngRaw) : NaN
   );
   return { blocked: !!reason, reason, text: reason ? geofenceMessage(reason) : '' };
 }
-// fixStaticText() can run before login (currentUser null) -- guard every currentUser read here too.
-function applyGeofenceToScanButton() {
-  // M5 fix (2026-09-25 review): the standing policy note ("check in with the face scanner") is
-  // static markup that renders for everyone, including a role in exemptRoles (e.g. driver) who is
-  // never actually subject to the gate -- hide it for them. currentUser is null pre-login, so
-  // includes(undefined) just leaves the note visible; it never throws.
-  const note = document.getElementById('scan-policy-note');
-  if (note) {
-    const role = currentUser && currentUser.role;
-    const exemptRoles = Array.isArray(APP_SETTINGS.geofence?.exemptRoles) ? APP_SETTINGS.geofence.exemptRoles : [];
-    note.style.display = exemptRoles.includes(role) ? 'none' : '';
-  }
-  const btn = document.getElementById('scan-btn');
-  const hint = document.getElementById('scan-geofence-hint');
-  if (!btn) return;
-  const st = geofenceUiState();
-  btn.disabled = st.blocked;
-  btn.classList.toggle('scan-blocked', st.blocked);
-  // 'flex' (not 'block') to match the .alert family's own layout (see index.html/style.css).
-  if (hint) { hint.textContent = st.text; hint.style.display = st.blocked ? 'flex' : 'none'; }
+
+// 2026-09-26 (owner): the geofence never disables #scan-btn any more -- a blocked press instead
+// opens #geofence-modal (see doScan()) with the reason's localized text, following this app's
+// existing openXModal()/closeXModal() convention (classList 'show', see e.g.
+// openInstallAppModal()/closeInstallAppModal()). applyLanguage() re-runs this (via
+// _geofenceModalReason) while the modal is open, so switching language mid-press updates the text
+// instead of leaving it stuck in whatever language was active when it opened.
+let _geofenceModalReason = '';
+function openGeofenceModal(reason) {
+  _geofenceModalReason = reason;
+  const body = document.getElementById('geofence-modal-body');
+  if (body) body.textContent = geofenceMessage(reason);
+  const modal = document.getElementById('geofence-modal');
+  if (modal) modal.classList.add('show');
+}
+function closeGeofenceModal() {
+  const modal = document.getElementById('geofence-modal');
+  if (modal) modal.classList.remove('show');
 }
 
 function onGPSSuccess(pos) {
@@ -7185,6 +7259,9 @@ function onGPSSuccess(pos) {
     lngRaw: lng,
     accuracy: acc,
     timestamp: new Date().toISOString(),
+    // 2026-09-26 (CRITICAL): this fix's age is judged from this field, not `timestamp` (an ISO
+    // string re-parse) -- see gpsIsFresh().
+    epochMs: Date.now(),
   };
 
   // Update status bar
@@ -7208,7 +7285,6 @@ function onGPSSuccess(pos) {
   // Render or update map
   initGpsMap(lat, lng, acc);
   scheduleServerClockFromGps();
-  applyGeofenceToScanButton();
 }
 
 function updateGPSError(msg) {
@@ -7941,6 +8017,11 @@ async function doScan(source) {
   const p2      = n => String(n).padStart(2, '0');
   const gpsInfo = currentGPS ? `${currentGPS.lat}, ${currentGPS.lng}` : 'ไม่ทราบตำแหน่ง';
   const gpsAcc  = currentGPS && Number.isFinite(Number(currentGPS.accuracy)) ? Number(currentGPS.accuracy) : null;
+  // 2026-09-26 (CRITICAL): the fix's age in seconds, sent alongside gps/gpsAccuracy so the server
+  // can independently enforce the same 60s staleness bound (webScanGateReason()) even against an
+  // old or modified client -- see gpsIsFresh()'s own comment for why this exists at all.
+  const gpsAgeSec = currentGPS && Number.isFinite(Number(currentGPS.epochMs))
+    ? Math.round((Date.now() - Number(currentGPS.epochMs)) / 1000) : null;
   const timeStr = `${p2(bk.h)}:${p2(bk.min)}`;
   const dateStr = businessDateFromYmd(bk);
   const key     = attKey(currentUser.id, dateStr);
@@ -7961,19 +8042,13 @@ async function doScan(source) {
     if (!ok) return;
   }
 
-  // 2026-09-25: web check-in geofence -- a preview of the server's decision (the server decides
-  // for real, see server.js's WebScan gate) so the employee gets an immediate, localized reason
-  // instead of a round-trip 403. Only a real check-in is gated -- shared with geofenceUiState()
-  // via webCheckinWouldBeCheckIn() so the two tests can never drift apart.
-  const isFirstScan = webCheckinWouldBeCheckIn();
-  if (isFirstScan) {
-    const reason = geofenceCheckinReason(
-      APP_SETTINGS.geofence, currentUser && currentUser.role,
-      currentGPS ? Number(currentGPS.latRaw) : NaN,
-      currentGPS ? Number(currentGPS.lngRaw) : NaN
-    );
-    if (reason) { showToast(geofenceMessage(reason), 'warning'); return; }
-  }
+  // 2026-09-25/26: web check-in geofence -- a preview of the server's decision (the server decides
+  // for real, see server.js's WebScan gate) using the exact same shared oracle geofenceUiState()
+  // -- fresh position, fresh settings, fresh attendance, actual check-in -- so the two can never
+  // drift apart. 2026-09-26 (owner): a blocked press opens #geofence-modal, never a toast, and
+  // never disables the button itself -- and sends NO request at all.
+  const gate = geofenceUiState();
+  if (gate.blocked) { openGeofenceModal(gate.reason); return; }
 
   _scanInFlight = true;
   const scanBtn = document.getElementById('scan-btn');
@@ -8028,15 +8103,20 @@ async function doScan(source) {
         dateTime: isoStr,
         eventType: 'WebScan',
         gps: gpsInfo,
-        gpsAccuracy: gpsAcc
+        gpsAccuracy: gpsAcc,
+        gpsAgeSec: gpsAgeSec
       })
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.success === false) {
-      // A geofence 403's `message` is English-only by design (see server.js's WebScan gate) --
-      // the client localizes it from `reason` instead of showing the raw English text.
-      const localizedGeofence = res.status === 403 && data.reason ? geofenceMessage(data.reason) : null;
-      throw new Error(localizedGeofence || data.message || (res.status === 400 ? 'Could not save scan' : 'Server error'));
+      // 2026-09-26 (owner): a geofence 403 also surfaces through #geofence-modal, not a toast --
+      // tag the error so the single catch block below can tell it apart from every other failure.
+      if (res.status === 403 && data.reason) {
+        const geoErr = new Error(geofenceMessage(data.reason));
+        geoErr.geofenceReason = data.reason;
+        throw geoErr;
+      }
+      throw new Error(data.message || (res.status === 400 ? 'Could not save scan' : 'Server error'));
     }
     const stamped = String(data.event_time || '');
     if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(stamped) && attendanceLog[key]) {
@@ -8059,7 +8139,8 @@ async function doScan(source) {
   } catch (e) {
     if (prevRec) attendanceLog[key] = prevRec;
     else delete attendanceLog[key];
-    showToast(L('❌ Could not save check-in: ', '❌ บันทึกเวลาไม่สำเร็จ: ') + (e.message || ''), 'danger');
+    if (e.geofenceReason) openGeofenceModal(e.geofenceReason);
+    else showToast(L('❌ Could not save check-in: ', '❌ บันทึกเวลาไม่สำเร็จ: ') + (e.message || ''), 'danger');
     return;
   } finally {
     _scanInFlight = false;
@@ -8141,14 +8222,9 @@ function updateScanButton() {
     checkedIn = true;
   }
 
-  // I2 fix (2026-09-25 review): the button's geofence-blocked state was only ever recomputed from
-  // GPS or settings events, never when attendanceLog itself changed -- e.g. login after a door
-  // scan (settings resolves before attendance, so the button is first drawn against an empty log
-  // and never corrected), or a door-scan WebSocket event arriving while a web tab sits open on a
-  // stationary device with no fresh watchPosition fix for hours (breaking "check-out is never
-  // gated" in the UI). updateScanButton() is the one function every one of those paths already
-  // calls, so recomputing here covers all of them without touching each call site individually.
-  applyGeofenceToScanButton();
+  // 2026-09-26 (owner): the geofence no longer touches this button at all (see geofenceUiState()'s
+  // own comment) -- there is nothing left to recompute here. The decision is made fresh at press
+  // time inside doScan() instead.
 }
 
 function appendLog(type, now, gpsInfo, source) {

@@ -314,22 +314,22 @@ test('the gate is wired into the WebScan branch, before the event is saved', () 
   assert.ok(gateAt > 0 && gateAt < saveAt, 'the gate wiring must run BEFORE saveEvent, or a refused check-in is still recorded');
 
   // Simulate the route's own dispatch: wrap the extracted wiring block in a function that takes
-  // the same req/res/eventTime/gps the route passes (gpsAccuracy is no longer forwarded into the
-  // gate at all -- 2026-09-26), stub webScanGateReason's return value, and put a sentinel right
-  // where the route's next statement (const tz = ...) begins. If the `return` on the 403 line
-  // were ever dropped, execution would fall through into the sentinel even on a refusal -- this is
-  // what makes that regression a failing assertion, not a silent pass.
+  // the same req/res/eventTime/gps/gpsAgeSec the route passes, stub webScanGateReason's return
+  // value, and put a sentinel right where the route's next statement (const tz = ...) begins. If
+  // the `return` on the 403 line were ever dropped, execution would fall through into the
+  // sentinel even on a refusal -- this is what makes that regression a failing assertion, not a
+  // silent pass.
   function runWiring(gateReason) {
     const ctx = { webScanGateReason: () => gateReason, sentinel: () => { ctx.reached = true; }, reached: false };
     vm.createContext(ctx);
-    vm.runInContext(`function wiring(req, res, eventTime, gps) {\n${gateBlock}\n  sentinel();\n}`, ctx);
+    vm.runInContext(`function wiring(req, res, eventTime, gps, gpsAgeSec) {\n${gateBlock}\n  sentinel();\n}`, ctx);
     const calls = {};
     const res = {
       status(code) { calls.status = code; return this; },
       json(payload) { calls.json = payload; return this; },
     };
     const req = { hikSource: 'webscan', hikUser: { role: 'user', employeeNo: '1' } };
-    ctx.wiring(req, res, '2026-09-25T08:25:00', '13.7,100.5');
+    ctx.wiring(req, res, '2026-09-25T08:25:00', '13.7,100.5', null);
     return { reached: ctx.reached, calls };
   }
 
@@ -342,7 +342,7 @@ test('the gate is wired into the WebScan branch, before the event is saved', () 
   // realms fails on prototype identity even when every value matches.
   assert.strictEqual(refused.calls.json.success, false);
   assert.strictEqual(refused.calls.json.reason, 'geofence-inside');
-  assert.strictEqual(refused.calls.json.message, 'Company policy: check-in must be made with the face scanner at the office.');
+  assert.strictEqual(refused.calls.json.message, 'Company policy: check-in must be made with the face scanner at the office. Please scan at the device, or submit a time-correction request if you cannot.');
 
   const allowed = runWiring('');
   assert.strictEqual(allowed.reached, true, 'an allowed scan must fall through to saveEvent');
@@ -356,22 +356,159 @@ test('the stored event carries the accuracy, and it is not public', () => {
   assert.ok(!/gpsAcc/.test(pub), 'gpsAcc must stay out of the public projection, like gps itself');
 });
 
+console.log('Geofence: stale-GPS fix (2026-09-26)');
+
+test('the GPS fix age is sanitised to a bounded number or null, exactly like accuracy', () => {
+  const A = sandbox(SERVER_SRC, ['sanitizeGpsAge']);
+  assert.strictEqual(A.sanitizeGpsAge(5), 5);
+  assert.strictEqual(A.sanitizeGpsAge('12'), 12);
+  assert.strictEqual(A.sanitizeGpsAge(0), 0, 'a real 0s age (just-obtained fix) must be kept');
+  assert.strictEqual(A.sanitizeGpsAge(-1), null);
+  assert.strictEqual(A.sanitizeGpsAge('abc'), null);
+  assert.strictEqual(A.sanitizeGpsAge(undefined), null, 'an older client that never sends this field must sanitise to null, not 0');
+  assert.strictEqual(A.sanitizeGpsAge(1e9), null);
+  assert.strictEqual(A.sanitizeGpsAge(null), null);
+  assert.strictEqual(A.sanitizeGpsAge(''), null);
+  assert.strictEqual(A.sanitizeGpsAge(true), null);
+  assert.strictEqual(A.sanitizeGpsAge([7]), null);
+});
+
+test('the route sanitises body.gpsAgeSec and forwards it into the gate', () => {
+  const route = SERVER_SRC.slice(SERVER_SRC.indexOf("app.post('/api/hikvision/event'"));
+  const body = route.slice(0, route.indexOf('\napp.'));
+  assert.ok(/const gpsAgeSec\s*=\s*sanitizeGpsAge\(body\.gpsAgeSec\)/.test(body),
+    'gpsAgeSec must be read through sanitizeGpsAge(), never the raw body value');
+  assert.ok(/webScanGateReason\(req\.hikUser,\s*eventTime,\s*gps,\s*gpsAgeSec\)/.test(body),
+    'gpsAgeSec must be forwarded into webScanGateReason as the 4th argument');
+});
+
+// 2026-09-26 (CRITICAL): webScanGateReason() independently enforces the same 60s bound the
+// client-side twin (app.js's gpsIsFresh()) applies before ever sending a request -- defence in
+// depth against an old or modified client. These drive the real, extracted function (stubbing
+// only its collaborators) so a regression in the staleness arithmetic, or in the "absent age must
+// not auto-refuse" decision, fails here rather than only in the wiring test above (which stubs
+// webScanGateReason itself and so never exercises this logic).
+function runWebScanGateReasonStaleness({ role, gps, gpsAgeSec, wouldBeCheckIn }) {
+  const G = { enabled: true };
+  const calls = [];
+  const ctx = {
+    webScanWouldBeCheckIn: () => wouldBeCheckIn,
+    getAppSettings: () => ({ geofence: G }),
+    parseGpsCoords: raw => raw === gps && gps ? { lat: 13.7268315, lng: 100.52847 } : null,
+    geofenceCheckinReason: (...args) => { calls.push(args); return 'stub-reason'; },
+  };
+  vm.createContext(ctx);
+  vm.runInContext(extractFunction(SERVER_SRC, 'webScanGateReason'), ctx);
+  ctx.webScanGateReason({ role }, '2026-09-25T08:25:00', gps, gpsAgeSec);
+  return { G, calls };
+}
+
+test('webScanGateReason: a PRESENT, stale gpsAgeSec (>60s) is treated as no position, even with real in-office coords', () => {
+  const { G, calls } = runWebScanGateReasonStaleness({ role: 'user', gps: '13.7268315,100.52847', gpsAgeSec: 61, wouldBeCheckIn: true });
+  assert.strictEqual(calls.length, 1);
+  assert.deepStrictEqual(calls[0], [G, 'user', NaN, NaN],
+    'a stale fix must reach geofenceCheckinReason as NaN/NaN -- exactly like no position at all, not the real (in-office) coords');
+});
+
+test('webScanGateReason: a PRESENT, fresh gpsAgeSec (<=60s) still uses the real coords', () => {
+  const { G, calls } = runWebScanGateReasonStaleness({ role: 'user', gps: '13.7268315,100.52847', gpsAgeSec: 60, wouldBeCheckIn: true });
+  assert.deepStrictEqual(calls[0], [G, 'user', 13.7268315, 100.52847], 'exactly 60s (the boundary) must still count as fresh');
+});
+
+test('webScanGateReason: an ABSENT gpsAgeSec (older client) falls through to the ordinary distance check, not an automatic refusal', () => {
+  // This is the deliberate, safer-of-two-evils choice for a not-yet-updated client: refusing every
+  // scan with no age field the moment this deploys would lock out every employee still running a
+  // cached app.js. See this function's own comment in server.js for the full reasoning.
+  const undef = runWebScanGateReasonStaleness({ role: 'user', gps: '13.7268315,100.52847', gpsAgeSec: undefined, wouldBeCheckIn: true });
+  assert.deepStrictEqual(undef.calls[0], [undef.G, 'user', 13.7268315, 100.52847]);
+  const nullAge = runWebScanGateReasonStaleness({ role: 'user', gps: '13.7268315,100.52847', gpsAgeSec: null, wouldBeCheckIn: true });
+  assert.deepStrictEqual(nullAge.calls[0], [nullAge.G, 'user', 13.7268315, 100.52847]);
+});
+
 console.log('Geofence: the client');
 
 const JA_SRC = fs.readFileSync(path.join(ROOT, 'attendance/lang/ja.js'), 'utf8');
 const INDEX_SRC = fs.readFileSync(path.join(ROOT, 'attendance/index.html'), 'utf8');
 
-test('the check-in POST sends the accuracy', () => {
+test('the check-in POST sends the accuracy and the fix age', () => {
   const fn = extractFunction(APP_SRC, 'doScan');
   assert.ok(/gpsAccuracy:/.test(fn), 'doScan must send gpsAccuracy or the server refuses every check-in');
+  assert.ok(/gpsAgeSec:/.test(fn), 'doScan must send gpsAgeSec or the server cannot judge staleness for an old/modified client');
 });
 
-test('the client refuses before posting, using the same shared function', () => {
+test('the client refuses before posting, using the same shared oracle as the button decision', () => {
   const fn = extractFunction(APP_SRC, 'doScan');
-  assert.ok(/geofenceCheckinReason\(/.test(fn), 'doScan must pre-check');
-  const preIdx = fn.indexOf('geofenceCheckinReason');
+  assert.ok(/geofenceUiState\(\)/.test(fn), 'doScan must pre-check via geofenceUiState() -- the single shared decision');
+  const preIdx = fn.indexOf('geofenceUiState()');
   const postIdx = fn.indexOf('/api/hikvision/event');
   assert.ok(preIdx > 0 && preIdx < postIdx, 'the pre-check must run before the request');
+});
+
+console.log('Geofence: stale-GPS fix -- client-side (2026-09-26)');
+
+// 2026-09-26 (CRITICAL): currentGPS is written once by onGPSSuccess() and otherwise never
+// re-validated -- a fix from minutes or hours ago would still satisfy the gate. gpsIsFresh() is
+// the pure, testable guard both geofenceUiState() and doScan() now use to treat an old fix as no
+// position at all. Pure and takes `nowMs` explicitly, so no Date.now() faking is needed here.
+test('gpsIsFresh (executed): a fresh fix passes, exactly 60s is still fresh, 61s is stale, and absence is never fresh', () => {
+  const A = sandbox(APP_SRC, ['gpsIsFresh']);
+  const now = 1_700_000_000_000;
+  assert.strictEqual(A.gpsIsFresh({ epochMs: now - 1000 }, now), true, 'a 1s-old fix is fresh');
+  assert.strictEqual(A.gpsIsFresh({ epochMs: now - 60000 }, now), true, 'exactly 60s old is still fresh (boundary)');
+  assert.strictEqual(A.gpsIsFresh({ epochMs: now - 60001 }, now), false, 'a hair over 60s old is stale');
+  assert.strictEqual(A.gpsIsFresh({ epochMs: now - 3600000 }, now), false, 'an hour-old commute fix must never satisfy the gate');
+  assert.strictEqual(A.gpsIsFresh(null, now), false, 'no position at all is not fresh');
+  assert.strictEqual(A.gpsIsFresh(undefined, now), false);
+  assert.strictEqual(A.gpsIsFresh({ epochMs: NaN }, now), false, 'a non-finite timestamp is not fresh');
+  assert.strictEqual(A.gpsIsFresh({}, now), false, 'a missing epochMs field (old-shaped currentGPS) is not fresh');
+});
+
+// 2026-09-26 (CRITICAL): PERMISSION_DENIED (1) and POSITION_UNAVAILABLE (2) are terminal -- no
+// further fix is coming without the user changing something -- so the stale commute position must
+// not go on satisfying the gate. TIMEOUT (3) is a deliberate exception: watchPosition keeps
+// retrying on its own and a single timeout is often transient, while a still-fresh position from
+// moments ago may already be sitting in currentGPS -- see the function's own comment in app.js for
+// the full reasoning. This drives the real, extracted function.
+test('handleGPSError (executed): clears currentGPS on PERMISSION_DENIED/POSITION_UNAVAILABLE, keeps it on TIMEOUT', () => {
+  function run(code) {
+    const ctx = {
+      currentGPS: { lat: '13.7', lng: '100.5' },
+      updateGPSError: () => {},
+      gpsErrorMsg: () => '',
+    };
+    vm.createContext(ctx);
+    vm.runInContext(extractFunction(APP_SRC, 'handleGPSError'), ctx);
+    ctx.handleGPSError({ code });
+    return ctx.currentGPS;
+  }
+  assert.strictEqual(run(1), null, 'PERMISSION_DENIED must clear currentGPS');
+  assert.strictEqual(run(2), null, 'POSITION_UNAVAILABLE must clear currentGPS');
+  assert.notStrictEqual(run(3), null, 'TIMEOUT must NOT clear currentGPS -- see the function\'s own comment for why');
+});
+
+test('onGPSSuccess (executed): stores an epochMs alongside the ISO timestamp, for the staleness check', () => {
+  const elements = {};
+  const stub = () => ({ style: {}, textContent: '' });
+  const ctx = {
+    document: {
+      getElementById: id => elements[id] || (elements[id] = stub()),
+      querySelectorAll: () => [],
+    },
+    currentGPS: null,
+    L: en => en,
+    fmtTime: () => '',
+    initGpsMap: () => {},
+    scheduleServerClockFromGps: () => {},
+  };
+  vm.createContext(ctx);
+  vm.runInContext(extractFunction(APP_SRC, 'onGPSSuccess'), ctx);
+  const before = Date.now();
+  ctx.onGPSSuccess({ coords: { latitude: 13.7268315, longitude: 100.52847, accuracy: 12 } });
+  const after = Date.now();
+  assert.ok(ctx.currentGPS, 'onGPSSuccess must set currentGPS');
+  assert.ok(Number.isFinite(ctx.currentGPS.epochMs) && ctx.currentGPS.epochMs >= before && ctx.currentGPS.epochMs <= after,
+    'epochMs must be a real Date.now() snapshot taken during this call');
+  assert.strictEqual(ctx.currentGPS.latRaw, 13.7268315);
 });
 
 // 2026-09-25 (review round 4): webCheckinWouldBeCheckIn() is the client half of the "would this
@@ -561,18 +698,23 @@ test('every new message exists in all three languages, with ja.js keyed on the e
   const settingsSnippet = APP_SRC.slice(settingsStart, settingsEnd);
 
   const pairs = [...extractLArgPairs(msgFn), ...extractLArgPairs(settingsSnippet)];
-  // 2026-09-26: was 12 before the accuracy-ceiling removal -- geofenceMessage() lost its 2-string
-  // "not precise enough" fallback (the 'geofence-accuracy' branch no longer exists) and the
-  // Settings card lost "Max GPS accuracy (m)", so 12 - 3 = 9.
+  // 2026-09-26: unchanged at 9 -- geofenceMessage() still has exactly 2 L() calls (the
+  // 'geofence-inside' text just got longer, with the remedy sentence added; no call was added or
+  // removed) and the Settings card is untouched by this round of fixes.
   assert.strictEqual(pairs.length, 9, `expected 9 L(en, th) calls across geofenceMessage + the Settings card, found ${pairs.length}`);
 
-  // The static policy note is translated by fixStaticText()/applyStaticI18n() via data-en (which
-  // also keys into window.LANG_JA, see applyStaticI18n()), not via L() -- it is the 10th string.
-  const noteMatch = /id="scan-policy-note"[^>]*data-en="((?:[^"\\]|\\.)*)"/.exec(INDEX_SRC);
-  assert.ok(noteMatch, 'scan-policy-note data-en attribute not found');
-  pairs.push({ en: noteMatch[1], th: null });
+  // The #geofence-modal header is translated by fixStaticText()/applyStaticI18n() via data-en
+  // (which also keys into window.LANG_JA, see applyStaticI18n()), not via L() -- it is the 10th
+  // string. (Its "OK" button reuses an existing "OK" ja.js key shared with other modals in this
+  // app, so it needs no check of its own here. The permanent policy banner this used to be is
+  // gone -- see "no permanent policy banner..." above.)
+  const modalStart = INDEX_SRC.indexOf('id="geofence-modal"');
+  assert.ok(modalStart >= 0, 'geofence-modal not found');
+  const headerMatch = /<h3\s+data-en="((?:[^"\\]|\\.)*)"/.exec(INDEX_SRC.slice(modalStart, modalStart + 400));
+  assert.ok(headerMatch, 'geofence-modal header data-en attribute not found');
+  pairs.push({ en: headerMatch[1], th: null });
 
-  assert.strictEqual(pairs.length, 10, `expected 10 total strings (9 L() + the static note), found ${pairs.length}`);
+  assert.strictEqual(pairs.length, 10, `expected 10 total strings (9 L() + the modal's static header), found ${pairs.length}`);
 
   for (const { en, th } of pairs) {
     assert.ok(en.length > 0, 'an L() English argument must not be empty');
@@ -595,37 +737,60 @@ test('the removed accuracy-ceiling strings are gone from ja.js, not just unreach
   }
 });
 
-test('the standing policy note is on the check-in screen, not only in the error', () => {
-  assert.ok(/id="scan-policy-note"/.test(INDEX_SRC), 'the policy note element must exist');
-  assert.ok(/data-en=/.test(INDEX_SRC.slice(INDEX_SRC.indexOf('scan-policy-note') - 300, INDEX_SRC.indexOf('scan-policy-note') + 300)),
-    'the note must carry data-en so fixStaticText() can translate it');
+// 2026-09-26 (owner): the permanent policy banner and the always-on hint are gone -- the geofence
+// never disables the button any more, so there is nothing left for either to stand in for.
+test('no permanent policy banner or always-on hint remain in the markup', () => {
+  assert.ok(!/id="scan-policy-note"/.test(INDEX_SRC), 'the permanent policy banner must be removed');
+  assert.ok(!/id="scan-geofence-hint"/.test(INDEX_SRC), 'the always-on hint must be removed');
 });
 
-test('the button state function never reads currentUser at load time', () => {
-  // fixStaticText() runs before login; anything it touches must not assume a logged-in user.
+test('the geofence modal exists with the expected structure', () => {
+  assert.ok(/id="geofence-modal"/.test(INDEX_SRC), '#geofence-modal must exist');
+  assert.ok(/id="geofence-modal-body"/.test(INDEX_SRC), '#geofence-modal-body must exist -- openGeofenceModal() fills it');
+  assert.ok(/onclick="closeGeofenceModal\(\)"/.test(INDEX_SRC), 'the modal must be closable, following this app\'s existing modal convention');
+});
+
+// 2026-09-26 (owner): the geofence must NEVER disable #scan-btn any more -- applyGeofenceToScanButton()
+// (which used to set btn.disabled/toggle .scan-blocked from geofenceUiState()) is removed entirely,
+// and nothing has replaced it with an equivalent. Every OTHER reason the button can be disabled
+// (observer accounts via blockIfObserver(), an in-flight scan via _scanInFlight/scanBtn.disabled in
+// doScan()) is untouched -- this only asserts the geofence-specific path is gone.
+test('the geofence never disables the scan button any more', () => {
+  assert.ok(!/function applyGeofenceToScanButton/.test(APP_SRC), 'the button-disabling function must be removed entirely');
+  assert.ok(!APP_SRC.includes('scan-blocked'), 'the now-dead disabled-state CSS class must not be referenced any more');
+  assert.ok(!/btn\.disabled\s*=\s*st\.blocked/.test(APP_SRC), 'nothing may assign the geofence decision into btn.disabled');
+  // doScan() itself must still disable the button while a request is in flight -- that is a
+  // DIFFERENT, still-legitimate reason and must be left exactly as it is.
+  const doScanFn = extractFunction(APP_SRC, 'doScan');
+  assert.ok(/scanBtn\.disabled\s*=\s*true/.test(doScanFn), 'the in-flight disable in doScan() must still be there');
+});
+
+// currentUser is guarded defensively in geofenceUiState() even though doScan() -- its only caller
+// -- is only ever reachable after login. The guard costs nothing to keep; this proves it stays.
+test('geofenceUiState guards every currentUser read', () => {
   const fn = extractFunction(APP_SRC, 'geofenceUiState');
   assert.ok(/currentUser/.test(fn) === false || /currentUser\s*&&/.test(fn) || /currentUser\?\./.test(fn),
     'guard every currentUser read in geofenceUiState');
 });
 
-// 2026-09-25 (review round 2, Critical): geofenceUiState() disables the single shared #scan-btn
-// purely from location/role, with no awareness of whether the next press would be a check-in or
-// a check-out. Scenario: checked in via the face scanner in the morning, then in the evening --
-// still on site -- opens the web app to check OUT. The server never gates a check-out, but the
-// old code would disable the button anyway, so the click (and doScan()'s own correctly-scoped
-// pre-check) never even fires. Fixed by making geofenceUiState() defer to the same
-// webCheckinWouldBeCheckIn() test doScan() uses, so the two paths cannot drift apart. These two
-// tests stub that shared test directly (rather than driving scanYmd()/attendanceLog/etc. through
-// it) so a regression that stops checking it -- and calls geofenceCheckinReason() unconditionally
-// again -- fails loudly instead of silently.
+// 2026-09-25 (review round 2, Critical): geofenceUiState() must be aware of whether the next press
+// would be a check-in or a check-out (via webCheckinWouldBeCheckIn()) -- checking out on-site in
+// the evening must never be refused by location. These stub that shared test directly (rather than
+// driving scanYmd()/attendanceLog/etc. through it) so a regression that stops checking it fails
+// loudly instead of silently. _geofenceSettingsFresh/_geofenceAttendanceFresh are stubbed true and
+// gpsIsFresh stubbed true so these two tests isolate exactly the webCheckinWouldBeCheckIn() branch;
+// the fail-open and staleness branches have their own dedicated tests below.
 test('geofenceUiState never blocks a press that would not be a new check-in, even standing at the office', () => {
   const ctx = {
     webCheckinWouldBeCheckIn: () => false,
     geofenceCheckinReason: () => { throw new Error('geofenceCheckinReason must not run -- this press is not a check-in'); },
     geofenceMessage: () => { throw new Error('geofenceMessage must not run -- this press is not a check-in'); },
+    gpsIsFresh: () => { throw new Error('gpsIsFresh must not run -- returned before reaching it'); },
     currentUser: { role: 'user' },
     currentGPS: { latRaw: PASO.lat, lngRaw: PASO.lng, accuracy: 10 },
     APP_SETTINGS: { geofence: G },
+    _geofenceSettingsFresh: true,
+    _geofenceAttendanceFresh: true,
   };
   vm.createContext(ctx);
   vm.runInContext(extractFunction(APP_SRC, 'geofenceUiState'), ctx);
@@ -638,14 +803,17 @@ test('geofenceUiState never blocks a press that would not be a new check-in, eve
   assert.strictEqual(st.text, '');
 });
 
-test('geofenceUiState still blocks an actual check-in standing at the office', () => {
+test('geofenceUiState still blocks an actual check-in standing at the office, with fresh settings/attendance/position', () => {
   const ctx = {
     webCheckinWouldBeCheckIn: () => true,
     geofenceCheckinReason: () => 'geofence-inside',
     geofenceMessage: reason => `msg:${reason}`,
+    gpsIsFresh: () => true,
     currentUser: { role: 'user' },
     currentGPS: { latRaw: PASO.lat, lngRaw: PASO.lng, accuracy: 10 },
     APP_SETTINGS: { geofence: G },
+    _geofenceSettingsFresh: true,
+    _geofenceAttendanceFresh: true,
   };
   vm.createContext(ctx);
   vm.runInContext(extractFunction(APP_SRC, 'geofenceUiState'), ctx);
@@ -654,58 +822,167 @@ test('geofenceUiState still blocks an actual check-in standing at the office', (
   assert.strictEqual(st.reason, 'geofence-inside');
 });
 
-// 2026-09-25 (review round 4, I2): geofenceUiState()'s button-blocked state (and, per M5, the
-// standing policy note's visibility) used to be recomputed only from GPS or settings events, never
-// when attendanceLog itself changed -- e.g. login after a door scan (settings resolves before
-// attendance, so the button is first drawn against an empty log and nothing later corrects it), or
-// a door-scan WebSocket event arriving on a stationary tab with no fresh watchPosition fix for
-// hours, silently blocking a check-out. Fix: updateScanButton() -- the one function every one of
-// those paths already calls -- now calls applyGeofenceToScanButton() at its end. This is a plain
-// text/wiring check (a full DOM+attendanceLog simulation of every call site would be its own
-// project); the function-level tests below cover applyGeofenceToScanButton()'s own logic directly.
-test('updateScanButton recomputes the geofence-blocked button state on every render (I2)', () => {
-  const fn = extractFunction(APP_SRC, 'updateScanButton');
-  assert.ok(/applyGeofenceToScanButton\(\)/.test(fn),
-    'updateScanButton must call applyGeofenceToScanButton(), or a change to attendanceLog (login after a door scan, a live WS event, doScan) leaves the button/note stale');
-});
-
-// M5 fix (2026-09-25 review): the standing policy note ("check in with the face scanner") is
-// static markup shown to everyone, including a role in exemptRoles (e.g. driver) who the gate
-// never actually applies to. applyGeofenceToScanButton() now hides it for them. These tests drive
-// the real, extracted function against a stubbed document/currentUser/APP_SETTINGS (geofenceUiState
-// itself is stubbed out -- it has its own tests above) so a regression in the note-hiding logic, or
-// a currentUser read that isn't guarded for the pre-login case, fails here.
-function runApplyGeofenceToScanButton({ currentUser, exemptRoles, blocked }) {
-  const elements = {
-    'scan-policy-note': { style: {} },
-    'scan-btn': { disabled: false, classList: { toggle(cls, on) { this[cls] = on; } } },
-    'scan-geofence-hint': { style: {}, textContent: '' },
-  };
+// 2026-09-26 (Important #2a/#2b, fail-open): until this session has genuinely fresh settings AND
+// fresh attendance, geofenceUiState() must never refuse locally -- see the flags' own comment in
+// app.js. Real scenarios this fixes: GET /api/settings failed (or is served from a stale pre-off
+// service-worker cache) so the compiled-in geofence.enabled:true would otherwise still apply; and
+// GET /api/events failed so attendanceLog looks empty and a real check-OUT would otherwise look
+// like an unknown first scan and get wrongly geofenced.
+test('geofenceUiState fails OPEN when settings have not loaded fresh this session', () => {
   const ctx = {
-    document: { getElementById: id => (Object.prototype.hasOwnProperty.call(elements, id) ? elements[id] : null) },
-    currentUser,
-    APP_SETTINGS: { geofence: { exemptRoles } },
-    geofenceUiState: () => ({ blocked, reason: blocked ? 'geofence-inside' : '', text: blocked ? 'blocked-text' : '' }),
+    webCheckinWouldBeCheckIn: () => true,
+    geofenceCheckinReason: () => { throw new Error('geofenceCheckinReason must not run -- settings are not fresh'); },
+    geofenceMessage: () => { throw new Error('geofenceMessage must not run -- settings are not fresh'); },
+    gpsIsFresh: () => true,
+    currentUser: { role: 'user' },
+    currentGPS: { latRaw: PASO.lat, lngRaw: PASO.lng },
+    APP_SETTINGS: { geofence: G },
+    _geofenceSettingsFresh: false,
+    _geofenceAttendanceFresh: true,
   };
   vm.createContext(ctx);
-  vm.runInContext(extractFunction(APP_SRC, 'applyGeofenceToScanButton'), ctx);
-  ctx.applyGeofenceToScanButton();
-  return elements;
-}
-
-test('applyGeofenceToScanButton (executed): hides the standing policy note for a role in exemptRoles', () => {
-  const driver = runApplyGeofenceToScanButton({ currentUser: { role: 'driver' }, exemptRoles: ['driver'], blocked: false });
-  assert.strictEqual(driver['scan-policy-note'].style.display, 'none', 'an exempt role must not see the standing policy note');
-
-  const user = runApplyGeofenceToScanButton({ currentUser: { role: 'user' }, exemptRoles: ['driver'], blocked: false });
-  assert.strictEqual(user['scan-policy-note'].style.display, '', 'a non-exempt role must still see the standing policy note');
+  vm.runInContext(extractFunction(APP_SRC, 'geofenceUiState'), ctx);
+  const st = ctx.geofenceUiState();
+  assert.strictEqual(st.blocked, false, 'must fail open when GET /api/settings has not succeeded this session');
+  assert.strictEqual(st.reason, '');
 });
 
-test('applyGeofenceToScanButton (executed): never throws before login, and leaves the note visible', () => {
-  // fixStaticText() can run with currentUser still null -- this must not throw, and must default
-  // to showing the note (role undefined is never in exemptRoles).
-  const result = runApplyGeofenceToScanButton({ currentUser: null, exemptRoles: ['driver'], blocked: false });
-  assert.strictEqual(result['scan-policy-note'].style.display, '');
+test('geofenceUiState fails OPEN when attendance has not loaded fresh this session', () => {
+  const ctx = {
+    webCheckinWouldBeCheckIn: () => true,
+    geofenceCheckinReason: () => { throw new Error('geofenceCheckinReason must not run -- attendance is not fresh'); },
+    geofenceMessage: () => { throw new Error('geofenceMessage must not run -- attendance is not fresh'); },
+    gpsIsFresh: () => true,
+    currentUser: { role: 'user' },
+    currentGPS: { latRaw: PASO.lat, lngRaw: PASO.lng },
+    APP_SETTINGS: { geofence: G },
+    _geofenceSettingsFresh: true,
+    _geofenceAttendanceFresh: false,
+  };
+  vm.createContext(ctx);
+  vm.runInContext(extractFunction(APP_SRC, 'geofenceUiState'), ctx);
+  const st = ctx.geofenceUiState();
+  assert.strictEqual(st.blocked, false, 'must fail open when GET /api/events has not succeeded this session -- a real check-out must never look like an unknown first scan');
+});
+
+// 2026-09-26 (CRITICAL #1): a stale fix must reach geofenceCheckinReason as NaN/NaN -- exactly
+// like no position at all -- never the real (possibly in-office) coordinates.
+test('geofenceUiState (Critical 1): a stale GPS fix is treated as no position, not the real coords', () => {
+  let seenLat, seenLng;
+  const ctx = {
+    webCheckinWouldBeCheckIn: () => true,
+    geofenceCheckinReason: (_G, _role, lat, lng) => { seenLat = lat; seenLng = lng; return 'geofence-no-position'; },
+    geofenceMessage: reason => `msg:${reason}`,
+    gpsIsFresh: () => false, // stale
+    currentUser: { role: 'user' },
+    currentGPS: { latRaw: PASO.lat, lngRaw: PASO.lng },
+    APP_SETTINGS: { geofence: G },
+    _geofenceSettingsFresh: true,
+    _geofenceAttendanceFresh: true,
+  };
+  vm.createContext(ctx);
+  vm.runInContext(extractFunction(APP_SRC, 'geofenceUiState'), ctx);
+  const st = ctx.geofenceUiState();
+  assert.ok(Number.isNaN(seenLat) && Number.isNaN(seenLng), 'a stale fix must be passed through as NaN/NaN, not the real coordinates');
+  assert.strictEqual(st.blocked, true);
+  assert.strictEqual(st.reason, 'geofence-no-position');
+});
+
+test('openGeofenceModal/closeGeofenceModal (executed): follow this app\'s existing modal-overlay convention', () => {
+  const modalEl = { classList: { added: [], removed: [], add(c) { this.added.push(c); }, remove(c) { this.removed.push(c); } } };
+  const bodyEl = { textContent: '' };
+  const ctx = {
+    document: { getElementById: id => id === 'geofence-modal' ? modalEl : id === 'geofence-modal-body' ? bodyEl : null },
+    geofenceMessage: reason => `msg:${reason}`,
+  };
+  vm.createContext(ctx);
+  vm.runInContext(`${extractFunction(APP_SRC, 'openGeofenceModal')}\n${extractFunction(APP_SRC, 'closeGeofenceModal')}`, ctx);
+  ctx.openGeofenceModal('geofence-inside');
+  assert.ok(modalEl.classList.added.includes('show'), 'openGeofenceModal must add the "show" class');
+  assert.strictEqual(bodyEl.textContent, 'msg:geofence-inside', 'openGeofenceModal must render the reason\'s message into the body');
+  ctx.closeGeofenceModal();
+  assert.ok(modalEl.classList.removed.includes('show'), 'closeGeofenceModal must remove the "show" class');
+});
+
+test('applyLanguage refreshes the geofence modal body while it is open, so a language switch mid-press is not stuck in the old language', () => {
+  const fn = extractFunction(APP_SRC, 'applyLanguage');
+  assert.ok(/geofence-modal/.test(fn) && /openGeofenceModal\(/.test(fn),
+    'applyLanguage must re-render the geofence modal body (via openGeofenceModal) when it is currently shown');
+});
+
+// 2026-09-26 (owner): a press that would be blocked must open the modal and send NO request at
+// all -- not even reach the code that sets _scanInFlight/posts the request. This extracts the
+// real wiring block from doScan() (the same "wrap in a function + sentinel" technique the
+// server-side wiring test above uses) so a dropped `return`, or a call to the wrong function,
+// fails an assertion here instead of only in a live browser. MUTATION-VERIFIED by hand: temporarily
+// removing the `return` after openGeofenceModal() made `reached` become true on a blocked press,
+// and the test failed as expected; the source was then restored (see the report for the transcript).
+function extractDoScanGateWiring(fnBody) {
+  const anchor = 'const gate = geofenceUiState();';
+  const anchorIdx = fnBody.indexOf(anchor);
+  assert.ok(anchorIdx >= 0, 'doScan must call geofenceUiState() to decide the gate');
+  const endAnchor = '_scanInFlight = true;';
+  const endIdx = fnBody.indexOf(endAnchor, anchorIdx);
+  assert.ok(endIdx > anchorIdx, '_scanInFlight = true must come after the gate check');
+  return fnBody.slice(anchorIdx, endIdx);
+}
+test('doScan (executed wiring): a blocked press opens the modal and returns before any request is sent', () => {
+  const fn = extractFunction(APP_SRC, 'doScan');
+  const block = extractDoScanGateWiring(fn);
+  function runWiring(blocked, reason) {
+    const ctx = {
+      geofenceUiState: () => ({ blocked, reason, text: `msg:${reason}` }),
+      openGeofenceModal: r => { ctx.modalReason = r; },
+      sentinel: () => { ctx.reached = true; },
+      reached: false, modalReason: null,
+    };
+    vm.createContext(ctx);
+    vm.runInContext(`function wiring() {\n${block}\n  sentinel();\n}`, ctx);
+    ctx.wiring();
+    return ctx;
+  }
+
+  const insideRun = runWiring(true, 'geofence-inside');
+  assert.strictEqual(insideRun.reached, false, 'a blocked press must return before _scanInFlight is ever set -- i.e. before any request is sent');
+  assert.strictEqual(insideRun.modalReason, 'geofence-inside');
+
+  const noPosRun = runWiring(true, 'geofence-no-position');
+  assert.strictEqual(noPosRun.reached, false, 'no usable position must also open the modal and send no request');
+  assert.strictEqual(noPosRun.modalReason, 'geofence-no-position');
+
+  const allowedRun = runWiring(false, '');
+  assert.strictEqual(allowedRun.reached, true, 'an allowed press must fall through toward sending the request');
+  assert.strictEqual(allowedRun.modalReason, null, 'the modal must never open for an allowed press');
+});
+
+test('doScan: a 403 that slips through from the server also opens the modal, not a toast', () => {
+  const fn = extractFunction(APP_SRC, 'doScan');
+  const catchIdx = fn.indexOf('} catch (e) {');
+  const finallyIdx = fn.indexOf('} finally {', catchIdx);
+  assert.ok(catchIdx > 0 && finallyIdx > catchIdx, 'doScan\'s catch/finally blocks not found');
+  const catchBlock = fn.slice(catchIdx, finallyIdx);
+  assert.ok(/e\.geofenceReason/.test(catchBlock), 'the catch block must branch on a tagged geofence error');
+  assert.ok(/openGeofenceModal\(\s*e\.geofenceReason\s*\)/.test(catchBlock), 'a geofence-tagged error must open the modal, not showToast()');
+
+  const throwSiteIdx = fn.indexOf('res.status === 403 && data.reason');
+  assert.ok(throwSiteIdx > 0 && throwSiteIdx < catchIdx, 'the 403 must be tagged with geofenceReason before the catch block, not handled inline there');
+});
+
+test('freshness flags: set only after a genuinely successful load, and reset on logout', () => {
+  const settingsFn = extractFunction(APP_SRC, 'loadSettingsFromBackend');
+  const okIdx = settingsFn.indexOf('if (!res.ok)');
+  const settingsFreshIdx = settingsFn.indexOf('_geofenceSettingsFresh = true');
+  assert.ok(okIdx >= 0 && settingsFreshIdx > okIdx, '_geofenceSettingsFresh must be set only after the res.ok check, never before it');
+
+  const attFn = extractFunction(APP_SRC, 'loadAttendanceFromBackend');
+  const returnTrueIdx = attFn.lastIndexOf('return true;');
+  const attFreshIdx = attFn.indexOf('_geofenceAttendanceFresh = true');
+  assert.ok(attFreshIdx >= 0 && attFreshIdx < returnTrueIdx, '_geofenceAttendanceFresh must be set right before the successful return, not after it');
+
+  const logoutFn = extractFunction(APP_SRC, 'logout');
+  assert.ok(/_geofenceSettingsFresh\s*=\s*false/.test(logoutFn), 'logout must reset _geofenceSettingsFresh');
+  assert.ok(/_geofenceAttendanceFresh\s*=\s*false/.test(logoutFn), 'logout must reset _geofenceAttendanceFresh');
+  assert.ok(/currentGPS\s*=\s*null/.test(logoutFn), 'logout must still clear currentGPS');
 });
 
 console.log('Geofence: reviewing the stored accuracy (Task 6)');
