@@ -8,7 +8,7 @@
 // are served from cache, but anything that WRITES (check-in, leave request, approval) is never
 // queued or replayed -- a time record invented from a phone's clock hours after the fact is worse
 // than an error message. Non-GET requests simply fail while offline and the UI says so.
-const SHELL_CACHE = 'ta-shell-v16';   // app shell: html/js/css/images, cache-first
+const SHELL_CACHE = 'ta-shell-v17';   // app shell: html/js/css/images, cache-first
 const DATA_CACHE  = 'ta-data-v11';    // GET /api responses, network-first
 
 // Query strings are part of the key, so a `?v=` bump is a cache miss and fetches the new file --
