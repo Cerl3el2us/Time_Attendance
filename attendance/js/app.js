@@ -4594,11 +4594,11 @@ function renderSettingsPage(_skipRefresh) {
 
     ${adminSection('allowance', '💰', L('Allowance Rates','อัตราเบี้ยเลี้ยง'), `
       ${row2(
-        field(L('Upcountry (฿/trip)','Upcountry (฿/ครั้ง)'), inp('set-allow-upcountry', s.allowances.upcountry, 'number')),
-        field(L('Abroad (฿/day)','ทำงานต่างประเทศ (฿/วัน)'), inp('set-allow-abroad', s.allowances.abroad != null ? s.allowances.abroad : 1100, 'number')),
+        field(L('Upcountry (฿/trip)','เบี้ยเลี้ยงเดินทางไปต่างจังหวัด (฿/ครั้ง)'), inp('set-allow-upcountry', s.allowances.upcountry, 'number')),
+        field(L('Abroad (฿/day)','เบี้ยเลี้ยงทำงานในต่างประเทศ (฿/วัน)'), inp('set-allow-abroad', s.allowances.abroad != null ? s.allowances.abroad : 1100, 'number')),
         field('', `<div style="padding:9px 10px;background:#f8fafc;border-radius:8px;font-size:12px;color:#94a3b8">${L('Applied per approved Upcountry request','นับต่อคำขอ Upcountry ที่ approved')}</div>`)
       )}
-      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Early Morning Bonus','เบี้ยมาเช้า')}</div>
+      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Early Morning Bonus','เบี้ยเลี้ยงมาเช้า')}</div>
       ${row2(
         field(L('×1 (06:30–07:29) ฿','×1 (06:30–07:29) ฿'), inp('set-early1-amt', s.allowances.earlyMorning1, 'number')),
         field(L('×2 (before 06:30) ฿','×2 (ก่อน 06:30) ฿'), inp('set-early2-amt', s.allowances.earlyMorning2, 'number'))
@@ -4607,7 +4607,7 @@ function renderSettingsPage(_skipRefresh) {
         field(L('Check-in before (×1 rate)','เช็กอินก่อนกี่โมงได้ ×1'), `<input id="set-early-thr1" type="time" value="${minsToTime(s.allowances.earlyThreshold1Min)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 07:30','เช่น 07:30')),
         field(L('Check-in before (×2 rate)','เช็กอินก่อนกี่โมงได้ ×2'), `<input id="set-early-thr2" type="time" value="${minsToTime(s.allowances.earlyThreshold2Min)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 06:30','เช่น 06:30'))
       )}
-      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Late Night Bonus','เบี้ยเลิกดึก')}</div>
+      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Late Night Bonus','เบี้ยเลี้ยงกลับดึก')}</div>
       ${row2(
         field(L('×1 (late night) ฿','×1 (แจ้งกลับดึก) ฿'), inp('set-late1-amt', s.allowances.lateNight1, 'number')),
         field(L('×2 (very late night) ฿','×2 (แจ้งกลับดึกมาก) ฿'), inp('set-late2-amt', s.allowances.lateNight2, 'number'))
@@ -4630,7 +4630,7 @@ function renderSettingsPage(_skipRefresh) {
         field(L('Allowance (฿/day)','เบี้ยเลี้ยง (฿/วัน)'), inp('set-longdistance-amt', s.allowances.longDistance, 'number')),
         field(L('Minimum distance (km)','ระยะทางขั้นต่ำ (กม.)'), inp('set-longdistance-threshold', s.allowances.longDistanceThresholdKm, 'number'))
       )}
-      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Phone Allowance','เบี้ยเลี้ยงโทรศัพท์')}</div>
+      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Phone Allowance','เบี้ยเลี้ยงค่าโทรศัพท์')}</div>
       ${row2(
         field(L('Phone Allowance (฿/month)','ค่าโทรศัพท์ (฿/เดือน)'), inp('set-phone-amt', s.allowances.phone, 'number'), L('also needs the per-employee eligibility checkbox','ต้องติ๊กสิทธิ์รายคนในหน้าข้อมูลพนักงานด้วย')),
         field('', '')
@@ -4655,18 +4655,18 @@ function renderSettingsPage(_skipRefresh) {
           <tbody>
             ${[
               ['diligence',    L('Diligence Allowance','เบี้ยขยัน'), L('rate set above (Allowance Rates)','ใช้อัตรากลางด้านบน')],
-              ['longDistance', L('Long Distance Allowance','ค่าเดินทางไกล'), L('rate set above (Allowance Rates)','ใช้อัตรากลางด้านบน')],
-              ['personalCar',  L('Personal Car Allowance','ค่าใช้รถส่วนตัว'), L('rate set above; enabled per employee','ใช้อัตรากลางด้านบน + ต้องติ๊กสิทธิ์รายคน')],
-              ['upcountry',    L('Upcountry Allowance','ค่า Upcountry'), L('rate set above (Allowance Rates)','ใช้อัตรากลางด้านบน')],
-              ['earlyLate',    L('Early Morning / Late Night','แจ้งมาเช้า/แจ้งกลับดึก'), L('rate set above (Allowance Rates)','ใช้อัตรากลางด้านบน')],
+              ['longDistance', L('Long Distance Allowance','เบี้ยเลี้ยงค่าเดินทางไกล'), L('rate set above (Allowance Rates)','ใช้อัตรากลางด้านบน')],
+              ['personalCar',  L('Personal Car Allowance','เบี้ยเลี้ยงค่าใช้รถส่วนตัว'), L('rate set above; enabled per employee','ใช้อัตรากลางด้านบน + ต้องติ๊กสิทธิ์รายคน')],
+              ['upcountry',    L('Upcountry Allowance','เบี้ยเลี้ยงเดินทางไปต่างจังหวัด'), L('rate set above (Allowance Rates)','ใช้อัตรากลางด้านบน')],
+              ['earlyLate',    L('Early Morning / Late Night','เบี้ยเลี้ยงมาเช้า/กลับดึก'), L('rate set above (Allowance Rates)','ใช้อัตรากลางด้านบน')],
               ['holidayWork',  L('Holiday Work','ทำงานวันหยุด'), L('weekend/public-holiday work requests','คำขอทำงานวันเสาร์-อาทิตย์/วันหยุด')],
               // 2026-09-21: this table is a HARDCODED list while saveSettings() loops ALLOWANCE_KEYS
               // to read the checkboxes back -- so a key present in ALLOWANCE_KEYS but missing a row
               // here silently saves as [] (nobody eligible) on the next Settings save. Any future
               // allowance key must be added in BOTH places.
-              ['abroad',       L('Abroad Allowance','ค่าทำงานต่างประเทศ'), L('rate set above; paid per day of the trip','ใช้อัตรากลางด้านบน จ่ายรายวันตลอดช่วงเดินทาง')],
+              ['abroad',       L('Abroad Allowance','เบี้ยเลี้ยงทำงานในต่างประเทศ'), L('rate set above; paid per day of the trip','ใช้อัตรากลางด้านบน จ่ายรายวันตลอดช่วงเดินทาง')],
               ['ot',           L('Overtime (OT) Pay','ค่า OT'), L('hourly rate × approved OT hours','อัตราต่อชม. × ชม.ที่อนุมัติ')],
-              ['phone',        L('Phone Allowance','เบี้ยเลี้ยงโทรศัพท์'), L('rate set above; enabled per employee','ใช้อัตรากลางด้านบน + ต้องติ๊กสิทธิ์รายคน')],
+              ['phone',        L('Phone Allowance','เบี้ยเลี้ยงค่าโทรศัพท์'), L('rate set above; enabled per employee','ใช้อัตรากลางด้านบน + ต้องติ๊กสิทธิ์รายคน')],
             ].map(([key, label, hint]) => `
               <tr style="border-bottom:1px solid #f1f5f9">
                 <td style="padding:8px 10px">
