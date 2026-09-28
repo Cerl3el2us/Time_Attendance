@@ -56,6 +56,8 @@ const SHARED = ['isVoidLeaveStatus', 'round2HalfUp', 'round1HalfUp', 'lateNightC
   'deviceScanQualifiesForLateNight', 'lateNightCheckoutOk', 'addOtHours', 'accumulateApprovedOtHours', 'otPayFromHourBuckets', 'effectiveOtMultiplier',
   'computePayroll', 'splitHolidayWorkOtMinutes', 'holidayWorkEndMins', 'standardOtMultiplier', 'abroadTravelCreditDays',
   'isAbroadTravelDay', 'isRevocableLeaveType',
+  // 2026-09-28: extracted out of computePayroll so the in-form pay preview reuses the same rules.
+  'hasUpcountryLocation', 'holidayTransportForRecord',
   // leave balance
   'normalizeAnnualLeaveTiers', 'getAnnualLeaveTiers', 'getAnnualLeaveMinMonths', 'annualLeaveUnlockDateStr',
   'isAnnualLeaveUnlocked', 'annualLeaveEntitlementDays', 'hourlyLeaveChargedMinutes', 'carryForwardExpiryEnabled',

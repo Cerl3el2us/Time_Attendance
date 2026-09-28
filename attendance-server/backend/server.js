@@ -4807,6 +4807,23 @@ function deriveOfficeOtFromEndTime(dateFrom, otEndTime, S) {
 }
 // 2026-09-24: approved paid-mode Holiday Work with OT hours -- counted as OT in the payslip OT
 // tile (display only). Dual-sync with app.js isHolidayWorkOtRecord.
+// 2026-09-28: extracted OUT of computePayroll so the in-form pay preview composes the very rule
+// payroll applies instead of carrying its own copy of it. computePayroll now calls these two.
+// An Upcountry claim needs at least one location with a real name on it.
+// DUAL-SYNC (identical text): app.js / server.js hasUpcountryLocation.
+function hasUpcountryLocation(l) {
+  return !!(l && Array.isArray(l.locations) && l.locations.some(x => x && x.name && String(x.name).trim()));
+}
+// Holiday transport for ONE Holiday Work record: paid mode only (annual-leave mode pays none), and
+// never on an Abroad day -- the Abroad allowance already covers that day. `!= null` rather than
+// `||` so a rate an admin deliberately set to 0 stays 0 instead of falling back to 500.
+// DUAL-SYNC (identical text): app.js / server.js holidayTransportForRecord.
+function holidayTransportForRecord(l, S, abroadDates) {
+  if (!l || l.compensationMode !== 'paid') return 0;
+  if (abroadDates && abroadDates.has(l.dateFrom)) return 0;
+  const rate = S && S.allowances ? S.allowances.holidayTransport : undefined;
+  return rate != null ? rate : 500;
+}
 function isHolidayWorkOtRecord(l) {
   return !!l && l.type === 'holiday-work' && l.status === 'approved' && l.compensationMode === 'paid' &&
     ((Number(l.otHours20) || 0) + (Number(l.otHours30) || 0)) > 0;
@@ -9775,8 +9792,7 @@ function computePayroll(user, start, end, periodIndex) {
     !isFullDayPersonalLeaveStatus(d.status)
   ).length : 0;
   const holidayWorkUpcountryCount = canUpcountry ? approvedHolidayWork.filter(l =>
-    !abroadDates.has(l.dateFrom) &&
-    Array.isArray(l.locations) && l.locations.some(x => x && x.name && String(x.name).trim())
+    !abroadDates.has(l.dateFrom) && hasUpcountryLocation(l)
   ).length : 0;
 
   let earlyCount = 0, earlyLateBonus = 0, lateNightCount = 0;
@@ -9866,9 +9882,7 @@ function computePayroll(user, start, end, periodIndex) {
   let holidayTransportTotal = 0;
   approvedHolidayWork.forEach(l => {
     if (l.compensationMode !== 'paid') return;
-    if (!abroadDates.has(l.dateFrom)) {
-      holidayTransportTotal += S.allowances.holidayTransport != null ? S.allowances.holidayTransport : 500;
-    }
+    holidayTransportTotal += holidayTransportForRecord(l, S, abroadDates);
     // 2026-09-24 (owner, round 7): the x2/x3 hours join the same buckets as OT. Dual-sync.
     addOtHours(otHourBuckets, 2, Number(l.otHours20) || 0);
     addOtHours(otHourBuckets, 3, Number(l.otHours30) || 0);

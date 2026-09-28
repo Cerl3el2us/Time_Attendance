@@ -2068,6 +2068,23 @@ function otEndTimeLabel(hhmm) {
 // (Dashboard, Reports monthly/yearly + detail, OT detail, payslip OT tile) now count it too.
 // Same record filter as computePayroll's approvedHolidayWork (paid + role eligible + not a
 // Company Trip day). Display-only; no pay changes. Dual-sync (count only): server.js getPayrollView.
+// 2026-09-28: extracted OUT of computePayroll so the in-form pay preview composes the very rule
+// payroll applies instead of carrying its own copy of it. computePayroll now calls these two.
+// An Upcountry claim needs at least one location with a real name on it.
+// DUAL-SYNC (identical text): app.js / server.js hasUpcountryLocation.
+function hasUpcountryLocation(l) {
+  return !!(l && Array.isArray(l.locations) && l.locations.some(x => x && x.name && String(x.name).trim()));
+}
+// Holiday transport for ONE Holiday Work record: paid mode only (annual-leave mode pays none), and
+// never on an Abroad day -- the Abroad allowance already covers that day. `!= null` rather than
+// `||` so a rate an admin deliberately set to 0 stays 0 instead of falling back to 500.
+// DUAL-SYNC (identical text): app.js / server.js holidayTransportForRecord.
+function holidayTransportForRecord(l, S, abroadDates) {
+  if (!l || l.compensationMode !== 'paid') return 0;
+  if (abroadDates && abroadDates.has(l.dateFrom)) return 0;
+  const rate = S && S.allowances ? S.allowances.holidayTransport : undefined;
+  return rate != null ? rate : 500;
+}
 function isHolidayWorkOtRecord(l) {
   return !!l && l.type === 'holiday-work' && l.status === 'approved' && l.compensationMode === 'paid' &&
     ((Number(l.otHours20) || 0) + (Number(l.otHours30) || 0)) > 0;
@@ -2170,6 +2187,181 @@ function otPayFromHourBuckets(buckets, hourlyRate) {
   });
   return out;
 }
+// ===== IN-FORM PAY PREVIEW (2026-09-28, owner) =====
+// "ใส่ชั่วโมงแล้วให้บอกว่าจะได้เงินเท่าไหร่" -- so an employee choosing between money and an extra
+// leave day on a holiday can see both outcomes before deciding.
+// It composes ONLY the functions payroll itself uses; it owns no money rule of its own. Whenever a
+// rule was still inline inside computePayroll it was extracted (hasUpcountryLocation,
+// holidayTransportForRecord) rather than copied here -- a second copy would drift.
+//
+// The pay period containing a date. computePayroll rounds OT once per multiplier bucket for the
+// WHOLE period, so a per-record figure can never match the payslip; the preview therefore reports
+// the MARGINAL amount across that period's buckets instead. Mirrors getPeriodBounds()'s own
+// `ed = sd - 1 || 20` quirk deliberately, so both agree on a period that starts on the 1st.
+function periodBoundsForDate(dateStr) {
+  const sd = APP_SETTINGS.payroll.periodStartDay || 21;
+  const ed = sd - 1 || 20;
+  const d = new Date(dateStr + 'T12:00:00');
+  const start = new Date(d.getFullYear(), d.getMonth() - (d.getDate() >= sd ? 0 : 1), sd);
+  const end = new Date(start.getFullYear(), start.getMonth() + 1, ed);
+  return { start: localDateStr(start), end: localDateStr(end) };
+}
+// The OT hour buckets this employee's period ALREADY holds: approved OT plus the x2/x3 hours of
+// approved paid-mode Holiday Work -- the same two sources computePayroll feeds into its buckets.
+// `excludeId` drops the record being edited so editing 3h to 4h reads as +1h, not +4h.
+function existingOtBuckets(userId, dateStr, excludeId) {
+  const { start, end } = periodBoundsForDate(dateStr);
+  const buckets = {};
+  const paidHwDates = new Set(DATA_LEAVES.filter(l => l.userId === userId && l.type === 'holiday-work' &&
+    l.status === 'approved' && l.compensationMode === 'paid' && l.id !== excludeId).map(l => l.dateFrom));
+  DATA_LEAVES.forEach(l => {
+    if (l.userId !== userId || l.status !== 'approved' || l.id === excludeId) return;
+    if (!l.dateFrom || l.dateFrom < start || l.dateFrom > end) return;
+    if (l.type === 'ot') {
+      // Same skip as computePayroll: a paid Holiday Work day owns that day's OT, so a separate
+      // office-OT record on it is not paid on top.
+      if (!l.isDriverOT && paidHwDates.has(l.dateFrom)) return;
+      accumulateApprovedOtHours(l, buckets);
+    } else if (l.type === 'holiday-work' && l.compensationMode === 'paid') {
+      addOtHours(buckets, 2, Number(l.otHours20) || 0);
+      addOtHours(buckets, 3, Number(l.otHours30) || 0);
+    }
+  });
+  return buckets;
+}
+// The driver contract floor lifts the x1.5 bucket's TOTAL hours before it is paid, exactly as
+// computePayroll does -- which is why a driver already above their floor correctly previews +฿0
+// instead of a number they will never actually receive.
+function applyGuaranteedOtFloor(buckets, user, canOt) {
+  const g = Number(user && user.guaranteedOT) || 0;
+  if (user && user.role === 'driver' && canOt && g > (buckets['1.5'] || 0)) {
+    buckets['1.5'] = round2HalfUp(g);
+  }
+  return buckets;
+}
+// opts: { date, user, mode, otEndTime, driverTiers:{1.5,2,3}, hwStartTime, hwEndTime, locations,
+//         lateOutHour, excludeLeaveId }
+// -> { lines:[{key,label,amount,note}], total, earnsLeaveDay, salaryKnown, warnings:[] }
+function estimateDayEarnings(opts) {
+  const o = opts || {};
+  const S = APP_SETTINGS;
+  const user = o.user || currentUser;
+  const date = o.date;
+  const lines = [], warnings = [];
+  const out = () => ({
+    lines, warnings, earnsLeaveDay: o.mode === 'annual-leave',
+    total: round2HalfUp(lines.reduce((s, l) => s + (Number(l.amount) || 0), 0)),
+    salaryKnown: (Number(user && user.salary) || 0) > 0,
+  });
+  if (!user || !date) return out();
+  const elig = S.allowanceEligibility;
+  const role = user.role;
+  const salary = Number(user.salary) || 0;
+  const hourlyRate = salary > 0 ? salary / 30 / 8 : 0;
+  const onAbroad = isApprovedAbroadDate(date);
+  const abroadDates = onAbroad ? new Set([date]) : new Set();
+
+  // --- OT (x1.5 office / driver tiers / x2-x3 holiday work) ---
+  const canOt = isAllowanceEligible(elig, role, 'ot');
+  const askHours = {};
+  if (o.otEndTime) {
+    const derived = deriveOfficeOtFromEndTime(date, o.otEndTime, S);
+    addOtHours(askHours, derived.otMultiplier, derived.otHours);
+  }
+  if (o.driverTiers) {
+    Object.keys(o.driverTiers).forEach(k => addOtHours(askHours, Number(k), Number(o.driverTiers[k]) || 0));
+  }
+  if (o.mode === 'paid' && o.hwStartTime && o.hwEndTime) {
+    const sp = splitHolidayWorkOtMinutes(o.hwStartTime, o.hwEndTime, S);
+    addOtHours(askHours, 2, sp.otHours20);
+    addOtHours(askHours, 3, sp.otHours30);
+  }
+  const askedKeys = Object.keys(askHours);
+  if (askedKeys.length && canOt) {
+    // The floor is applied to each side's OWN real hour total, never to "floor + new hours" -- doing
+    // it once on the baseline and then adding on top would charge the employee's new hours against
+    // an already-lifted bucket and report a gain the payslip will never show. applyGuaranteedOtFloor
+    // mutates, so both sides get their own copy.
+    const raw = existingOtBuckets(user.id, date, o.excludeLeaveId);
+    const merged = { ...raw };
+    askedKeys.forEach(k => addOtHours(merged, Number(k), askHours[k]));
+    const before = otPayFromHourBuckets(applyGuaranteedOtFloor({ ...raw }, user, canOt), hourlyRate).otAmount;
+    const after = otPayFromHourBuckets(applyGuaranteedOtFloor(merged, user, canOt), hourlyRate).otAmount;
+    const gain = round2HalfUp(after - before);
+    const detail = askedKeys.sort((a, b) => Number(a) - Number(b))
+      .map(k => `${askHours[k]} ${L('h', 'ชม.')} ×${k}`).join(' + ');
+    lines.push({ key: 'ot', label: `⏱️ OT ${detail}`, amount: gain });
+    if (gain === 0 && hourlyRate > 0 && role === 'driver') {
+      warnings.push(L('Your guaranteed monthly OT already covers these hours, so they add nothing.',
+        'OT ขั้นต่ำตามสัญญาของคุณครอบชั่วโมงนี้อยู่แล้ว จึงไม่ได้เพิ่ม'));
+    }
+  }
+
+  // --- Early Morning: read off the day's REAL scan, never guessed ---
+  const canEarlyLate = isAllowanceEligible(elig, role, 'earlyLate');
+  if (canEarlyLate && !onAbroad) {
+    const d0 = new Date(date + 'T12:00:00');
+    const row = (generatePeriodDays(d0, d0, false, user.id) || [])[0];
+    const hwDates = new Set(DATA_LEAVES.filter(l => l.userId === user.id && l.type === 'holiday-work' &&
+      l.status === 'approved').map(l => l.dateFrom));
+    // On the Holiday Work form the request being filled in IS what unlocks a rest day's early
+    // morning, so treat this date as covered while previewing it.
+    if (o.mode) hwDates.add(date);
+    if (row && deviceScanQualifiesForEarlyMorning(row, hwDates)) {
+      const tier = earlyMorningTierFromCheckIn(row.checkIn, S);
+      if (tier) {
+        lines.push({ key: 'early', label: `🌅 ${L('Early Morning', 'เบี้ยเลี้ยงมาเช้า')} ×${tier}`,
+          amount: earlyMorningAllowanceForTier(tier),
+          note: currentLang === 'ja' ? `打刻 ${row.checkIn}` : L(`scan ${row.checkIn}`, `สแกน ${row.checkIn}`) });
+      }
+    } else if (row && row.checkIn && !isDeviceScanSource(row.checkInSource) &&
+        earlyMorningTierFromCheckIn(row.checkIn, S)) {
+      // The time would have qualified -- it is the web check-in that disqualifies it. Say so
+      // instead of silently leaving the line out and looking like a miscalculation.
+      lines.push({ key: 'early', label: `🌅 ${L('Early Morning', 'เบี้ยเลี้ยงมาเช้า')}`, amount: 0,
+        note: L('needs a face-scanner check-in at the office', 'ต้องสแกนเข้าที่เครื่องสแกนหน้าออฟฟิศ') });
+    }
+  }
+
+  // --- Late Night, only when this form bundles it ---
+  if (canEarlyLate && !onAbroad && Number(o.lateOutHour) > 0) {
+    lines.push({ key: 'late-night', label: `🌙 ${L('Late Night', 'เบี้ยเลี้ยงกลับดึก')}`,
+      amount: lateOutAllowanceForHour(Number(o.lateOutHour)) });
+  }
+
+  // --- Holiday transport: paid-mode Holiday Work only ---
+  const transport = holidayTransportForRecord({ compensationMode: o.mode, dateFrom: date }, S, abroadDates);
+  if (transport > 0) {
+    lines.push({ key: 'holiday-transport', label: `🚐 ${L('Holiday transport', 'ค่าเดินทางวันหยุด')}`, amount: transport });
+  }
+
+  // --- Upcountry: both compensation modes pay it, if a location was entered ---
+  if (isAllowanceEligible(elig, role, 'upcountry') && !onAbroad && hasUpcountryLocation({ locations: o.locations })) {
+    lines.push({ key: 'upcountry', label: `🏞️ ${L('Upcountry', 'เบี้ยเลี้ยงเดินทางไปต่างจังหวัด')}`,
+      amount: Number(S.allowances.upcountry) || 0 });
+  }
+
+  if (onAbroad) {
+    warnings.push(L('On an approved Abroad day the Abroad allowance covers the day — no holiday transport, no Upcountry.',
+      'วันทำงานต่างประเทศที่อนุมัติแล้ว เบี้ยเลี้ยงต่างประเทศครอบวันนั้นอยู่แล้ว — ไม่จ่ายค่าเดินทางวันหยุดและ Upcountry'));
+  }
+  // A trap the forms never showed before: on a PAID Holiday Work day, payroll ignores a separate
+  // office-OT record for the same date (its x2/x3 hours are what gets paid instead). Someone who
+  // already filed OT for that day and then picks "take the money" would otherwise expect both.
+  if (o.mode === 'paid') {
+    const clash = DATA_LEAVES.filter(l => l.userId === user.id && l.type === 'ot' && !l.isDriverOT &&
+      l.dateFrom === date && !isVoidLeaveStatus(l.status) && l.id !== o.excludeLeaveId);
+    if (clash.length) {
+      const hrs = round2HalfUp(clash.reduce((s, l) => s + (Number(l.otHours) || 0), 0));
+      warnings.push(currentLang === 'ja'
+        ? `この日には残業申請（${hrs}時間）があります — 現金を選ぶと、その申請は加算されません`
+        : L(`An OT request of ${hrs}h exists for this day — choosing the money means it is not counted on top`,
+            `มีใบขอ OT ของวันนี้อยู่ ${hrs} ชม. — ถ้าเลือกรับเป็นเงิน ใบนั้นจะไม่ถูกนับเพิ่ม`));
+    }
+  }
+  return out();
+}
+
 function canSubmitHolidayWorkForDate(dateStr, userId) {
   const uid = userId || (currentUser && currentUser.id);
   if (!uid || !dateStr) return { ok: false, reason: 'missing' };
@@ -12674,8 +12866,7 @@ function computePayroll(user, start, end, periodIndex) {
     !isFullDayPersonalLeaveStatus(d.status)
   ).length : 0;
   const holidayWorkUpcountryCount = canUpcountry ? approvedHolidayWork.filter(l =>
-    !abroadDates.has(l.dateFrom) &&
-    Array.isArray(l.locations) && l.locations.some(x => x && x.name && String(x.name).trim())
+    !abroadDates.has(l.dateFrom) && hasUpcountryLocation(l)
   ).length : 0;
 
   let earlyCount = 0, earlyLateBonus = 0, lateNightCount = 0;
@@ -12777,9 +12968,7 @@ function computePayroll(user, start, end, periodIndex) {
   const holidayWorkOtCount = approvedHolidayWork.filter(isHolidayWorkOtRecord).length;
   approvedHolidayWork.forEach(l => {
     if (l.compensationMode !== 'paid') return;
-    if (!abroadDates.has(l.dateFrom)) {
-      holidayTransportTotal += S.allowances.holidayTransport != null ? S.allowances.holidayTransport : 500;
-    }
+    holidayTransportTotal += holidayTransportForRecord(l, S, abroadDates);
     // 2026-09-24 (owner, round 7): the x2/x3 hours join the same buckets as OT. Dual-sync.
     addOtHours(otHourBuckets, 2, Number(l.otHours20) || 0);
     addOtHours(otHourBuckets, 3, Number(l.otHours30) || 0);
@@ -16747,6 +16936,9 @@ function updateDriverOTFieldsVisibility() {
     document.getElementById('ot-mins-20').value = '0';
     document.getElementById('ot-mins-30').value = '0';
   }
+  // The tier fields were just shown/hidden and possibly cleared -- the money on screen has to follow
+  // (a stale weekend figure must not survive switching to a weekday).
+  calcDriverOTPreview();
 }
 function onOTFileChange() {
   const file = document.getElementById('ot-file').files[0];
@@ -16781,6 +16973,32 @@ function syncOfficeOtFormHints() {
       : L(`OT x2.0 hours (holiday ${w})`, `ชั่วโมง OT ×2.0 (วันหยุด ${w})`);
   }
 }
+// One itemised line per component, then the total: "🌅 Early Morning ×1  ฿240 / ⏱️ OT 2 ชม. ×1.5
+// ฿225 / รวม ฿465". A zero line is kept (with its note) on purpose -- it explains why something the
+// employee expected is not being paid.
+function payPreviewText(est) {
+  if (!est || !est.lines.length) return '';
+  const parts = est.lines.map(l => {
+    const amt = est.salaryKnown || l.key !== 'ot' ? `฿${fmt2dp(l.amount)}` : '—';
+    return `${l.label} ${amt}${l.note ? ` (${l.note})` : ''}`;
+  });
+  // With no salary on file the OT line reads '—', so a total would be the sum of only the parts we
+  // could work out -- worse than showing none.
+  const otUnknown = !est.salaryKnown && est.lines.some(l => l.key === 'ot');
+  if (est.lines.length > 1 && !otUnknown) {
+    parts.push(`${currentLang === 'ja' ? '合計' : L('Total', 'รวม')} ฿${fmt2dp(est.total)}`);
+  }
+  return parts.join('  ·  ');
+}
+// The employee this form is being filled in FOR. 2026-09-28: calcOTHours() used to read
+// currentUser.salary while openOTModal() targets inspectUser, so when MD/superadmin opened the form
+// on behalf of another employee the estimate was computed from the APPROVER's own salary.
+function otFormTargetUser() {
+  if (isSuperAdmin() && currentPage === 'attendance' && canViewOtherEmployees()) {
+    return qaAttendanceInspectUser(DATA_USERS.find(u => u.id === selectedAttUserId) || currentUser);
+  }
+  return currentUser;
+}
 function calcOTHours() {
   syncOfficeOtFormHints();
   const date    = document.getElementById('ot-date').value;
@@ -16790,11 +17008,11 @@ function calcOTHours() {
   if (!endTime) { display.style.display = 'none'; return; }
   const derived = deriveOfficeOtFromEndTime(date, endTime, APP_SETTINGS);
   if (!(derived.otHours > 0)) { display.style.display = 'none'; return; }
-  const salary = currentUser?.salary || 0;
-  const hourlyRate = salary > 0 ? salary / 30 / 8 : 0;
-  const amount = salary > 0 ? otPayAmountFromLeave(derived, hourlyRate) : 0;
-  const amountStr = salary > 0 ? ` ≈ ฿${fmt2dp(amount)}` : '';
-  hoursText.textContent = `${otHoursRateDetail(derived)}${amountStr}`;
+  const user = otFormTargetUser();
+  const est = estimateDayEarnings({ date, user, otEndTime: endTime, excludeLeaveId: editingLeaveId });
+  const detail = payPreviewText(est);
+  // Hours always show; the money only when this employee's salary is known to this session.
+  hoursText.textContent = detail || otHoursRateDetail(derived);
   const rangeHint = document.getElementById('ot-hours-range-hint');
   if (rangeHint) rangeHint.style.display = 'none';
   display.style.display = 'block';
@@ -16923,6 +17141,36 @@ async function submitOT() {
 
 // Driver OT: hours entered directly per multiplier tier (1.5 / 2.0 / 3.0), no end-time auto-calc.
 // Approved by Accounting by default, or MD if APPROVAL_ROUTING['driver-ot'] is toggled on.
+// Hours + minutes of one driver OT tier, rounded exactly as submitDriverOT() and the server do, so
+// the preview cannot show a figure derived from different hours than the ones submitted.
+function driverOtTierHours(hId, mId) {
+  return round2HalfUp((parseInt(document.getElementById(hId).value) || 0) +
+    (parseInt(document.getElementById(mId).value) || 0) / 60);
+}
+// 2026-09-28 (owner): the driver OT form had no money on it at all. Live-updates as the tier hours
+// are typed, itemised, and includes Early Morning when that day's real scan earns it.
+function calcDriverOTPreview() {
+  const box = document.getElementById('ot-driver-pay-display');
+  const text = document.getElementById('ot-driver-pay-text');
+  if (!box || !text) return;
+  const date = document.getElementById('ot-date')?.value;
+  const tiers = {
+    1.5: driverOtTierHours('ot-hours-15', 'ot-mins-15'),
+    2: driverOtTierHours('ot-hours-20', 'ot-mins-20'),
+    3: driverOtTierHours('ot-hours-30', 'ot-mins-30'),
+  };
+  if (!date || !(tiers[1.5] > 0 || tiers[2] > 0 || tiers[3] > 0)) { box.style.display = 'none'; return; }
+  const est = estimateDayEarnings({
+    date, user: otFormTargetUser(), driverTiers: tiers, excludeLeaveId: editingLeaveId,
+  });
+  const line = payPreviewText(est);
+  if (!line) { box.style.display = 'none'; return; }
+  text.textContent = line;
+  box.style.display = 'block';
+  const warn = est.warnings[0];
+  if (warn) text.textContent += `  ·  ⚠️ ${warn}`;
+}
+
 async function submitDriverOT() {
   if (blockIfObserver()) return;
   const date   = document.getElementById('ot-date').value;
@@ -17052,6 +17300,79 @@ function refreshHolidayWorkCompHint() {
       'เพิ่มลาพักร้อน 1 วัน ไม่จ่ายค่าเดินทางวันหยุด และไม่คิด OT ×2/×3 ยังจ่าย Early Morning (สแกน Hikvision) และ Upcountry ถ้ากรอกสถานที่'
     );
   }
+  refreshHolidayWorkPayCompare();
+}
+
+// 2026-09-28 (owner): the money-vs-leave-day decision, side by side with real numbers. Both cards
+// are always shown, so the employee compares instead of switching the dropdown back and forth; the
+// selected one is highlighted. Display only -- the dropdown stays the single source of the mode.
+function hwPayPreviewInputs() {
+  return {
+    date: document.getElementById('holiday-work-date')?.value || '',
+    hwStartTime: document.getElementById('holiday-work-start-time')?.value || '',
+    hwEndTime: document.getElementById('holiday-work-end-time')?.value || '',
+    locationName: (document.getElementById('holiday-work-location')?.value || '').trim(),
+    lateOutHour: document.getElementById('holiday-work-include-latenight')?.checked ? _hwLateOutSelected : 0,
+  };
+}
+function hwPayCardHtml(est, opts) {
+  const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+  const on = opts.selected;
+  const rows = est.lines.map(l =>
+    `<div style="display:flex;justify-content:space-between;gap:8px;font-size:11.5px;color:var(--text)">
+       <span>${escapeHtml(l.label)}${l.note ? ` <span style="color:#94a3b8">(${escapeHtml(l.note)})</span>` : ''}</span>
+       <span style="white-space:nowrap">${est.salaryKnown || l.key !== 'ot' ? `฿${fmt2dp(l.amount)}` : '—'}</span>
+     </div>`).join('');
+  const leaveRow = est.earnsLeaveDay
+    ? `<div style="display:flex;justify-content:space-between;gap:8px;font-size:11.5px;color:var(--text)">
+         <span>🌴 ${L('Annual leave', 'ลาพักร้อน')}</span><span style="white-space:nowrap">+1 ${L('day', 'วัน')}</span></div>`
+    : '';
+  const otUnknown = !est.salaryKnown && est.lines.some(l => l.key === 'ot');
+  return `<div style="font-size:12px;font-weight:800;color:${on ? '#0369a1' : '#64748b'};margin-bottom:6px">
+      ${on ? '✅ ' : ''}${escapeHtml(opts.title)}
+    </div>
+    ${leaveRow}${rows || (est.earnsLeaveDay ? '' : `<div style="font-size:11.5px;color:#94a3b8">${L('Nothing extra on this day', 'ไม่มีรายการเพิ่มในวันนี้')}</div>`)}
+    <div style="border-top:1px dashed var(--border);margin:6px 0 4px"></div>
+    <div style="display:flex;justify-content:space-between;gap:8px;font-size:12.5px;font-weight:800;color:var(--text)">
+      <span>${currentLang === 'ja' ? '合計' : L('Total', 'รวม')}</span>
+      <span style="white-space:nowrap">${otUnknown ? '—' : `฿${fmt2dp(est.total)}`}${est.earnsLeaveDay ? ` + 1 ${L('day', 'วัน')}` : ''}</span>
+    </div>`
+    + (on ? `<div style="margin-top:6px;font-size:10.5px;color:${dark ? '#7dd3fc' : '#0369a1'}">${L('Currently selected', 'ที่เลือกอยู่')}</div>` : '');
+}
+function refreshHolidayWorkPayCompare() {
+  const wrap = document.getElementById('hw-pay-compare');
+  if (!wrap) return;
+  const paidCard = document.getElementById('hw-pay-card-paid');
+  const leaveCard = document.getElementById('hw-pay-card-leave');
+  const mode = document.getElementById('holiday-work-comp-mode')?.value || 'annual-leave';
+  const inp = hwPayPreviewInputs();
+  if (!inp.date) { wrap.style.display = 'none'; return; }
+  const user = currentUser;
+  const common = {
+    date: inp.date, user,
+    hwStartTime: inp.hwStartTime, hwEndTime: inp.hwEndTime,
+    locations: inp.locationName ? [{ name: inp.locationName }] : null,
+    lateOutHour: inp.lateOutHour,
+    excludeLeaveId: editingLeaveId,
+  };
+  const paid = estimateDayEarnings({ ...common, mode: 'paid' });
+  const leave = estimateDayEarnings({ ...common, mode: 'annual-leave' });
+  // Nothing to compare yet: no times entered and no allowance earned either way.
+  if (!paid.lines.length && !leave.lines.length) { wrap.style.display = 'none'; return; }
+  const selBorder = '#7dd3fc';
+  paidCard.innerHTML = hwPayCardHtml(paid, { title: `💰 ${L('Take the money', 'รับเป็นเงิน')}`, selected: mode === 'paid' });
+  leaveCard.innerHTML = hwPayCardHtml(leave, { title: `🌴 ${L('Take a leave day', 'รับเป็นวันลา')}`, selected: mode === 'annual-leave' });
+  paidCard.style.borderColor = mode === 'paid' ? selBorder : 'var(--border)';
+  leaveCard.style.borderColor = mode === 'annual-leave' ? selBorder : 'var(--border)';
+  // Warnings belong to the mode actually selected -- showing the paid-mode OT clash while the
+  // employee is looking at the leave option would be noise.
+  const warnEl = document.getElementById('hw-pay-warnings');
+  if (warnEl) {
+    const list = (mode === 'paid' ? paid : leave).warnings;
+    warnEl.innerHTML = list.map(w => `<div>⚠️ ${escapeHtml(w)}</div>`).join('');
+    warnEl.style.display = list.length ? 'block' : 'none';
+  }
+  wrap.style.display = 'block';
 }
 
 let _hwLateOutSelected = 0;
@@ -17116,6 +17437,7 @@ function onHolidayWorkLateNightToggle() {
   const tiers = document.getElementById('holiday-work-latenight-tiers');
   if (tiers) tiers.style.display = cb && cb.checked ? '' : 'none';
   if (!(cb && cb.checked)) _hwLateOutSelected = 0;
+  refreshHolidayWorkPayCompare();
 }
 
 function selectHwLateOutTime(hour) {
@@ -17137,6 +17459,7 @@ function selectHwLateOutTime(hour) {
     sel.style.borderColor = '#6ee7b7';
     sel.style.background  = _isDark ? 'rgba(16,185,129,0.15)' : '#f0fdf4';
   }
+  refreshHolidayWorkPayCompare();
 }
 
 function refreshHolidayWorkGate() {
@@ -17162,6 +17485,9 @@ function refreshHolidayWorkGate() {
   noteEl.textContent = currentLang === 'ja'
     ? '✅ この日は休日出勤を申請できます'
     : L('✅ You can submit holiday work for this date', '✅ วันนี้สามารถยื่นขอทำงานวันหยุดได้');
+  // The date drives Early Morning (that day's real scan), the holiday tier and the Late Night
+  // bundle, so the comparison has to be recomputed whenever it changes.
+  refreshHolidayWorkPayCompare();
 }
 
 function resolveHolidayWorkModalDate(preferred) {

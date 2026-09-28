@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="th">
 <head>
   <meta charset="UTF-8">
@@ -1526,9 +1526,9 @@
           <div class="form-group">
             <label class="form-label" data-en="OT x1.5 hours (weekday after 17:30)">ชั่วโมง OT ×1.5 (วันธรรมดาหลัง 17:30)</label>
             <div style="display:flex;gap:8px;align-items:center">
-              <input type="number" id="ot-hours-15" class="form-control" min="0" step="1" placeholder="0" style="flex:1;min-width:0">
+              <input type="number" id="ot-hours-15" oninput="calcDriverOTPreview()" class="form-control" min="0" step="1" placeholder="0" style="flex:1;min-width:0">
               <span style="font-size:12px;color:#64748b;white-space:nowrap" data-en="hr">ชม.</span>
-              <input type="number" id="ot-mins-15" class="form-control" min="0" max="59" step="1" placeholder="0" style="flex:1;min-width:0">
+              <input type="number" id="ot-mins-15" oninput="calcDriverOTPreview()" class="form-control" min="0" max="59" step="1" placeholder="0" style="flex:1;min-width:0">
               <span style="font-size:12px;color:#64748b;white-space:nowrap" data-en="min">น.</span>
             </div>
           </div>
@@ -1537,23 +1537,27 @@
           <div class="form-group">
             <label class="form-label" id="ot-driver-label-20" data-en="OT x2.0 hours (holiday 08:30–17:30)">ชั่วโมง OT ×2.0 (วันหยุด 08:30–17:30)</label>
             <div style="display:flex;gap:8px;align-items:center">
-              <input type="number" id="ot-hours-20" class="form-control" min="0" step="1" placeholder="0" style="flex:1;min-width:0">
+              <input type="number" id="ot-hours-20" oninput="calcDriverOTPreview()" class="form-control" min="0" step="1" placeholder="0" style="flex:1;min-width:0">
               <span style="font-size:12px;color:#64748b;white-space:nowrap" data-en="hr">ชม.</span>
-              <input type="number" id="ot-mins-20" class="form-control" min="0" max="59" step="1" placeholder="0" style="flex:1;min-width:0">
+              <input type="number" id="ot-mins-20" oninput="calcDriverOTPreview()" class="form-control" min="0" max="59" step="1" placeholder="0" style="flex:1;min-width:0">
               <span style="font-size:12px;color:#64748b;white-space:nowrap" data-en="min">น.</span>
             </div>
           </div>
           <div class="form-group">
             <label class="form-label" data-en="OT x3.0 hours (holiday after 17:30)">ชั่วโมง OT ×3.0 (วันหยุดหลัง 17:30)</label>
             <div style="display:flex;gap:8px;align-items:center">
-              <input type="number" id="ot-hours-30" class="form-control" min="0" step="1" placeholder="0" style="flex:1;min-width:0">
+              <input type="number" id="ot-hours-30" oninput="calcDriverOTPreview()" class="form-control" min="0" step="1" placeholder="0" style="flex:1;min-width:0">
               <span style="font-size:12px;color:#64748b;white-space:nowrap" data-en="hr">ชม.</span>
-              <input type="number" id="ot-mins-30" class="form-control" min="0" max="59" step="1" placeholder="0" style="flex:1;min-width:0">
+              <input type="number" id="ot-mins-30" oninput="calcDriverOTPreview()" class="form-control" min="0" max="59" step="1" placeholder="0" style="flex:1;min-width:0">
               <span style="font-size:12px;color:#64748b;white-space:nowrap" data-en="min">น.</span>
             </div>
           </div>
         </div>
         <div style="font-size:11px;color:#94a3b8;margin-top:-8px;margin-bottom:12px" data-en="Fill in the hours that apply — leave others at 0">กรอกเฉพาะช่องที่มีชั่วโมง OT จริง ช่องที่ไม่มีให้เว้นเป็น 0</div>
+        <div id="ot-driver-pay-display" style="background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:10px 14px;margin-bottom:12px;display:none">
+          <span style="font-size:13px;color:#c2410c;font-weight:600" id="ot-driver-pay-text"></span>
+          <div style="font-size:11px;color:#9a3412;margin-top:4px" data-en="Estimate for this day. OT is paid on the period total, so the payslip can differ by a few satang.">ประมาณการของวันนี้ OT จ่ายตามยอดรวมทั้งงวด สลิปจริงอาจต่างระดับสตางค์</div>
+        </div>
       </div>
       <div class="form-group">
         <label class="form-label"><span data-en="Reason / OT work">เหตุผล / งานที่ทำ OT</span> <span id="ot-reason-required-mark" style="color:#ef4444">*</span></label>
@@ -1686,16 +1690,16 @@
       </div>
       <div class="form-group">
         <label class="form-label"><span data-en="Location (Upcountry)">สถานที่ (Upcountry)</span> <span style="color:#ef4444">*</span></label>
-        <input type="text" id="holiday-work-location" class="form-control" placeholder="ระบุสถานที่ทำงาน..." data-en-ph="Specify work location..." />
+        <input type="text" id="holiday-work-location" class="form-control" oninput="refreshHolidayWorkPayCompare()" placeholder="ระบุสถานที่ทำงาน..." data-en-ph="Specify work location..." />
       </div>
       <div style="display:flex;gap:10px">
         <div class="form-group" style="flex:1">
           <label class="form-label"><span data-en="Work start (off-site)">เวลาเริ่มงาน (นอกสถานที่)</span> <span style="color:#ef4444">*</span></label>
-          <input type="time" id="holiday-work-start-time" class="form-control" />
+          <input type="time" id="holiday-work-start-time" class="form-control" onchange="refreshHolidayWorkPayCompare()" />
         </div>
         <div class="form-group" style="flex:1">
           <label class="form-label"><span data-en="Work end (off-site)">เวลาเลิกงาน (นอกสถานที่)</span> <span style="color:#ef4444">*</span></label>
-          <input type="time" id="holiday-work-end-time" class="form-control" />
+          <input type="time" id="holiday-work-end-time" class="form-control" onchange="refreshHolidayWorkPayCompare()" />
         </div>
       </div>
       <div style="font-size:11px;color:#94a3b8;margin-top:-8px" data-en="An end time before 05:00 means after midnight (same work day) — the whole shift is paid at this day's holiday rate.">เวลาเลิกก่อน 05:00 หมายถึงหลังเที่ยงคืน (นับเป็นวันทำงานเดียวกัน) — คิดอัตราวันหยุดของวันนี้ทั้งกะ</div>
@@ -1706,6 +1710,14 @@
           <option value="paid" data-en="Paid (OT + transport)">ชดเชยเป็นเงิน (OT + ค่าเดินทาง)</option>
         </select>
         <div id="holiday-work-comp-hint" style="font-size:11px;color:#64748b;margin-top:6px;line-height:1.45"></div>
+        <div id="hw-pay-compare" style="display:none;margin-top:10px">
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <div id="hw-pay-card-paid" style="flex:1;min-width:150px;border:1px solid var(--border);border-radius:10px;padding:10px 12px"></div>
+            <div id="hw-pay-card-leave" style="flex:1;min-width:150px;border:1px solid var(--border);border-radius:10px;padding:10px 12px"></div>
+          </div>
+          <div id="hw-pay-warnings" style="display:none;font-size:11px;color:#b45309;margin-top:6px;line-height:1.45"></div>
+          <div style="font-size:10.5px;color:#94a3b8;margin-top:6px;line-height:1.4" data-en="Estimate for this day. OT is paid on the period total, so the payslip can differ by a few satang.">ประมาณการของวันนี้ OT จ่ายตามยอดรวมทั้งงวด สลิปจริงอาจต่างระดับสตางค์</div>
+        </div>
       </div>
       <div class="form-group">
         <label class="form-label"><span data-en="Reason / Work details">เหตุผล / รายละเอียดงานที่ทำ</span> <span style="color:#ef4444">*</span></label>

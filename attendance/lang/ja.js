@@ -1323,6 +1323,19 @@ window.LANG_JA = {
   "This web check-out is waiting for Accounting/MD review — 🌙 can be submitted after it is allowed": "このWeb退勤は経理/MDの確認待ちです — 承認後に🌙を申請できます",
   "Accounting/MD did not allow this web check-out — 🌙 cannot be claimed": "経理/MDがこのWeb退勤を承認しませんでした — 🌙は申請できません",
 
+  /* 2026-09-28 — in-form pay preview (OT + Holiday Work). "Total", "Upcountry", "Early Morning",
+     "Late Night", "Annual leave", "day" and "h" already have entries above and are NOT repeated:
+     a duplicate key in this object literal silently overrides the earlier one. */
+  "Holiday transport": "休日交通費",
+  "Take the money": "現金で受け取る",
+  "Take a leave day": "休暇で受け取る",
+  "Currently selected": "現在の選択",
+  "Nothing extra on this day": "この日の追加支給はありません",
+  "needs a face-scanner check-in at the office": "オフィスの顔認証端末での出勤打刻が必要です",
+  "Your guaranteed monthly OT already covers these hours, so they add nothing.": "契約上の最低残業時間がこの時間を既に含んでいるため、増額はありません。",
+  "On an approved Abroad day the Abroad allowance covers the day — no holiday transport, no Upcountry.": "承認済みの海外勤務日は海外勤務手当が対象となるため、休日交通費と地方出張手当は支給されません。",
+  "Estimate for this day. OT is paid on the period total, so the payslip can differ by a few satang.": "この日の概算です。残業は給与期間の合計で計算されるため、給与明細とは数サタン異なる場合があります。",
+
   /* 2026-09-28 — Excused Attendance (MD/Accounting forgive lateness/absence, force majeure).
      "Select all", "Cancel", "Start date" and "End date" already have entries above -- deliberately
      not repeated here: a duplicate key in this object literal silently overrides the earlier one. */
