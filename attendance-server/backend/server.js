@@ -6349,11 +6349,25 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
       }
     }
 
+    const S = getAppSettings();
+    const leaves = readLeaves();
+    // SECURITY FIX 2026-08-13 (C-2): fail closed on a transient read error instead of silently
+    // treating it as "no leaves exist yet" and overwriting leaves.json with an empty array below.
+    if (leaves === null) return res.status(503).json({ success:false, message:'Service temporarily unavailable' });
+    // 2026-09-23: a trip's travel days cannot also carry Holiday Work (runs here, after `leaves`
+    // is read -- it used to sit above the read and threw a TDZ ReferenceError on every abroad POST).
+    if (type === 'abroad' && abroadTravelDayHolidayWorkConflict(leaves, userId, body.dateFrom, body.dateTo)) {
+      return res.status(409).json({ success:false, message: ABROAD_TRAVEL_HW_CONFLICT_MSG });
+    }
+
     // 2026-09-28 (owner): which already-spent leave an excused grant will give back. Collected and
     // GUARDED here, applied further down in the same write. Each returned record is checked against
     // its OWN period (not the grant's) because a flood span can reach back into a period that has
     // since been locked / MD-approved / tax-confirmed -- returning a day there would silently
     // contradict a frozen payroll. Refuse the whole grant instead of returning only some days.
+    // MUST stay BELOW `const leaves = readLeaves()` above: this block reads `leaves`, and sitting
+    // above the read is a TDZ ReferenceError on every excused POST -- the exact trap the abroad
+    // check two lines up already carries a warning about, and which this code fell into once.
     const excusedReturns = [];
     if (type === 'excused') {
       const _excTo = body.dateTo || body.dateFrom;
@@ -6377,17 +6391,6 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
         }
         excusedReturns.push(l);
       }
-    }
-
-    const S = getAppSettings();
-    const leaves = readLeaves();
-    // SECURITY FIX 2026-08-13 (C-2): fail closed on a transient read error instead of silently
-    // treating it as "no leaves exist yet" and overwriting leaves.json with an empty array below.
-    if (leaves === null) return res.status(503).json({ success:false, message:'Service temporarily unavailable' });
-    // 2026-09-23: a trip's travel days cannot also carry Holiday Work (runs here, after `leaves`
-    // is read -- it used to sit above the read and threw a TDZ ReferenceError on every abroad POST).
-    if (type === 'abroad' && abroadTravelDayHolidayWorkConflict(leaves, userId, body.dateFrom, body.dateTo)) {
-      return res.status(409).json({ success:false, message: ABROAD_TRAVEL_HW_CONFLICT_MSG });
     }
     // Duplicate personal-car on the same date (pending or approved) is rejected — payroll would
     // otherwise pay both once approved. Same date + rejected is allowed (resubmit after a deny).

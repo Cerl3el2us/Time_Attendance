@@ -157,6 +157,19 @@ test('a mistaken grant can be taken back', () => {
   assert.ok(fn.includes("'excused'"), 'excused is not revocable -- a wrong grant would be permanent');
 });
 
+test('the leave-return scan sits BELOW the leaves read (TDZ)', () => {
+  // This block iterates `leaves`, which POST /api/leaves declares with `const` partway through the
+  // handler. Placed above that declaration it is a TDZ ReferenceError on EVERY excused grant --
+  // a 500 for the whole feature -- and both `node --check` and ESLint pass on it happily. The same
+  // trap already bit the abroad check in this handler once, which is why it is pinned here.
+  const handler = SERVER_SRC.slice(SERVER_SRC.indexOf("app.post('/api/leaves'"));
+  const readIdx = handler.indexOf('const leaves = readLeaves();');
+  const scanIdx = handler.indexOf('const excusedReturns = [];');
+  assert.ok(readIdx > 0 && scanIdx > 0, 'markers not found');
+  assert.ok(scanIdx > readIdx,
+    'the excused leave-return scan must come after `const leaves = readLeaves()` or every grant throws');
+});
+
 test('granting is refused for anyone but MD/Accounting, and needs a reason', () => {
   assert.ok(SERVER_SRC.includes("const isExcusedGrant = type === 'excused' && (['md', 'accounting'].includes(live.role)"),
     'role gate missing');
