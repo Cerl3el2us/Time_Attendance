@@ -848,7 +848,10 @@ window.LANG_JA = {
   "e.g. Songkran, National Day...": "例：ソンクラーン、建国記念日...",
   "file(s)": "ファイル",
   "from the 21st": "21日から",
-  "h": "時",
+  // 2026-09-28: was "時" (o'clock). Every use of this key counts a DURATION of OT hours
+  // (otHoursRateDetail, the driver tier list, the in-form pay preview), so "2.5時" read as
+  // "2.5 o'clock" to a Japanese user; 時間 is the unit for hours elapsed.
+  "h": "時間",
   "has been approved": "承認されました",
   "hr": "時間",
   "items": "件",
