@@ -1,3 +1,59 @@
+/* ============================================================================
+ *  TIME ATTENDANCE — server.js
+ *  The whole backend: ~11,000 lines, ~60 REST routes, a WebSocket, the payroll
+ *  engine and the Hikvision face-scanner ingestion. Data is JSON files in
+ *  backend/data/ — there is no database.
+ *
+ *  HOW TO FIND THINGS
+ *  Search for an area's banner comment, e.g.   ===== LEAVES API =====
+ *  (No line numbers on purpose: they would be wrong after the first edit.)
+ * ----------------------------------------------------------------------------
+ *  1 · PROCESS AND TRANSPORT
+ *      JWT SECRET · BODY PARSER · JWT AUTH ENFORCEMENT · WEBSOCKET ·
+ *      HTTPS (port 3443)
+ *
+ *  2 · STORAGE  (read/write helpers per JSON file — all writes go through them)
+ *      EVENTS · LEAVES · USERS
+ *
+ *  3 · FACE SCANNER
+ *      HIKVISION DIGEST AUTH HELPER · HIKVISION HELPERS · HIKVISION PUSH ENDPOINT
+ *
+ *  4 · API
+ *      REST API · USER API · LEAVES API · HOLIDAYS API · EXCHANGE RATE API ·
+ *      COMPANY ANNOUNCEMENTS · WEB CHECK-OUT LATE NIGHT REVIEWS ·
+ *      FILE UPLOADS · ATTACHMENT CLEANUP · PUSH SUBSCRIBE
+ *
+ *  5 · RULES AND MONEY   ⚠ DUAL-SYNC with attendance/js/app.js — see below
+ *      PAYROLL ENGINE · ALLOWANCE ELIGIBILITY · APPROVAL ROUTING /
+ *      STATE-MACHINE HELPERS · FINALIZE PAYROLL · FREEZING PAID PAYROLL
+ *      PERIODS · YEAR-END CARRY-FORWARD · EARNED DAY PROTECTION ·
+ *      HOURLY LEAVE JOBS
+ *
+ *  6 · NOTIFICATIONS
+ *      PUSH NOTIFICATIONS (web-push / VAPID) · IN-APP NOTIFICATION INBOX ·
+ *      EMAIL HELPERS · NOTIFICATION CRON
+ * ----------------------------------------------------------------------------
+ *  RULES THIS FILE WILL PUNISH YOU FOR BREAKING
+ *
+ *  1. DUAL-SYNC. Any function whose comment says DUAL-SYNC has a twin in
+ *     attendance/js/app.js and the two must stay identical — otherwise the
+ *     figure an employee sees and the figure that gets paid drift apart, with
+ *     nothing to warn you. `npm test` compares several of them line for line.
+ *  2. WRITES GO THROUGH THE LOCK. Mutating a JSON file means the file's lock
+ *     wrapper (withLeavesLock / withUsersLock / …): read, change, save inside
+ *     the same call, never a read here and a save later.
+ *  3. READS FAIL CLOSED. readLeaves()/readUsers() return null on a read error;
+ *     a mutating handler must answer 503 rather than treat null as "empty",
+ *     which would overwrite the file with nothing.
+ *  4. DECLARE BEFORE USE. `const leaves = readLeaves()` sits partway down the
+ *     POST /api/leaves handler; code placed above it that reads `leaves` throws
+ *     at runtime, and neither `node --check` nor ESLint catches it. This has
+ *     happened twice — see the comments around that line.
+ *
+ *  Restarting this process: attendance-server/DEVELOPER_HANDOFF.md, and never
+ *  skip the start-time check before testing anything that writes.
+ * ========================================================================== */
+
 process.on('uncaughtException',  err => console.error('[CRASH] uncaughtException:', err.message));
 process.on('unhandledRejection', err => console.error('[CRASH] unhandledRejection:', err && err.message));
 
@@ -5085,7 +5141,8 @@ function getApprovedHolidayWorkAnnualLeaveDays(leaves, userId, year, exceptId) {
     l.userId === userId && l.type === 'abroad' && l.status === 'approved' && l.id !== exceptId);
   return hwDays + abroadTravelCreditDays(abroad, yStart, yEnd);
 }
-// ===== 2026-09-24 (owner): never take back an earned annual-leave day that is already used =====
+// ===== EARNED DAY PROTECTION =====
+// 2026-09-24 (owner): never take back an earned annual-leave day that is already used
 // Cancelling (owner) or revoking (MD/Accounting) an approved Holiday Work taken as annual leave,
 // or revoking an approved Abroad trip whose travel-day credit has arrived, removes earned days.
 // Refused with code 'earned-day-used' when the owner's annual balance for that year -- the SAME
@@ -7504,7 +7561,8 @@ function autoYearEndCarryForward() {
   }
 }
 
-// ===== 2026-09-24 (owner, round 7): hourly leave jobs =====
+// ===== HOURLY LEAVE JOBS =====
+// 2026-09-24 (owner, round 7): hourly leave jobs
 // One hourly cron tick (scheduleYearEndCarryForward) runs, each isolated in its own try/catch:
 // the automatic carry-forward, the overdue-run reminder, the carry-forward expiry reminders and
 // the notification-inbox retention prune.

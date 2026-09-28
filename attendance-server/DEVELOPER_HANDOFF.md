@@ -25,7 +25,7 @@ static HTML/CSS/JS frontend, both served from one Synology NAS.
   URL changed 2026-08-16 as part of the folder move, the same day the compatibility symlinks
   were removed entirely; the nginx config has a dedicated allow-exception carved into the
   `/Time_Attendance/` blanket deny for this specific path, see
-  `deploy/nginx/www.attendance-server-deny.conf`'s "second addition" comment)
+  `scripts/deploy/nginx/www.attendance-server-deny.conf`'s "second addition" comment)
 - **API/WebSocket**: `http://192.168.100.100:3000/api/*`, `ws://192.168.100.100:3000/ws`
 
 ## Where the code lives
@@ -192,12 +192,17 @@ There is no single spec document. The most reliable sources, in order:
    `deriveAttendanceCounts()` in both `app.js` and `server.js` for payroll
    (see the dual-sync section above); `APPROVAL_ROUTING` / `computeNextStatus`
    / `STATUS_TO_ROLE` in `app.js` for the leave-approval state machine.
-2. **The `*_FOR_SONNET.md` files in this same folder** (`Z:\Time_Attendance\attendance-server\`)
-   — these are point-in-time design/review documents written for a coding
-   agent, covering payroll calc, security review, frontend logic, leave
-   submission/balance rules, etc. Dated, may be stale on details but generally
-   right on intent.
-3. **`Z:\claude_memory\project_time_attendance.md`** and the other
+2. **`docs/superpowers/specs/`** — dated design specs for individual features,
+   newest first. Each one records what was decided and why, and is written
+   against the code as it was on that date.
+3. **`docs/design-history/`** (moved there 2026-09-28 from this folder, where
+   they were easy to mistake for current documentation) — the `*_FOR_SONNET.md`
+   point-in-time design/review documents written for a coding agent, covering
+   payroll calc, security review, frontend logic, leave submission/balance
+   rules, etc. Dated, stale on details, but generally right on intent. Read
+   that folder's own README first — several rules they describe were later
+   reversed by the owner.
+4. **`Z:\claude_memory\project_time_attendance.md`** and the other
    `project_time_attendance_*.md` files there — a running log of every
    session's changes, decisions, and the reasoning behind them, going back to
    the project's start. Extremely detailed but written for an AI assistant to

@@ -1,4 +1,71 @@
-﻿// ===== Build number =====
+﻿/* ============================================================================
+ *  TIME ATTENDANCE — app.js
+ *  The entire front-end lives in this one file (~21,700 lines, ~830 functions).
+ *
+ *  HOW TO FIND THINGS
+ *  Every area below is marked in the code with a banner comment. Search for the
+ *  name with the equals signs, e.g.   ===== PAYROLL ENGINE =====
+ *  (Deliberately no line numbers here: they would be wrong after the first edit,
+ *  and a wrong map is worse than no map.)
+ * ----------------------------------------------------------------------------
+ *  1 · FOUNDATIONS
+ *      BUILD NUMBER · PWA INSTALL PROMPT · I18N · SYSTEM ACCOUNT · BACKEND ·
+ *      JWT AUTH TOKEN · SESSION PERSISTENCE · AUTH · SESSION TIMEOUT ·
+ *      NAVIGATION · MOBILE SIDEBAR · CLOCK · TOAST · DARK MODE ·
+ *      DATE FORMAT HELPERS · TYPED TIME ENTRY · TYPED DATE ENTRY
+ *
+ *  2 · CONFIGURATION  (what MD/Accounting can change in Settings)
+ *      APP SETTINGS · ALLOWANCE ELIGIBILITY · APPROVAL ROUTING ·
+ *      APPROVAL DELEGATE-TO-ACCOUNTING · PERIOD LOCK · SETTINGS PAGE ·
+ *      HOLIDAYS MANAGEMENT PAGE
+ *
+ *  3 · ATTENDANCE  (scans, and what a day means)
+ *      GPS & MAP · CHECK-IN · ATTENDANCE DATA GENERATION · ATTENDANCE TABLE ·
+ *      MY ATTENDANCE PAGE · ATTENDANCE DETAIL MODAL · CHECK-IN STATUS ·
+ *      WEB CHECK-OUT LATE NIGHT REVIEW · CALENDAR PAGE · PERIOD MANAGEMENT ·
+ *      PERIOD DROPDOWN · HIKVISION LIVE
+ *
+ *  4 · REQUESTS AND APPROVALS
+ *      MODALS · EDIT (in place) FOR PENDING REQUESTS · OT · HOLIDAY WORK ·
+ *      ABROAD · EXCUSED ATTENDANCE · EARLY MORNING · TIME CORRECTION ·
+ *      LONG DISTANCE · PERSONAL CAR · CLEAR OLD ATTACHMENTS ·
+ *      LEAVE BALANCE SUMMARY · LEAVE HISTORY · MY REQUESTS PAGE ·
+ *      APPROVALS · CANCELLED / REVOKED HISTORY · IN-APP NOTIFICATION INBOX ·
+ *      TODAY LEAVE MODAL
+ *
+ *  5 · MONEY   ⚠ everything here is DUAL-SYNC with server.js — see the rules below
+ *      PAYROLL ENGINE · IN-FORM PAY PREVIEW · PAYSLIP · FINALIZE PAYROLL ·
+ *      FREEZING PAID PAYROLL PERIODS · PAYROLL HISTORY · PAYROLL EXPORTS ·
+ *      50 ทวิ · LEAVE CARRY-FORWARD · EARNED DAY PROTECTION
+ *
+ *  6 · PEOPLE
+ *      EMPLOYEES · ADD / EDIT EMPLOYEE · EMPLOYEE PROFILE VIEW · MY PROFILE ·
+ *      EMPLOYEE LEAVE SUMMARY · ARCHIVE (Former Employees) ·
+ *      FORCE PASSWORD CHANGE GATE · SYNC NAME TO HIKVISION
+ *
+ *  7 · REPORTING AND TOOLS
+ *      DASHBOARD · REPORTS · AUDIT LOG · FAQ · DATA BACKUP
+ * ----------------------------------------------------------------------------
+ *  FOUR RULES THIS FILE WILL PUNISH YOU FOR BREAKING
+ *
+ *  1. DUAL-SYNC. A function whose comment says DUAL-SYNC has a twin in
+ *     attendance-server/backend/server.js. Change one without the other and the
+ *     two sides quietly compute different money. `npm test` compares them.
+ *  2. THREE LANGUAGES AT ONCE. New user-facing text needs Thai, English and
+ *     Japanese from the first commit: L('English', 'ไทย') plus a key in
+ *     lang/ja.js (keyed by the English string).
+ *  3. BUMP THE CACHE-BUSTER. After editing this file, change ?v= on app.js in
+ *     index.html, or browsers keep serving the old copy and your fix "does not
+ *     work" for everyone but you.
+ *  4. DECLARE BEFORE USE. `const`/`let` at the top of a function body are not
+ *     hoisted: code placed above one that reads it throws at runtime, and
+ *     neither `node --check` nor ESLint will tell you. This has bitten this
+ *     codebase three times.
+ *
+ *  Before committing:  node --check attendance/js/app.js  ·  npm run lint  ·  npm test
+ * ========================================================================== */
+
+// ===== Build number =====
 // Shown in the sidebar footer. Bumped together with the ?v= cache-buster in index.html, which
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
@@ -3579,7 +3646,8 @@ function getApprovedHolidayWorkDays(year, userId) {
   return hwDays + abroadTravelCreditDays(abroad, yStart, yEnd);
 }
 
-// ===== 2026-09-24 (owner): never take back an earned annual-leave day that is already used =====
+// ===== EARNED DAY PROTECTION =====
+// 2026-09-24 (owner): never take back an earned annual-leave day that is already used
 // Cancelling (owner) or revoking (MD/Accounting) an approved Holiday Work taken as annual leave,
 // or revoking an approved Abroad trip whose travel-day credit has arrived, removes earned days.
 // The server refuses with code 'earned-day-used' when the owner's annual balance for that year --
@@ -4010,7 +4078,8 @@ async function processYearEndCarryForward(forYear) {
   }
 }
 
-// ===== 2026-09-24 (owner, round 7): carry-forward at risk / expiry policy impact =====
+// ===== CARRY-FORWARD AT RISK =====
+// 2026-09-24 (owner, round 7): carry-forward at risk / expiry policy impact
 // Active employees whose carry-forward for `year` is still at risk: what the FIFO rule would
 // forfeit if the expiry date were today (pending leave dated on/before the expiry counts as used)
 // -- the same figure the server's reminders use (server.js carryForwardAtRiskList).
