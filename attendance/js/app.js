@@ -2309,6 +2309,14 @@ function applyGuaranteedOtFloor(buckets, user, canOt) {
 // opts: { date, user, mode, otEndTime, driverTiers:{1.5,2,3}, hwStartTime, hwEndTime, locations,
 //         lateOutHour, excludeLeaveId }
 // -> { lines:[{key,label,amount,note}], total, earnsLeaveDay, salaryKnown, warnings:[] }
+// KNOWN AND ACCEPTED (owner, 2026-09-28): this reads the salary held in memory by THIS page. The
+// USER_UPDATED websocket broadcast carries a stripped public projection with no salary in it (a
+// deliberate 2026-08-04 privacy fix), and it replaces the DATA_USERS slot without touching
+// currentUser -- so if someone edits an employee's salary while that employee has the app open, the
+// preview keeps quoting the old figure until they reload. The payslip is unaffected: it recomputes
+// on every open. The owner chose to live with this rather than add a fetch on every form open.
+// If a previewed amount ever looks wrong, check this before suspecting the maths -- it already cost
+// one investigation.
 function estimateDayEarnings(opts) {
   const o = opts || {};
   const S = APP_SETTINGS;
