@@ -11,7 +11,7 @@ window.LANG_JA = {
   "ℹ️ Once approved, the system will add ": "ℹ️ 承認されると、システムは",
   " to your annual leave balance": "をあなたの年次有給休暇残日数に追加します",
   "— set by Managing Director only": "— Managing Directorのみが設定可能",
-  "🪪 Document Type": "🪪 書類の種類",
+  "🆔 Document Type": "🆔 書類の種類",
   // 2026-08-17: new employee fields (prefix, Thai name, ID-card address). Note: every
   // prefix-related label -- "Name Prefix" / "🏷️ Name Prefix" (read-only views) and
   // "Name Prefix (English)" / "Name Prefix (Thai)" (the two synced edit-form <select>s added
@@ -29,7 +29,7 @@ window.LANG_JA = {
   "Full Name (Thai)": "氏名（タイ語）",
   "🇹🇭 Full Name (Thai)": "🇹🇭 氏名（タイ語）",
   "Address on ID Card": "IDカード記載の住所",
-  "🪪 Address on ID Card": "🪪 IDカード記載の住所",
+  "🆔 Address on ID Card": "🆔 IDカード記載の住所",
   "ℹ️ As printed on the ID card — may differ from the current address above": "ℹ️ IDカードに記載されているとおり — 上記の現住所と異なる場合があります",
   "ℹ️ Name prefix, Thai name and ID-card address are maintained by HR — contact MD or Accounting to correct them.": "ℹ️ 敬称、タイ語氏名、IDカード記載の住所は人事が管理しています — 修正が必要な場合はMDまたは経理までご連絡ください。",
   // 2026-08-17: 3rd document-type option, for foreign employees who have no Thai national ID.

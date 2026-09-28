@@ -571,8 +571,8 @@ function syncNamePrefix(source) {
 // also touches maxlength/placeholder, not just display text.
 function idCardFieldLabel(idType) {
   if (idType === 'passport') return '🛂 Passport No.';
-  if (idType === 'tax_id') return '🪪 ' + L('Tax ID Number', 'เลขประจำตัวผู้เสียภาษีอากร');
-  return '🪪 ' + L('National ID', 'เลขบัตรประชาชน');
+  if (idType === 'tax_id') return '🆔 ' + L('Tax ID Number', 'เลขประจำตัวผู้เสียภาษีอากร');
+  return '🆔 ' + L('National ID', 'เลขบัตรประชาชน');
 }
 function formatIdCardValue(idType, idCard) {
   if (!idCard) return '—';
@@ -10806,7 +10806,7 @@ function renderMyProfile() {
             ${profileRow(L('📞 Phone', '📞 โทรศัพท์'), u.phone || '—')}
             ${profileRow(L('📧 Email', '📧 อีเมล'), u.email || '—')}
             ${profileRow(L('🏠 Current Address', '🏠 ที่อยู่ปัจจุบัน'), u.address || '—')}
-            ${profileRow(L('🪪 Address on ID Card', '🪪 ที่อยู่ตามบัตรประชาชน'), u.idCardAddress || '—')}
+            ${profileRow(L('🆔 Address on ID Card', '🆔 ที่อยู่ตามบัตรประชาชน'), u.idCardAddress || '—')}
             ${profileRow(L('🆘 Emergency Contact', '🆘 ผู้ติดต่อฉุกเฉิน'), u.emergencyContact ? `${u.emergencyContact}${u.emergencyRelation ? ' (' + relationLabel(u.emergencyRelation) + ')' : ''} — ${u.emergencyPhone || '—'}` : '—')}
           </div>
           <div style="font-size:11px;color:#94a3b8;margin-top:10px">
@@ -11383,7 +11383,7 @@ function openEmployeeProfile(id) {
         <div class="profile-field-grid">
           <div class="profile-field"><label>${L('Name Prefix', 'คำนำหน้า')}</label><p>${namePrefixLabel(u.namePrefix) || '—'}</p></div>
           <div class="profile-field"><label>${L('Full Name (Thai)', 'ชื่อ-นามสกุล (ภาษาไทย)')}</label><p>${escapeHtml([u.firstNameTh, u.lastNameTh].filter(Boolean).join(' ') || '—')}</p></div>
-          <div class="profile-field"><label>${idCardFieldLabel(u.idType).replace(/^[🛂🪪]\s*/, '')}</label><p>${escapeHtml(u.idCard || '—')}</p></div>
+          <div class="profile-field"><label>${idCardFieldLabel(u.idType).replace(/^[🛂🆔]\s*/, '')}</label><p>${escapeHtml(u.idCard || '—')}</p></div>
           <div class="profile-field"><label>${L('Date of Birth', 'วันเกิด')}</label><p>${u.dob ? fmtDate(new Date(u.dob + 'T12:00:00')) : '—'}</p></div>
           <div class="profile-field"><label>${L('Gender', 'เพศ')}</label><p>${{ male: L('Male','ชาย'), female: L('Female','หญิง'), other: L('Other','อื่นๆ') }[u.gender] || '—'}</p></div>
           <div class="profile-field"><label>${L('Phone', 'โทรศัพท์')}</label><p>${escapeHtml(u.phone || '—')}</p></div>
@@ -13468,7 +13468,7 @@ async function renderPayslip() {
   // label) -- TH/JA stay dynamic per idType since only English was asked to change.
   const idcardLabelEl = el('payslip-idcard-label');
   // NOTE: idCardFieldLabel()'s own emoji-strip regex (used elsewhere, e.g. line ~5896) is
-  // `[🛂🪪]` without the `u` flag -- since these are astral-plane chars, an unflagged class
+  // `[🛂🆔]` without the `u` flag -- since these are astral-plane chars, an unflagged class
   // matches lone surrogate halves and silently fails to strip anything. Using \S+ instead here
   // (strip the whole leading non-space token, whatever it is) sidesteps that bug rather than
   // repeating it.
