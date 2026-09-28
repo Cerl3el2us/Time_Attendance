@@ -63,7 +63,9 @@ const SETTINGS = () => ({
 
 // A sandbox per test. generatePeriodDays is stubbed to one row -- the preview only ever reads that
 // day's scan out of it, and the row shape is the contract between them.
+let sandboxAbroadCalls = [];
 function makeWorld(opts = {}) {
+  sandboxAbroadCalls = [];
   const sandbox = {
     APP_SETTINGS: opts.settings || SETTINGS(),
     DATA_LEAVES: opts.leaves || [],
@@ -72,7 +74,9 @@ function makeWorld(opts = {}) {
     L: (en) => en,
     isPublicHoliday: () => !!opts.publicHoliday,
     isCompanyTripDay: () => !!opts.companyTrip,
-    isApprovedAbroadDate: () => !!opts.abroad,
+    // Records which user id it was asked about, so a test can prove the preview asks about the
+    // FORM'S employee rather than falling back to whoever is logged in.
+    isApprovedAbroadDate: (d, uid) => { sandboxAbroadCalls.push(uid); return !!opts.abroad; },
     generatePeriodDays: () => [opts.row || { date: opts.date, status: 'absent' }],
     DEFAULT_ALLOWANCE_ELIGIBILITY: { ot: EVERY_ROLE, earlyLate: EVERY_ROLE, upcountry: EVERY_ROLE },
     Number, Math, JSON, Object, Array, String, Set, Date, isNaN, parseInt, parseFloat, Boolean,
@@ -293,6 +297,15 @@ test('a role excluded from earlyLate never sees the line', () => {
   s.allowanceEligibility.earlyLate = ['user'];
   const W = makeWorld({ date: '2026-09-28', settings: s, row: deviceRow('06:12') });
   assert.strictEqual(amountOf(W.estimateDayEarnings({ date: '2026-09-28', user: DRIVER() }), 'early'), null);
+});
+
+test('the Abroad check asks about the FORM\'S employee, not whoever is logged in', () => {
+  // isApprovedAbroadDate() falls back to currentUser when no id is passed, so an admin filling the
+  // form in for someone else would otherwise get their OWN trip days applied to that employee.
+  const W = makeWorld({ date: HW.date });
+  W.estimateDayEarnings({ ...HW, user: { id: 99, role: 'user', salary: 24000 }, mode: 'paid' });
+  assert.ok(sandboxAbroadCalls.length, 'the abroad check was never called');
+  assert.ok(sandboxAbroadCalls.every(uid => uid === 99), `asked about ${JSON.stringify(sandboxAbroadCalls)}`);
 });
 
 console.log('T5 the period the marginal figure is measured over');

@@ -2258,7 +2258,9 @@ function estimateDayEarnings(opts) {
   const role = user.role;
   const salary = Number(user.salary) || 0;
   const hourlyRate = salary > 0 ? salary / 30 / 8 : 0;
-  const onAbroad = isApprovedAbroadDate(date);
+  // user.id, NOT the default: isApprovedAbroadDate() falls back to currentUser, so an admin opening
+  // this form on behalf of an employee would otherwise be asking whether THEY were abroad that day.
+  const onAbroad = isApprovedAbroadDate(date, user.id);
   const abroadDates = onAbroad ? new Set([date]) : new Set();
 
   // --- OT (x1.5 office / driver tiers / x2-x3 holiday work) ---
