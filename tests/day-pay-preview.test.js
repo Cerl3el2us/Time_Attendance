@@ -153,6 +153,29 @@ test('no salary on file: hours still preview, money is marked unknown', () => {
   assert.strictEqual(amountOf(est, 'ot'), 0);
 });
 
+test('the amount always matches the hours on the label — every half hour, every tier', () => {
+  // A live reading once showed "OT 3 ชม. ×1.5" next to an amount that belonged to 1 hour. It could
+  // not be reproduced and the two values come from the same object, so it should be impossible --
+  // this walks the whole range rather than trusting that argument. Empty baseline, so the marginal
+  // amount is simply hours x multiplier x hourly rate.
+  const W = makeWorld({ date: '2026-09-28' });
+  const hourly = STAFF.salary / 30 / 8;
+  const bad = [];
+  for (let h = 0.5; h <= 8; h += 0.5) {
+    [1.5, 2, 3].forEach(mult => {
+      const est = W.estimateDayEarnings({ date: '2026-09-28', user: STAFF, driverTiers: { [mult]: h } });
+      const line = est.lines.find(l => l.key === 'ot');
+      const expected = Math.round(hourly * mult * h * 100) / 100;
+      // the hours are the number right after "OT"; stripping every non-digit would glue the
+      // multiplier onto them ("0.5 ... ×1.5" -> 0.51.5)
+      const labelHours = parseFloat((String(line.label).match(/OT\s+([\d.]+)/) || [])[1]);
+      if (Math.abs(line.amount - expected) > 0.01) bad.push(`${h}h x${mult}: amount ${line.amount} != ${expected}`);
+      if (Math.abs(labelHours - h) > 0.001) bad.push(`${h}h x${mult}: label says ${labelHours}`);
+    });
+  }
+  assert.strictEqual(bad.length, 0, '\n      ' + bad.join('\n      '));
+});
+
 console.log('T2 driver OT — the guaranteed-OT floor tells the truth');
 
 test('a driver under the floor sees the real gain', () => {
