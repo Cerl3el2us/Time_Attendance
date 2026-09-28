@@ -1,4 +1,4 @@
-/* Japanese translation dictionary for Time Attendance — Tozai Boeki Kaisha (Thailand) Ltd. */
+﻿/* Japanese translation dictionary for Time Attendance — Tozai Boeki Kaisha (Thailand) Ltd. */
 window.LANG_JA = {
   // 2026-07-18 i18n gap audit — data-en/data-en-ph/data-en-title attributes with no JA entry at
   // all (silently fell back to English in JA mode; found while auditing modals for the Leave/
@@ -1339,7 +1339,7 @@ window.LANG_JA = {
   /* 2026-09-28 — Excused Attendance (MD/Accounting forgive lateness/absence, force majeure).
      "Select all", "Cancel", "Start date" and "End date" already have entries above -- deliberately
      not repeated here: a duplicate key in this object literal silently overrides the earlier one. */
-  "🛟 Grant Excused Attendance": "🛟 出勤免除の設定",
+  "⛑️ Grant Excused Attendance": "⛑️ 出勤免除の設定",
   "Reason (recorded on every day granted)": "理由（免除する各日に記録されます）",
   "e.g. flooding at the employee's home": "例：従業員の自宅が浸水",
   "Employees": "対象従業員",
@@ -1347,7 +1347,7 @@ window.LANG_JA = {
   "📌 A late arrival stops counting as late and a day with no scan stops counting as absent. Pay is unaffected — the day is paid in full and no leave is deducted.": "📌 遅刻は遅刻として数えられなくなり、打刻のない日も欠勤として数えられなくなります。給与は変わりません — 全額支給され、休暇も控除されません。",
   "📌 All allowances still pay as normal, including Early Morning and OT for anyone who did come in.": "📌 手当はすべて通常どおり支給されます。出勤した人の早朝手当や残業も含みます。",
   "📌 An approved annual / sick / business leave already filed on these dates is cancelled and the quota returned.": "📌 該当日に承認済みの有給・病気・私用休暇がある場合、その申請は取り消され、日数が返却されます。",
-  "🛟 Grant": "🛟 設定する",
+  "⛑️ Grant": "⛑️ 設定する",
   "Excused": "出勤免除",
   "Forgive lateness / absence for a force-majeure event": "不可抗力による遅刻・欠勤を免除する",
 

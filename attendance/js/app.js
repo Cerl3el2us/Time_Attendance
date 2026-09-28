@@ -1,4 +1,4 @@
-// ===== Build number =====
+﻿// ===== Build number =====
 // Shown in the sidebar footer. Bumped together with the ?v= cache-buster in index.html, which
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
@@ -9184,7 +9184,7 @@ function renderAttEmployeeSelector() {
         <select id="att-emp-select" onchange="onAttEmpChange(this.value)" style="min-width:200px;padding:8px 12px;border:1.5px solid #93c5fd;border-radius:8px;font-size:14px;background:var(--bg-card);color:var(--text)">
           ${employees.map(u => `<option value="${u.id}" ${selectedAttUserId == u.id ? 'selected' : ''}>#${escapeHtml(u.employeeNo)} ${escapeHtml(u.name)}${u.position ? ' — ' + escapeHtml(u.position) : ''}</option>`).join('')}
         </select>
-        ${canGrantExcused() ? `<button class="btn btn-sm" onclick="openExcusedModal()" style="background:#e0f2fe;color:#0369a1;border:1px solid #bae6fd;white-space:nowrap" title="${L('Forgive lateness / absence for a force-majeure event', 'ยกเว้นการมาสาย/ขาดงานจากเหตุสุดวิสัย')}">🛟 ${L('Excused', 'ยกเว้นการมาสาย/ขาดงาน')}</button>` : ''}
+        ${canGrantExcused() ? `<button class="btn btn-sm" onclick="openExcusedModal()" style="background:#e0f2fe;color:#0369a1;border:1px solid #bae6fd;white-space:nowrap" title="${L('Forgive lateness / absence for a force-majeure event', 'ยกเว้นการมาสาย/ขาดงานจากเหตุสุดวิสัย')}">⛑️ ${L('Excused', 'ยกเว้นการมาสาย/ขาดงาน')}</button>` : ''}
       </div>
       ${isSuperAdmin() && qaAttendanceActionsEnabled(currentEmp) ? `<div style="margin-top:8px;font-size:11px;color:#9a3412">🛠️ ${L('Request buttons follow the selected employee (or the preview role). The system account cannot actually submit.', 'ปุ่มคำขอแสดงตามพนักงานที่เลือก (หรือตาม role ที่ดูเป็น) — บัญชีระบบยื่นคำขอจริงไม่ได้')}</div>` : ''}
     </div>`;
@@ -9325,7 +9325,7 @@ function renderAttendanceTable() {
     absent: `<span class="badge badge-danger" style="opacity:0.7">⏸ ${L('Absent', 'ไม่มาทำงาน')}</span>`,
     // 2026-09-28: Excused Attendance, the no-scan case. Deliberately NOT badge-danger -- the
     // company decided this day is not the employee's fault, so it must not read like an absence.
-    excused: `<span class="badge badge-info">🛟 ${currentLang === 'ja' ? '出勤免除' : L('Excused', 'ได้รับการยกเว้น')}</span>`,
+    excused: `<span class="badge badge-info">⛑️ ${currentLang === 'ja' ? '出勤免除' : L('Excused', 'ได้รับการยกเว้น')}</span>`,
     'not-clocked-in': `<span class="badge badge-warning" style="opacity:0.85">⏸ ${L('No morning check-in', 'ยังไม่ลงเวลาทำงาน')}</span>`,
     future: `<span class="badge badge-gray" style="color:#94a3b8">⏳ ${L('Upcoming', 'ยังไม่ถึง')}</span>`,
   };
@@ -9379,7 +9379,7 @@ function renderAttendanceTable() {
     const _base = statusMap[row.status] || '';
     if (row.excused && row.status !== 'excused') {
       const _exT = currentLang === 'ja' ? '出勤免除' : L('Excused', 'ยกเว้น');
-      return `${_base} <span class="badge badge-info" title="${escapeHtml(row.excusedReason || '')}">🛟 ${_exT}</span>`;
+      return `${_base} <span class="badge badge-info" title="${escapeHtml(row.excusedReason || '')}">⛑️ ${_exT}</span>`;
     }
     return _base;
   };
@@ -9642,7 +9642,7 @@ function buildAttendancePrintView({ targetUser, days, start, end, workDays, late
     // now reads as 'Present', so without this the printed sheet would look like an ordinary on-time
     // day and nobody could tell months later why the lateness is gone.
     const excusedNote = row.excused
-      ? `🛟 ${currentLang === 'ja' ? '出勤免除' : L('Excused', 'ยกเว้น')}${row.excusedReason ? `: ${escapeHtml(row.excusedReason)}` : ''}`
+      ? `⛑️ ${currentLang === 'ja' ? '出勤免除' : L('Excused', 'ยกเว้น')}${row.excusedReason ? `: ${escapeHtml(row.excusedReason)}` : ''}`
       : '';
     const notesCell = row.status === 'holiday'
       ? escapeHtml(row.holidayName || L('Public Holiday', 'วันหยุดราชการ'))
@@ -13762,7 +13762,7 @@ function leaveTypeLabel(l) {
   // partial `ja` map would make them lose that fallback for every OTHER type and drop to the raw
   // '📋 <type>' default.
   if (l.type === 'excused') {
-    return currentLang === 'ja' ? '🛟 出勤免除' : L('🛟 Excused Attendance', '🛟 ยกเว้นการมาสาย/ขาดงาน');
+    return currentLang === 'ja' ? '⛑️ 出勤免除' : L('⛑️ Excused Attendance', '⛑️ ยกเว้นการมาสาย/ขาดงาน');
   }
   const map = {
     th: { annual:'🏖️ ขอลาพักร้อน', sick:'🤒 ขอลาป่วย', business:'📋 ขอลากิจ', upcountry:'🗺️ Upcountry', 'late-out':'🌙 แจ้งกลับดึก' },
@@ -17734,8 +17734,11 @@ function openExcusedModal() {
 function closeExcusedModal() {
   document.getElementById('excused-modal').classList.remove('show');
 }
+// Same population as the attendance page's own employee selector, MD included in the exclusion:
+// the Managing Director's lateness / absence is not tracked at all (owner, 2026-09-28), so there is
+// nothing an excused day could forgive for them.
 function excusedCandidateEmployees() {
-  return DATA_USERS.filter(u => isEmployeeRecord(u) && u.active !== false)
+  return DATA_USERS.filter(u => isEmployeeRecord(u) && u.active !== false && u.role !== 'md')
     .sort((a, b) => parseInt(a.employeeNo) - parseInt(b.employeeNo));
 }
 function renderExcusedEmployeeList() {
@@ -17867,9 +17870,9 @@ async function submitExcusedGrant() {
       ? (currentLang === 'ja' ? `（休暇${returned}件を返却）` : L(` (${returned} leave request(s) returned)`, ` (คืนใบลา ${returned} ใบ)`))
       : '';
     showToast(currentLang === 'ja'
-      ? `🛟 ${granted}名に出勤免除を設定しました${retTxt}`
-      : L(`🛟 Excused attendance granted to ${granted} employee(s)${retTxt}`,
-          `🛟 กำหนดการยกเว้นให้พนักงาน ${granted} คนแล้ว${retTxt}`), 'success');
+      ? `⛑️ ${granted}名に出勤免除を設定しました${retTxt}`
+      : L(`⛑️ Excused attendance granted to ${granted} employee(s)${retTxt}`,
+          `⛑️ กำหนดการยกเว้นให้พนักงาน ${granted} คนแล้ว${retTxt}`), 'success');
   }
   if (failures.length) {
     showToast(`❌ ${L('Could not grant', 'กำหนดไม่สำเร็จ')}: ${failures.join(' | ')}`, 'danger');

@@ -6244,9 +6244,11 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
     const isQuickFixTimeCorrection = type === 'time-correction' && (['md', 'accounting'].includes(live.role) || isSuperAdminUser(live)) && body.userId !== undefined && Number(body.userId) !== live.id;
     // 2026-09-28 (owner): EXCUSED ATTENDANCE is granted BY MD/Accounting FOR an employee, so like
     // Quick Fix above it may target someone else. Two deliberate differences from Quick Fix:
-    //   1. it is NOT gated on `target !== live.id` -- the MD's own house can flood too, and that
-    //      would be a legitimate grant, not the self-approval hole that gating exists to stop
-    //      (an employee cannot reach this branch at all, so there is no self-grant to close);
+    //   1. it is NOT gated on `target !== live.id` -- an Accounting user's own house can flood too,
+    //      and that would be a legitimate grant, not the self-approval hole that gating exists to
+    //      stop (an employee cannot reach this branch at all, so there is no self-grant to close).
+    //      The MD is a separate case: their lateness/absence is not tracked at all (owner,
+    //      2026-09-28), so the grant UI leaves them out of the employee list entirely;
     //   2. the role check REFUSES rather than falling through, so a non-admin POSTing
     //      `type:'excused'` directly gets a 403 instead of silently creating a pending record.
     const isExcusedGrant = type === 'excused' && (['md', 'accounting'].includes(live.role) || isSuperAdminUser(live));
