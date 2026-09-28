@@ -1891,9 +1891,19 @@ function withdrawnRowStyle(l) {
 // Dual-sync with server.js isRevocableLeaveType (the money-bearing request types).
 // 2026-09-24 (owner): + time-correction -- once revoked the day falls back to the real scans
 // (every log builder only applies APPROVED corrections).
+// 2026-09-28: 'excused' carries no pay, but it is the ONLY way to undo a mistaken Excused
+// Attendance grant -- the DELETE route is owner-only (`leave.userId !== live.id` -> 403) and the
+// record belongs to the employee, not to the MD/Accounting user who granted it, so without this
+// a wrong person or wrong date would be stuck forever. This route's own requireRole('md',
+// 'accounting') is the right gate for taking a grant back.
+// Its "nobody revokes their own approval" guard is deliberately left alone: an MD who grants
+// themselves an excused day has the OTHER admin role undo it, rather than loosening a
+// self-approval control for this one type.
+// NOTE: revoking a grant does NOT re-create the annual/sick/business leave the grant returned --
+// the employee re-files it. The confirm dialog says so.
 function isRevocableLeaveType(type) {
   return ['holiday-work', 'ot', 'early-morning', 'late-out', 'upcountry', 'long-distance',
-    'personal-car', 'abroad', 'time-correction'].includes(type);
+    'personal-car', 'abroad', 'time-correction', 'excused'].includes(type);
 }
 // Types applyApprovalToLog() writes into the approving session's attendanceLog -- a cancel/revoke of
 // one of these needs loadAttendanceFromBackend() to fall back to the real scans in that session.
@@ -6066,6 +6076,28 @@ function generatePeriodDays(start, end, isCurrent, userId) {
       }
     }
 
+    // 2026-09-28 (owner): EXCUSED ATTENDANCE -- MD/Accounting forgives a late arrival or a whole
+    // missing day for a force-majeure event ("น้ำท่วมไม่ได้ท่วมทุกบ้านพร้อมกัน", so it is granted per
+    // employee per date, never company-wide). Its own pass AFTER the leave overlays above, so the
+    // order of DATA_LEAVES can never change the outcome.
+    // Only 'late' and 'absent' are touched: a leave day / weekend / holiday / company trip / abroad
+    // day already counts as neither late nor absent, and an excuse must not override them.
+    // A forgiven LATE day becomes 'present' rather than a new status on purpose -- the work-day
+    // counters are `present|late|not-clocked-in|abroad` (workDays ~9081, daysWorked ~12827 which is
+    // printed on the payslip), so a new status would erase the day of the employee who did fight
+    // through the flood to come in. The real scan times are kept; the badge carries the excuse.
+    // DUAL-SYNC: twin block in server.js generatePeriodDays().
+    let excused = false, excusedReason = '';
+    if (uid && !isFuture && (status === 'late' || status === 'absent')) {
+      const _exc = DATA_LEAVES.find(l => l.userId == uid && l.type === 'excused' &&
+        l.status === 'approved' && l.dateFrom <= dateStr && (l.dateTo || l.dateFrom) >= dateStr);
+      if (_exc) {
+        excused = true;
+        excusedReason = _exc.reason || '';
+        status = status === 'late' ? 'present' : 'excused';
+      }
+    }
+
     const holidayName = DATA_HOLIDAYS.find(h => h.date === dateStr)?.name || null;
     // 2026-09-23: after the overlay, so a review counts only for the effective (corrected) web
     // check-out it was made on. Dual-sync twin in server.js.
@@ -6073,7 +6105,7 @@ function generatePeriodDays(start, end, isCurrent, userId) {
     // 2026-09-24 (owner): scan instants + GPS zone, for the display-only local time on Abroad days.
     const _abroadRec = (status === 'abroad' && uid) ? attendanceLog[attKey(uid, dateStr)] : null;
     const abroadScan = _abroadRec ? { inAt: _abroadRec.checkInAt || null, inTz: _abroadRec.checkInGpsTz || null, outAt: _abroadRec.checkOutAt || null, outTz: _abroadRec.checkOutGpsTz || null } : null;
-    days.push({ date: dateStr, dayName: dayNamesEn[d.getDay()], isWeekend, isPubHoliday, isFuture, isToday, status, checkIn, checkOut, earlyIn, lateOut, upcountry, longDistance, longDistanceKm, longDistanceAllowance, checkInSource, checkOutSource, earlyApproved, lateApproved, checkInGPS, checkOutGPS, checkInGpsAcc, checkOutGpsAcc, holidayName, firstScanAfterCutoff, partialLeave, checkOutReview, rawCheckOut, abroadScan });
+    days.push({ date: dateStr, dayName: dayNamesEn[d.getDay()], isWeekend, isPubHoliday, isFuture, isToday, status, checkIn, checkOut, earlyIn, lateOut, upcountry, longDistance, longDistanceKm, longDistanceAllowance, checkInSource, checkOutSource, earlyApproved, lateApproved, checkInGPS, checkOutGPS, checkInGpsAcc, checkOutGpsAcc, holidayName, firstScanAfterCutoff, partialLeave, checkOutReview, rawCheckOut, abroadScan, excused, excusedReason });
     d.setDate(d.getDate() + 1);
   }
   return days;
@@ -8960,6 +8992,7 @@ function renderAttEmployeeSelector() {
         <select id="att-emp-select" onchange="onAttEmpChange(this.value)" style="min-width:200px;padding:8px 12px;border:1.5px solid #93c5fd;border-radius:8px;font-size:14px;background:var(--bg-card);color:var(--text)">
           ${employees.map(u => `<option value="${u.id}" ${selectedAttUserId == u.id ? 'selected' : ''}>#${escapeHtml(u.employeeNo)} ${escapeHtml(u.name)}${u.position ? ' — ' + escapeHtml(u.position) : ''}</option>`).join('')}
         </select>
+        ${canGrantExcused() ? `<button class="btn btn-sm" onclick="openExcusedModal()" style="background:#e0f2fe;color:#0369a1;border:1px solid #bae6fd;white-space:nowrap" title="${L('Forgive lateness / absence for a force-majeure event', 'ยกเว้นการมาสาย/ขาดงานจากเหตุสุดวิสัย')}">🛟 ${L('Excused', 'ยกเว้นการมาสาย/ขาดงาน')}</button>` : ''}
       </div>
       ${isSuperAdmin() && qaAttendanceActionsEnabled(currentEmp) ? `<div style="margin-top:8px;font-size:11px;color:#9a3412">🛠️ ${L('Request buttons follow the selected employee (or the preview role). The system account cannot actually submit.', 'ปุ่มคำขอแสดงตามพนักงานที่เลือก (หรือตาม role ที่ดูเป็น) — บัญชีระบบยื่นคำขอจริงไม่ได้')}</div>` : ''}
     </div>`;
@@ -9098,6 +9131,9 @@ function renderAttendanceTable() {
     // 'not-clocked-in' status below (a scan exists, just after the cutoff with no morning
     // check-in), which is a genuinely different situation from a day with NO scan at all.
     absent: `<span class="badge badge-danger" style="opacity:0.7">⏸ ${L('Absent', 'ไม่มาทำงาน')}</span>`,
+    // 2026-09-28: Excused Attendance, the no-scan case. Deliberately NOT badge-danger -- the
+    // company decided this day is not the employee's fault, so it must not read like an absence.
+    excused: `<span class="badge badge-info">🛟 ${currentLang === 'ja' ? '出勤免除' : L('Excused', 'ได้รับการยกเว้น')}</span>`,
     'not-clocked-in': `<span class="badge badge-warning" style="opacity:0.85">⏸ ${L('No morning check-in', 'ยังไม่ลงเวลาทำงาน')}</span>`,
     future: `<span class="badge badge-gray" style="color:#94a3b8">⏳ ${L('Upcoming', 'ยังไม่ถึง')}</span>`,
   };
@@ -9145,7 +9181,15 @@ function renderAttendanceTable() {
       const name = row.holidayName || L('Public Holiday', 'วันหยุดราชการ');
       return `<span class="badge badge-amber">🎌 ${escapeHtml(name)}</span>`;
     }
-    return statusMap[row.status] || '';
+    // 2026-09-28: a FORGIVEN LATE arrival reads as 'Present' (so the work-day counters keep it),
+    // which would leave the row with no trace of why the lateness vanished -- the chip carries the
+    // excuse, and its tooltip the reason MD/Accounting recorded.
+    const _base = statusMap[row.status] || '';
+    if (row.excused && row.status !== 'excused') {
+      const _exT = currentLang === 'ja' ? '出勤免除' : L('Excused', 'ยกเว้น');
+      return `${_base} <span class="badge badge-info" title="${escapeHtml(row.excusedReason || '')}">🛟 ${_exT}</span>`;
+    }
+    return _base;
   };
 
   days.forEach(row => {
@@ -9360,6 +9404,9 @@ function buildAttendancePrintView({ targetUser, days, start, end, workDays, late
       case 'holiday':         return { text: L('Holiday', 'วันหยุด'), cls: 'holiday' };
       case 'weekend':         return { text: L('Weekend', 'วันหยุดสุดสัปดาห์'), cls: 'muted' };
       case 'absent':          return { text: L('Absent', 'ไม่มาทำงาน'), cls: 'danger' };
+      // 2026-09-28: Excused Attendance, the no-scan case. 'info' not 'danger' -- the company
+      // decided this absence is not the employee's fault, and the badge must not read like one.
+      case 'excused':         return { text: currentLang === 'ja' ? '出勤免除' : L('Excused', 'ได้รับการยกเว้น'), cls: 'info' };
       case 'not-clocked-in':  return { text: L('No morning check-in', 'ยังไม่ลงเวลาทำงาน'), cls: 'warn' };
       default:                return { text: '—', cls: 'muted' };
     }
@@ -9399,9 +9446,15 @@ function buildAttendancePrintView({ targetUser, days, start, end, workDays, late
       const pcLv = DATA_LEAVES.find(l => l.userId === targetUser.id && l.type === 'personal-car' && l.dateFrom === row.date && l.status === 'approved');
       if (pcLv) badges.push('🚙');
     }
+    // 2026-09-28: the excuse must be visible wherever the day is shown -- a forgiven late arrival
+    // now reads as 'Present', so without this the printed sheet would look like an ordinary on-time
+    // day and nobody could tell months later why the lateness is gone.
+    const excusedNote = row.excused
+      ? `🛟 ${currentLang === 'ja' ? '出勤免除' : L('Excused', 'ยกเว้น')}${row.excusedReason ? `: ${escapeHtml(row.excusedReason)}` : ''}`
+      : '';
     const notesCell = row.status === 'holiday'
       ? escapeHtml(row.holidayName || L('Public Holiday', 'วันหยุดราชการ'))
-      : (badges.join(' ') || '—');
+      : ([excusedNote, badges.join(' ')].filter(Boolean).join(' · ') || '—');
 
     return `<tr class="${rowCls}">
       <td class="att-print-date">${fmtDateLong(row.date)}</td>
@@ -13515,6 +13568,13 @@ function leaveTypeLabel(l) {
       ? `🚙 Personal Car (+฿${rate.toLocaleString()})`
       : `🚙 รถส่วนตัว (+฿${rate.toLocaleString()})`;
   }
+  // 2026-09-28: handled with an early return, NOT by adding a `ja:` key to the map below -- that map
+  // has no `ja` entry at all today, so every Japanese-language user falls back to `map.th`; adding a
+  // partial `ja` map would make them lose that fallback for every OTHER type and drop to the raw
+  // '📋 <type>' default.
+  if (l.type === 'excused') {
+    return currentLang === 'ja' ? '🛟 出勤免除' : L('🛟 Excused Attendance', '🛟 ยกเว้นการมาสาย/ขาดงาน');
+  }
   const map = {
     th: { annual:'🏖️ ขอลาพักร้อน', sick:'🤒 ขอลาป่วย', business:'📋 ขอลากิจ', upcountry:'🗺️ Upcountry', 'late-out':'🌙 แจ้งกลับดึก' },
     en: { annual:'🏖️ Annual Leave', sick:'🤒 Sick Leave', business:'📋 Business Leave', upcountry:'🗺️ Upcountry', 'late-out':'🌙 Late Night Out' },
@@ -17313,6 +17373,181 @@ async function submitAbroad() {
     : (currentLang === 'ja'
       ? `✅ 海外勤務を申請しました（${days}日）`
       : L(`✅ Work-abroad request submitted (${days} days)`, `✅ ยื่นแจ้งทำงานต่างประเทศแล้ว (${days} วัน)`)), 'success');
+}
+
+// ===== EXCUSED ATTENDANCE (2026-09-28, owner) =====
+// MD/Accounting forgive a late arrival or a whole missing day for a force-majeure event. Granted
+// per employee per date ("น้ำท่วมไม่ได้ท่วมทุกบ้านพร้อมกัน"), several employees at a time, and it takes
+// effect immediately -- there is nothing to approve. Server twin: POST /api/leaves type 'excused'.
+function canGrantExcused() {
+  const r = effectiveRole();
+  return r === 'md' || r === 'accounting';
+}
+// Declared BEFORE its first reader on purpose: a `let` used above its declaration is a TDZ throw,
+// and this file has been bitten by exactly that before (uploadLimiter, 2026-09-25).
+// Kept outside the rendered list so the filter box can re-render without losing ticks.
+let _excusedSelectedIds = new Set();
+function openExcusedModal() {
+  if (!canGrantExcused()) {
+    showToast(L('⛔ Only the Managing Director or Accounting can grant this',
+      '⛔ เฉพาะ Managing Director หรือบัญชีเท่านั้นที่กำหนดได้'), 'danger');
+    return;
+  }
+  const today = businessDateStr();
+  document.getElementById('excused-date-from').value = today;
+  document.getElementById('excused-date-to').value = today;
+  document.getElementById('excused-reason').value = '';
+  document.getElementById('excused-emp-filter').value = '';
+  const all = document.getElementById('excused-select-all');
+  if (all) all.checked = false;
+  _excusedSelectedIds = new Set();
+  renderExcusedEmployeeList();
+  refreshExcusedHint();
+  document.getElementById('excused-modal').classList.add('show');
+}
+function closeExcusedModal() {
+  document.getElementById('excused-modal').classList.remove('show');
+}
+function excusedCandidateEmployees() {
+  return DATA_USERS.filter(u => isEmployeeRecord(u) && u.active !== false)
+    .sort((a, b) => parseInt(a.employeeNo) - parseInt(b.employeeNo));
+}
+function renderExcusedEmployeeList() {
+  const box = document.getElementById('excused-employee-list');
+  if (!box) return;
+  const q = (document.getElementById('excused-emp-filter')?.value || '').trim().toLowerCase();
+  const list = excusedCandidateEmployees().filter(u => !q ||
+    String(u.name || '').toLowerCase().includes(q) || String(u.employeeNo || '').toLowerCase().includes(q));
+  if (!list.length) {
+    box.innerHTML = `<div style="padding:10px;font-size:12px;color:#94a3b8">${L('No matching employee', 'ไม่พบพนักงานที่ค้นหา')}</div>`;
+    return;
+  }
+  box.innerHTML = list.map(u => `
+    <label style="display:flex;align-items:center;gap:8px;padding:5px 6px;border-radius:6px;cursor:pointer;font-size:13px">
+      <input type="checkbox" value="${u.id}" onchange="onExcusedEmpToggle(${u.id}, this.checked)"
+        ${_excusedSelectedIds.has(u.id) ? 'checked' : ''} style="width:15px;height:15px;cursor:pointer">
+      <span>#${escapeHtml(u.employeeNo)} ${escapeHtml(u.name)}${u.position ? ` — ${escapeHtml(u.position)}` : ''}</span>
+    </label>`).join('');
+}
+function onExcusedEmpToggle(id, checked) {
+  if (checked) _excusedSelectedIds.add(id); else _excusedSelectedIds.delete(id);
+  refreshExcusedHint();
+}
+function toggleAllExcusedEmployees(checked) {
+  // Only the employees currently visible under the filter -- ticking "select all" while a search is
+  // active must not silently grant the day to everyone in the company.
+  const q = (document.getElementById('excused-emp-filter')?.value || '').trim().toLowerCase();
+  excusedCandidateEmployees()
+    .filter(u => !q || String(u.name || '').toLowerCase().includes(q) || String(u.employeeNo || '').toLowerCase().includes(q))
+    .forEach(u => { if (checked) _excusedSelectedIds.add(u.id); else _excusedSelectedIds.delete(u.id); });
+  renderExcusedEmployeeList();
+  refreshExcusedHint();
+}
+// Working days in an inclusive range: weekends and public holidays excluded. Mirrors the server's
+// deriveLeaveDaysCount(), which is what stamps the record's `days`.
+function excusedWorkingDaysInRange(from, to) {
+  if (!from) return 0;
+  let days = 0;
+  let d = new Date(from + 'T12:00:00');
+  const end = new Date((to || from) + 'T12:00:00');
+  while (d <= end) {
+    if (d.getDay() !== 0 && d.getDay() !== 6 && !isPublicHoliday(localDateStr(d))) days++;
+    d.setDate(d.getDate() + 1);
+  }
+  return days;
+}
+function refreshExcusedHint() {
+  const hint = document.getElementById('excused-span-hint');
+  if (!hint) return;
+  const from = document.getElementById('excused-date-from')?.value;
+  const to = document.getElementById('excused-date-to')?.value;
+  const n = _excusedSelectedIds.size;
+  if (!from || !to) { hint.textContent = ''; return; }
+  if (to < from) {
+    hint.style.color = '#dc2626';
+    hint.textContent = currentLang === 'ja'
+      ? '⚠️ 終了日は開始日以降にしてください'
+      : L('⚠️ End date must be on or after the start date', '⚠️ วันที่สิ้นสุดต้องไม่ก่อนวันที่เริ่ม');
+    return;
+  }
+  // Working days only: a weekend or public holiday inside the span already counts as neither late
+  // nor absent, so there is nothing there to excuse.
+  // Its own loop on purpose -- calcLeaveDays() takes NO arguments, it reads the LEAVE form's own
+  // date inputs and writes that form's summary element, so calling it from here would both count
+  // the wrong dates and reach into an unrelated form.
+  const days = excusedWorkingDaysInRange(from, to);
+  hint.style.color = '#64748b';
+  hint.textContent = currentLang === 'ja'
+    ? `対象 ${days}勤務日 × ${n}名`
+    : L(`${days} working day(s) × ${n} employee(s)`, `${days} วันทำงาน × ${n} คน`);
+}
+async function submitExcusedGrant() {
+  if (!canGrantExcused()) {
+    showToast(L('⛔ Only the Managing Director or Accounting can grant this',
+      '⛔ เฉพาะ Managing Director หรือบัญชีเท่านั้นที่กำหนดได้'), 'danger');
+    return;
+  }
+  const dateFrom = document.getElementById('excused-date-from').value;
+  const dateTo = document.getElementById('excused-date-to').value || dateFrom;
+  const reason = document.getElementById('excused-reason').value.trim();
+  if (!dateFrom) { showToast(L('⚠️ Please specify the date', '⚠️ กรุณาระบุวันที่'), 'warning'); return; }
+  if (dateTo < dateFrom) {
+    showToast(L('⚠️ End date must be on or after the start date', '⚠️ วันที่สิ้นสุดต้องไม่ก่อนวันที่เริ่ม'), 'warning');
+    return;
+  }
+  if (!reason) { showToast(L('⚠️ Please specify the reason', '⚠️ กรุณาระบุเหตุผล'), 'warning'); return; }
+  const ids = [..._excusedSelectedIds];
+  if (!ids.length) {
+    showToast(L('⚠️ Please select at least one employee', '⚠️ กรุณาเลือกพนักงานอย่างน้อย 1 คน'), 'warning');
+    return;
+  }
+  let granted = 0, returned = 0;
+  const failures = [];
+  // One POST per employee: the endpoint grants for one userId at a time, and each grant (plus the
+  // leave it returns) is atomic on the server. A refusal for one employee -- e.g. their period is
+  // locked -- must not stop the others, so failures are collected and reported by name.
+  for (const uid of ids) {
+    const emp = DATA_USERS.find(u => u.id === uid);
+    try {
+      const res = await apiFetch(`/api/leaves`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: uid, type: 'excused', dateFrom, dateTo, reason }),
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message || 'Server error');
+      if (!DATA_LEAVES.find(l => l.id === data.leave.id)) {
+        DATA_LEAVES.push(data.leave);
+        nextLeaveId = Math.max(nextLeaveId, data.leave.id + 1);
+      }
+      // Mirror the leave the server just returned, or this session keeps showing it as approved --
+      // the balance on screen would stay short until a reload.
+      (data.returnedLeaveIds || []).forEach(rid => {
+        const r = DATA_LEAVES.find(l => l.id === rid);
+        if (r) { r.status = 'cancelled'; returned++; }
+      });
+      granted++;
+    } catch (e) {
+      failures.push(`${emp ? emp.name : uid}: ${e.message}`);
+    }
+  }
+  closeExcusedModal();
+  updateMyRequestsBadge();
+  if (currentPage === 'attendance') renderAttendanceTable();
+  if (currentPage === 'my-requests') renderMyRequests();
+  if (currentPage === 'leave') renderLeaveHistory();
+  renderDashboard();
+  if (granted) {
+    const retTxt = returned
+      ? (currentLang === 'ja' ? `（休暇${returned}件を返却）` : L(` (${returned} leave request(s) returned)`, ` (คืนใบลา ${returned} ใบ)`))
+      : '';
+    showToast(currentLang === 'ja'
+      ? `🛟 ${granted}名に出勤免除を設定しました${retTxt}`
+      : L(`🛟 Excused attendance granted to ${granted} employee(s)${retTxt}`,
+          `🛟 กำหนดการยกเว้นให้พนักงาน ${granted} คนแล้ว${retTxt}`), 'success');
+  }
+  if (failures.length) {
+    showToast(`❌ ${L('Could not grant', 'กำหนดไม่สำเร็จ')}: ${failures.join(' | ')}`, 'danger');
+  }
 }
 
 async function submitHolidayWork() {

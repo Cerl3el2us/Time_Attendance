@@ -1622,6 +1622,52 @@
   </div>
 </div>
 
+<div class="modal-overlay" id="excused-modal" onclick="if(event.target===this)closeExcusedModal()">
+  <div class="modal" style="max-width:560px">
+    <div class="modal-header">
+      <h3 data-en="🛟 Grant Excused Attendance">🛟 กำหนดการยกเว้นการมาสาย/ขาดงาน</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeExcusedModal()">✕</button>
+    </div>
+    <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
+      <div style="display:flex;gap:10px">
+        <div class="form-group" style="flex:1">
+          <label class="form-label"><span data-en="Start date">วันที่เริ่ม</span> <span style="color:#ef4444">*</span></label>
+          <input type="date" id="excused-date-from" class="form-control" onchange="refreshExcusedHint()" />
+        </div>
+        <div class="form-group" style="flex:1">
+          <label class="form-label"><span data-en="End date">วันที่สิ้นสุด</span> <span style="color:#ef4444">*</span></label>
+          <input type="date" id="excused-date-to" class="form-control" onchange="refreshExcusedHint()" />
+        </div>
+      </div>
+      <div id="excused-span-hint" style="font-size:12px;color:#64748b;margin-top:-6px;line-height:1.5"></div>
+      <div class="form-group">
+        <label class="form-label"><span data-en="Reason (recorded on every day granted)">เหตุผล (บันทึกไว้กับทุกวันที่ยกเว้น)</span> <span style="color:#ef4444">*</span></label>
+        <textarea id="excused-reason" class="form-control" rows="2" maxlength="2000" placeholder="เช่น น้ำท่วมบ้านพนักงาน" data-en-ph="e.g. flooding at the employee's home"></textarea>
+      </div>
+      <div class="form-group" style="margin-bottom:0">
+        <label class="form-label" style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+          <span><span data-en="Employees">พนักงานที่ได้รับ</span> <span style="color:#ef4444">*</span></span>
+          <label style="display:flex;align-items:center;gap:6px;font-weight:500;font-size:12px;cursor:pointer">
+            <input type="checkbox" id="excused-select-all" onchange="toggleAllExcusedEmployees(this.checked)" style="width:15px;height:15px;cursor:pointer">
+            <span data-en="Select all">เลือกทั้งหมด</span>
+          </label>
+        </label>
+        <input type="text" id="excused-emp-filter" class="form-control" oninput="renderExcusedEmployeeList()" style="margin-bottom:8px" placeholder="ค้นหาชื่อหรือรหัสพนักงาน" data-en-ph="Search name or employee no." />
+        <div id="excused-employee-list" style="max-height:220px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:6px"></div>
+      </div>
+      <div style="font-size:12px;color:#0369a1;background:#f0f9ff;border-radius:8px;padding:10px;line-height:1.55">
+        <div data-en="📌 A late arrival stops counting as late and a day with no scan stops counting as absent. Pay is unaffected — the day is paid in full and no leave is deducted.">📌 วันที่มาสายจะไม่ถูกนับว่าสาย และวันที่ไม่มีการสแกนจะไม่ถูกนับว่าขาดงาน เงินไม่เปลี่ยน — จ่ายเต็มและไม่ตัดวันลา</div>
+        <div style="margin-top:6px" data-en="📌 All allowances still pay as normal, including Early Morning and OT for anyone who did come in.">📌 เบี้ยเลี้ยงทุกอย่างยังได้ปกติ รวมถึงเบี้ยมาเช้าและ OT ของคนที่มาทำงาน</div>
+        <div style="margin-top:6px" data-en="📌 An approved annual / sick / business leave already filed on these dates is cancelled and the quota returned.">📌 ถ้ามีใบลาพักร้อน/ลาป่วย/ลากิจที่อนุมัติแล้วในวันเหล่านี้ ระบบจะยกเลิกใบนั้นและคืนโควตาวันลาให้</div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeExcusedModal()" data-en="Cancel">ยกเลิก</button>
+      <button class="btn btn-primary" onclick="submitExcusedGrant()" data-en="🛟 Grant">🛟 กำหนดการยกเว้น</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="holiday-work-modal" onclick="if(event.target===this)closeHolidayWorkModal()">
   <div class="modal" style="max-width:480px">
     <div class="modal-header">
@@ -2698,7 +2744,7 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js" integrity="sha384-SYKAG6cglRMN0RVvhNeBY0r3FYKNOJtznwA0v7B5Vp9tr31xAHsZC0DqkQ/pZDmj" crossorigin="anonymous"></script>
-<script src="lang/ja.js?v=20260926g"></script>  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js" integrity="sha384-5JqMv4L/Xa0hfvtF06qboNdhvuYXUku9ZrhZh3bSk8VXF0A/RuSLHpLsSV9Zqhl6" crossorigin="anonymous"></script>
+<script src="lang/ja.js?v=20260928a"></script>  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js" integrity="sha384-5JqMv4L/Xa0hfvtF06qboNdhvuYXUku9ZrhZh3bSk8VXF0A/RuSLHpLsSV9Zqhl6" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ja.js" integrity="sha384-mKor8U8jwukUkfxaFPCsxKF9S62PXq4gG7zcZ5yQ2x3KL1msprJZeFlKFEDeeb5V" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/th.js" integrity="sha384-E6OVFg1zUc/pckGxry0YZ6VeZ1E17l7Jl8ZQx58jbEfxxkz9LqknQhiIrA9zg/8b" crossorigin="anonymous"></script>
 

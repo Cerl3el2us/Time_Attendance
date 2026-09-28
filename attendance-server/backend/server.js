@@ -5417,6 +5417,12 @@ const TYPE_SCOPED_LEAVE_FIELDS = {
   // are acceptable per the user. Adding the key here also registers the type in
   // VALID_LEAVE_TYPES (built from Object.keys of this object).
   abroad:              ['location'],
+  // 2026-09-28 (owner): Excused Attendance. No type-scoped fields of its own -- it only needs the
+  // universal userId/dateFrom/dateTo/reason. MD/Accounting grant it FOR an employee, so the POST
+  // handler takes `userId` from the body for this type only (every other type is always the
+  // caller's own) and stamps status 'approved' immediately: there is nothing to approve, the
+  // decision IS the grant. Registering the key here also puts the type in VALID_LEAVE_TYPES.
+  excused:             [],
 };
 // SECURITY FIX 2026-08-13 (Opus-planned leaves-whitelist, phase 1): every field that reaches a
 // stored leave record now falls into exactly one of three lists -- this one (client-settable on
@@ -6090,6 +6096,12 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
       // day it spans and is paid for every one of them. Display-only; payroll counts day
       // statuses, not this field.
       body.days = abroadSpanDays(body.dateFrom, body.dateTo);
+    } else if (type === 'excused') {
+      // 2026-09-28: derived, never trusted from the client -- the working days in the range, since
+      // a weekend or public holiday inside a flood span has nothing to excuse (it already counts as
+      // neither late nor absent). Display-only, exactly like abroad's above: generatePeriodDays()
+      // decides the real effect per date, not this number.
+      body.days = deriveLeaveDaysCount(body.dateFrom, body.dateTo);
     }
     // 2026-08-09 (Opus audit finding 2.5): validateUpcountryLocations(undefined) returns null
     // (valid/absent), so a direct POST with type:'upcountry' and no `locations` array at all was
@@ -6213,8 +6225,22 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
     // ones this whole day's audits have been closing. The real signal for "this is quick-fix" is
     // that the targeted userId is someone OTHER than the submitter.
     const isQuickFixTimeCorrection = type === 'time-correction' && (['md', 'accounting'].includes(live.role) || isSuperAdminUser(live)) && body.userId !== undefined && Number(body.userId) !== live.id;
+    // 2026-09-28 (owner): EXCUSED ATTENDANCE is granted BY MD/Accounting FOR an employee, so like
+    // Quick Fix above it may target someone else. Two deliberate differences from Quick Fix:
+    //   1. it is NOT gated on `target !== live.id` -- the MD's own house can flood too, and that
+    //      would be a legitimate grant, not the self-approval hole that gating exists to stop
+    //      (an employee cannot reach this branch at all, so there is no self-grant to close);
+    //   2. the role check REFUSES rather than falling through, so a non-admin POSTing
+    //      `type:'excused'` directly gets a 403 instead of silently creating a pending record.
+    const isExcusedGrant = type === 'excused' && (['md', 'accounting'].includes(live.role) || isSuperAdminUser(live));
+    if (type === 'excused' && !isExcusedGrant) {
+      return res.status(403).json({ success:false, message:'Only the Managing Director or Accounting can grant excused attendance' });
+    }
+    if (type === 'excused' && !String(body.reason || '').trim()) {
+      return res.status(400).json({ success:false, message:'reason is required for excused attendance' });
+    }
     let targetUser = live;
-    if (isQuickFixTimeCorrection) {
+    if (isQuickFixTimeCorrection || (isExcusedGrant && body.userId !== undefined)) {
       const foundTarget = users.find(u => u.id === Number(body.userId));
       if (!foundTarget) return res.status(400).json({ success:false, message:'Target employee not found' });
       targetUser = foundTarget;
@@ -6268,6 +6294,11 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
       // separate approval needed" -- the approver IS the authority here, same reasoning as the
       // two auto-approve branches above.
       status = 'approved'; approver = live.name; approvedAt = new Date().toISOString();
+    } else if (isExcusedGrant) {
+      // 2026-09-28 (owner): there is nothing to approve -- MD/Accounting deciding to excuse the
+      // day IS the grant, so it lands approved and takes effect at once. The period-lock /
+      // MD-frozen / accounting-confirmed guards below still apply because status is 'approved'.
+      status = 'approved'; approver = live.name; approvedAt = new Date().toISOString();
     } else {
       status = initialStatusForRequester(routeKey, targetUser.role);
     }
@@ -6296,6 +6327,36 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
       }
       if (status === 'approved' && mdApprovedPeriodInRange(body.dateFrom, body.dateTo, userId)) {
         return res.status(409).json({ success:false, message:'Payroll for this period has already been approved by the Managing Director -- ask them to revoke approval first' });
+      }
+    }
+
+    // 2026-09-28 (owner): which already-spent leave an excused grant will give back. Collected and
+    // GUARDED here, applied further down in the same write. Each returned record is checked against
+    // its OWN period (not the grant's) because a flood span can reach back into a period that has
+    // since been locked / MD-approved / tax-confirmed -- returning a day there would silently
+    // contradict a frozen payroll. Refuse the whole grant instead of returning only some days.
+    const excusedReturns = [];
+    if (type === 'excused') {
+      const _excTo = body.dateTo || body.dateFrom;
+      for (const l of leaves) {
+        if (l.userId !== userId || l.status !== 'approved') continue;
+        if (!['annual', 'sick', 'business'].includes(l.type)) continue;
+        if (!l.dateFrom || !isValidDateStr(l.dateFrom)) continue;
+        const lTo = (l.dateTo && isValidDateStr(l.dateTo)) ? l.dateTo : l.dateFrom;
+        if (l.dateFrom > _excTo || lTo < body.dateFrom) continue;
+        if (lockedPeriodInRange(l.dateFrom, lTo)) {
+          return res.status(400).json({ success:false, code:'period-locked',
+            message:`Cannot return the leave of ${l.dateFrom}: that pay period is locked` });
+        }
+        if (mdApprovedPeriodInRange(l.dateFrom, lTo, userId)) {
+          return res.status(409).json({ success:false, code:'period-frozen',
+            message:`Cannot return the leave of ${l.dateFrom}: the Managing Director has already approved that payroll` });
+        }
+        if (accountingConfirmedInRange(l.dateFrom, lTo, userId)) {
+          return res.status(409).json({ success:false, code:'period-confirmed',
+            message:`Cannot return the leave of ${l.dateFrom}: Accounting has already confirmed tax for that period` });
+        }
+        excusedReturns.push(l);
       }
     }
 
@@ -6470,7 +6531,34 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
       id: nextId(leaves), serverCreatedAt: new Date().toISOString(),
     };
     leaves.push(leave);
+    // 2026-09-28 (owner): an excused grant RETURNS the leave the employee already spent on that
+    // date ("คืนวันลาให้อัตโนมัติ") -- every approved annual/sick/business record overlapping the range
+    // is soft-cancelled in THIS SAME write, which is what puts the quota back: every balance reader
+    // counts only non-void records (isVoidLeaveStatus). Same field shape as the cancel route so the
+    // history views and `cancelledWith` linking behave identically.
+    // Guards ran before the push above, so this is all-or-nothing -- never a half-applied grant.
+    if (excusedReturns.length) {
+      const _retAt = new Date().toISOString();
+      excusedReturns.forEach(ret => {
+        const ri = leaves.findIndex(l => l.id === ret.id);
+        if (ri < 0) return;
+        leaves[ri] = { ...leaves[ri], status: 'cancelled', cancelledAt: _retAt,
+          cancelledById: live.id, cancelledBy: live.name, cancelledWith: leave.id };
+        console.log('[LEAVE] leave returned by excused grant', JSON.stringify({ id: ret.id,
+          userId, type: ret.type, dateFrom: ret.dateFrom, dateTo: ret.dateTo || ret.dateFrom,
+          days: ret.days, excusedId: leave.id, by: live.id }));
+      });
+    }
     saveLeaves(leaves);
+    // 2026-09-28: a returned ANNUAL day leaves the year-end pool, exactly like the create path
+    // below -- without this the snapshotted carry-forward keeps counting a day the employee got back.
+    if (excusedReturns.some(r => r.type === 'annual') && targetUser) {
+      try {
+        refreshSnapshottedCarryForward(leaves, targetUser, leave.dateFrom);
+      } catch (e) {
+        console.error('[LEAVE] carry-forward refresh after excused return failed', e && e.message);
+      }
+    }
     // 2026-09-24 (review M): annual leave (pending or approved) counts in the year-end pool, so a
     // request dated in a year whose carry-forward is already snapshotted rewrites that snapshot.
     if (type === 'annual' && targetUser) {
@@ -6488,7 +6576,9 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
     // pattern as USER_CREATED.
     broadcast({ type: 'LEAVE_CREATED', leave: toPublicLeaveProjection(leave) });
     notifyLeaveStatusChange(null, leave);
-    res.json({ success:true, leave });
+    // 2026-09-28: the grant tells the caller which leave it gave back, so the UI can say so instead
+    // of the employee discovering a changed balance with no explanation.
+    res.json({ success:true, leave, ...(excusedReturns.length ? { returnedLeaveIds: excusedReturns.map(r => r.id) } : {}) });
   } catch(e) {
     res.status(500).json({ success:false, error:e.message });
   }
@@ -7874,9 +7964,21 @@ function notifyApprovedRecordCancelled(actor, records) {
 // annualLateDeductMinutes, app.js attendanceTimesForDate / generatePeriodDays /
 // computeLateDeductMinutes; approval never writes events.json).
 // Dual-sync with app.js isRevocableLeaveType.
+// 2026-09-28: 'excused' carries no pay, but it is the ONLY way to undo a mistaken Excused
+// Attendance grant -- the DELETE route is owner-only (`leave.userId !== live.id` -> 403) and the
+// record belongs to the employee, not to the MD/Accounting user who granted it, so without this
+// a wrong person or wrong date would be stuck forever. This route's own requireRole('md',
+// 'accounting') is the right gate for taking a grant back.
+// Its "nobody revokes their own approval" guard is deliberately left alone: an MD who grants
+// themselves an excused day has the OTHER admin role undo it, rather than loosening a
+// self-approval control for this one type.
+// NOTE: revoking a grant does NOT re-create the annual/sick/business leave the grant returned --
+// the employee re-files it. The confirm dialog says so.
+// Comments stay OUTSIDE the body on purpose: the dual-sync test compares the function text of both
+// copies, so a comment inside one body and not the other is a failure.
 function isRevocableLeaveType(type) {
   return ['holiday-work', 'ot', 'early-morning', 'late-out', 'upcountry', 'long-distance',
-    'personal-car', 'abroad', 'time-correction'].includes(type);
+    'personal-car', 'abroad', 'time-correction', 'excused'].includes(type);
 }
 // 2026-09-24 (owner, review M): revoking an approved time-correction revokes, in the same step,
 // the employee's APPROVED money records on that date whose validity depended on the corrected
@@ -9492,7 +9594,28 @@ function generatePeriodDays(start, end, isCurrent, user, attLog, leaves, appSett
     // 2026-09-23: after the overlay, so a review counts only for the effective (corrected) web
     // check-out it was made on. Dual-sync twin in app.js.
     const checkOutReview = checkoutReviewDecisionFor(reviewMap[`${uid}_${dateStr}`], checkOut, checkOutSource);
-    days.push({ date: dateStr, isWeekend, isPubHoliday, isFuture, status, checkIn, checkOut, lateOut, upcountry, longDistance, longDistanceKm, longDistanceAllowance, lateApproved, firstScanAfterCutoff, partialLeave, checkInSource, checkOutSource, checkOutReview, rawCheckOut });
+    // 2026-09-28 (owner): EXCUSED ATTENDANCE -- MD/Accounting forgives a late arrival or a whole
+    // missing day for a force-majeure event ("น้ำท่วมไม่ได้ท่วมทุกบ้านพร้อมกัน", so it is granted per
+    // employee per date, never company-wide). Its own pass AFTER the leave overlays above, so the
+    // order of the leaves array can never change the outcome.
+    // Only 'late' and 'absent' are touched: a leave day / weekend / holiday / company trip / abroad
+    // day already counts as neither late nor absent, and an excuse must not override them.
+    // A forgiven LATE day becomes 'present' rather than a new status on purpose -- the work-day
+    // counters are `present|late|not-clocked-in|abroad` (daysWorked is printed on the payslip), so a
+    // new status would erase the day of the employee who did fight through the flood to come in.
+    // The real scan times are kept; the badge carries the excuse.
+    // DUAL-SYNC: twin block in app.js generatePeriodDays().
+    let excused = false, excusedReason = '';
+    if (uid && !isFuture && (status === 'late' || status === 'absent')) {
+      const _exc = (leaves || []).find(l => l.userId == uid && l.type === 'excused' &&
+        l.status === 'approved' && l.dateFrom <= dateStr && (l.dateTo || l.dateFrom) >= dateStr);
+      if (_exc) {
+        excused = true;
+        excusedReason = _exc.reason || '';
+        status = status === 'late' ? 'present' : 'excused';
+      }
+    }
+    days.push({ date: dateStr, isWeekend, isPubHoliday, isFuture, status, checkIn, checkOut, lateOut, upcountry, longDistance, longDistanceKm, longDistanceAllowance, lateApproved, firstScanAfterCutoff, partialLeave, checkInSource, checkOutSource, checkOutReview, rawCheckOut, excused, excusedReason });
     d.setDate(d.getDate() + 1);
   }
   return days;

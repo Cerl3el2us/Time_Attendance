@@ -1323,6 +1323,21 @@ window.LANG_JA = {
   "This web check-out is waiting for Accounting/MD review — 🌙 can be submitted after it is allowed": "このWeb退勤は経理/MDの確認待ちです — 承認後に🌙を申請できます",
   "Accounting/MD did not allow this web check-out — 🌙 cannot be claimed": "経理/MDがこのWeb退勤を承認しませんでした — 🌙は申請できません",
 
+  /* 2026-09-28 — Excused Attendance (MD/Accounting forgive lateness/absence, force majeure).
+     "Select all", "Cancel", "Start date" and "End date" already have entries above -- deliberately
+     not repeated here: a duplicate key in this object literal silently overrides the earlier one. */
+  "🛟 Grant Excused Attendance": "🛟 出勤免除の設定",
+  "Reason (recorded on every day granted)": "理由（免除する各日に記録されます）",
+  "e.g. flooding at the employee's home": "例：従業員の自宅が浸水",
+  "Employees": "対象従業員",
+  "Search name or employee no.": "氏名または社員番号で検索",
+  "📌 A late arrival stops counting as late and a day with no scan stops counting as absent. Pay is unaffected — the day is paid in full and no leave is deducted.": "📌 遅刻は遅刻として数えられなくなり、打刻のない日も欠勤として数えられなくなります。給与は変わりません — 全額支給され、休暇も控除されません。",
+  "📌 All allowances still pay as normal, including Early Morning and OT for anyone who did come in.": "📌 手当はすべて通常どおり支給されます。出勤した人の早朝手当や残業も含みます。",
+  "📌 An approved annual / sick / business leave already filed on these dates is cancelled and the quota returned.": "📌 該当日に承認済みの有給・病気・私用休暇がある場合、その申請は取り消され、日数が返却されます。",
+  "🛟 Grant": "🛟 設定する",
+  "Excused": "出勤免除",
+  "Forgive lateness / absence for a force-majeure event": "不可抗力による遅刻・欠勤を免除する",
+
   /* 2026-09-21 — Abroad (work-abroad trip request + allowance) */
   "✈️ Report Work Abroad": "✈️ 海外勤務の申請",
   "Work Abroad": "海外勤務",
