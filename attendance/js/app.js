@@ -17339,6 +17339,17 @@ function hwPayCardHtml(est, opts) {
     </div>`
     + (on ? `<div style="margin-top:6px;font-size:10.5px;color:${dark ? '#7dd3fc' : '#0369a1'}">${L('Currently selected', 'ที่เลือกอยู่')}</div>` : '');
 }
+// 2026-09-28 (owner): the cards are the control, not just a read-out -- clicking one picks that
+// compensation mode. The <select> stays the single source of truth and is kept in sync, so
+// submitHolidayWork() keeps reading exactly one place.
+function selectHwCompMode(mode) {
+  const sel = document.getElementById('holiday-work-comp-mode');
+  if (!sel || sel.value === mode) return;
+  sel.value = mode;
+  // Same path the dropdown's own onchange takes: updates the explanatory hint AND re-renders the
+  // cards, so the highlight, the hint and the select can never disagree.
+  refreshHolidayWorkCompHint();
+}
 function refreshHolidayWorkPayCompare() {
   const wrap = document.getElementById('hw-pay-compare');
   if (!wrap) return;
