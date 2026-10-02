@@ -14391,7 +14391,7 @@ function checkoutReviewPendingBoxHtml(pending, reviewed) {
         <tbody>${tab === 'reviewed' ? checkoutReviewReviewedRowsHtml(list) : checkoutReviewPendingRowsHtml(list)}</tbody>
       </table>
     </div>`;
-  return `<div style="flex:1;display:flex;flex-direction:column;padding:12px 14px;border:1px solid #f59e0b;border-radius:10px;background:var(--bg-card)">
+  return `<div style="padding:12px 14px;border:1px solid #f59e0b;border-radius:10px;background:var(--bg-card)">
     <div style="font-weight:700;color:var(--text);margin-bottom:4px">⚠️ ${escapeHtml(L('Web check-out review', 'ตรวจสอบเช็กเอาท์ผ่านเว็บ'))}</div>
     <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">${escapeHtml(hint)}</div>
     <div style="margin-bottom:8px">${tabBtn('pending', L('Awaiting review', 'รอตรวจสอบ'), pending.length)}${tabBtn('reviewed', L('Reviewed', 'ตรวจแล้ว'), reviewed.length)}</div>
@@ -14415,9 +14415,10 @@ function reviewBoxesRow() {
   if (!row) {
     row = document.createElement('div');
     row.id = 'review-boxes-row';
-    // stretch, not flex-start: the two cards hold different numbers of rows and a short one
-    // next to a tall one reads as unfinished rather than simply emptier.
-    row.style.cssText = 'display:flex;gap:12px;flex-wrap:wrap;align-items:stretch;margin-bottom:14px';
+    // 2026-10-02 (owner): equal WIDTH, natural height. Stretching them to match heights left
+    // the shorter card holding a block of empty space, which looks like something failed to
+    // load; a card with one row in it should simply be short.
+    row.style.cssText = 'display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start;margin-bottom:14px';
     summEl.insertBefore(row, summEl.firstChild);
   }
   return row;
@@ -14439,7 +14440,7 @@ function refreshCheckoutReviewPendingBox() {
   if (!box) {
     box = document.createElement('div');
     box.id = 'checkout-review-pending-box';
-    box.style.cssText = 'flex:1 1 0;min-width:320px;display:flex';
+    box.style.cssText = 'flex:1 1 0;min-width:320px';
     row.insertBefore(box, row.firstChild);
   }
   box.innerHTML = checkoutReviewPendingBoxHtml(pending, reviewed);
@@ -14573,7 +14574,7 @@ function morningReviewPendingBoxHtml(pending, reviewed) {
         <tbody>${tab === 'reviewed' ? morningReviewReviewedRowsHtml(list) : morningReviewPendingRowsHtml(list)}</tbody>
       </table>
     </div>`;
-  return `<div style="flex:1;display:flex;flex-direction:column;padding:12px 14px;border:1px solid #f59e0b;border-radius:10px;background:var(--bg-card)">
+  return `<div style="padding:12px 14px;border:1px solid #f59e0b;border-radius:10px;background:var(--bg-card)">
     <div style="font-weight:700;color:var(--text);margin-bottom:4px">⚠️ ${escapeHtml(L('Early morning review', 'ตรวจสอบการมาเช้า'))}</div>
     <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">${escapeHtml(hint)}</div>
     <div style="margin-bottom:8px">${tabBtn('pending', L('Awaiting review', 'รอตรวจสอบ'), pending.length)}${tabBtn('reviewed', L('Reviewed', 'ตรวจแล้ว'), reviewed.length)}</div>
@@ -14596,7 +14597,7 @@ function refreshMorningReviewPendingBox() {
   if (!box) {
     box = document.createElement('div');
     box.id = 'morning-review-pending-box';
-    box.style.cssText = 'flex:1 1 0;min-width:320px;display:flex';
+    box.style.cssText = 'flex:1 1 0;min-width:320px';
     row.appendChild(box);
   }
   box.innerHTML = morningReviewPendingBoxHtml(pending, reviewed);
