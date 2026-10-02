@@ -1421,6 +1421,15 @@ window.LANG_JA = {
   "Holiday work already exists on this trip's start or end date, and a travel day cannot also carry holiday work. Reject this trip (the employee can resubmit it with other dates), or reject that holiday work first if it is still pending": "この出張の出発日または帰着日にすでに休日出勤があり、移動日に休日出勤を重ねることはできません。この出張を却下する（社員は別の日程で再申請できます）か、その休日出勤がまだ承認待ちであれば先に却下してください",
   // 2026-09-24: web check-out review box — Awaiting / Reviewed tabs (Approvals page)
   "Web check-out review": "Web退勤の確認",
+  // 2026-10-02 (owner): the morning review -- the twin of the Web check-out review above.
+  "Early morning review": "早朝出勤の確認",
+  "Genuine early start — pay the allowance": "本当に早朝出勤 — 手当を支給",
+  "Not a real early start — set the real check-in time": "早朝出勤ではない — 実際の出勤時刻に修正",
+  "❌ Not a real early start": "❌ 早朝出勤ではない",
+  "Came through again": "再通過",
+  "No reviewed mornings in the current or previous pay period": "今期・前期に確認済みの早朝出勤はありません",
+  "⚠️ Check-in time changed — reload and review again": "⚠️ 出勤時刻が変更されました — 再読み込みして確認し直してください",
+  "Checked in early enough to earn the Early Morning allowance, then came through the door again between {from} and {to}. The allowance is held until someone decides. Not allowed = set the real check-in time, which also makes the day count as late.": "早朝手当の対象となる時刻に出勤した後、{from}〜{to} に再度ドアを通過しています。確認されるまで手当は保留されます。「不支給」は実際の出勤時刻に修正することを意味し、その日は遅刻として扱われます。",
   "Awaiting review": "確認待ち",
   "Reviewed": "確認済み",
   "Reviewed by": "確認者",

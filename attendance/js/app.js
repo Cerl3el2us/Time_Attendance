@@ -9630,8 +9630,10 @@ function renderAttendanceTable() {
       // tooltip carries the evidence, since a flag nobody can check is just noise.
       if (row.morningReviewNeeded && !row.morningReview) {
         const _later = morningReviewLaterScans(targetUserId, row);
-        const _why = L(`Scanned at ${row.checkIn}, came through again at ${_later.join(', ') || '—'} — the Early Morning allowance is held until this is reviewed`,
-          `สแกนตอน ${row.checkIn} แล้วผ่านประตูอีกตอน ${_later.join(', ') || '—'} — เบี้ยมาเช้าถูกพักไว้จนกว่าจะตรวจสอบ`);
+        const _why = currentLang === 'ja'
+          ? `${row.checkIn} に打刻後、${_later.join('、') || '—'} に再度通過 — 確認されるまで早朝手当は保留されます`
+          : L(`Scanned at ${row.checkIn}, came through again at ${_later.join(', ') || '—'} — the Early Morning allowance is held until this is reviewed`,
+              `สแกนตอน ${row.checkIn} แล้วผ่านประตูอีกตอน ${_later.join(', ') || '—'} — เบี้ยมาเช้าถูกพักไว้จนกว่าจะตรวจสอบ`);
         earlyWarnBadge = `<span class="badge badge-danger" style="margin-left:4px" title="${escapeHtml(_why)}">⚠️ ${L('Verify','ตรวจสอบ')}</span>`;
         if (!isViewingSelf && isMdAccountingView()) {
           earlyWarnBadge += ` <button class="btn btn-ghost btn-sm" style="color:#059669" onclick="setMorningReview(${targetUserId}, '${escapeJsAttr(row.date)}', 'allow', '${escapeJsAttr(row.checkIn)}')" title="${L('Genuine early start — pay the allowance','มาทำงานแต่เช้าจริง — จ่ายเบี้ย')}">✅</button>`;
@@ -14609,9 +14611,12 @@ function denyMorningReview(userId, dateStr, checkIn) {
   const banner = document.getElementById('tc-warning-banner');
   if (banner) {
     banner.className = 'alert alert-warning';
-    banner.innerHTML = escapeHtml(L(
-      `Scanned at ${checkIn}, then came through the door again at ${later.join(', ') || '—'}. Set the time this person really started, and say why — both are kept with the decision.`,
-      `สแกนตอน ${checkIn} แล้วยังผ่านประตูอีกตอน ${later.join(', ') || '—'} — ใส่เวลาที่มาทำงานจริงและเหตุผล ทั้งสองอย่างจะถูกเก็บไว้กับผลตรวจสอบ`));
+    // a sentence with times in it cannot be keyed in ja.js, so Japanese is written out here --
+    // the same pattern the rest of this file uses for interpolated text.
+    banner.innerHTML = escapeHtml(currentLang === 'ja'
+      ? `${checkIn} に打刻後、${later.join('、') || '—'} に再度ドアを通過しています。実際に勤務を開始した時刻と理由を入力してください — どちらも確認結果と共に保存されます。`
+      : L(`Scanned at ${checkIn}, then came through the door again at ${later.join(', ') || '—'}. Set the time this person really started, and say why — both are kept with the decision.`,
+          `สแกนตอน ${checkIn} แล้วยังผ่านประตูอีกตอน ${later.join(', ') || '—'} — ใส่เวลาที่มาทำงานจริงและเหตุผล ทั้งสองอย่างจะถูกเก็บไว้กับผลตรวจสอบ`));
   }
   const title = document.getElementById('tc-modal-title');
   if (title) title.textContent = L('❌ Not a real early start', '❌ ไม่ได้มาทำงานแต่เช้าจริง');

@@ -1156,6 +1156,10 @@
                 <option value="cancelled" data-en="Cancelled">ยกเลิกแล้ว</option>
                 <option value="revoked" data-en="Approval revoked">เพิกถอนการอนุมัติแล้ว</option>
               </select>
+              <!-- 2026-10-02 (owner): an <input type="month"> renders as an empty box until
+                   something is picked, and it cannot carry a placeholder, so this filter sat
+                   there unlabelled with only a hover title to explain it. -->
+              <span style="font-size:13px;color:var(--text-muted);align-self:center" data-en="Submitted month:">เดือนที่ยื่น:</span>
               <input type="month" id="audit-filter-month" onchange="renderAuditLog()" title="กรองตามวันที่ยื่นคำขอ ไม่ใช่วันที่ของการลา/คำขอเอง" data-en-title="Filters by the date the request was submitted, not the leave/request's own date range" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--bg-card);color:var(--text)">
               <button class="btn btn-ghost btn-sm" onclick="document.getElementById('audit-filter-user').value='';document.getElementById('audit-filter-type').value='';document.getElementById('audit-filter-status').value='';document.getElementById('audit-filter-month').value='';renderAuditLog()" data-en="✕ Clear">✕ ล้างตัวกรอง</button>
             </div>
@@ -2756,10 +2760,10 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js" integrity="sha384-SYKAG6cglRMN0RVvhNeBY0r3FYKNOJtznwA0v7B5Vp9tr31xAHsZC0DqkQ/pZDmj" crossorigin="anonymous"></script>
-<script src="lang/ja.js?v=20261002b"></script>  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js" integrity="sha384-5JqMv4L/Xa0hfvtF06qboNdhvuYXUku9ZrhZh3bSk8VXF0A/RuSLHpLsSV9Zqhl6" crossorigin="anonymous"></script>
+<script src="lang/ja.js?v=20261002c"></script>  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js" integrity="sha384-5JqMv4L/Xa0hfvtF06qboNdhvuYXUku9ZrhZh3bSk8VXF0A/RuSLHpLsSV9Zqhl6" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ja.js" integrity="sha384-mKor8U8jwukUkfxaFPCsxKF9S62PXq4gG7zcZ5yQ2x3KL1msprJZeFlKFEDeeb5V" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/th.js" integrity="sha384-E6OVFg1zUc/pckGxry0YZ6VeZ1E17l7Jl8ZQx58jbEfxxkz9LqknQhiIrA9zg/8b" crossorigin="anonymous"></script>
 
-<script src="js/app.js?v=20261002b"></script>
+<script src="js/app.js?v=20261002c"></script>
 </body>
 </html>
