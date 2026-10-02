@@ -128,6 +128,20 @@ test('days that pay no allowance at all are skipped: leave, Company Trip, Abroad
 // The point of this one is the second half. Eligibility is a Settings table the owner edits, so a
 // rule that reads a role list written in code would silently stop covering a role the day it is
 // switched on -- and nobody would notice, because the flag simply never appears.
+// A weekend or public holiday pays nothing unless Holiday Work was approved for it. Flagging one
+// anyway would hold an allowance that never existed and then block the pay period on a decision
+// that cannot change a single number.
+test('a rest day is only reviewed when Holiday Work makes it payable', () => {
+  for (const [side, X] of SIDES) {
+    const sat = day({ isWeekend: true });
+    const scans = ['06:30', '08:31'];
+    assert.strictEqual(X.morningReviewTrigger(sat, USER, S, scans, new Set()), false, `${side} Saturday, no Holiday Work`);
+    assert.strictEqual(X.morningReviewTrigger(sat, USER, S, scans, undefined), false, `${side} Saturday, nothing passed`);
+    assert.strictEqual(X.morningReviewTrigger(sat, USER, S, scans, new Set(['2026-09-22'])), true, `${side} Saturday with Holiday Work`);
+    assert.strictEqual(X.morningReviewTrigger(day({ isPubHoliday: true }), USER, S, scans, new Set()), false, `${side} public holiday`);
+  }
+});
+
 test('eligibility comes from Settings, not from a role list in the code', () => {
   for (const [side, X] of SIDES) {
     const scans = ['06:30', '08:31'];

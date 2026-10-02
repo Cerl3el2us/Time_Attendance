@@ -1572,10 +1572,14 @@ function morningReviewWindowOf(allowances) {
 // business day's pass times (HH:MM) from the attendance log. Eligibility is read from Settings on
 // every call, never from a role list written here, so opening earlyLate to another role later
 // starts flagging that role the same day without touching this file.
-function morningReviewTrigger(day, user, S, doorScans) {
+function morningReviewTrigger(day, user, S, doorScans, holidayWorkDateSet) {
   if (!day || !user || !S || !day.checkIn || day.isFuture) return false;
   if (!isEarlyMorningDayStatus(day.status) || !isDeviceScanSource(day.checkInSource)) return false;
   if (isFullDayPersonalLeaveStatus(day.status)) return false;
+  // Same rest-day rule the payment path uses: a weekend or public holiday pays nothing without an
+  // approved Holiday Work, so flagging one would hold money that was never going to be paid and
+  // then block the pay period on a decision that cannot change any number.
+  if (isRestAttendanceDay(day) && !(holidayWorkDateSet && holidayWorkDateSet.has(day.date))) return false;
   if (!isAllowanceEligible(S.allowanceEligibility, user.role, 'earlyLate')) return false;
   const a = S.allowances || {};
   const inMins = parseHHMMToMins(day.checkIn);
