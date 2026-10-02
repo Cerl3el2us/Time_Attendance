@@ -6508,13 +6508,13 @@ async function fetchExchangeRate() {
           // Only from the second publication onwards -- before that there is nothing to compare
           // against and an arrow would be a guess. 'same' is rendered too, so a day where the
           // bank republished an unchanged rate is not mistaken for missing data. 2026-10-02
-          // (owner): that case shows '-', not '=' -- a dash reads as "no movement" at a glance,
+          // (owner): that case shows a dash, not '=' -- it reads as "no movement" at a glance,
           // while '=' was being read as part of the number next to it.
           const d = hasRate ? bank.dir : null;
           const delta = (hasRate && typeof bank.prev === 'number') ? bank.ttb - bank.prev : null;
           arrowEl.className = 'rate-arrow' + (d ? ' ' + d : '');
           arrowEl.textContent = !d ? ''
-            : d === 'same' ? '-'
+            : d === 'same' ? '–'
             : (d === 'up' ? '▲' : '▼') + ' ' + Math.abs(delta).toFixed(2);
           arrowEl.title = !d ? '' : `${L('Previous', 'ครั้งก่อน')}: ${bank.prev.toFixed(2)}`;
         }

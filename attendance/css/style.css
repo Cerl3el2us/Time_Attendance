@@ -3674,7 +3674,9 @@ tr.finalize-row-confirmed:hover td {
 }
 .rate-arrow.up   { color: #16a34a; }
 .rate-arrow.down { color: #dc2626; }
-.rate-arrow.same { color: #94a3b8; }
+/* 2026-10-02 (owner): the no-change dash sat alone where the up/down arrows carry a number
+   beside them, so at the shared 11px it read as a speck. Sized for the one case. */
+.rate-arrow.same { color: #94a3b8; font-size: 16px; line-height: 11px; letter-spacing: 1px; }
 
 /* ===== 2026-09-26 (design round 3): login card =====
    The language switcher is new -- the app shipped with no way to change language before
