@@ -1413,8 +1413,8 @@ window.LANG_JA = {
   "Carried-forward days are used first. When off, carried-forward days never expire and no expiry reminder is shown.": "繰越日数から先に消化されます。オフにすると繰越日数は失効せず、失効前の通知も表示されません。",
   "⚠️ The selected time is entirely within the 12:00–13:00 lunch break": "⚠️ 選択した時間はすべて12:00〜13:00の昼休み内です",
   // 2026-09-24: payroll batch — Company Trip / OT past midnight / Holiday Work OT in OT views / abroad approval
-  "An end time before 05:00 means after midnight (same work day).": "05:00より前の終了時刻は深夜0時以降（同じ勤務日）として扱います。",
-  "⚠️ End time must be after 17:30 (before 05:00 = after midnight)": "⚠️ 終了時刻は17:30以降にしてください（05:00より前＝深夜0時以降）",
+  "An end time before 05:30 means after midnight (same work day).": "05:30より前の終了時刻は深夜0時以降（同じ勤務日）として扱います。",
+  "⚠️ End time must be after 17:30 (before 05:30 = after midnight)": "⚠️ 終了時刻は17:30以降にしてください（05:30より前＝深夜0時以降）",
   "next day": "翌日",
   "This date is a Company Trip day — no allowance of any kind is paid, so Holiday Work cannot be filed": "この日は社員旅行日です — 手当は一切支給されないため、休日出勤は申請できません",
   "Holiday Work": "休日出勤",
@@ -1437,8 +1437,8 @@ window.LANG_JA = {
   "This request type has no pay to revoke": "この申請の種類には取り消す支給がありません",
   "Could not revoke the approval": "承認を取り消せませんでした",
   // 2026-09-24: Holiday Work past midnight
-  "An end time before 05:00 means after midnight (same work day) — the whole shift is paid at this day's holiday rate.": "05:00より前の終了時刻は深夜0時以降（同じ勤務日）として扱い、勤務全体をこの日の休日レートで支給します。",
-  "⚠️ End time must be after start time (before 05:00 = after midnight)": "⚠️ 終了時刻は開始時刻より後にしてください（05:00より前＝深夜0時以降）",
+  "An end time before 05:30 means after midnight (same work day) — the whole shift is paid at this day's holiday rate.": "05:30より前の終了時刻は深夜0時以降（同じ勤務日）として扱い、勤務全体をこの日の休日レートで支給します。",
+  "⚠️ End time must be after start time (before 05:30 = after midnight)": "⚠️ 終了時刻は開始時刻より後にしてください（05:30より前＝深夜0時以降）",
   // 2026-09-24: automatic year-end carry-forward (status line / manual button), web check-out undo
   "automatic": "自動",
   "Only last year can be carried forward": "繰り越せるのは前年のみです",

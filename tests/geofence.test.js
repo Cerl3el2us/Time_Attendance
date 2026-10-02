@@ -9,6 +9,9 @@ const assert = require('assert');
 const ROOT = path.join(__dirname, '..');
 const APP_SRC = fs.readFileSync(path.join(ROOT, 'attendance/js/app.js'), 'utf8');
 const SERVER_SRC = fs.readFileSync(path.join(ROOT, 'attendance-server/backend/server.js'), 'utf8');
+// 2026-10-02: the business-day boundary is read out of the real source instead of repeating the
+// number here, so moving it can never leave these sandboxes asserting against the old value.
+const BUSINESS_DAY_START_MINS = Number(/const BUSINESS_DAY_START_MINS = (\d+);/.exec(APP_SRC)[1]);
 
 function extractBraced(src, startIdx, openIdx, name) {
   let depth = 0;
@@ -30,6 +33,7 @@ function sameSource(name) {
 }
 function sandbox(src, names) {
   const ctx = {};
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   vm.runInContext(names.map(n => extractFunction(src, n)).join('\n'), ctx);
   return ctx;
@@ -222,20 +226,28 @@ test('accuracy is sanitised to a bounded number or null', () => {
 });
 
 test('only a real check-in is gated: pre-dawn and post-cutoff scans are check-outs', () => {
-  const ctx = { CHECKIN_CUTOFF: '13:00', buildAttendanceLogForUser: () => ({}) };
+  const ctx = { HHMM_RE: /^([01][0-9]|2[0-3]):[0-5][0-9]$/, CHECKIN_CUTOFF: '13:00', buildAttendanceLogForUser: () => ({}) };
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
-  vm.runInContext(extractFunction(SERVER_SRC, 'webScanWouldBeCheckIn'), ctx);
+  vm.runInContext(extractFunction(SERVER_SRC, 'parseHHMMToMins') + ';' +
+    extractFunction(SERVER_SRC, 'webScanWouldBeCheckIn'), ctx);
   const U = { employeeNo: '1' };
   assert.strictEqual(ctx.webScanWouldBeCheckIn(U, '2026-09-25T08:25:00'), true);
-  assert.strictEqual(ctx.webScanWouldBeCheckIn(U, '2026-09-25T02:10:00'), false, 'before 05:00 is a late-night check-out');
+  assert.strictEqual(ctx.webScanWouldBeCheckIn(U, '2026-09-25T02:10:00'), false, 'before 05:30 is a late-night check-out');
+  // 2026-10-02: 05:15 is the case an `hour < 5` compare gets wrong -- it reads as hour 5 and
+  // would wrongly open a new day. Only a minutes compare against the boundary gets it right.
+  assert.strictEqual(ctx.webScanWouldBeCheckIn(U, '2026-09-25T05:15:00'), false, '05:15 is still last night');
+  assert.strictEqual(ctx.webScanWouldBeCheckIn(U, '2026-09-25T05:30:00'), true, '05:30 opens the new day');
   assert.strictEqual(ctx.webScanWouldBeCheckIn(U, '2026-09-25T13:00:00'), false, 'at the cutoff is a check-out');
   assert.strictEqual(ctx.webScanWouldBeCheckIn(U, '2026-09-25T17:40:00'), false);
 });
 
 test('an employee who already checked in today is not gated again', () => {
-  const ctx = { CHECKIN_CUTOFF: '13:00', buildAttendanceLogForUser: () => ({ '2026-09-25': { checkIn: '08:20' } }) };
+  const ctx = { HHMM_RE: /^([01][0-9]|2[0-3]):[0-5][0-9]$/, CHECKIN_CUTOFF: '13:00', buildAttendanceLogForUser: () => ({ '2026-09-25': { checkIn: '08:20' } }) };
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
-  vm.runInContext(extractFunction(SERVER_SRC, 'webScanWouldBeCheckIn'), ctx);
+  vm.runInContext(extractFunction(SERVER_SRC, 'parseHHMMToMins') + ';' +
+    extractFunction(SERVER_SRC, 'webScanWouldBeCheckIn'), ctx);
   assert.strictEqual(ctx.webScanWouldBeCheckIn({ employeeNo: '1' }, '2026-09-25T09:00:00'), false);
 });
 
@@ -259,6 +271,7 @@ test('webScanGateReason: a check-out is never asked for GPS', () => {
     parseGpsCoords: () => { throw new Error('parseGpsCoords must not run for a check-out'); },
     geofenceCheckinReason: () => { geofenceCalls++; return 'geofence-inside'; },
   };
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   vm.runInContext(extractFunction(SERVER_SRC, 'webScanGateReason'), ctx);
   const result = ctx.webScanGateReason({ role: 'user' }, '2026-09-25T17:40:00', '13.7,100.5');
@@ -279,6 +292,7 @@ test('webScanGateReason: the master switch is checked first, without running the
     parseGpsCoords: () => { throw new Error('parseGpsCoords must not run when disabled'); },
     geofenceCheckinReason: () => { throw new Error('geofenceCheckinReason must not run when disabled'); },
   };
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   vm.runInContext(extractFunction(SERVER_SRC, 'webScanGateReason'), ctx);
   const result = ctx.webScanGateReason({ role: 'user' }, '2026-09-25T08:25:00', '13.7,100.5');
@@ -296,6 +310,7 @@ test('webScanGateReason: a check-in defers entirely to geofenceCheckinReason, wi
     parseGpsCoords: raw => raw === '13.7,100.5' ? { lat: 13.7, lng: 100.5 } : null,
     geofenceCheckinReason: (...args) => { calls.push(args); return 'geofence-inside'; },
   };
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   vm.runInContext(`${extractFunction(SERVER_SRC, 'sanitizeGpsAge')}\n${extractFunction(SERVER_SRC, 'webScanGateReason')}`, ctx);
 
@@ -338,6 +353,7 @@ test('the gate is wired into the WebScan branch, before the event is saved', () 
   // refusal -- this is what makes that regression a failing assertion, not a silent pass.
   function runWiring(gateReason) {
     const ctx = { webScanGateReason: () => gateReason, sentinel: () => { ctx.reached = true; }, reached: false };
+    ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
     vm.createContext(ctx);
     vm.runInContext(`function wiring(req, res, eventTime, gps, body) {\n${gateBlock}\n  sentinel();\n}`, ctx);
     const calls = {};
@@ -430,6 +446,7 @@ function runWebScanGateReasonStaleness({ role, gps, gpsAgeSec, wouldBeCheckIn })
     parseGpsCoords: raw => raw === gps && gps ? { lat: 13.7268315, lng: 100.52847 } : null,
     geofenceCheckinReason: (...args) => { calls.push(args); return 'stub-reason'; },
   };
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   vm.runInContext(`${extractFunction(SERVER_SRC, 'sanitizeGpsAge')}\n${extractFunction(SERVER_SRC, 'webScanGateReason')}`, ctx);
   // gpsAgeSec here is the RAW value, exactly as the route now forwards body.gpsAgeSec unsanitized.
@@ -522,6 +539,7 @@ test('handleGPSError (executed): clears currentGPS on PERMISSION_DENIED/POSITION
       updateGPSError: () => {},
       gpsErrorMsg: () => '',
     };
+    ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
     vm.createContext(ctx);
     vm.runInContext(extractFunction(APP_SRC, 'handleGPSError'), ctx);
     ctx.handleGPSError({ code });
@@ -546,6 +564,7 @@ test('onGPSSuccess (executed): stores an epochMs alongside the ISO timestamp, fo
     initGpsMap: () => {},
     scheduleServerClockFromGps: () => {},
   };
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   vm.runInContext(extractFunction(APP_SRC, 'onGPSSuccess'), ctx);
   const before = Date.now();
@@ -572,12 +591,15 @@ test('webCheckinWouldBeCheckIn (executed): already checked in, pre-dawn, at/afte
       businessDateFromYmd: () => '2026-09-25',
       attKey: (userId, dateStr) => `${userId}|${dateStr}`,
     };
+    ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
     vm.createContext(ctx);
     vm.runInContext(extractFunction(APP_SRC, 'webCheckinWouldBeCheckIn'), ctx);
     return ctx.webCheckinWouldBeCheckIn();
   }
   assert.strictEqual(run({ h: 8, min: 25 }, '08:00'), false, 'already checked in today -- the next press is a check-out');
-  assert.strictEqual(run({ h: 2, min: 10 }, null), false, 'before 05:00 is a late-night check-out');
+  assert.strictEqual(run({ h: 2, min: 10 }, null), false, 'before 05:30 is a late-night check-out');
+  assert.strictEqual(run({ h: 5, min: 15 }, null), false, '05:15 is still last night (an hour-only compare gets this wrong)');
+  assert.strictEqual(run({ h: 5, min: 30 }, null), true, '05:30 opens the new day');
   assert.strictEqual(run({ h: 13, min: 0 }, null), false, 'at the cutoff is a check-out');
   assert.strictEqual(run({ h: 14, min: 30 }, null), false, 'after the cutoff is a check-out');
   assert.strictEqual(run({ h: 8, min: 25 }, null), true, 'the ordinary case: no check-in yet, before the cutoff, not pre-dawn');
@@ -655,6 +677,7 @@ function runGeofenceSave(existingGeofence, elements) {
     },
     APP_SETTINGS: { geofence: { ...existingGeofence } },
   };
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   vm.runInContext(`function run() {\n${snippet}\n}`, ctx);
   ctx.run();
@@ -860,6 +883,7 @@ test('geofenceUiState never blocks a press that would not be a new check-in, eve
     _geofenceSettingsFresh: true,
     _geofenceAttendanceFresh: true,
   };
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   vm.runInContext(extractFunction(APP_SRC, 'geofenceUiState'), ctx);
   const st = ctx.geofenceUiState();
@@ -883,6 +907,7 @@ test('geofenceUiState still blocks an actual check-in standing at the office, wi
     _geofenceSettingsFresh: true,
     _geofenceAttendanceFresh: true,
   };
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   vm.runInContext(extractFunction(APP_SRC, 'geofenceUiState'), ctx);
   const st = ctx.geofenceUiState();
@@ -908,6 +933,7 @@ test('geofenceUiState fails OPEN when settings have not loaded fresh this sessio
     _geofenceSettingsFresh: false,
     _geofenceAttendanceFresh: true,
   };
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   vm.runInContext(extractFunction(APP_SRC, 'geofenceUiState'), ctx);
   const st = ctx.geofenceUiState();
@@ -927,6 +953,7 @@ test('geofenceUiState fails OPEN when attendance has not loaded fresh this sessi
     _geofenceSettingsFresh: true,
     _geofenceAttendanceFresh: false,
   };
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   vm.runInContext(extractFunction(APP_SRC, 'geofenceUiState'), ctx);
   const st = ctx.geofenceUiState();
@@ -948,6 +975,7 @@ test('geofenceUiState (Critical 1): a stale GPS fix is treated as no position, n
     _geofenceSettingsFresh: true,
     _geofenceAttendanceFresh: true,
   };
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   vm.runInContext(extractFunction(APP_SRC, 'geofenceUiState'), ctx);
   const st = ctx.geofenceUiState();
@@ -963,6 +991,7 @@ test('openGeofenceModal/closeGeofenceModal (executed): follow this app\'s existi
     document: { getElementById: id => id === 'geofence-modal' ? modalEl : id === 'geofence-modal-body' ? bodyEl : null },
     geofenceMessage: reason => `msg:${reason}`,
   };
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   vm.runInContext(`${extractFunction(APP_SRC, 'openGeofenceModal')}\n${extractFunction(APP_SRC, 'closeGeofenceModal')}`, ctx);
   ctx.openGeofenceModal('geofence-inside');
@@ -1022,6 +1051,7 @@ test('doScan (executed wiring): a blocked press opens the modal and returns befo
       _scanInFlight: false,
       reached: false, modalReason: null, refreshCalled: false, onGPSSuccessCalledWith: null,
     };
+    ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
     vm.createContext(ctx);
     vm.runInContext(`async function wiring() {\n${block}\n  sentinel();\n}`, ctx);
     return ctx.wiring().then(() => ctx);
@@ -1157,6 +1187,7 @@ function runGpsRowButtons(row, canSeeGPS) {
     escapeHtml: s => s,
     L: en => en,
   };
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   vm.runInContext(`${accFn}\nfunction run() {\n${snippet}\n  return { gpsInBtn, gpsOutBtn };\n}`, ctx);
   return ctx.run();

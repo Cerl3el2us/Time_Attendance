@@ -14,6 +14,9 @@ const assert = require('assert');
 const ROOT = path.join(__dirname, '..');
 const APP_SRC = fs.readFileSync(path.join(ROOT, 'attendance/js/app.js'), 'utf8');
 const SERVER_SRC = fs.readFileSync(path.join(ROOT, 'attendance-server/backend/server.js'), 'utf8');
+// 2026-10-02: the business-day boundary is read out of the real source instead of repeating the
+// number here, so moving it can never leave these sandboxes asserting against the old value.
+const BUSINESS_DAY_START_MINS = Number(/const BUSINESS_DAY_START_MINS = (\d+);/.exec(APP_SRC)[1]);
 
 function extractFunction(src, name) {
   const re = new RegExp(`^(async )?function ${name}\\(`, 'm');
@@ -69,6 +72,7 @@ function makeClient(world) {
     generatePeriodDays: () => world.pDays, getFinalizeKey: () => 'k', calcAnnualTax: () => 0,
     L: en => en,
   };
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   vm.runInContext(CLIENT_FNS.map(n => extractFunction(APP_SRC, n)).join('\n'), ctx);
   return ctx;
@@ -84,6 +88,7 @@ function makeServer(world) {
     readCheckoutReviews: () => ({}), generatePeriodDays: () => world.pDays, getFinalizeKey: () => 'k',
     calcAnnualTax: () => 0,
   };
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   // The Set constant is not a function -- evaluate its real declaration line from server.js.
   const setLine = SERVER_SRC.match(/^const COMPANY_TRIP_NO_CLAIM_TYPES = .*$/m)[0].replace(/^const /, '');
@@ -121,14 +126,16 @@ test('driver OT hours stored to 2dp: server POST/PUT and app.js submitDriverOT u
 
 console.log('T2 office OT past midnight');
 const THU = '2026-09-24', FRI = '2026-09-25';
-test('duration: end before 05:00 is after midnight of the same work day', () => {
+test('duration: end before 05:30 is after midnight of the same work day', () => {
   for (const [side, X] of both(world())) {
     const d = (date, t) => X.deriveOfficeOtFromEndTime(date, t, SETTINGS).otHours;
     assert.strictEqual(d(THU, '20:30'), 3, side);
     assert.strictEqual(d(THU, '00:00'), 6.5, side);
     assert.strictEqual(d(THU, '01:00'), 7.5, side);
     assert.strictEqual(d(THU, '04:59'), 11.48, side);
-    assert.strictEqual(d(THU, '05:00'), 0, side);   // morning time -> not OT
+    assert.strictEqual(d(THU, '05:00'), 11.5, side);    // 2026-10-02: still last night
+    assert.strictEqual(d(THU, '05:29'), 11.98, side);
+    assert.strictEqual(d(THU, '05:30'), 0, side);       // morning time -> not OT
     assert.strictEqual(d(THU, '17:30'), 0, side);
     assert.strictEqual(d(THU, '17:50'), 0.33, side);
     assert.strictEqual(d('2026-09-26', '20:00'), 0, side); // Saturday -> Holiday Work, not office OT
@@ -160,13 +167,14 @@ test('scan window: OT end after midnight is checked against an after-midnight ch
   }
 });
 console.log('T5 Holiday Work past midnight (2026-09-24)');
-test('holidayWorkEndMins: end before 05:00 that is not after the start = after midnight', () => {
+test('holidayWorkEndMins: end before 05:30 that is not after the start = after midnight', () => {
   for (const [side, X] of both(world())) {
     assert.strictEqual(X.holidayWorkEndMins('20:00', '01:00'), 25 * 60, side);
     assert.strictEqual(X.holidayWorkEndMins('08:30', '04:59'), 28 * 60 + 59, side);
     assert.strictEqual(X.holidayWorkEndMins('08:30', '17:30'), 17 * 60 + 30, side);
     assert.strictEqual(X.holidayWorkEndMins('03:00', '04:00'), 4 * 60, side);   // same early morning
-    assert.ok(Number.isNaN(X.holidayWorkEndMins('20:00', '05:00')), side);      // 05:00 is morning, before start
+    assert.strictEqual(X.holidayWorkEndMins('20:00', '05:00'), 29 * 60, side);  // 2026-10-02: still last night
+    assert.ok(Number.isNaN(X.holidayWorkEndMins('20:00', '05:30')), side);      // 05:30 is morning, before start
     assert.ok(Number.isNaN(X.holidayWorkEndMins('10:00', '10:00')), side);
     assert.ok(Number.isNaN(X.holidayWorkEndMins('10:00', '09:00')), side);
   }
@@ -178,7 +186,8 @@ test('split: start-day rate, x3 after 17:30 through midnight, lunch only on the 
     assert.deepStrictEqual([s('08:30', '02:00').otHours20, s('08:30', '02:00').otHours30], [8, 8.5], side);
     assert.deepStrictEqual([s('10:00', '04:59').otHours20, s('10:00', '04:59').otHours30], [6.5, 11.48], side);
     assert.deepStrictEqual([s('08:30', '17:30').otHours20, s('08:30', '17:30').otHours30], [8, 0], side);
-    assert.deepStrictEqual([s('20:00', '05:00').otHours20, s('20:00', '05:00').otHours30], [0, 0], side);
+    assert.deepStrictEqual([s('20:00', '05:00').otHours20, s('20:00', '05:00').otHours30], [0, 9], side);
+    assert.deepStrictEqual([s('20:00', '05:30').otHours20, s('20:00', '05:30').otHours30], [0, 0], side);
   }
 });
 test('scan window: an after-midnight Holiday Work end is checked against the real check-out', () => {
@@ -196,15 +205,16 @@ test('POST/PUT and the client form accept an after-midnight end (static)', () =>
 });
 
 // 2026-09-24 (review fix 5): the after-midnight rule only for a start at/after 05:00; 20 h cap.
-test('holidayWorkEndMins: start before 05:00 never wraps; 04:00-03:00 and 00:00-00:00 refused; 18:00-02:00 ok', () => {
+test('holidayWorkEndMins: start before 05:30 never wraps; 04:00-03:00 and 00:00-00:00 refused; 18:00-02:00 ok', () => {
   for (const [side, X] of both(world())) {
     assert.ok(Number.isNaN(X.holidayWorkEndMins('04:00', '03:00')), side);
     assert.ok(Number.isNaN(X.holidayWorkEndMins('00:00', '00:00')), side);
     assert.ok(Number.isNaN(X.holidayWorkEndMins('04:59', '04:00')), side);
     assert.strictEqual(X.holidayWorkEndMins('18:00', '02:00'), 26 * 60, side);
-    assert.strictEqual(X.holidayWorkEndMins('05:00', '04:00'), 28 * 60, side); // 23 h -> refused by the cap
+    assert.ok(Number.isNaN(X.holidayWorkEndMins('05:00', '04:00')), side);     // 2026-10-02: 05:00 starts before the day
+    assert.strictEqual(X.holidayWorkEndMins('05:30', '04:00'), 28 * 60, side); // 22.5 h -> refused by the cap
     assert.strictEqual(X.holidayWorkTooLong('18:00', '02:00'), false, side);
-    assert.strictEqual(X.holidayWorkTooLong('05:00', '04:00'), true, side);
+    assert.strictEqual(X.holidayWorkTooLong('05:30', '04:00'), true, side);
     assert.strictEqual(X.holidayWorkTooLong('06:00', '02:00'), false, side); // exactly 20 h
     assert.strictEqual(X.holidayWorkTooLong('06:00', '02:01'), true, side);
     assert.strictEqual(X.holidayWorkTooLong('04:00', '03:00'), false, side); // already invalid, not "too long"

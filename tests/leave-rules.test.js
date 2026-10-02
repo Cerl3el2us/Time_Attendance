@@ -13,6 +13,9 @@ const assert = require('assert');
 const ROOT = path.join(__dirname, '..');
 const APP_SRC = fs.readFileSync(path.join(ROOT, 'attendance/js/app.js'), 'utf8');
 const SERVER_SRC = fs.readFileSync(path.join(ROOT, 'attendance-server/backend/server.js'), 'utf8');
+// 2026-10-02: the business-day boundary is read out of the real source instead of repeating the
+// number here, so moving it can never leave these sandboxes asserting against the old value.
+const BUSINESS_DAY_START_MINS = Number(/const BUSINESS_DAY_START_MINS = (\d+);/.exec(APP_SRC)[1]);
 
 function extractFunction(src, name) {
   const re = new RegExp(`^(async )?function ${name}\\(`, 'm');
@@ -56,6 +59,7 @@ function makeClient(world) {
     isNonWorkDayForComp: d => { const x = new Date(d + 'T12:00:00').getDay(); return x === 0 || x === 6; },
     computeLateDeductMinutes: () => ({ count: 0, deductMin: 0 }),
   };
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   vm.runInContext(CLIENT_FNS.map(n => extractFunction(APP_SRC, n)).join('\n'), ctx);
   return ctx;
@@ -73,6 +77,7 @@ function makeServer(world) {
     businessLeaveEntitlementDays: () => 3,
     annualLateDeductMinutes: () => 0,
   };
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   vm.runInContext(SERVER_FNS.map(n => extractFunction(SERVER_SRC, n)).join('\n'), ctx);
   return ctx;

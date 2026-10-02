@@ -14,6 +14,9 @@ const ROOT = path.join(__dirname, '..');
 const APP_SRC = fs.readFileSync(path.join(ROOT, 'attendance/js/app.js'), 'utf8');
 const SERVER_SRC = fs.readFileSync(path.join(ROOT, 'attendance-server/backend/server.js'), 'utf8');
 const JA_SRC = fs.readFileSync(path.join(ROOT, 'attendance/lang/ja.js'), 'utf8');
+// 2026-10-02: the business-day boundary is read out of the real source instead of repeating the
+// number here, so moving it can never leave these sandboxes asserting against the old value.
+const BUSINESS_DAY_START_MINS = Number(/const BUSINESS_DAY_START_MINS = (\d+);/.exec(APP_SRC)[1]);
 
 function extractBraced(src, startIdx, openIdx, name) {
   let depth = 0;
@@ -43,6 +46,7 @@ function sameSource(name) {
   assert.strictEqual(norm(extractFunction(APP_SRC, name)), norm(extractFunction(SERVER_SRC, name)), `${name} differs between app.js and server.js`);
 }
 function sandbox(src, names, ctx, extra) {
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   vm.runInContext((extra || '') + '\n' + names.map(n => extractFunction(src, n)).join('\n'), ctx);
   return ctx;
@@ -192,6 +196,7 @@ function clientRenderer(lang) {
     getApprovalTypeLabels: () => ({ annual: '🏖️ Annual Leave', ot: '⏱️ OT', 'holiday-work': '🔄 Holiday Work', 'late-out': '🌙 Late Night' }),
     fmtDate: d => d.toISOString().slice(0, 10),
   };
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   vm.runInContext(JA_SRC, ctx);
   ctx.LANG_JA = ctx.window.LANG_JA;
@@ -537,7 +542,9 @@ test('lateNightThresholdMins / lateNightPoints identical both sides; a threshold
     assert.strictEqual(X.lateNightThresholdMins(19), 19 * 60, side);
     assert.strictEqual(X.lateNightThresholdMins(1), 25 * 60, side);
     assert.strictEqual(X.lateNightThresholdMins(0), 24 * 60, side);
-    assert.strictEqual(X.lateNightThresholdMins(5), 5 * 60, side);
+    // 2026-10-02: 05:00 is now BEFORE the business day starts, so hour 5 means 29:00.
+    assert.strictEqual(X.lateNightThresholdMins(5), 29 * 60, side);
+    assert.strictEqual(X.lateNightThresholdMins(6), 6 * 60, side);
     assert.ok(Number.isNaN(X.lateNightThresholdMins('x')), side);
     // x2 from 20:00 (x1 from 19)
     assert.strictEqual(X.lateNightPoints('19:30', 20), 1, side);

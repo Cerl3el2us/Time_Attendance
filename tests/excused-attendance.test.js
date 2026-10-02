@@ -19,6 +19,9 @@ const vm = require('vm');
 const ROOT = path.join(__dirname, '..');
 const APP_SRC = fs.readFileSync(path.join(ROOT, 'attendance/js/app.js'), 'utf8');
 const SERVER_SRC = fs.readFileSync(path.join(ROOT, 'attendance-server/backend/server.js'), 'utf8');
+// 2026-10-02: the business-day boundary is read out of the real source instead of repeating the
+// number here, so moving it can never leave these sandboxes asserting against the old value.
+const BUSINESS_DAY_START_MINS = Number(/const BUSINESS_DAY_START_MINS = (\d+);/.exec(APP_SRC)[1]);
 
 let passed = 0;
 function test(name, fn) {
@@ -41,6 +44,7 @@ const SERVER_BLOCK = extract(SERVER_SRC, "let excused = false, excusedReason = '
 
 function compile(block, leavesVarName) {
   const sandbox = {};
+  sandbox.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(sandbox);
   vm.runInContext(
     `function decide(uid, isFuture, status, dateStr, ${leavesVarName}) {\n${block}\n` +

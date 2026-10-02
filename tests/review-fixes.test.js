@@ -12,6 +12,9 @@ const assert = require('assert');
 const ROOT = path.join(__dirname, '..');
 const APP_SRC = fs.readFileSync(path.join(ROOT, 'attendance/js/app.js'), 'utf8');
 const SERVER_SRC = fs.readFileSync(path.join(ROOT, 'attendance-server/backend/server.js'), 'utf8');
+// 2026-10-02: the business-day boundary is read out of the real source instead of repeating the
+// number here, so moving it can never leave these sandboxes asserting against the old value.
+const BUSINESS_DAY_START_MINS = Number(/const BUSINESS_DAY_START_MINS = (\d+);/.exec(APP_SRC)[1]);
 
 function extractFunction(src, name) {
   const m = new RegExp(`^(async )?function ${name}\\(`, 'm').exec(src);
@@ -32,6 +35,7 @@ function sameSource(name) {
 const J = v => JSON.parse(JSON.stringify(v));
 const eq = (a, b, msg) => assert.deepStrictEqual(J(a), b, msg);
 function sandbox(src, names, ctx) {
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   vm.runInContext(names.map(n => extractFunction(src, n)).join('\n'), ctx);
   return ctx;

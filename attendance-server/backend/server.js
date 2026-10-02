@@ -1417,7 +1417,7 @@ function isoFromYmd(ymd) {
 }
 function businessDateFromYmd(ymd) {
   const d = new Date(ymd.y, ymd.m, ymd.day);
-  if (ymd.h < 5) d.setDate(d.getDate() - 1);
+  if (ymd.h * 60 + ymd.min < BUSINESS_DAY_START_MINS) d.setDate(d.getDate() - 1);
   const p2 = n => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
 }
@@ -4793,9 +4793,9 @@ function parseHHMMToMins(hhmm) {
   return h * 60 + m;
 }
 // 2026-09-24 (owner): Holiday Work may run past midnight, same convention as office OT -- an end
-// time that is not after the start and is before 05:00 is after midnight of the SAME work day
+// time that is not after the start and is before 05:30 is after midnight of the SAME work day
 // (lateNightCheckoutMins). Returns the end in minutes from the work day's 00:00 (up to 28:59), or
-// NaN when the end is not after the start. A start before 05:00 with a later end the same morning
+// NaN when the end is not after the start. A start before 05:30 with a later end the same morning
 // stays a same-day range. Dual-sync with app.js.
 function holidayWorkEndMins(workStartTime, workEndTime) {
   const startMin = parseHHMMToMins(workStartTime);
@@ -4803,8 +4803,8 @@ function holidayWorkEndMins(workStartTime, workEndTime) {
   if (!Number.isFinite(startMin) || !Number.isFinite(endMin)) return NaN;
   if (endMin > startMin) return endMin;
   // 2026-09-24 (review M): the after-midnight rule applies only to a shift that STARTS at/after
-  // 05:00 -- 04:00-03:00 used to become a 23-hour shift.
-  if (startMin < 5 * 60) return NaN;
+  // 05:30 -- 04:00-03:00 used to become a 23-hour shift.
+  if (startMin < BUSINESS_DAY_START_MINS) return NaN;
   const nextDay = lateNightCheckoutMins(workEndTime);
   return nextDay > startMin ? nextDay : NaN;
 }
@@ -4848,7 +4848,7 @@ function officeOtStdStartHHMM(S) {
 const OFFICE_OT_WEEKEND_MSG = 'Weekends and public holidays use Holiday Work — do not submit office OT for those days';
 // Office OT is request-gated (never derived from scan-out). Weekdays only: hours after 17:30 at ×1.5.
 // Weekend / public-holiday pay goes through Holiday Work (start–end), not this form. Drivers use isDriverOT.
-// 2026-09-24 (owner): office OT may run past midnight -- an end time before 05:00 is after
+// 2026-09-24 (owner): office OT may run past midnight -- an end time before 05:30 is after
 // midnight of the SAME work day (the check-out convention of lateNightCheckoutMins). The rate is
 // always the start day's: office OT only exists on a weekday (x1.5), so running into a weekend or
 // public holiday after midnight never turns it into x2/x3. Dual-sync with app.js.
@@ -5019,7 +5019,7 @@ function holidayWorkSubmitBlockReason(user, dateStr) {
 // from times the employee types, which were never compared with the day's real scans -- a 10:00
 // arrival could claim 06:00-23:59. The typed start may not be earlier than the check-in and the
 // typed end may not be later than the check-out. Uses attendanceDayForUser, so approved
-// time-corrections count. A check-out (and, since 2026-09-24, a typed OT end) before 05:00 belongs
+// time-corrections count. A check-out (and, since 2026-09-24, a typed OT end) before 05:30 belongs
 // to the same business day (after midnight).
 // Dual-sync with app.js scanWindowError.
 function scanWindowError(user, dateStr, startHHMM, endHHMM) {
@@ -5038,7 +5038,7 @@ function scanWindowError(user, dateStr, startHHMM, endHHMM) {
     const endLimit = day.checkOut || (rawDay && rawDay.lastScan);
     if (!endLimit) return 'A check-out is required for this date — submit a time correction first';
     // 2026-09-24: the typed end follows the same after-midnight rule as the check-out (an OT or
-    // Holiday Work end before 05:00 is after midnight; see holidayWorkEndMins).
+    // Holiday Work end before 05:30 is after midnight; see holidayWorkEndMins).
     const outMin = lateNightCheckoutMins(endLimit);
     if (lateNightCheckoutMins(endHHMM) > outMin) {
       return `End time cannot be later than your check-out (${endLimit})`;
@@ -6218,9 +6218,9 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
           !body.workEndTime || !HHMM_RE.test(body.workEndTime)) {
         return res.status(400).json({ success:false, message:'workStartTime and workEndTime are required and must be in HH:MM format for holiday-work requests' });
       }
-      // 2026-09-24 (owner): an end before 05:00 is after midnight of the same work day.
+      // 2026-09-24 (owner): an end before 05:30 is after midnight of the same work day.
       if (!Number.isFinite(holidayWorkEndMins(body.workStartTime, body.workEndTime))) {
-        return res.status(400).json({ success:false, message:'workEndTime must be after workStartTime (an end before 05:00 counts as after midnight)' });
+        return res.status(400).json({ success:false, message:'workEndTime must be after workStartTime (an end before 05:30 counts as after midnight)' });
       }
       if (holidayWorkTooLong(body.workStartTime, body.workEndTime)) {
         return res.status(400).json({ success:false, code:'hw-too-long', message:'Holiday Work cannot be longer than 20 hours' });
@@ -6503,7 +6503,7 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
         }
         const derivedOfficeOt = deriveOfficeOtFromEndTime(body.dateFrom, body.otEndTime, S);
         if (!(derivedOfficeOt.otHours > 0)) {
-          return res.status(400).json({ success:false, message: 'End time must be after 17:30 (an end before 05:00 counts as after midnight)' });
+          return res.status(400).json({ success:false, message: 'End time must be after 17:30 (an end before 05:30 counts as after midnight)' });
         }
         const otScanErr = scanWindowError(targetUser, body.dateFrom, null, body.otEndTime);
         if (otScanErr) return res.status(400).json({ success:false, message: otScanErr });
@@ -6962,7 +6962,7 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
         return res.status(400).json({ success:false, message:'workStartTime and workEndTime are required and must be in HH:MM format for holiday-work requests' });
       }
       if (!Number.isFinite(holidayWorkEndMins(resolvedWorkStart, resolvedWorkEnd))) {
-        return res.status(400).json({ success:false, message:'workEndTime must be after workStartTime (an end before 05:00 counts as after midnight)' });
+        return res.status(400).json({ success:false, message:'workEndTime must be after workStartTime (an end before 05:30 counts as after midnight)' });
       }
       if (holidayWorkTooLong(resolvedWorkStart, resolvedWorkEnd)) {
         return res.status(400).json({ success:false, code:'hw-too-long', message:'Holiday Work cannot be longer than 20 hours' });
@@ -7163,7 +7163,7 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
       const derivedOfficeOt = deriveOfficeOtFromEndTime(dateFrom, otEndTime, getAppSettings());
       Object.assign(safeUpdates, derivedOfficeOt);
       if (!(derivedOfficeOt.otHours > 0)) {
-        return res.status(400).json({ success:false, message: 'End time must be after 17:30 (an end before 05:00 counts as after midnight)' });
+        return res.status(400).json({ success:false, message: 'End time must be after 17:30 (an end before 05:30 counts as after midnight)' });
       }
       const otScanErrPut = scanWindowError(ownerUser || live, dateFrom, null, otEndTime);
       if (otScanErrPut) return res.status(400).json({ success:false, message: otScanErrPut });
@@ -9021,6 +9021,15 @@ const DEFAULT_APP_SETTINGS = {
 // etc.) scattered across computePayroll()/renderPayslip()/payslipXlsx.js/the Finalize Payroll
 // page with a single settings-driven eligibility table, so "who gets this allowance" is a
 // config edit instead of a code change requiring both engines to be touched in lockstep.
+// 2026-10-02 (owner): the business day starts at 05:30, not 05:00. A scan before it belongs to
+// the PREVIOUS working day -- it is that evening's check-out, however long past midnight -- and a
+// scan at or after it opens a new day. Moved here because the number used to be written out as
+// `5` or `5 * 60` in eighteen separate places across these two files with no single source of
+// truth, and eleven of those compared the HOUR ONLY (`hour < 5`), which cannot express a
+// half-hour boundary at all: `hour < 5.5` is true for 05:00-05:59, so a naive edit would have
+// thrown a whole extra hour onto the previous day without failing a single test. Every site now
+// compares minutes-since-midnight against this one constant.
+const BUSINESS_DAY_START_MINS = 330; // 05:30
 const ALLOWANCE_KEYS = ['diligence', 'longDistance', 'personalCar', 'upcountry', 'earlyLate', 'ot', 'phone', 'holidayWork', 'abroad'];
 const ROLE_KEYS = ['md', 'manager', 'accounting', 'user', 'marketing', 'driver'];
 const DEFAULT_ALLOWANCE_ELIGIBILITY = {
@@ -9073,17 +9082,17 @@ function deviceScanQualifiesForEarlyMorning(d, holidayWorkDateSet) {
   if (isRestAttendanceDay(d) && !(holidayWorkDateSet && holidayWorkDateSet.has(d.date))) return false;
   return true;
 }
-// 2026-09-23 (web check-out Late Night review): a check-out before 05:00 belongs to the same
+// 2026-09-23 (web check-out Late Night review): a check-out before 05:30 belongs to the same
 // business day (after midnight), so it compares as 24:00 + time. NaN for anything not HH:MM.
 function lateNightCheckoutMins(hhmm) {
   if (typeof hhmm !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(hhmm)) return NaN;
   const [h, m] = hhmm.split(':').map(Number);
   const mins = h * 60 + m;
-  return mins < 5 * 60 ? mins + 24 * 60 : mins;
+  return mins < BUSINESS_DAY_START_MINS ? mins + 24 * 60 : mins;
 }
 // 2026-09-24 (review M): Late Night points for a qualifying day -- 2 once the check-out is at/after
 // the x2 threshold hour, else 1. Used to compare the parseInt() hour of lateOut, which read "01:30" as hour 1
-// and paid x1 for a check-out past midnight; lateNightCheckoutMins puts before-05:00 on the
+// and paid x1 for a check-out past midnight; lateNightCheckoutMins puts before-05:30 on the
 // previous evening's clock (+24h).
 // 2026-09-24 (review LOW, final round): a threshold HOUR before 05 (e.g. 01 = 01:00 after
 // midnight) is normalised with the same +24h rule as the check-out, so ×2 from 01:00 means 25:00
@@ -9108,7 +9117,7 @@ function lateNightThresholdHourOf(allowances, tier) {
 function lateNightThresholdMins(hour) {
   const h = Number(hour);
   if (!Number.isFinite(h)) return NaN;
-  return h < 5 ? h * 60 + 24 * 60 : h * 60;
+  return h * 60 < BUSINESS_DAY_START_MINS ? h * 60 + 24 * 60 : h * 60;
 }
 function lateNightPoints(lateOut, thr2Hour) {
   return lateNightCheckoutMins(lateOut) >= lateNightThresholdMins(thr2Hour) ? 2 : 1;
@@ -9370,9 +9379,9 @@ function buildAttendanceLogForUser(user, start, end) {
     if (!raw) return;
     const datePart = raw.substring(0, 10);
     const timePart = raw.substring(11, 16);
-    const hour = parseInt(timePart.substring(0, 2), 10);
+    const scanMins = parseHHMMToMins(timePart);
     let businessDate = datePart;
-    if (hour < 5) {
+    if (scanMins < BUSINESS_DAY_START_MINS) {
       const d = new Date(datePart + 'T00:00:00');
       d.setDate(d.getDate() - 1);
       businessDate = ta_localDateStr(d);
@@ -9380,7 +9389,7 @@ function buildAttendanceLogForUser(user, start, end) {
     if (!log[businessDate]) log[businessDate] = {};
     const rec = log[businessDate];
     const source = ev.eventType === 'WebScan' ? 'web' : 'device';
-    if (hour < 5) {
+    if (scanMins < BUSINESS_DAY_START_MINS) {
       // 2026-09-23: always overwrite -- events are sorted by instant, so an after-midnight scan
       // is the latest of the business day ("00:30" used to lose to a "12:30" lunch scan on a
       // string compare). Dual-sync with app.js loadAttendanceFromBackend.
@@ -9420,8 +9429,8 @@ function webScanWouldBeCheckIn(user, eventTimeIso) {
   const raw = String(eventTimeIso || '');
   const datePart = raw.substring(0, 10);
   const timePart = raw.substring(11, 16);
-  const hour = parseInt(timePart.substring(0, 2), 10);
-  if (!Number.isFinite(hour) || hour < 5) return false;   // late-night return = check-out
+  const scanMins = parseHHMMToMins(timePart);
+  if (!Number.isFinite(scanMins) || scanMins < BUSINESS_DAY_START_MINS) return false; // late-night return = check-out
   if (timePart >= CHECKIN_CUTOFF) return false;           // first scan after the cutoff = check-out
   const log = buildAttendanceLogForUser(user);
   return !(log[datePart] && log[datePart].checkIn);
@@ -9704,7 +9713,7 @@ function generatePeriodDays(start, end, isCurrent, user, attLog, leaves, appSett
 // 2026-08-27: Late Night Out may only be submitted after a check-out that already meets the ×1
 // threshold. 2026-09-23 (web check-out review): a face-scanner check-out qualifies directly; a web
 // check-out qualifies only after Accounting/MD allowed that exact effective check-out time (see
-// checkoutReviewTrigger / PUT /api/checkout-reviews). A check-out before 05:00 is after midnight
+// checkoutReviewTrigger / PUT /api/checkout-reviews). A check-out before 05:30 is after midnight
 // on the same business day and reaches the top tier. The chosen tier (lateOutTime) may not be
 // later than the real check-out -- this used to be checked only in the browser.
 // Returns CHECKOUT_REVIEWS_UNAVAILABLE when the reviews file cannot be read (callers answer 503).

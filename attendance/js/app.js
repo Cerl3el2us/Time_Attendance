@@ -1456,6 +1456,15 @@ let TAWI50_OVERRIDES = {};
 // etc.) scattered across computePayroll()/renderPayslip()/payslipXlsx.js/the Finalize Payroll
 // page with a single settings-driven eligibility table, so "who gets this allowance" is a
 // config edit instead of a code change requiring both engines to be touched in lockstep.
+// 2026-10-02 (owner): the business day starts at 05:30, not 05:00. A scan before it belongs to
+// the PREVIOUS working day -- it is that evening's check-out, however long past midnight -- and a
+// scan at or after it opens a new day. Moved here because the number used to be written out as
+// `5` or `5 * 60` in eighteen separate places across these two files with no single source of
+// truth, and eleven of those compared the HOUR ONLY (`hour < 5`), which cannot express a
+// half-hour boundary at all: `hour < 5.5` is true for 05:00-05:59, so a naive edit would have
+// thrown a whole extra hour onto the previous day without failing a single test. Every site now
+// compares minutes-since-midnight against this one constant.
+const BUSINESS_DAY_START_MINS = 330; // 05:30
 const ALLOWANCE_KEYS = ['diligence', 'longDistance', 'personalCar', 'upcountry', 'earlyLate', 'ot', 'phone', 'holidayWork', 'abroad'];
 const ROLE_KEYS = ['md', 'manager', 'accounting', 'user', 'marketing', 'driver'];
 const DEFAULT_ALLOWANCE_ELIGIBILITY = {
@@ -1538,17 +1547,17 @@ function deviceScanQualifiesForEarlyMorning(d, holidayWorkDateSet) {
   if (isRestAttendanceDay(d) && !(holidayWorkDateSet && holidayWorkDateSet.has(d.date))) return false;
   return true;
 }
-// 2026-09-23 (web check-out Late Night review): a check-out before 05:00 belongs to the same
+// 2026-09-23 (web check-out Late Night review): a check-out before 05:30 belongs to the same
 // business day (after midnight), so it compares as 24:00 + time. NaN for anything not HH:MM.
 function lateNightCheckoutMins(hhmm) {
   if (typeof hhmm !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(hhmm)) return NaN;
   const [h, m] = hhmm.split(':').map(Number);
   const mins = h * 60 + m;
-  return mins < 5 * 60 ? mins + 24 * 60 : mins;
+  return mins < BUSINESS_DAY_START_MINS ? mins + 24 * 60 : mins;
 }
 // 2026-09-24 (review M): Late Night points for a qualifying day -- 2 once the check-out is at/after
 // the x2 threshold hour, else 1. Used to compare the parseInt() hour of lateOut, which read "01:30" as hour 1
-// and paid x1 for a check-out past midnight; lateNightCheckoutMins puts before-05:00 on the
+// and paid x1 for a check-out past midnight; lateNightCheckoutMins puts before-05:30 on the
 // previous evening's clock (+24h).
 // 2026-09-24 (review LOW, final round): a threshold HOUR before 05 (e.g. 01 = 01:00 after
 // midnight) is normalised with the same +24h rule as the check-out, so ×2 from 01:00 means 25:00
@@ -1556,7 +1565,7 @@ function lateNightCheckoutMins(hhmm) {
 function lateNightThresholdMins(hour) {
   const h = Number(hour);
   if (!Number.isFinite(h)) return NaN;
-  return h < 5 ? h * 60 + 24 * 60 : h * 60;
+  return h * 60 < BUSINESS_DAY_START_MINS ? h * 60 + 24 * 60 : h * 60;
 }
 function lateNightPoints(lateOut, thr2Hour) {
   return lateNightCheckoutMins(lateOut) >= lateNightThresholdMins(thr2Hour) ? 2 : 1;
@@ -1811,7 +1820,7 @@ function parseHHMMToMins(hhmm) {
 }
 // 2026-09-23 (Opus audit M-1, rule confirmed by the owner): a typed Holiday Work start may not be
 // earlier than the check-in, and a typed Holiday Work / office OT end may not be later than the
-// check-out. Approved time-corrections count; a check-out before 05:00 is after midnight on the
+// check-out. Approved time-corrections count; a check-out before 05:30 is after midnight on the
 // same business day; approved Abroad days need no scan. Returns a toast message or null.
 // Dual-sync with server.js scanWindowError.
 function scanWindowError(dateStr, startHHMM, endHHMM, userId) {
@@ -1831,7 +1840,7 @@ function scanWindowError(dateStr, startHHMM, endHHMM, userId) {
         '⚠️ วันที่เลือกยังไม่มีเวลาสแกนออกงาน — กรุณายื่นขอแก้ไขเวลาก่อน');
     }
     // 2026-09-24: the typed end follows the same after-midnight rule as the check-out (an OT or
-    // Holiday Work end before 05:00 is after midnight; see holidayWorkEndMins).
+    // Holiday Work end before 05:30 is after midnight; see holidayWorkEndMins).
     const outMin = lateNightCheckoutMins(endLimit);
     if (lateNightCheckoutMins(endHHMM) > outMin) {
       return L('⚠️ End time cannot be later than your check-out', '⚠️ เวลาเลิกต้องไม่หลังเวลาสแกนออกงาน') + ` (${endLimit})`;
@@ -1840,9 +1849,9 @@ function scanWindowError(dateStr, startHHMM, endHHMM, userId) {
   return null;
 }
 // 2026-09-24 (owner): Holiday Work may run past midnight, same convention as office OT -- an end
-// time that is not after the start and is before 05:00 is after midnight of the SAME work day
+// time that is not after the start and is before 05:30 is after midnight of the SAME work day
 // (lateNightCheckoutMins). Returns the end in minutes from the work day's 00:00 (up to 28:59), or
-// NaN when the end is not after the start. A start before 05:00 with a later end the same morning
+// NaN when the end is not after the start. A start before 05:30 with a later end the same morning
 // stays a same-day range. Dual-sync with server.js.
 function holidayWorkEndMins(workStartTime, workEndTime) {
   const startMin = parseHHMMToMins(workStartTime);
@@ -1850,8 +1859,8 @@ function holidayWorkEndMins(workStartTime, workEndTime) {
   if (!Number.isFinite(startMin) || !Number.isFinite(endMin)) return NaN;
   if (endMin > startMin) return endMin;
   // 2026-09-24 (review M): the after-midnight rule applies only to a shift that STARTS at/after
-  // 05:00 -- 04:00-03:00 used to become a 23-hour shift.
-  if (startMin < 5 * 60) return NaN;
+  // 05:30 -- 04:00-03:00 used to become a 23-hour shift.
+  if (startMin < BUSINESS_DAY_START_MINS) return NaN;
   const nextDay = lateNightCheckoutMins(workEndTime);
   return nextDay > startMin ? nextDay : NaN;
 }
@@ -1894,7 +1903,7 @@ function officeOtStdStartHHMM(S) {
 }
 // Office OT is request-gated (never derived from scan-out). Weekdays only: hours after 17:30 at ×1.5.
 // Weekend / public-holiday pay goes through Holiday Work (start–end), not this form. Drivers use submitDriverOT.
-// 2026-09-24 (owner): office OT may run past midnight -- an end time before 05:00 is after
+// 2026-09-24 (owner): office OT may run past midnight -- an end time before 05:30 is after
 // midnight of the SAME work day (the check-out convention of lateNightCheckoutMins). The rate is
 // always the start day's: office OT only exists on a weekday (x1.5), so running into a weekend or
 // public holiday after midnight never turns it into x2/x3. Dual-sync with server.js.
@@ -6569,10 +6578,10 @@ async function loadAttendanceFromBackend() {
       // event_time is local wall clock of the scan timezone (Bangkok +07:00, or GPS IANA offset)
       const datePart = raw.substring(0, 10);
       const timePart = raw.substring(11, 16); // "HH:MM"
-      const hour = parseInt(timePart.substring(0, 2), 10);
+      const scanMins = parseHHMMToMins(timePart);
 
       let businessDate = datePart;
-      if (hour < 5) {
+      if (scanMins < BUSINESS_DAY_START_MINS) {
         const d = new Date(datePart + 'T00:00:00');
         d.setDate(d.getDate() - 1);
         businessDate = localDateStr(d);
@@ -6594,7 +6603,7 @@ async function loadAttendanceFromBackend() {
       // stays undefined rather than becoming 0.
       const gpsAcc = Number.isFinite(ev.gpsAcc) ? ev.gpsAcc : undefined;
 
-      if (hour < 5) {
+      if (scanMins < BUSINESS_DAY_START_MINS) {
         // 2026-09-23: always overwrite -- events are sorted by instant, so an after-midnight scan
         // is the latest of the business day. The old `timePart > rec.checkOut` string compare
         // lost "00:30" to an earlier "12:30" lunch scan, capping the day's check-out at 12:30.
@@ -7549,7 +7558,7 @@ function isoFromYmd(ymd) {
 }
 function businessDateFromYmd(ymd) {
   const d = new Date(ymd.y, ymd.m, ymd.day);
-  if (ymd.h < 5) d.setDate(d.getDate() - 1);
+  if (ymd.h * 60 + ymd.min < BUSINESS_DAY_START_MINS) d.setDate(d.getDate() - 1);
   return localDateStr(d);
 }
 function serverNowMs() {
@@ -7704,7 +7713,7 @@ function webCheckinWouldBeCheckIn() {
   const timeStr = `${p2(bk.h)}:${p2(bk.min)}`;
   const dateStr = businessDateFromYmd(bk);
   const key     = attKey(currentUser.id, dateStr);
-  const isPreDawn = bk.h < 5;
+  const isPreDawn = bk.h * 60 + bk.min < BUSINESS_DAY_START_MINS;
   return !isPreDawn && !attendanceLog[key]?.checkIn && timeStr < CHECKIN_CUTOFF;
 }
 // 2026-09-25: web check-in geofence -- localized copy of the server's 403 reason codes (the
@@ -8542,8 +8551,8 @@ async function doScan(source) {
   const timeStr = `${p2(bk.h)}:${p2(bk.min)}`;
   const dateStr = businessDateFromYmd(bk);
   const key     = attKey(currentUser.id, dateStr);
-  // ก่อนตี 5 = กลับดึก → checkout เสมอ (ไม่นับเป็น check-in ใหม่)
-  const isPreDawn = bk.h < 5;
+  // ก่อน 05:30 = กลับดึก → checkout เสมอ (ไม่นับเป็น check-in ใหม่)
+  const isPreDawn = bk.h * 60 + bk.min < BUSINESS_DAY_START_MINS;
   const isFirst   = !isPreDawn && !attendanceLog[key]?.checkIn;
   // 2026-08-06: mirror the CHECKIN_CUTOFF rule (loadAttendanceFromBackend()/processLiveScanEvent())
   // for the manual "ตอกบัตร" button too -- without this, pressing it at e.g. 14:00 with no earlier
@@ -9973,7 +9982,7 @@ function renderDashboard() {
   if (elPCar) elPCar.textContent = personalCarDashCount;
 
   // Today leave + attendance count (consistent across stat cards).
-  // 2026-09-01: all "today" dashboard cards use the business day (before 05:00 = previous
+  // 2026-09-01: all "today" dashboard cards use the business day (before 05:30 = previous
   // work date) so leave exclusion and check-in counts cannot point at two different days.
   const bizStr = businessDateStr();
   const el5 = document.getElementById('dash-today-date');
@@ -13775,7 +13784,7 @@ function formatTimePart(l) {
           `${hs}–${he} (${h > 0 ? h+'ชม.' : ''}${m > 0 ? m+'น.' : ''})`);
   }
   if (l.type === 'late-out' && l.lateOutTime) {
-    // 2026-09-24: before-05:00 counts as after midnight (+24h), like lateNightPoints.
+    // 2026-09-24: before-05:30 counts as after midnight (+24h), like lateNightPoints.
     const allowance = lateOutAllowanceForHour(Math.floor(lateNightCheckoutMins(l.lateOutTime) / 60));
     // SECURITY FIX 2026-08-09 (Opus audit finding 1.4): lateOutTime is client-controlled and this
     // return value is interpolated into innerHTML by every caller (approval cards, leave detail) --
@@ -16623,7 +16632,7 @@ function lateOutAllowanceForHour(hour) {
 // 2026-09-23 (web check-out review): reads ONE generatePeriodDays() row -- the same source payroll
 // uses -- so the corrected check-out, its source and the Accounting/MD review always agree with
 // what will be paid. Full-day leave is checked first because that overlay clears the times.
-// A check-out before 05:00 is after midnight on the same business day (lateNightCheckoutMins).
+// A check-out before 05:30 is after midnight on the same business day (lateNightCheckoutMins).
 function canSubmitLateNightForDate(dateStr, userId, opts) {
   const uid = userId || (currentUser && currentUser.id);
   if (!uid || !dateStr) return { ok: false, reason: 'missing' };
@@ -17040,8 +17049,8 @@ function syncOfficeOtFormHints() {
     // 2026-09-24: OT may end after midnight -- say how to enter it.
     hint.textContent = L('Weekday OT is calculated from 17:30 (×1.5). Must submit OT — not auto from scan-out.',
         'วันธรรมดา: OT คำนวณตั้งแต่ 17:30 (×1.5) ต้องยื่นขอ OT ก่อน ระบบไม่คำนวณจากสแกนออกอัตโนมัติ') + ' ' +
-      L('An end time before 05:00 means after midnight (same work day).',
-        'เวลาเลิกก่อน 05:00 หมายถึงหลังเที่ยงคืน (นับเป็นวันทำงานเดียวกัน)');
+      L('An end time before 05:30 means after midnight (same work day).',
+        'เวลาเลิกก่อน 05:30 หมายถึงหลังเที่ยงคืน (นับเป็นวันทำงานเดียวกัน)');
   }
   if (rangeHint) {
     rangeHint.textContent = L(' (17:30 → specified time)', ' (17:30 → เวลาที่ระบุ)');
@@ -17163,7 +17172,7 @@ async function submitOT() {
   if (!(derived.otHours > 0)) {
     showToast(isNonWorkDayForComp(date)
       ? checkedInDateBlockedMessage({ reason: 'holiday-ot' })
-      : L('⚠️ End time must be after 17:30 (before 05:00 = after midnight)', '⚠️ เวลาเลิกงานต้องหลัง 17:30 (ก่อน 05:00 = หลังเที่ยงคืน)'), 'warning');
+      : L('⚠️ End time must be after 17:30 (before 05:30 = after midnight)', '⚠️ เวลาเลิกงานต้องหลัง 17:30 (ก่อน 05:30 = หลังเที่ยงคืน)'), 'warning');
     return;
   }
   const otScanErr = scanWindowError(date, null, endTime);
@@ -17996,9 +18005,9 @@ async function submitHolidayWork() {
     showToast(L('⚠️ Work start and end times are required (HH:MM)', '⚠️ กรุณาระบุเวลาเริ่มและเลิกงาน (HH:MM)'), 'warning');
     return;
   }
-  // 2026-09-24 (owner): an end before 05:00 is after midnight of the same work day.
+  // 2026-09-24 (owner): an end before 05:30 is after midnight of the same work day.
   if (!Number.isFinite(holidayWorkEndMins(workStartTime, workEndTime))) {
-    showToast(L('⚠️ End time must be after start time (before 05:00 = after midnight)', '⚠️ เวลาเลิกงานต้องหลังเวลาเริ่มงาน (ก่อน 05:00 = หลังเที่ยงคืน)'), 'warning');
+    showToast(L('⚠️ End time must be after start time (before 05:30 = after midnight)', '⚠️ เวลาเลิกงานต้องหลังเวลาเริ่มงาน (ก่อน 05:30 = หลังเที่ยงคืน)'), 'warning');
     return;
   }
   if (holidayWorkTooLong(workStartTime, workEndTime)) {
@@ -20602,10 +20611,10 @@ function processLiveScanEvent(ev) {
   if (sep < 0) return;
   const datePart = raw.substring(0, sep);
   const timePart = raw.substring(sep + 1, sep + 6); // "HH:MM"
-  const hour = parseInt(timePart.split(':')[0]);
+  const scanMins = parseHHMMToMins(timePart);
 
   let businessDate = datePart;
-  if (hour < 5) {
+  if (scanMins < BUSINESS_DAY_START_MINS) {
     const d = new Date(datePart + 'T00:00:00');
     d.setDate(d.getDate() - 1);
     businessDate = localDateStr(d);
@@ -20635,16 +20644,16 @@ function processLiveScanEvent(ev) {
   // morning event as an 'out' and duplicate the timeline.
   if (rec.scans.some(s => s.time === timePart && (s.source || '') === (source || ''))) return;
 
-  if (hour < 5) {
+  if (scanMins < BUSINESS_DAY_START_MINS) {
     // 2026-08-16 (Opus audit L-3): was unconditional, unlike the other two checkOut-setting
     // branches below (both guarded with `!rec.checkOut || timePart > rec.checkOut`) and unlike
     // loadAttendanceFromBackend()'s own equivalent path -- an out-of-order live event could
     // overwrite a later, more correct checkOut with an earlier one until the next reload
     // re-derived it correctly, showing a different time live vs after refresh.
-    // 2026-09-23: an after-midnight scan (< 05:00) always beats a same-day daytime check-out
+    // 2026-09-23: an after-midnight scan (< 05:30) always beats a same-day daytime check-out
     // ("00:30" used to lose to "12:30" on a plain string compare); between two after-midnight
     // scans the later one wins, keeping the out-of-order guard above.
-    const existingIsAfterMidnight = rec.checkOut && rec.checkOut < '05:00';
+    const existingIsAfterMidnight = rec.checkOut && parseHHMMToMins(rec.checkOut) < BUSINESS_DAY_START_MINS;
     if (!rec.checkOut || !existingIsAfterMidnight || timePart > rec.checkOut) {
       rec.checkOut = timePart;
       rec.checkOutSource = source;
@@ -21744,9 +21753,9 @@ function _faqRulesItems() {
       ) },
     { icon: '🌙', roles: _faqEligibleRoles('earlyLate'), q: _faq('How does the Late Night Allowance / "report late-out" work?', 'Late Night Allowance / แจ้งกลับดึก คำนวณยังไง?', '深夜手当・「深夜退勤報告」はどう機能しますか？'),
       a: _faq(
-        `On a weekday: check in, then check out at or after ${String(thr1).padStart(2,'0')}:00 → +฿${amt1} (or ${String(thr2).padStart(2,'0')}:00 → +฿${amt2}); a check-out after midnight (00:00–04:59, same working day) counts as the ${String(thr2).padStart(2,'0')}:00 tier. You must submit 🌙. A face-scanner check-out unlocks 🌙 straight away. A web Check Out after ${String(thr1).padStart(2,'0')}:00 is first reviewed by Accounting/MD: if they allow it you can submit 🌙 as usual (it still needs normal approval); if they do not, 🌙 is not paid. If you scan out at the terminal and later also tap Check Out on the web, the later web tap becomes your check-out and needs review. On a holiday: submit Holiday Work first (or tick 🌙 on that form if you already checked out), then 🌙 is paid only after both Holiday Work and Late Night are approved. ${_faqNotEligibleText('earlyLate')}`,
-        `วันธรรมดา: เช็กอินแล้วเช็กเอาท์ตั้งแต่ ${String(thr1).padStart(2,'0')}:00 → +฿${amt1} (หรือ ${String(thr2).padStart(2,'0')}:00 → +฿${amt2}) เช็กเอาท์หลังเที่ยงคืน (00:00–04:59 ของวันทำงานเดียวกัน) นับเป็นขั้น ${String(thr2).padStart(2,'0')}:00 ต้องยื่น 🌙 สแกนออกที่เครื่องยื่น 🌙 ได้ทันที ถ้ากด Check Out บนเว็บหลัง ${String(thr1).padStart(2,'0')}:00 บัญชี/MD จะตรวจสอบก่อน: ถ้าอนุญาตก็ยื่น 🌙 ได้ตามปกติ (ยังต้องรออนุมัติตามปกติ) ถ้าไม่อนุญาต 🌙 จะไม่จ่าย ถ้าสแกนออกที่เครื่องแล้วมากด Check Out บนเว็บทีหลัง เวลาเว็บที่หลังกว่าจะกลายเป็นเวลาออกและต้องรอตรวจสอบ วันหยุด: ต้องยื่น Holiday Work ก่อน (หรือติ๊ก 🌙 ในฟอร์มนั้นถ้าเช็กเอาท์แล้ว) จ่ายเมื่อทั้ง Holiday Work และแจ้งกลับดึกอนุมัติแล้ว ${_faqNotEligibleText('earlyLate')}`,
-        `平日：出勤後、${String(thr1).padStart(2,'0')}:00以降に退勤 → +฿${amt1}（${String(thr2).padStart(2,'0')}:00以降は+฿${amt2}）。深夜0時以降（同じ勤務日の00:00〜04:59）の退勤は${String(thr2).padStart(2,'0')}:00区分として扱います。🌙申請が必要です。顔認証端末での退勤ならすぐ🌙を申請できます。${String(thr1).padStart(2,'0')}:00以降のWeb退勤は先に経理／MDが確認します：許可されれば通常どおり🌙を申請でき（通常の承認は必要）、不許可なら🌙は支給されません。端末で退勤した後にWebで退勤を押すと、後のWeb打刻が退勤時刻になり確認が必要です。休日：先に休日出勤（またはそのフォームで🌙にチェック）。両方承認後に支給。${_faqNotEligibleText('earlyLate')}`
+        `On a weekday: check in, then check out at or after ${String(thr1).padStart(2,'0')}:00 → +฿${amt1} (or ${String(thr2).padStart(2,'0')}:00 → +฿${amt2}); a check-out after midnight (00:00–05:29, same working day) counts as the ${String(thr2).padStart(2,'0')}:00 tier. You must submit 🌙. A face-scanner check-out unlocks 🌙 straight away. A web Check Out after ${String(thr1).padStart(2,'0')}:00 is first reviewed by Accounting/MD: if they allow it you can submit 🌙 as usual (it still needs normal approval); if they do not, 🌙 is not paid. If you scan out at the terminal and later also tap Check Out on the web, the later web tap becomes your check-out and needs review. On a holiday: submit Holiday Work first (or tick 🌙 on that form if you already checked out), then 🌙 is paid only after both Holiday Work and Late Night are approved. ${_faqNotEligibleText('earlyLate')}`,
+        `วันธรรมดา: เช็กอินแล้วเช็กเอาท์ตั้งแต่ ${String(thr1).padStart(2,'0')}:00 → +฿${amt1} (หรือ ${String(thr2).padStart(2,'0')}:00 → +฿${amt2}) เช็กเอาท์หลังเที่ยงคืน (00:00–05:29 ของวันทำงานเดียวกัน) นับเป็นขั้น ${String(thr2).padStart(2,'0')}:00 ต้องยื่น 🌙 สแกนออกที่เครื่องยื่น 🌙 ได้ทันที ถ้ากด Check Out บนเว็บหลัง ${String(thr1).padStart(2,'0')}:00 บัญชี/MD จะตรวจสอบก่อน: ถ้าอนุญาตก็ยื่น 🌙 ได้ตามปกติ (ยังต้องรออนุมัติตามปกติ) ถ้าไม่อนุญาต 🌙 จะไม่จ่าย ถ้าสแกนออกที่เครื่องแล้วมากด Check Out บนเว็บทีหลัง เวลาเว็บที่หลังกว่าจะกลายเป็นเวลาออกและต้องรอตรวจสอบ วันหยุด: ต้องยื่น Holiday Work ก่อน (หรือติ๊ก 🌙 ในฟอร์มนั้นถ้าเช็กเอาท์แล้ว) จ่ายเมื่อทั้ง Holiday Work และแจ้งกลับดึกอนุมัติแล้ว ${_faqNotEligibleText('earlyLate')}`,
+        `平日：出勤後、${String(thr1).padStart(2,'0')}:00以降に退勤 → +฿${amt1}（${String(thr2).padStart(2,'0')}:00以降は+฿${amt2}）。深夜0時以降（同じ勤務日の00:00〜05:29）の退勤は${String(thr2).padStart(2,'0')}:00区分として扱います。🌙申請が必要です。顔認証端末での退勤ならすぐ🌙を申請できます。${String(thr1).padStart(2,'0')}:00以降のWeb退勤は先に経理／MDが確認します：許可されれば通常どおり🌙を申請でき（通常の承認は必要）、不許可なら🌙は支給されません。端末で退勤した後にWebで退勤を押すと、後のWeb打刻が退勤時刻になり確認が必要です。休日：先に休日出勤（またはそのフォームで🌙にチェック）。両方承認後に支給。${_faqNotEligibleText('earlyLate')}`
       ) },
     { icon: '⏰', roles: ['md','accounting','manager','user','driver','marketing'], q: _faq('What happens if I\'m late?', 'มาสายแล้วเป็นยังไง?', '遅刻したらどうなりますか？'),
       a: !S.lateDeductPolicy.enabled
@@ -21916,9 +21925,9 @@ function _faqHowToItems() {
     { icon: '🌙', q: _faq('How do I report a late-night out?', 'แจ้งกลับดึกยังไง?', '深夜退勤の報告はどうしますか？'),
       a: _faq('Click the 🌙 icon for that day:', 'กดไอคอน 🌙 ของวันนั้น:', 'その日の🌙アイコンをクリックします：')
       + ul(
-        _faq('<b>Date</b> — only dates with a check-out at or after the configured time are selectable (dark): a face-scanner check-out, or a web Check Out that Accounting/MD has allowed. A check-out after midnight (up to 04:59) belongs to the same working day. Locked / confirmed / frozen pay periods are grayed out.',
-             '<b>วันที่</b> — เลือกได้เฉพาะวันที่เช็กเอาท์ถึงเกณฑ์เวลาแล้ว (สีเข้ม): สแกนออกที่เครื่อง หรือกด Check Out บนเว็บที่บัญชี/MD อนุญาตแล้ว เช็กเอาท์หลังเที่ยงคืน (ถึง 04:59) นับเป็นวันทำงานเดียวกัน รอบที่ล็อก / Confirm / แช่แข็งแล้วเป็นสีเทา',
-             '<b>日付</b> — 設定時刻以降に退勤した日だけ選べます（濃い色）：顔認証端末での退勤、または経理／MDが許可したWeb退勤。深夜0時以降（04:59まで）の退勤は同じ勤務日です。ロック／確定／凍結済み期間は灰色です。'),
+        _faq('<b>Date</b> — only dates with a check-out at or after the configured time are selectable (dark): a face-scanner check-out, or a web Check Out that Accounting/MD has allowed. A check-out after midnight (up to 05:29) belongs to the same working day. Locked / confirmed / frozen pay periods are grayed out.',
+             '<b>วันที่</b> — เลือกได้เฉพาะวันที่เช็กเอาท์ถึงเกณฑ์เวลาแล้ว (สีเข้ม): สแกนออกที่เครื่อง หรือกด Check Out บนเว็บที่บัญชี/MD อนุญาตแล้ว เช็กเอาท์หลังเที่ยงคืน (ถึง 05:29) นับเป็นวันทำงานเดียวกัน รอบที่ล็อก / Confirm / แช่แข็งแล้วเป็นสีเทา',
+             '<b>日付</b> — 設定時刻以降に退勤した日だけ選べます（濃い色）：顔認証端末での退勤、または経理／MDが許可したWeb退勤。深夜0時以降（05:29まで）の退勤は同じ勤務日です。ロック／確定／凍結済み期間は灰色です。'),
         _faq('<b>Return time</b> — pick whichever of the two tier buttons matches your actual return time; this determines the allowance amount, and it cannot be later than your check-out. The 🌙 button appears only once the day qualifies (default 19:00). On a holiday row it stays hidden until then; on a weekday it keeps a placeholder slot. After a web Check Out the row shows ⏳ until Accounting/MD reviews it — ✅ means you can submit 🌙, ❌ means it will not be paid. Advance requests are not allowed.',
              '<b>เวลาที่กลับ</b> — เลือกปุ่ม tier ที่ตรงกับเวลาที่กลับจริง จะกำหนดจำนวนเบี้ยเลี้ยงที่ได้ และต้องไม่หลังเวลาเช็กเอาท์ ปุ่ม 🌙 จะขึ้นเมื่อวันนั้นเข้าเกณฑ์แล้วเท่านั้น (ค่าเริ่มต้น 19:00) แถววันหยุดจะซ่อนจนกว่าจะเข้าเกณฑ์ แถววันธรรมดามีช่องว่างรอไว้ ถ้ากด Check Out บนเว็บ แถวจะขึ้น ⏳ จนกว่าบัญชี/MD จะตรวจสอบ — ✅ แปลว่ายื่น 🌙 ได้ ❌ แปลว่าไม่จ่าย ยื่นล่วงหน้าไม่ได้',
              '<b>帰宅時刻</b> — 実際の帰宅時刻に合う方の区分ボタンを選択します。これにより支給額が決まり、退勤時刻より後にはできません。🌙ボタンはその日が条件を満たしたときだけ表示されます（既定19:00）。休日行はそれまで非表示、平日行はプレースホルダー枠があります。Web退勤の場合は経理／MDが確認するまで⏳が表示され、✅なら🌙を申請でき、❌なら支給されません。事前申請はできません。'),
@@ -21943,10 +21952,10 @@ function _faqHowToItems() {
       a: _faq('Go to the Check-in page (not shown to MD/Observer — they don\'t track attendance):', 'ไปที่หน้า "ลงเวลาทำงาน" (ไม่มีให้ MD/Observer เพราะไม่ต้องลงเวลา):', '「勤怠打刻」ページに移動します（MD/Observerには表示されません — 勤怠記録の対象外です）：')
       + ul(
         _faq('Tap the big green button to record the current time. The <b>first</b> tap of the day (after 5:00 AM) is your check-in; <b>every tap after that</b> updates your check-out to the latest time — so if you tap 3 times, the 3rd tap is your final check-out.',
-             'กดปุ่มวงกลมสีเขียวใหญ่เพื่อบันทึกเวลาปัจจุบัน กดครั้ง<b>แรก</b>ของวัน (หลัง 05:00 น.) จะเป็นเวลาเข้างาน กด<b>ครั้งต่อๆ ไป</b>จะอัปเดตเวลาออกงานเป็นเวลาล่าสุดเสมอ — ถ้ากด 3 ครั้ง ครั้งที่ 3 คือเวลาออกงานจริง',
+             'กดปุ่มวงกลมสีเขียวใหญ่เพื่อบันทึกเวลาปัจจุบัน กดครั้ง<b>แรก</b>ของวัน (หลัง 05:30 น.) จะเป็นเวลาเข้างาน กด<b>ครั้งต่อๆ ไป</b>จะอัปเดตเวลาออกงานเป็นเวลาล่าสุดเสมอ — ถ้ากด 3 ครั้ง ครั้งที่ 3 คือเวลาออกงานจริง',
              '大きな緑色のボタンをタップして現在時刻を記録します。その日の<b>最初</b>のタップ（午前5:00以降）が出勤時刻になります。<b>それ以降のタップ</b>は毎回、退勤時刻を最新の時刻に更新します — 3回タップした場合、3回目が最終的な退勤時刻になります。'),
         _faq('Tapping <b>before 5:00 AM</b> always counts as a check-out (for people finishing very late the night before), never a new check-in.',
-             'กด<b>ก่อน 05:00 น.</b> จะนับเป็นเวลาออกงานเสมอ (สำหรับคนที่เลิกงานดึกมากจากเมื่อคืน) ไม่ใช่การเข้างานใหม่',
+             'กด<b>ก่อน 05:30 น.</b> จะนับเป็นเวลาออกงานเสมอ (สำหรับคนที่เลิกงานดึกมากจากเมื่อคืน) ไม่ใช่การเข้างานใหม่',
              '<b>午前5:00より前</b>のタップは常に退勤としてカウントされます（前夜遅くまで勤務していた人向け）。新たな出勤としては扱われません。'),
         _faq(`Check-in after ${stdStart} is marked <b>Late</b> — except for Drivers, who are exempt from the late flag entirely.`,
              `เช็กอินหลัง ${stdStart} น. จะถูกทำเครื่องหมายว่า <b>มาสาย</b> — ยกเว้น Driver ที่ไม่ถูกนับว่ามาสายเลย`,

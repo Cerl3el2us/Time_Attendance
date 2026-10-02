@@ -13,6 +13,9 @@ const assert = require('assert');
 const ROOT = path.join(__dirname, '..');
 const APP_SRC = fs.readFileSync(path.join(ROOT, 'attendance/js/app.js'), 'utf8');
 const SERVER_SRC = fs.readFileSync(path.join(ROOT, 'attendance-server/backend/server.js'), 'utf8');
+// 2026-10-02: the business-day boundary is read out of the real source instead of repeating the
+// number here, so moving it can never leave these sandboxes asserting against the old value.
+const BUSINESS_DAY_START_MINS = Number(/const BUSINESS_DAY_START_MINS = (\d+);/.exec(APP_SRC)[1]);
 
 function extractBraced(src, startIdx, openIdx, name) {
   let depth = 0;
@@ -73,6 +76,7 @@ function makeClient(w) {
     computeLateDeductMinutes: () => ({ count: 0, deductMin: 0 }),
     payPeriodBlockedForRange: () => (w.frozen ? { blocked: true, reason: 'period-frozen' } : { blocked: false }),
   };
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   vm.runInContext(CLIENT_FNS.map(n => extractFunction(APP_SRC, n)).join('\n'), ctx);
   return ctx;
@@ -87,6 +91,7 @@ function makeServer(w) {
     isPublicHoliday: () => false, isCompanyTripDay: d => (w.tripDays || []).includes(d), isNonWorkDayForComp: isWeekendStr,
     annualLateDeductMinutes: () => 0,
   };
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   vm.runInContext(SERVER_FNS.map(n => extractFunction(SERVER_SRC, n)).join('\n'), ctx);
   return ctx;
@@ -308,6 +313,7 @@ function emailCtx(emp) {
     fmtEmailDateLong: () => '1 Dec 2026', getTypeLabel: t => t, TYPE_ICONS: {},
     emailShell: o => `[${o.headerIcon}|${o.headerTitle}]${o.bodyHtml}`, console: { log() {} },
   };
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   vm.runInContext([extractConstObject(SERVER_SRC, 'EMAIL_I18N'), extractFunction(SERVER_SRC, 'escapeHtml'),
     extractFunction(SERVER_SRC, 'emailLangOf'), extractFunction(SERVER_SRC, 'buildResultDetailRows'),

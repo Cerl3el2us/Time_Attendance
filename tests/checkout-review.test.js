@@ -13,6 +13,9 @@ const assert = require('assert');
 const ROOT = path.join(__dirname, '..');
 const APP_SRC = fs.readFileSync(path.join(ROOT, 'attendance/js/app.js'), 'utf8');
 const SERVER_SRC = fs.readFileSync(path.join(ROOT, 'attendance-server/backend/server.js'), 'utf8');
+// 2026-10-02: the business-day boundary is read out of the real source instead of repeating the
+// number here, so moving it can never leave these sandboxes asserting against the old value.
+const BUSINESS_DAY_START_MINS = Number(/const BUSINESS_DAY_START_MINS = (\d+);/.exec(APP_SRC)[1]);
 
 function balancedFrom(src, start, label) {
   const i = src.indexOf('{', start);
@@ -38,6 +41,7 @@ const FNS = ['isAllowanceEligible', 'isDeviceScanSource', 'isFullDayPersonalLeav
   'lateNightCheckoutMins', 'lateNightThresholdMins', 'lateNightThresholdHourOf', 'checkoutReviewDecisionFor', 'lateNightCheckoutOk', 'checkoutReviewTrigger'];
 function load(src) {
   const ctx = {};
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   vm.runInContext(extractConstObject(src, 'DEFAULT_ALLOWANCE_ELIGIBILITY') + '\n' +
     FNS.map(n => extractFunction(src, n)).join('\n'), ctx);
@@ -56,11 +60,14 @@ const USER = { id: 5, role: 'user' };
 const day = o => ({ date: '2026-09-22', status: 'present', checkIn: '08:20', checkOut: '19:30', checkOutSource: 'web', isFuture: false, ...o });
 
 console.log('lateNightCheckoutMins');
-test('HH:MM -> minutes; before 05:00 counts as +24h (after midnight, same work day)', () => {
+test('HH:MM -> minutes; before 05:30 counts as +24h (after midnight, same work day)', () => {
   for (const [side, X] of SIDES) {
     assert.strictEqual(X.lateNightCheckoutMins('19:00'), 19 * 60, side);
     assert.strictEqual(X.lateNightCheckoutMins('23:59'), 23 * 60 + 59, side);
-    assert.strictEqual(X.lateNightCheckoutMins('05:00'), 5 * 60, side);
+    // 2026-10-02: the boundary moved to 05:30, so 05:00 now belongs to the previous evening.
+    assert.strictEqual(X.lateNightCheckoutMins('05:00'), 24 * 60 + 5 * 60, side);
+    assert.strictEqual(X.lateNightCheckoutMins('05:29'), 24 * 60 + 5 * 60 + 29, side);
+    assert.strictEqual(X.lateNightCheckoutMins('05:30'), 5 * 60 + 30, side);
     assert.strictEqual(X.lateNightCheckoutMins('04:59'), 24 * 60 + 4 * 60 + 59, side);
     assert.strictEqual(X.lateNightCheckoutMins('00:00'), 24 * 60, side);
     assert.strictEqual(X.lateNightCheckoutMins('01:30'), 25 * 60 + 30, side);
@@ -108,6 +115,7 @@ test('web check-out at/after the Late Night x1 time triggers a review', () => {
     assert.strictEqual(X.checkoutReviewTrigger(day({ checkOut: '19:00' }), USER, S), true, `${side} exactly 19:00`);
     assert.strictEqual(X.checkoutReviewTrigger(day({ checkOut: '18:59' }), USER, S), false, `${side} 18:59`);
     assert.strictEqual(X.checkoutReviewTrigger(day({ checkOut: '01:15' }), USER, S), true, `${side} after midnight`);
+    assert.strictEqual(X.checkoutReviewTrigger(day({ checkOut: '05:29' }), USER, S), true, `${side} 05:29 still last night`);
     assert.strictEqual(X.checkoutReviewTrigger(day({ checkOut: '05:30' }), USER, S), false, `${side} 05:30 is morning`);
     const s20 = { ...S, allowances: { lateNightThreshold1Hour: 20 } };
     assert.strictEqual(X.checkoutReviewTrigger(day({ checkOut: '19:30' }), USER, s20), false, `${side} threshold 20`);
