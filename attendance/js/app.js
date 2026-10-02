@@ -9616,20 +9616,16 @@ function renderAttendanceTable() {
         // held, so the row read as "paid" on a day nothing had been paid for. A held day says so
         // on its face -- greyed, with (awaiting review) next to it -- and a refused one says that
         // too, instead of both looking exactly like a day that paid.
-        const _mrState = row.morningReviewNeeded
-          ? (row.morningReview === 'allow' ? 'paid' : row.morningReview === 'deny' ? 'denied' : 'held')
-          : 'paid';
-        if (_mrState === 'paid') {
-          earlyBadge = attAllowIcon('🌅', `${L('Early Morning', 'Early Morning')} ${row.checkIn} (${bonus})`);
-        } else {
-          const _held = _mrState === 'held'
-            ? L('awaiting review', 'รอตรวจสอบ')
-            : L('not paid', 'ไม่จ่าย');
-          const _tip = _mrState === 'held'
-            ? `${L('Early Morning', 'Early Morning')} ${row.checkIn} (${bonus}) — ${L('held until reviewed', 'พักไว้จนกว่าจะตรวจสอบ')}`
-            : `${L('Early Morning', 'Early Morning')} ${row.checkIn} — ${L('reviewed and not paid', 'ตรวจสอบแล้ว ไม่จ่าย')}`;
+        // Two states, not three. A refusal always comes with the real arrival time, and once that
+        // time is past 07:30 this badge stops rendering at all under the ordinary Early Morning
+        // rule -- so a "reviewed and not paid" badge had almost no way to ever appear, and a third
+        // state nobody meets is a third state to understand for nothing. Held or paid.
+        if (row.morningReviewNeeded && row.morningReview !== 'allow') {
+          const _tip = `${L('Early Morning', 'Early Morning')} ${row.checkIn} (${bonus}) — ${L('held until reviewed', 'พักไว้จนกว่าจะตรวจสอบ')}`;
           earlyBadge = `<span class="att-allow-icon" style="opacity:.45" title="${escapeHtml(_tip)}">🌅</span>` +
-            `<span style="font-size:10px;color:#92400e;margin-left:2px;white-space:nowrap">(${escapeHtml(_held)})</span>`;
+            `<span style="font-size:10px;color:#92400e;margin-left:2px;white-space:nowrap">(${escapeHtml(L('awaiting review', 'รอตรวจสอบ'))})</span>`;
+        } else {
+          earlyBadge = attAllowIcon('🌅', `${L('Early Morning', 'Early Morning')} ${row.checkIn} (${bonus})`);
         }
       }
       // Check-in before 06:00 is often a false read (e.g. a door scan while someone lingered
@@ -14647,6 +14643,14 @@ async function setMorningReview(userId, dateStr, decision, checkIn, reason) {
 // The suggested time is the first door pass inside the review window, which is the arrival the
 // flag was raised about; Accounting can pick any of the day's times instead.
 let _morningDenyTarget = null;
+function pickCorrectedTime(t) {
+  const input = document.getElementById('tc-corrected-time');
+  if (input) input.value = t;
+}
+function clearScanPicks() {
+  const picks = document.getElementById('tc-scan-picks');
+  if (picks) { picks.innerHTML = ''; picks.style.display = 'none'; }
+}
 function denyMorningReview(userId, dateStr, checkIn) {
   if (blockIfObserver()) return;
   const uid = Number(userId);
@@ -14659,6 +14663,30 @@ function denyMorningReview(userId, dateStr, checkIn) {
   if (suggested) {
     const input = document.getElementById('tc-corrected-time');
     if (input) input.value = suggested;
+  }
+  // 2026-10-02 (owner): the real arrival is not always the next pass. Somebody can scan at 06:00,
+  // again at 07:00, again at 08:35 and once more at 10:00 -- only a person reading the day can say
+  // which one was the actual start. Every pass of that business day is offered as a button; the
+  // suggested one is marked, and the original check-in is marked too so it is obvious which is
+  // which. The field stays editable for a time that was never scanned at all.
+  const picks = document.getElementById('tc-scan-picks');
+  if (picks) {
+    const all = (attendanceLog[attKey(uid, dateStr)] || {}).doorScans || [];
+    if (all.length) {
+      const btns = all.map(t => {
+        const isSuggested = t === suggested;
+        const isCheckIn = t === checkIn;
+        const tag = isCheckIn ? L(' (checked in)', ' (เวลาเข้างานเดิม)')
+          : isSuggested ? L(' (suggested)', ' (ที่แนะนำ)') : '';
+        const style = isSuggested
+          ? 'border:1px solid #2563eb;background:#eff6ff;color:#1d4ed8'
+          : isCheckIn ? 'border:1px solid #e2e8f0;background:#f8fafc;color:#94a3b8'
+          : 'border:1px solid #e2e8f0;background:var(--bg-card);color:var(--text)';
+        return `<button type="button" onclick="pickCorrectedTime('${escapeJsAttr(t)}')" style="${style};border-radius:6px;padding:4px 8px;margin:0 4px 4px 0;font-size:12px;cursor:pointer">${escapeHtml(t)}${escapeHtml(tag)}</button>`;
+      }).join('');
+      picks.innerHTML = `<div style="font-size:11px;color:var(--text-muted);margin-bottom:3px">${escapeHtml(L('Door passes on this day — pick the real arrival', 'เวลาที่ผ่านประตูของวันนี้ — เลือกเวลาที่มาจริง'))}</div>${btns}`;
+      picks.style.display = '';
+    }
   }
   const banner = document.getElementById('tc-warning-banner');
   if (banner) {
@@ -18756,6 +18784,8 @@ async function submitEarlyMorning() {
 let _tcQuickFixTarget = null;
 
 function openTimeCorrectionModal(date, checkIn, checkOut) {
+  // any other use of this modal must not inherit a refusal's scan buttons
+  clearScanPicks();
   _tcQuickFixTarget = null;
   document.getElementById('tc-date').value = date;
   document.getElementById('tc-current-in').textContent  = checkIn  || L('— (no data)', '— (ไม่มีข้อมูล)');
@@ -18788,6 +18818,7 @@ function openTimeCorrectionModal(date, checkIn, checkOut) {
 function closeTimeCorrectionModal() {
   // a cancelled modal must not leave a refusal armed for whatever is corrected next
   _morningDenyTarget = null;
+  clearScanPicks();
   document.getElementById('time-correction-modal').classList.remove('show');
 }
 

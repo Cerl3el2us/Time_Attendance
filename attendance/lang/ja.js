@@ -1424,9 +1424,10 @@ window.LANG_JA = {
   // 2026-10-02 (owner): the morning review -- the twin of the Web check-out review above.
   "Early morning review": "早朝出勤の確認",
   "awaiting review": "確認待ち",
-  "not paid": "不支給",
+  "Door passes on this day — pick the real arrival": "この日のドア通過 — 実際の出勤時刻を選択",
+  " (checked in)": "（元の出勤時刻）",
+  " (suggested)": "（推奨）",
   "held until reviewed": "確認まで保留",
-  "reviewed and not paid": "確認済み・不支給",
   "Allowed — undo": "支給済み — 取消",
   "Not allowed — undo": "不支給 — 取消",
   "Genuine early start — pay the allowance": "本当に早朝出勤 — 手当を支給",
