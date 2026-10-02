@@ -1565,7 +1565,12 @@ function morningReviewWindowOf(allowances) {
   const a = allowances || {};
   const start = Number.isFinite(a.morningReviewWindowStartMin) ? a.morningReviewWindowStartMin : 480; // 08:00
   const end   = Number.isFinite(a.morningReviewWindowEndMin)   ? a.morningReviewWindowEndMin   : 720; // 12:00
-  return { start, end };
+  // 2026-10-02 (owner): a minimum gap, so stepping outside to take a delivery and coming straight
+  // back is not read as having gone home. Every flagged day in the real history sat more than an
+  // hour apart, so 30 minutes loses none of them and spares the obvious false ones. Settings-driven
+  // like the rest; 0 restores the original behaviour of counting any later pass at all.
+  const minGap = Number.isFinite(a.morningReviewMinGapMin) ? a.morningReviewMinGapMin : 30;
+  return { start, end, minGap };
 }
 // A day Accounting has to look at before the Early Morning allowance is paid: a device check-in
 // early enough to earn it, and a later door pass inside the review window. `doorScans` is that
@@ -1586,10 +1591,13 @@ function morningReviewTrigger(day, user, S, doorScans, holidayWorkDateSet) {
   const thr1 = Number.isFinite(a.earlyThreshold1Min) ? a.earlyThreshold1Min : 450;
   // Nothing to review on a day that earns nothing: a 08:10 arrival has no allowance to withhold.
   if (!Number.isFinite(inMins) || inMins > thr1) return false;
+  // An explicit off switch, so the rule can be stopped from Settings without a code change --
+  // the same shape lateDeductPolicy.enabled already uses.
+  if (a.morningReviewEnabled === false) return false;
   const w = morningReviewWindowOf(a);
   return (Array.isArray(doorScans) ? doorScans : []).some(t => {
     const m = parseHHMMToMins(t);
-    return Number.isFinite(m) && m > inMins && m >= w.start && m <= w.end;
+    return Number.isFinite(m) && m - inMins >= w.minGap && m > inMins && m >= w.start && m <= w.end;
   });
 }
 // A decision holds only while the check-in it was made against is still the day's check-in. A
@@ -14658,11 +14666,37 @@ async function setMorningReview(userId, dateStr, decision, checkIn, reason) {
 // The suggested time is the first door pass inside the review window, which is the arrival the
 // flag was raised about; Accounting can pick any of the day's times instead.
 let _morningDenyTarget = null;
+let _morningPickState = null;
+// Rebuilt on every pick so the filled button always matches the field. It reads the field rather
+// than remembering a choice of its own, so a time typed by hand honestly clears the highlight
+// instead of leaving a button looking chosen when it is not.
+function renderScanPicks() {
+  const picks = document.getElementById('tc-scan-picks');
+  if (!picks || !_morningPickState || !_morningPickState.all.length) return;
+  const { all, suggested, checkIn } = _morningPickState;
+  const current = (document.getElementById('tc-corrected-time') || {}).value || '';
+  const btns = all.map(t => {
+    const isSel = t === current;
+    const isCheckIn = t === checkIn;
+    const tag = isCheckIn ? L('checked in', 'เวลาเดิม')
+      : t === suggested ? L('suggested', 'แนะนำ') : '';
+    const style = isSel
+      ? 'border:2px solid #1d4ed8;background:#2563eb;color:#fff;box-shadow:0 2px 6px rgba(37,99,235,.45)'
+      : isCheckIn ? 'border:1px solid #e2e8f0;background:#f1f5f9;color:#94a3b8'
+      : 'border:1px solid #cbd5e1;background:var(--bg-card);color:var(--text)';
+    const sub = `<div style="font-size:10px;font-weight:600;opacity:.85;margin-top:2px;min-height:12px">${tag ? escapeHtml(tag) : '&nbsp;'}</div>`;
+    return `<button type="button" aria-pressed="${isSel}" onclick="pickCorrectedTime('${escapeJsAttr(t)}')" style="${style};border-radius:8px;padding:8px 0;margin:0 8px 8px 0;font-size:17px;font-weight:700;line-height:1.1;cursor:pointer;width:92px;text-align:center;vertical-align:top;transition:background .12s,border-color .12s">${escapeHtml(t)}${sub}</button>`;
+  }).join('');
+  picks.innerHTML = `<div style="font-size:13px;font-weight:700;color:var(--text);margin:8px 0 6px">🚪 ${escapeHtml(L('Door passes on this day — pick the real arrival', 'เวลาที่ผ่านประตูของวันนี้ — เลือกเวลาที่มาจริง'))}</div>${btns}`;
+  picks.style.display = '';
+}
 function pickCorrectedTime(t) {
   const input = document.getElementById('tc-corrected-time');
   if (input) input.value = t;
+  renderScanPicks();
 }
 function clearScanPicks() {
+  _morningPickState = null;
   const picks = document.getElementById('tc-scan-picks');
   if (picks) { picks.innerHTML = ''; picks.style.display = 'none'; }
 }
@@ -14684,31 +14718,11 @@ function denyMorningReview(userId, dateStr, checkIn) {
   // which one was the actual start. Every pass of that business day is offered as a button; the
   // suggested one is marked, and the original check-in is marked too so it is obvious which is
   // which. The field stays editable for a time that was never scanned at all.
-  const picks = document.getElementById('tc-scan-picks');
-  if (picks) {
-    const all = (attendanceLog[attKey(uid, dateStr)] || {}).doorScans || [];
-    if (all.length) {
-      // 2026-10-02 (owner): these were 12px chips and read as a footnote, when choosing one of
-      // them is the actual decision being made in this dialog. Sized like buttons, with the
-      // suggested one filled rather than merely outlined.
-      const btns = all.map(t => {
-        const isSuggested = t === suggested;
-        const isCheckIn = t === checkIn;
-        const tag = isCheckIn ? L('checked in', 'เวลาเดิม')
-          : isSuggested ? L('suggested', 'แนะนำ') : '';
-        const style = isSuggested
-          ? 'border:2px solid #1d4ed8;background:#2563eb;color:#fff;box-shadow:0 1px 3px rgba(37,99,235,.4)'
-          : isCheckIn ? 'border:1px solid #e2e8f0;background:#f1f5f9;color:#94a3b8'
-          : 'border:1px solid #cbd5e1;background:var(--bg-card);color:var(--text)';
-        // the caption line is rendered on every button, empty or not: without it the two labelled
-        // buttons stood taller than the rest and the row looked like a mistake rather than a set.
-        const sub = `<div style="font-size:10px;font-weight:600;opacity:.85;margin-top:2px;min-height:12px">${tag ? escapeHtml(tag) : '&nbsp;'}</div>`;
-        return `<button type="button" onclick="pickCorrectedTime('${escapeJsAttr(t)}')" style="${style};border-radius:8px;padding:8px 0;margin:0 8px 8px 0;font-size:17px;font-weight:700;line-height:1.1;cursor:pointer;width:92px;text-align:center;vertical-align:top">${escapeHtml(t)}${sub}</button>`;
-      }).join('');
-      picks.innerHTML = `<div style="font-size:13px;font-weight:700;color:var(--text);margin:8px 0 6px">🚪 ${escapeHtml(L('Door passes on this day — pick the real arrival', 'เวลาที่ผ่านประตูของวันนี้ — เลือกเวลาที่มาจริง'))}</div>${btns}`;
-      picks.style.display = '';
-    }
-  }
+  // 2026-10-02 (owner): the buttons tell you which one is chosen, and keep telling you as you
+  // change your mind. A highlight stuck on "suggested" says nothing about what is in the field,
+  // and the field is the only thing that gets saved.
+  _morningPickState = { all: (attendanceLog[attKey(uid, dateStr)] || {}).doorScans || [], suggested, checkIn };
+  renderScanPicks();
   const banner = document.getElementById('tc-warning-banner');
   if (banner) {
     banner.className = 'alert alert-warning';

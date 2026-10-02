@@ -9279,7 +9279,12 @@ function morningReviewWindowOf(allowances) {
   const a = allowances || {};
   const start = Number.isFinite(a.morningReviewWindowStartMin) ? a.morningReviewWindowStartMin : 480; // 08:00
   const end   = Number.isFinite(a.morningReviewWindowEndMin)   ? a.morningReviewWindowEndMin   : 720; // 12:00
-  return { start, end };
+  // 2026-10-02 (owner): a minimum gap, so stepping outside to take a delivery and coming straight
+  // back is not read as having gone home. Every flagged day in the real history sat more than an
+  // hour apart, so 30 minutes loses none of them and spares the obvious false ones. Settings-driven
+  // like the rest; 0 restores the original behaviour of counting any later pass at all.
+  const minGap = Number.isFinite(a.morningReviewMinGapMin) ? a.morningReviewMinGapMin : 30;
+  return { start, end, minGap };
 }
 // A day Accounting has to look at before the Early Morning allowance is paid: a device check-in
 // early enough to earn it, and a later door pass inside the review window. `doorScans` is that
@@ -9300,10 +9305,13 @@ function morningReviewTrigger(day, user, S, doorScans, holidayWorkDateSet) {
   const thr1 = Number.isFinite(a.earlyThreshold1Min) ? a.earlyThreshold1Min : 450;
   // Nothing to review on a day that earns nothing: a 08:10 arrival has no allowance to withhold.
   if (!Number.isFinite(inMins) || inMins > thr1) return false;
+  // An explicit off switch, so the rule can be stopped from Settings without a code change --
+  // the same shape lateDeductPolicy.enabled already uses.
+  if (a.morningReviewEnabled === false) return false;
   const w = morningReviewWindowOf(a);
   return (Array.isArray(doorScans) ? doorScans : []).some(t => {
     const m = parseHHMMToMins(t);
-    return Number.isFinite(m) && m > inMins && m >= w.start && m <= w.end;
+    return Number.isFinite(m) && m - inMins >= w.minGap && m > inMins && m >= w.start && m <= w.end;
   });
 }
 // A decision holds only while the check-in it was made against is still the day's check-in. A

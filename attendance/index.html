@@ -1438,7 +1438,7 @@
       </div>
       <div class="form-field" style="margin-bottom:0">
         <label data-en="Correct Time">เวลาที่ถูกต้อง</label>
-        <input type="time" id="tc-corrected-time">
+        <input type="time" id="tc-corrected-time" oninput="renderScanPicks()">
         <!-- 2026-10-02 (owner): when a flagged morning is refused, the real arrival is one of
              the day's own door passes, so they are offered as buttons instead of being typed.
              Filled by denyMorningReview(); hidden for every other use of this modal. -->
@@ -2770,6 +2770,6 @@
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ja.js" integrity="sha384-mKor8U8jwukUkfxaFPCsxKF9S62PXq4gG7zcZ5yQ2x3KL1msprJZeFlKFEDeeb5V" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/th.js" integrity="sha384-E6OVFg1zUc/pckGxry0YZ6VeZ1E17l7Jl8ZQx58jbEfxxkz9LqknQhiIrA9zg/8b" crossorigin="anonymous"></script>
 
-<script src="js/app.js?v=20261002p"></script>
+<script src="js/app.js?v=20261002q"></script>
 </body>
 </html>
