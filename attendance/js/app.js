@@ -14700,8 +14700,10 @@ function denyMorningReview(userId, dateStr, checkIn) {
           ? 'border:2px solid #1d4ed8;background:#2563eb;color:#fff;box-shadow:0 1px 3px rgba(37,99,235,.4)'
           : isCheckIn ? 'border:1px solid #e2e8f0;background:#f1f5f9;color:#94a3b8'
           : 'border:1px solid #cbd5e1;background:var(--bg-card);color:var(--text)';
-        const sub = tag ? `<div style="font-size:10px;font-weight:600;opacity:.85;margin-top:1px">${escapeHtml(tag)}</div>` : '';
-        return `<button type="button" onclick="pickCorrectedTime('${escapeJsAttr(t)}')" style="${style};border-radius:8px;padding:8px 14px;margin:0 8px 8px 0;font-size:17px;font-weight:700;line-height:1.1;cursor:pointer;min-width:70px">${escapeHtml(t)}${sub}</button>`;
+        // the caption line is rendered on every button, empty or not: without it the two labelled
+        // buttons stood taller than the rest and the row looked like a mistake rather than a set.
+        const sub = `<div style="font-size:10px;font-weight:600;opacity:.85;margin-top:2px;min-height:12px">${tag ? escapeHtml(tag) : '&nbsp;'}</div>`;
+        return `<button type="button" onclick="pickCorrectedTime('${escapeJsAttr(t)}')" style="${style};border-radius:8px;padding:8px 0;margin:0 8px 8px 0;font-size:17px;font-weight:700;line-height:1.1;cursor:pointer;width:92px;text-align:center;vertical-align:top">${escapeHtml(t)}${sub}</button>`;
       }).join('');
       picks.innerHTML = `<div style="font-size:13px;font-weight:700;color:var(--text);margin:8px 0 6px">🚪 ${escapeHtml(L('Door passes on this day — pick the real arrival', 'เวลาที่ผ่านประตูของวันนี้ — เลือกเวลาที่มาจริง'))}</div>${btns}`;
       picks.style.display = '';
