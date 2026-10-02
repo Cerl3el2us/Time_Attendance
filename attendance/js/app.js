@@ -9650,7 +9650,7 @@ function renderAttendanceTable() {
         const _done = row.morningReview === 'allow'
           ? L('Allowed — undo', 'จ่ายเบี้ยแล้ว — กดเพื่อเพิกถอน')
           : L('Not allowed — undo', 'ไม่จ่ายเบี้ย — กดเพื่อเพิกถอน');
-        earlyWarnBadge = ` <button class="btn btn-ghost btn-sm" style="color:#64748b" onclick="setMorningReview(${targetUserId}, '${escapeJsAttr(row.date)}', null, '${escapeJsAttr(row.checkIn)}')" title="${escapeHtml(_done)}">${row.morningReview === 'allow' ? '✅' : '❌'}↩️</button>`;
+        earlyWarnBadge = ` <button class="btn btn-ghost btn-sm" style="color:#64748b" onclick="setMorningReview(${targetUserId}, '${escapeJsAttr(row.date)}', null, '${escapeJsAttr(row.checkIn)}')" title="${escapeHtml(_done)}">${row.morningReview === 'allow' ? '✓' : '✕'}↩️</button>`;
       }
       if (row.morningReviewNeeded && !row.morningReview) {
         const _later = morningReviewLaterScans(targetUserId, row);
@@ -9661,7 +9661,7 @@ function renderAttendanceTable() {
         earlyWarnBadge = `<span class="badge badge-danger" style="margin-left:4px" title="${escapeHtml(_why)}">⚠️ ${L('Verify','ตรวจสอบ')}</span>`;
         if (!isViewingSelf && isMdAccountingView()) {
           earlyWarnBadge += ` <button class="btn btn-ghost btn-sm" style="color:#059669" onclick="setMorningReview(${targetUserId}, '${escapeJsAttr(row.date)}', 'allow', '${escapeJsAttr(row.checkIn)}')" title="${L('Genuine early start — pay the allowance','มาทำงานแต่เช้าจริง — จ่ายเบี้ย')}">✅</button>`;
-          earlyWarnBadge += ` <button class="btn btn-ghost btn-sm" style="color:#dc2626" onclick="denyMorningReview(${targetUserId}, '${escapeJsAttr(row.date)}', '${escapeJsAttr(row.checkIn)}')" title="${L('Not a real early start — set the real check-in time','ไม่ได้มาทำงานแต่เช้าจริง — แก้เป็นเวลาที่มาจริง')}">❌</button>`;
+          earlyWarnBadge += ` <button class="btn btn-ghost btn-sm" style="color:#dc2626" onclick="denyMorningReview(${targetUserId}, '${escapeJsAttr(row.date)}', '${escapeJsAttr(row.checkIn)}')" title="${L('Not a real early start — set the real check-in time','ไม่ได้มาทำงานแต่เช้าจริง — แก้เป็นเวลาที่มาจริง')}">✕</button>`;
         }
       }
     }
@@ -14242,7 +14242,7 @@ function buildApprovalCard(l, role) {
   const actionHtml = isPendingForMe
     ? `<div class="approval-actions" onclick="event.stopPropagation()">
          <button class="btn btn-success btn-sm" onclick="approveMockLeave(${l.id})">${approveLabel}</button>
-         <button class="btn btn-danger btn-sm" onclick="rejectMockLeave(${l.id})">${L('❌ Reject', '❌ ปฏิเสธ')}</button>
+         <button class="btn btn-danger btn-sm" onclick="rejectMockLeave(${l.id})">${L('✕ Reject', '✕ ปฏิเสธ')}</button>
        </div>` : '';
   const card = document.createElement('div');
   card.className = 'approval-card pending';
@@ -14331,7 +14331,7 @@ function checkoutReviewPendingRowsHtml(items) {
       ${checkoutReviewDayCells(user, day)}
       <td style="padding:6px 8px;white-space:nowrap;text-align:right">
         <button class="btn btn-ghost btn-sm" style="color:#059669" title="${escapeHtml(L('Allow this web check-out (unlocks 🌙)', 'อนุญาตเวลาออกผ่านเว็บนี้ (ปลดล็อก 🌙)'))}" onclick="setCheckoutReview(${uid}, '${d}', 'allow', '${escapeJsAttr(day.checkOut || '')}')">✅</button>
-        <button class="btn btn-ghost btn-sm" style="color:#dc2626" title="${escapeHtml(L('Do not allow this web check-out', 'ไม่อนุญาตเวลาออกผ่านเว็บนี้'))}" onclick="setCheckoutReview(${uid}, '${d}', 'deny', '${escapeJsAttr(day.checkOut || '')}')">❌</button>
+        <button class="btn btn-ghost btn-sm" style="color:#dc2626" title="${escapeHtml(L('Do not allow this web check-out', 'ไม่อนุญาตเวลาออกผ่านเว็บนี้'))}" onclick="setCheckoutReview(${uid}, '${d}', 'deny', '${escapeJsAttr(day.checkOut || '')}')">✕</button>
       </td>
     </tr>`;
   }).join('');
@@ -14514,7 +14514,7 @@ function morningReviewPendingRowsHtml(items) {
       ${morningReviewDayCells(user, day)}
       <td style="padding:6px 8px;white-space:nowrap;text-align:right">
         <button class="btn btn-ghost btn-sm" style="color:#059669" title="${escapeHtml(L('Genuine early start — pay the allowance', 'มาทำงานแต่เช้าจริง — จ่ายเบี้ย'))}" onclick="setMorningReview(${uid}, '${d}', 'allow', '${ci}')">✅</button>
-        <button class="btn btn-ghost btn-sm" style="color:#dc2626" title="${escapeHtml(L('Not a real early start — set the real check-in time', 'ไม่ได้มาทำงานแต่เช้าจริง — แก้เป็นเวลาที่มาจริง'))}" onclick="denyMorningReview(${uid}, '${d}', '${ci}')">❌</button>
+        <button class="btn btn-ghost btn-sm" style="color:#dc2626" title="${escapeHtml(L('Not a real early start — set the real check-in time', 'ไม่ได้มาทำงานแต่เช้าจริง — แก้เป็นเวลาที่มาจริง'))}" onclick="denyMorningReview(${uid}, '${d}', '${ci}')">✕</button>
       </td>
     </tr>`;
   }).join('');
@@ -14808,7 +14808,7 @@ function renderApprovals() {
         batchBar.style.cssText = 'display:none;gap:8px;align-items:center;margin-bottom:8px';
         batchBar.innerHTML = `
           <button id="btn-approve-sel" onclick="approveSelected()" style="padding:6px 14px;border-radius:8px;background:#3b82f6;color:#fff;border:none;font-size:12px;font-weight:700;cursor:pointer">${L('✅ Approve Selected', '✅ Approve ที่เลือก')}</button>
-          <button id="btn-reject-sel"  onclick="rejectSelected()"  style="padding:6px 14px;border-radius:8px;background:#ef4444;color:#fff;border:none;font-size:12px;font-weight:700;cursor:pointer">${L('❌ Reject Selected', '❌ Reject ที่เลือก')}</button>`;
+          <button id="btn-reject-sel"  onclick="rejectSelected()"  style="padding:6px 14px;border-radius:8px;background:#ef4444;color:#fff;border:none;font-size:12px;font-weight:700;cursor:pointer">${L('✕ Reject Selected', '✕ Reject ที่เลือก')}</button>`;
         summEl.appendChild(batchBar);
       }
     }
@@ -14884,8 +14884,12 @@ function renderApprovals() {
               <td class="col-hide-mobile" style="padding:10px 12px;color:var(--text-muted)">${dateLine}</td>
               <td style="padding:10px 12px;color:var(--text-muted)">${detailMain}${detailDate}${detailReason}</td>
               <td onclick="event.stopPropagation()" style="padding:8px 12px;text-align:center">
-                <button onclick="approveMockLeave(${l.id})" style="padding:4px 10px;border-radius:6px;background:#10b981;color:#fff;border:none;font-size:11px;font-weight:700;cursor:pointer;margin-right:4px">✅</button>
-                <button onclick="rejectMockLeave(${l.id})" style="padding:4px 10px;border-radius:6px;background:#ef4444;color:#fff;border:none;font-size:11px;font-weight:700;cursor:pointer">❌</button>
+                ${''/* 2026-10-02 (owner): these were the ✅ and ❌ emoji on solid green and red
+                     buttons. An emoji carries its own colour and ignores `color:#fff`, so a red
+                     cross sat on a red button and all but vanished. Plain glyphs take the white
+                     the button already asks for. */}
+                <button onclick="approveMockLeave(${l.id})" style="padding:4px 10px;border-radius:6px;background:#10b981;color:#fff;border:none;font-size:13px;font-weight:700;line-height:1;cursor:pointer;margin-right:4px" title="${escapeHtml(L('Approve', 'อนุมัติ'))}">✓</button>
+                <button onclick="rejectMockLeave(${l.id})" style="padding:4px 10px;border-radius:6px;background:#ef4444;color:#fff;border:none;font-size:13px;font-weight:700;line-height:1;cursor:pointer" title="${escapeHtml(L('Reject', 'ปฏิเสธ'))}">✕</button>
               </td>
             </tr>`;
           }).join('')}
@@ -16061,7 +16065,7 @@ function showApprovalDetail(id) {
   const actionButtons = canAct
     ? `<div style="display:flex;gap:10px">
         <button onclick="approveMockLeave(${l.id});closeApprovalDetail();" style="flex:1;padding:11px;border-radius:8px;background:#10b981;color:#fff;border:none;font-size:14px;font-weight:700;cursor:pointer">✅ ${L('Approve', 'อนุมัติ')}</button>
-        <button onclick="rejectMockLeave(${l.id});closeApprovalDetail();" style="flex:1;padding:11px;border-radius:8px;background:#ef4444;color:#fff;border:none;font-size:14px;font-weight:700;cursor:pointer">❌ ${L('Reject', 'ไม่อนุมัติ')}</button>
+        <button onclick="rejectMockLeave(${l.id});closeApprovalDetail();" style="flex:1;padding:11px;border-radius:8px;background:#ef4444;color:#fff;border:none;font-size:14px;font-weight:700;cursor:pointer">✕ ${L('Reject', 'ไม่อนุมัติ')}</button>
       </div>`
     : '';
   // 2026-09-24 (owner): MD / Accounting can take back an approval on a money-bearing request until
