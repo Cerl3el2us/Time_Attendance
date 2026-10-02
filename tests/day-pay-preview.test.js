@@ -40,7 +40,7 @@ function extractFunction(src, name) {
 const FNS = [
   'round2HalfUp', 'isVoidLeaveStatus', 'parseHHMMToMins', 'lateNightCheckoutMins', 'lateNightThresholdHourOf',
   'lateNightThresholdMins', 'lateOutAllowanceForHour', 'isDeviceScanSource',
-  'isEarlyMorningDayStatus', 'isRestAttendanceDay', 'deviceScanQualifiesForEarlyMorning',
+  'isEarlyMorningDayStatus', 'isRestAttendanceDay', 'deviceScanQualifiesForEarlyMorning', 'earlyMorningCheckInOk',
   'earlyMorningThresholdMins', 'earlyMorningAllowanceForTier', 'earlyMorningTierFromCheckIn',
   'effectiveOtMultiplier', 'standardOtMultiplier', 'isNonWorkDayForComp', 'deriveOfficeOtFromEndTime',
   'holidayWorkEndMins', 'splitHolidayWorkOtMinutes', 'addOtHours', 'accumulateApprovedOtHours',

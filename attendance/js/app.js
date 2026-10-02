@@ -1545,7 +1545,64 @@ function deviceScanQualifiesForEarlyMorning(d, holidayWorkDateSet) {
   if (!d || !d.checkIn || d.status === 'company-trip') return false;
   if (!isEarlyMorningDayStatus(d.status) || !isDeviceScanSource(d.checkInSource)) return false;
   if (isRestAttendanceDay(d) && !(holidayWorkDateSet && holidayWorkDateSet.has(d.date))) return false;
+  // 2026-10-02 (owner): a flagged morning pays nothing until Accounting decides. Placed here so
+  // the one predicate covers the scan path everywhere it is asked -- payroll, the payslip, the
+  // day-pay preview and the attendance badge all route through it.
+  if (!earlyMorningCheckInOk(d)) return false;
   return true;
+}
+// 2026-10-02 (owner): Early Morning pays off the face scanner alone -- unlike Late Night, which
+// also needs an approved claim -- so sleeping at the office after a party and walking through the
+// door at 06:30 paid the same as driving in at 06:30 to work. The scanner cannot tell the two
+// apart: it records AccessControllerEvent, a pass, with no direction, and people pass through it
+// several times a day as a matter of course. What it can show is a later pass: measured over
+// 585 working days of real scans, only 19% of the days that earned the allowance had another pass
+// between 08:00 and 12:00, and every one of those sat at least half an hour after the early scan.
+// That is a signal, not a proof -- somebody who genuinely started at 06:30 and stepped out for
+// breakfast looks identical -- so it raises a flag for Accounting rather than cutting the money.
+// The window is in Settings because the shape of a working morning is a business decision.
+function morningReviewWindowOf(allowances) {
+  const a = allowances || {};
+  const start = Number.isFinite(a.morningReviewWindowStartMin) ? a.morningReviewWindowStartMin : 480; // 08:00
+  const end   = Number.isFinite(a.morningReviewWindowEndMin)   ? a.morningReviewWindowEndMin   : 720; // 12:00
+  return { start, end };
+}
+// A day Accounting has to look at before the Early Morning allowance is paid: a device check-in
+// early enough to earn it, and a later door pass inside the review window. `doorScans` is that
+// business day's pass times (HH:MM) from the attendance log. Eligibility is read from Settings on
+// every call, never from a role list written here, so opening earlyLate to another role later
+// starts flagging that role the same day without touching this file.
+function morningReviewTrigger(day, user, S, doorScans) {
+  if (!day || !user || !S || !day.checkIn || day.isFuture) return false;
+  if (!isEarlyMorningDayStatus(day.status) || !isDeviceScanSource(day.checkInSource)) return false;
+  if (isFullDayPersonalLeaveStatus(day.status)) return false;
+  if (!isAllowanceEligible(S.allowanceEligibility, user.role, 'earlyLate')) return false;
+  const a = S.allowances || {};
+  const inMins = parseHHMMToMins(day.checkIn);
+  const thr1 = Number.isFinite(a.earlyThreshold1Min) ? a.earlyThreshold1Min : 450;
+  // Nothing to review on a day that earns nothing: a 08:10 arrival has no allowance to withhold.
+  if (!Number.isFinite(inMins) || inMins > thr1) return false;
+  const w = morningReviewWindowOf(a);
+  return (Array.isArray(doorScans) ? doorScans : []).some(t => {
+    const m = parseHHMMToMins(t);
+    return Number.isFinite(m) && m > inMins && m >= w.start && m <= w.end;
+  });
+}
+// A decision holds only while the check-in it was made against is still the day's check-in. A
+// time correction, or a later scan that rewrites the morning, puts the day back to pending --
+// otherwise a decision could be banked and the facts changed underneath it afterwards. Same rule
+// as checkoutReviewDecisionFor on the evening side.
+function morningReviewDecisionFor(review, checkIn) {
+  if (!review || !checkIn || review.checkIn !== checkIn) return null;
+  return review.decision === 'allow' || review.decision === 'deny' ? review.decision : null;
+}
+// Early Morning is payable when the day was never flagged, or was flagged and allowed. A flagged
+// day with no decision yet pays nothing -- the money is held, not lost, and the pay period cannot
+// be closed while one is still waiting (see the finalize guard), so nobody is quietly short-paid
+// because Accounting did not get to it.
+function earlyMorningCheckInOk(d) {
+  if (!d) return false;
+  return d.morningReviewNeeded !== true || d.morningReview === 'allow';
 }
 // 2026-09-23 (web check-out Late Night review): a check-out before 05:30 belongs to the same
 // business day (after midnight), so it compares as 24:00 + time. NaN for anything not HH:MM.
@@ -6596,6 +6653,12 @@ async function loadAttendanceFromBackend() {
       if (ev.timezone && isSafeTimeZone(ev.timezone)) rec.timezone = ev.timezone;
 
       const source = ev.eventType === 'WebScan' ? 'web' : 'device';
+      // 2026-10-02 (owner): keep every door pass of the business day, not only the first and the
+      // last. The morning review has to ask whether a later pass exists before it can treat an
+      // early scan as a real arrival, and Accounting is shown the list itself to decide on. Times
+      // only -- the reader needs "came through again at 08:31", not GPS or which reader it was.
+      if (!rec.doorScans) rec.doorScans = [];
+      if (!rec.doorScans.includes(timePart)) rec.doorScans.push(timePart);
       const gps    = ev.gps || '';
       // 2026-09-25 (geofence T6): the accuracy the phone reported at scan time, in metres, for
       // reviewing a web check-in's claimed position. Old events have none at all -- Number.isFinite
@@ -20630,6 +20693,12 @@ function processLiveScanEvent(ev) {
   if (ev.timezone && isSafeTimeZone(ev.timezone)) rec.timezone = ev.timezone;
 
   const source = ev.eventType === 'WebScan' ? 'web' : 'device';
+  // 2026-10-02 (owner): keep every door pass of the business day, not only the first and the
+  // last. The morning review has to ask whether a later pass exists before it can treat an
+  // early scan as a real arrival, and Accounting is shown the list itself to decide on. Times
+  // only -- the reader needs "came through again at 08:31", not GPS or which reader it was.
+  if (!rec.doorScans) rec.doorScans = [];
+  if (!rec.doorScans.includes(timePart)) rec.doorScans.push(timePart);
   const gps    = ev.gps || '';
   // 2026-09-25 (geofence T6): mirrors loadAttendanceFromBackend()'s copy -- the full-access WS
   // SCAN_EVENT payload carries gpsAcc the same way the REST event does.

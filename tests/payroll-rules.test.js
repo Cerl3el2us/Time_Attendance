@@ -50,7 +50,7 @@ const SETTINGS = {
 const SHARED = ['isVoidLeaveStatus', 'round2HalfUp', 'round1HalfUp', 'deriveOfficeOtFromEndTime', 'lateNightCheckoutMins', 'lateNightThresholdMins', 'lateNightThresholdHourOf', 'parseHHMMToMins',
   'isHolidayWorkDay', 'isNonWorkDayForComp', 'isHolidayWorkOtRecord', 'companyTripDateInRange',
   'isFullDayPersonalLeaveStatus', 'isRestAttendanceDay', 'isDeviceScanSource', 'isEarlyMorningDayStatus',
-  'deviceScanQualifiesForEarlyMorning', 'deviceScanQualifiesForLateNight', 'lateNightCheckoutOk',
+  'deviceScanQualifiesForEarlyMorning', 'earlyMorningCheckInOk', 'deviceScanQualifiesForLateNight', 'lateNightCheckoutOk',
   'addOtHours', 'accumulateApprovedOtHours', 'otPayFromHourBuckets', 'effectiveOtMultiplier', 'computePayroll', 'splitHolidayWorkOtMinutes', 'holidayWorkEndMins',
   // 2026-09-28: extracted out of computePayroll so the in-form pay preview reuses the same rules.
   'hasUpcountryLocation', 'holidayTransportForRecord',
