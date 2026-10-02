@@ -9323,10 +9323,11 @@ function morningReviewWindowOf(allowances) {
   const a = allowances || {};
   const start = Number.isFinite(a.morningReviewWindowStartMin) ? a.morningReviewWindowStartMin : 480; // 08:00
   const end   = Number.isFinite(a.morningReviewWindowEndMin)   ? a.morningReviewWindowEndMin   : 720; // 12:00
-  // 2026-10-02 (owner): a minimum gap, so stepping outside to take a delivery and coming straight
-  // back is not read as having gone home. Every flagged day in the real history sat more than an
-  // hour apart, so 30 minutes loses none of them and spares the obvious false ones. Settings-driven
-  // like the rest; 0 restores the original behaviour of counting any later pass at all.
+  // 2026-10-02 (owner): a grace period for the detector, not a claim about what the person did.
+  // A pass this soon after the check-in simply does not count towards the flag -- the scanner
+  // records a pass with no direction, so nothing here knows whether anyone went anywhere. Every
+  // flagged day in the real history sat more than an hour apart, so 30 minutes loses none of
+  // them. Settings-driven like the rest; 0 counts any later pass at all.
   const minGap = Number.isFinite(a.morningReviewMinGapMin) ? a.morningReviewMinGapMin : 30;
   return { start, end, minGap };
 }

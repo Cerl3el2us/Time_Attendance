@@ -1584,10 +1584,11 @@ function morningReviewWindowOf(allowances) {
   const a = allowances || {};
   const start = Number.isFinite(a.morningReviewWindowStartMin) ? a.morningReviewWindowStartMin : 480; // 08:00
   const end   = Number.isFinite(a.morningReviewWindowEndMin)   ? a.morningReviewWindowEndMin   : 720; // 12:00
-  // 2026-10-02 (owner): a minimum gap, so stepping outside to take a delivery and coming straight
-  // back is not read as having gone home. Every flagged day in the real history sat more than an
-  // hour apart, so 30 minutes loses none of them and spares the obvious false ones. Settings-driven
-  // like the rest; 0 restores the original behaviour of counting any later pass at all.
+  // 2026-10-02 (owner): a grace period for the detector, not a claim about what the person did.
+  // A pass this soon after the check-in simply does not count towards the flag -- the scanner
+  // records a pass with no direction, so nothing here knows whether anyone went anywhere. Every
+  // flagged day in the real history sat more than an hour apart, so 30 minutes loses none of
+  // them. Settings-driven like the rest; 0 counts any later pass at all.
   const minGap = Number.isFinite(a.morningReviewMinGapMin) ? a.morningReviewMinGapMin : 30;
   return { start, end, minGap };
 }
@@ -5173,7 +5174,7 @@ function renderSettingsPage(_skipRefresh) {
         field(L('until','ถึง'), `<input id="set-mr-to" type="time" value="${minsToTime(morningReviewWindowOf(s.allowances).end)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 12:00','เช่น 12:00'))
       )}
       ${row2(
-        field(L('Ignore a pass sooner than (minutes)','ไม่นับ ถ้าห่างจากเวลาเข้างานไม่ถึง (นาที)'), inp('set-mr-gap', morningReviewWindowOf(s.allowances).minGap, 'number', 'min="0" max="480" step="5"'), L('stepping out briefly is not going home','ออกไปแป๊บเดียวไม่ถือว่ากลับบ้าน')),
+        field(L('Ignore a pass sooner than (minutes)','ไม่นับ ถ้าห่างจากเวลาเข้างานไม่ถึง (นาที)'), inp('set-mr-gap', morningReviewWindowOf(s.allowances).minGap, 'number', 'min="0" max="480" step="5"'), L('grace period — a pass this soon after check-in is not counted','ช่วงผ่อนผัน — ผ่านประตูภายในเวลานี้หลังเข้างาน จะไม่ถูกนับ')),
         ''
       )}
       <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Late Night Bonus','เบี้ยเลี้ยงกลับดึก')}</div>
