@@ -375,9 +375,10 @@ const NOTIFICATION_RETENTION_DAYS = 90;
 const NOTIFICATION_MAX_PER_USER = 300;
 // Every kind the server writes (app.js NOTIFICATION_RENDERERS has one renderer per kind).
 const NOTIFICATION_KINDS = ['request-approved', 'request-rejected', 'approval-needed', 'request-revoked',
-  'accounting-revoked', 'approved-cancelled', 'cf-expiry-reminder', 'cf-run-overdue', 'cf-manual-decision'];
+  'accounting-revoked', 'approved-cancelled', 'cf-expiry-reminder', 'cf-run-overdue', 'cf-manual-decision',
+  'time-corrected'];
 // Pages a link may point at (app.js openNotificationLink).
-const NOTIFICATION_LINK_PAGES = ['my-requests', 'approval', 'approval-history', 'leave', 'settings'];
+const NOTIFICATION_LINK_PAGES = ['my-requests', 'approval', 'approval-history', 'leave', 'settings', 'attendance'];
 // null on a read/parse failure or a non-array -- mutating callers fail closed (never overwrite it).
 function readNotifications() {
   try {
@@ -550,6 +551,32 @@ function badgeCountForUser(user) {
 function notifyLeaveStatusChange(oldStatus, leave) {
   const typeName = typeof getTypeLabel === 'function' ? getTypeLabel(leave.type, 'en') : leave.type;
   const users = readUsers() || [];
+  // 2026-10-02 (owner): a time correction entered by MD/Accounting on somebody else's record is
+  // not a request that person made, so the generic "Your request has been approved" told them
+  // nothing -- they were left to notice a changed time on their own. They are told what changed,
+  // on which day, by whom, and why. Only for a correction created already-approved by a reviewer:
+  // one the employee submitted themselves still follows the ordinary approved/rejected path.
+  if (leave.type === 'time-correction' && oldStatus === null && leave.status === 'approved' && leave.approver) {
+    const target = users.find(u => u.id === leave.userId);
+    const fieldEn = leave.correctionField === 'checkOut' ? 'check-out' : 'check-in';
+    sendPushToUser(leave.userId, {
+      title: 'Attendance time corrected',
+      body: `${leave.approver} set your ${fieldEn} on ${leave.dateFrom} to ${leave.correctedTime}`
+        + (leave.reason ? ` — ${leave.reason}` : ''),
+      tag: 'ta-time-correction',
+      url: '/',
+      badge: badgeCountForUser(target),
+    }, {
+      kind: 'time-corrected',
+      params: {
+        leaveId: leave.id, date: leave.dateFrom, field: leave.correctionField === 'checkOut' ? 'checkOut' : 'checkIn',
+        originalTime: leave.originalTime || '', correctedTime: leave.correctedTime || '',
+        by: leave.approver || '', reason: leave.reason || '',
+      },
+      link: { page: 'attendance' },
+    });
+    return;
+  }
   if (leave.status === 'approved' || leave.status === 'rejected') {
     const emp = users.find(u => u.id === leave.userId);
     sendPushToUser(leave.userId, {

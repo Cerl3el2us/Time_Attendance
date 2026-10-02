@@ -204,6 +204,7 @@ function clientRenderer(lang) {
 }
 const SAMPLE = {
   'request-approved': { type: 'ot', dateFrom: '2027-11-02', dateTo: '2027-11-02', leaveId: 1 },
+  'time-corrected': { leaveId: 9, date: '2027-11-02', field: 'checkIn', originalTime: '06:56', correctedTime: '08:31', by: 'Acc', reason: 'slept at the office' },
   'request-rejected': { type: 'annual', dateFrom: '2027-11-02', dateTo: '2027-11-04' },
   'approval-needed': { type: 'ot', dateFrom: '2027-11-02', employeeName: 'Somchai' },
   'request-revoked': { type: 'holiday-work', dateFrom: '2027-11-06', by: 'Acc', reason: 'wrong day', also: [{ type: 'late-out', dateFrom: '2027-11-06' }] },

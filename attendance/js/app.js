@@ -15543,6 +15543,20 @@ function notifReasonText(reason) {
 // Plain text + icon for one item, in the CURRENT language. Pure apart from the label helpers.
 // Every server kind (server.js NOTIFICATION_KINDS) has a renderer; anything else is generic.
 const NOTIFICATION_RENDERERS = {
+  // 2026-10-02 (owner): MD/Accounting corrected this person's scan time. They did not ask for it,
+  // so the message has to carry the whole fact: which time, which day, from what to what, by whom
+  // and why -- otherwise the only way to find out is to notice the number changed.
+  'time-corrected': p => {
+    const fld = p.field === 'checkOut'
+      ? (currentLang === 'ja' ? '退勤時刻' : L('check-out', 'เวลาออกงาน'))
+      : (currentLang === 'ja' ? '出勤時刻' : L('check-in', 'เวลาเข้างาน'));
+    const from = p.originalTime && p.originalTime !== '—' ? p.originalTime : '—';
+    const why = p.reason ? (currentLang === 'ja' ? `（理由: ${p.reason}）` : L(`(reason: ${p.reason})`, `(เหตุผล: ${p.reason})`)) : '';
+    return { icon: '🔧', text: currentLang === 'ja'
+      ? `${p.by} が ${notifDateRange(p.date, p.date)} の${fld}を ${from} から ${p.correctedTime} に修正しました${why}`
+      : L(`${p.by} changed your ${fld} on ${notifDateRange(p.date, p.date)} from ${from} to ${p.correctedTime} ${why}`,
+          `${p.by} แก้${fld}วันที่ ${notifDateRange(p.date, p.date)} จาก ${from} เป็น ${p.correctedTime} ${why}`) };
+  },
   'request-approved': p => ({ icon: '✅', text: currentLang === 'ja'
     ? `${notifTypeLabel(p.type)}の申請（${notifDateRange(p.dateFrom, p.dateTo)}）が承認されました`
     : L(`Your ${notifTypeLabel(p.type)} request (${notifDateRange(p.dateFrom, p.dateTo)}) was approved`,
@@ -15694,7 +15708,9 @@ function openNotificationLink(link) {
     if (leave && (currentPage === 'leave' || currentPage === 'my-requests')) showLeaveDetail(leave.id);
     return;
   }
-  if (['leave', 'settings'].includes(link.page)) navigateTo(link.page);
+  // 2026-10-02: 'attendance' joins the list so a time-correction notice opens the table the
+  // changed time is actually on, rather than doing nothing when tapped.
+  if (['leave', 'settings', 'attendance'].includes(link.page)) navigateTo(link.page);
 }
 
 function onTopbarBellClick() {
