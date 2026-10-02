@@ -4998,6 +4998,34 @@ function renderSettingsPage(_skipRefresh) {
         field(L('Check-in before (×1 rate)','เช็กอินก่อนกี่โมงได้ ×1'), `<input id="set-early-thr1" type="time" value="${minsToTime(s.allowances.earlyThreshold1Min)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 07:30','เช่น 07:30')),
         field(L('Check-in before (×2 rate)','เช็กอินก่อนกี่โมงได้ ×2'), `<input id="set-early-thr2" type="time" value="${minsToTime(s.allowances.earlyThreshold2Min)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 06:30','เช่น 06:30'))
       )}
+      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Late Night Bonus','เบี้ยเลี้ยงกลับดึก')}</div>
+      ${row2(
+        field(L('×1 (late night) ฿','×1 (แจ้งกลับดึก) ฿'), inp('set-late1-amt', s.allowances.lateNight1, 'number')),
+        field(L('×2 (very late night) ฿','×2 (แจ้งกลับดึกมาก) ฿'), inp('set-late2-amt', s.allowances.lateNight2, 'number'))
+      )}
+      ${row2(
+        field(L('Holiday transport (฿/day)','ค่าเดินทางวันหยุด (฿/วัน)'), inp('set-holiday-transport', s.allowances.holidayTransport != null ? s.allowances.holidayTransport : 500, 'number'), L('Paid holiday-work compensation mode only','เฉพาะโหมดชดเชยเป็นเงินเท่านั้น')),
+        field('', '')
+      )}
+      ${row2(
+        field(L('Check-out from (×1 rate)','เช็กเอาท์ตั้งแต่กี่โมงได้ ×1'), `<input id="set-late-thr1" type="time" value="${String(lateNightThresholdHourOf(s.allowances, 1)).padStart(2,'0')}:00" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 19:00','เช่น 19:00')),
+        field(L('Check-out from (×2 rate)','เช็กเอาท์ตั้งแต่กี่โมงได้ ×2'), `<input id="set-late-thr2" type="time" value="${String(lateNightThresholdHourOf(s.allowances, 2)).padStart(2,'0')}:00" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 20:00','เช่น 20:00'))
+      )}
+      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Diligence / Personal Car','เบี้ยขยัน / ค่าใช้รถส่วนตัว')}</div>
+      ${row2(
+        field(L('Diligence Allowance (฿/month)','เบี้ยขยัน (฿/เดือน)'), inp('set-diligence-amt', s.allowances.diligence, 'number'), L('who gets it is set in Allowance Eligibility below','ใครได้บ้างตั้งได้ที่สิทธิ์เบี้ยเลี้ยงด้านล่าง')),
+        field(L('Personal Car (฿/time)','ค่าใช้รถส่วนตัว (฿/ครั้ง)'), inp('set-personalcar-amt', s.allowances.personalCar, 'number'), L('also needs the per-employee eligibility checkbox','ต้องติ๊กสิทธิ์รายคนในหน้าข้อมูลพนักงานด้วย'))
+      )}
+      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Long Distance','Long Distance')}</div>
+      ${row2(
+        field(L('Allowance (฿/day)','เบี้ยเลี้ยง (฿/วัน)'), inp('set-longdistance-amt', s.allowances.longDistance, 'number')),
+        field(L('Minimum distance (km)','ระยะทางขั้นต่ำ (กม.)'), inp('set-longdistance-threshold', s.allowances.longDistanceThresholdKm, 'number'))
+      )}
+      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Phone Allowance','เบี้ยเลี้ยงค่าโทรศัพท์')}</div>
+      ${row2(
+        field(L('Phone Allowance (฿/month)','ค่าโทรศัพท์ (฿/เดือน)'), inp('set-phone-amt', s.allowances.phone, 'number'), L('also needs the per-employee eligibility checkbox','ต้องติ๊กสิทธิ์รายคนในหน้าข้อมูลพนักงานด้วย')),
+        field('', '')
+      )}
 
     `)}
 
@@ -5082,34 +5110,6 @@ function renderSettingsPage(_skipRefresh) {
       ${row2(
         field(L('Ignore a pass sooner than (minutes)','ไม่นับ ถ้าห่างจากเวลาเข้างานไม่ถึง (นาที)'), inp('set-mr-gap', morningReviewWindowOf(s.allowances).minGap, 'number', 'min="0" max="480" step="5"'), L('grace period — a pass this soon after check-in is not counted','ช่วงผ่อนผัน — ผ่านประตูภายในเวลานี้หลังเข้างาน จะไม่ถูกนับ')),
         ''
-      )}
-      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Late Night Bonus','เบี้ยเลี้ยงกลับดึก')}</div>
-      ${row2(
-        field(L('×1 (late night) ฿','×1 (แจ้งกลับดึก) ฿'), inp('set-late1-amt', s.allowances.lateNight1, 'number')),
-        field(L('×2 (very late night) ฿','×2 (แจ้งกลับดึกมาก) ฿'), inp('set-late2-amt', s.allowances.lateNight2, 'number'))
-      )}
-      ${row2(
-        field(L('Holiday transport (฿/day)','ค่าเดินทางวันหยุด (฿/วัน)'), inp('set-holiday-transport', s.allowances.holidayTransport != null ? s.allowances.holidayTransport : 500, 'number'), L('Paid holiday-work compensation mode only','เฉพาะโหมดชดเชยเป็นเงินเท่านั้น')),
-        field('', '')
-      )}
-      ${row2(
-        field(L('Check-out from (×1 rate)','เช็กเอาท์ตั้งแต่กี่โมงได้ ×1'), `<input id="set-late-thr1" type="time" value="${String(lateNightThresholdHourOf(s.allowances, 1)).padStart(2,'0')}:00" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 19:00','เช่น 19:00')),
-        field(L('Check-out from (×2 rate)','เช็กเอาท์ตั้งแต่กี่โมงได้ ×2'), `<input id="set-late-thr2" type="time" value="${String(lateNightThresholdHourOf(s.allowances, 2)).padStart(2,'0')}:00" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 20:00','เช่น 20:00'))
-      )}
-      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Diligence / Personal Car','เบี้ยขยัน / ค่าใช้รถส่วนตัว')}</div>
-      ${row2(
-        field(L('Diligence Allowance (฿/month)','เบี้ยขยัน (฿/เดือน)'), inp('set-diligence-amt', s.allowances.diligence, 'number'), L('who gets it is set in Allowance Eligibility below','ใครได้บ้างตั้งได้ที่สิทธิ์เบี้ยเลี้ยงด้านล่าง')),
-        field(L('Personal Car (฿/time)','ค่าใช้รถส่วนตัว (฿/ครั้ง)'), inp('set-personalcar-amt', s.allowances.personalCar, 'number'), L('also needs the per-employee eligibility checkbox','ต้องติ๊กสิทธิ์รายคนในหน้าข้อมูลพนักงานด้วย'))
-      )}
-      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Long Distance','Long Distance')}</div>
-      ${row2(
-        field(L('Allowance (฿/day)','เบี้ยเลี้ยง (฿/วัน)'), inp('set-longdistance-amt', s.allowances.longDistance, 'number')),
-        field(L('Minimum distance (km)','ระยะทางขั้นต่ำ (กม.)'), inp('set-longdistance-threshold', s.allowances.longDistanceThresholdKm, 'number'))
-      )}
-      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Phone Allowance','เบี้ยเลี้ยงค่าโทรศัพท์')}</div>
-      ${row2(
-        field(L('Phone Allowance (฿/month)','ค่าโทรศัพท์ (฿/เดือน)'), inp('set-phone-amt', s.allowances.phone, 'number'), L('also needs the per-employee eligibility checkbox','ต้องติ๊กสิทธิ์รายคนในหน้าข้อมูลพนักงานด้วย')),
-        field('', '')
       )}
     `)}
 
