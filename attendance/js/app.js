@@ -14418,7 +14418,11 @@ function reviewBoxesRow() {
     // 2026-10-02 (owner): equal WIDTH, natural height. Stretching them to match heights left
     // the shorter card holding a block of empty space, which looks like something failed to
     // load; a card with one row in it should simply be short.
-    row.style.cssText = 'display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start;margin-bottom:14px';
+    // align-self:stretch and width:100%: the parent #approval-summary-bar is a COLUMN flex with
+    // align-items:flex-start, so a child sizes to its own content and stops there -- which is
+    // why this row sat short of the page no matter what the cards inside it asked for. The
+    // other children of that bar carry the same stretch for the same reason.
+    row.style.cssText = 'display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start;align-self:stretch;width:100%;margin-bottom:14px';
     summEl.insertBefore(row, summEl.firstChild);
   }
   return row;
