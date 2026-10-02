@@ -5057,6 +5057,62 @@ function renderSettingsPage(_skipRefresh) {
       )}
     `)}
 
+    ${adminSection('time', '🌅', L('Early morning review','ตรวจสอบการมาเช้า'), `
+      ${''/* 2026-10-02 (owner): the first window is not a field -- it is the business-day start
+           and the x1 threshold, so a separate setting could be left disagreeing with the rate and
+           quietly leave a paid day that nothing ever reviews. It is still worth SEEING, so it is
+           stated here, read-only, from the live values, next to the window that is editable. */}
+      <div style="font-size:12.5px;line-height:1.7;color:var(--text);background:var(--bg-soft,#f8fafc);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:12px">
+        ${currentLang === 'ja'
+          ? `<b>① 対象となる出勤</b>：${minsToTime(BUSINESS_DAY_START_MINS)}〜${minsToTime(s.allowances.earlyThreshold1Min)}（早朝手当の対象時間。下の閾値に連動）<br>
+             <b>② 再通過の確認</b>：${minsToTime(morningReviewWindowOf(s.allowances).start)}〜${minsToTime(morningReviewWindowOf(s.allowances).end)} に再びドアを通過した場合、その日の手当は確認まで保留されます`
+          : L(`<b>1. Days this looks at</b>: a check-in between ${minsToTime(BUSINESS_DAY_START_MINS)} and ${minsToTime(s.allowances.earlyThreshold1Min)} — the hours that earn the allowance. Not a setting: it follows the thresholds above, so no paid day can fall outside it.<br>
+               <b>2. What holds the allowance</b>: another door pass between ${minsToTime(morningReviewWindowOf(s.allowances).start)} and ${minsToTime(morningReviewWindowOf(s.allowances).end)}. That day's allowance is then held until somebody decides.`,
+              `<b>1. ตรวจวันไหนบ้าง</b>: วันที่เข้างานระหว่าง ${minsToTime(BUSINESS_DAY_START_MINS)}–${minsToTime(s.allowances.earlyThreshold1Min)} ซึ่งเป็นช่วงที่ได้เบี้ยมาเช้า — ตั้งค่าไม่ได้เพราะผูกกับเกณฑ์ด้านบน จะได้ไม่มีวันที่ได้เงินแล้วหลุดการตรวจ<br>
+               <b>2. อะไรทำให้พักเบี้ย</b>: ผ่านประตูอีกครั้งระหว่าง ${minsToTime(morningReviewWindowOf(s.allowances).start)}–${minsToTime(morningReviewWindowOf(s.allowances).end)} เบี้ยของวันนั้นจะถูกพักไว้จนกว่าจะมีคนตัดสิน`)}
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;margin:0 0 12px;font-size:13px;font-weight:600;color:#374151;cursor:pointer">
+        <input id="set-mr-enabled" type="checkbox" ${s.allowances.morningReviewEnabled === false ? '' : 'checked'} style="width:18px;height:18px;cursor:pointer">
+        ${L('Hold the allowance for review when an early scan is followed by another door pass','พักเบี้ยไว้ตรวจสอบ เมื่อสแกนเช้าแล้วยังผ่านประตูอีกครั้ง')}
+      </label>
+      ${row2(
+        field(L('Look for another pass from','ตรวจการผ่านประตูตั้งแต่'), `<input id="set-mr-from" type="time" value="${minsToTime(morningReviewWindowOf(s.allowances).start)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 08:00','เช่น 08:00')),
+        field(L('until','ถึง'), `<input id="set-mr-to" type="time" value="${minsToTime(morningReviewWindowOf(s.allowances).end)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 12:00','เช่น 12:00'))
+      )}
+      ${row2(
+        field(L('Ignore a pass sooner than (minutes)','ไม่นับ ถ้าห่างจากเวลาเข้างานไม่ถึง (นาที)'), inp('set-mr-gap', morningReviewWindowOf(s.allowances).minGap, 'number', 'min="0" max="480" step="5"'), L('grace period — a pass this soon after check-in is not counted','ช่วงผ่อนผัน — ผ่านประตูภายในเวลานี้หลังเข้างาน จะไม่ถูกนับ')),
+        ''
+      )}
+      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Late Night Bonus','เบี้ยเลี้ยงกลับดึก')}</div>
+      ${row2(
+        field(L('×1 (late night) ฿','×1 (แจ้งกลับดึก) ฿'), inp('set-late1-amt', s.allowances.lateNight1, 'number')),
+        field(L('×2 (very late night) ฿','×2 (แจ้งกลับดึกมาก) ฿'), inp('set-late2-amt', s.allowances.lateNight2, 'number'))
+      )}
+      ${row2(
+        field(L('Holiday transport (฿/day)','ค่าเดินทางวันหยุด (฿/วัน)'), inp('set-holiday-transport', s.allowances.holidayTransport != null ? s.allowances.holidayTransport : 500, 'number'), L('Paid holiday-work compensation mode only','เฉพาะโหมดชดเชยเป็นเงินเท่านั้น')),
+        field('', '')
+      )}
+      ${row2(
+        field(L('Check-out from (×1 rate)','เช็กเอาท์ตั้งแต่กี่โมงได้ ×1'), `<input id="set-late-thr1" type="time" value="${String(lateNightThresholdHourOf(s.allowances, 1)).padStart(2,'0')}:00" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 19:00','เช่น 19:00')),
+        field(L('Check-out from (×2 rate)','เช็กเอาท์ตั้งแต่กี่โมงได้ ×2'), `<input id="set-late-thr2" type="time" value="${String(lateNightThresholdHourOf(s.allowances, 2)).padStart(2,'0')}:00" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 20:00','เช่น 20:00'))
+      )}
+      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Diligence / Personal Car','เบี้ยขยัน / ค่าใช้รถส่วนตัว')}</div>
+      ${row2(
+        field(L('Diligence Allowance (฿/month)','เบี้ยขยัน (฿/เดือน)'), inp('set-diligence-amt', s.allowances.diligence, 'number'), L('who gets it is set in Allowance Eligibility below','ใครได้บ้างตั้งได้ที่สิทธิ์เบี้ยเลี้ยงด้านล่าง')),
+        field(L('Personal Car (฿/time)','ค่าใช้รถส่วนตัว (฿/ครั้ง)'), inp('set-personalcar-amt', s.allowances.personalCar, 'number'), L('also needs the per-employee eligibility checkbox','ต้องติ๊กสิทธิ์รายคนในหน้าข้อมูลพนักงานด้วย'))
+      )}
+      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Long Distance','Long Distance')}</div>
+      ${row2(
+        field(L('Allowance (฿/day)','เบี้ยเลี้ยง (฿/วัน)'), inp('set-longdistance-amt', s.allowances.longDistance, 'number')),
+        field(L('Minimum distance (km)','ระยะทางขั้นต่ำ (กม.)'), inp('set-longdistance-threshold', s.allowances.longDistanceThresholdKm, 'number'))
+      )}
+      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Phone Allowance','เบี้ยเลี้ยงค่าโทรศัพท์')}</div>
+      ${row2(
+        field(L('Phone Allowance (฿/month)','ค่าโทรศัพท์ (฿/เดือน)'), inp('set-phone-amt', s.allowances.phone, 'number'), L('also needs the per-employee eligibility checkbox','ต้องติ๊กสิทธิ์รายคนในหน้าข้อมูลพนักงานด้วย')),
+        field('', '')
+      )}
+    `)}
+
     ${adminSection('time', '📍', L('Area where web check-in is blocked','พื้นที่ห้ามเช็คอินผ่านเว็บ'), `
       <label style="display:flex;align-items:center;gap:8px;margin:0 0 12px;font-size:13px;font-weight:600;color:#374151;cursor:pointer">
         <input id="set-geo-enabled" type="checkbox" ${s.geofence.enabled ? 'checked' : ''} style="width:18px;height:18px;cursor:pointer">
@@ -5161,62 +5217,6 @@ function renderSettingsPage(_skipRefresh) {
         <input id="allowance-type-input" type="text" placeholder="${L('Category name...','ชื่อหมวดหมู่...')}" onkeydown="if(event.key==='Enter')addAllowanceType()" style="flex:1;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px">
         <button type="button" class="btn btn-primary btn-sm" onclick="addAllowanceType()">+ ${L('Add','เพิ่ม')}</button>
       </div>
-    `)}
-
-    ${adminSection('time', '🌅', L('Early morning review','ตรวจสอบการมาเช้า'), `
-      ${''/* 2026-10-02 (owner): the first window is not a field -- it is the business-day start
-           and the x1 threshold, so a separate setting could be left disagreeing with the rate and
-           quietly leave a paid day that nothing ever reviews. It is still worth SEEING, so it is
-           stated here, read-only, from the live values, next to the window that is editable. */}
-      <div style="font-size:12.5px;line-height:1.7;color:var(--text);background:var(--bg-soft,#f8fafc);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:12px">
-        ${currentLang === 'ja'
-          ? `<b>① 対象となる出勤</b>：${minsToTime(BUSINESS_DAY_START_MINS)}〜${minsToTime(s.allowances.earlyThreshold1Min)}（早朝手当の対象時間。下の閾値に連動）<br>
-             <b>② 再通過の確認</b>：${minsToTime(morningReviewWindowOf(s.allowances).start)}〜${minsToTime(morningReviewWindowOf(s.allowances).end)} に再びドアを通過した場合、その日の手当は確認まで保留されます`
-          : L(`<b>1. Days this looks at</b>: a check-in between ${minsToTime(BUSINESS_DAY_START_MINS)} and ${minsToTime(s.allowances.earlyThreshold1Min)} — the hours that earn the allowance. Not a setting: it follows the thresholds above, so no paid day can fall outside it.<br>
-               <b>2. What holds the allowance</b>: another door pass between ${minsToTime(morningReviewWindowOf(s.allowances).start)} and ${minsToTime(morningReviewWindowOf(s.allowances).end)}. That day's allowance is then held until somebody decides.`,
-              `<b>1. ตรวจวันไหนบ้าง</b>: วันที่เข้างานระหว่าง ${minsToTime(BUSINESS_DAY_START_MINS)}–${minsToTime(s.allowances.earlyThreshold1Min)} ซึ่งเป็นช่วงที่ได้เบี้ยมาเช้า — ตั้งค่าไม่ได้เพราะผูกกับเกณฑ์ด้านบน จะได้ไม่มีวันที่ได้เงินแล้วหลุดการตรวจ<br>
-               <b>2. อะไรทำให้พักเบี้ย</b>: ผ่านประตูอีกครั้งระหว่าง ${minsToTime(morningReviewWindowOf(s.allowances).start)}–${minsToTime(morningReviewWindowOf(s.allowances).end)} เบี้ยของวันนั้นจะถูกพักไว้จนกว่าจะมีคนตัดสิน`)}
-      </div>
-      <label style="display:flex;align-items:center;gap:8px;margin:0 0 12px;font-size:13px;font-weight:600;color:#374151;cursor:pointer">
-        <input id="set-mr-enabled" type="checkbox" ${s.allowances.morningReviewEnabled === false ? '' : 'checked'} style="width:18px;height:18px;cursor:pointer">
-        ${L('Hold the allowance for review when an early scan is followed by another door pass','พักเบี้ยไว้ตรวจสอบ เมื่อสแกนเช้าแล้วยังผ่านประตูอีกครั้ง')}
-      </label>
-      ${row2(
-        field(L('Look for another pass from','ตรวจการผ่านประตูตั้งแต่'), `<input id="set-mr-from" type="time" value="${minsToTime(morningReviewWindowOf(s.allowances).start)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 08:00','เช่น 08:00')),
-        field(L('until','ถึง'), `<input id="set-mr-to" type="time" value="${minsToTime(morningReviewWindowOf(s.allowances).end)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 12:00','เช่น 12:00'))
-      )}
-      ${row2(
-        field(L('Ignore a pass sooner than (minutes)','ไม่นับ ถ้าห่างจากเวลาเข้างานไม่ถึง (นาที)'), inp('set-mr-gap', morningReviewWindowOf(s.allowances).minGap, 'number', 'min="0" max="480" step="5"'), L('grace period — a pass this soon after check-in is not counted','ช่วงผ่อนผัน — ผ่านประตูภายในเวลานี้หลังเข้างาน จะไม่ถูกนับ')),
-        ''
-      )}
-      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Late Night Bonus','เบี้ยเลี้ยงกลับดึก')}</div>
-      ${row2(
-        field(L('×1 (late night) ฿','×1 (แจ้งกลับดึก) ฿'), inp('set-late1-amt', s.allowances.lateNight1, 'number')),
-        field(L('×2 (very late night) ฿','×2 (แจ้งกลับดึกมาก) ฿'), inp('set-late2-amt', s.allowances.lateNight2, 'number'))
-      )}
-      ${row2(
-        field(L('Holiday transport (฿/day)','ค่าเดินทางวันหยุด (฿/วัน)'), inp('set-holiday-transport', s.allowances.holidayTransport != null ? s.allowances.holidayTransport : 500, 'number'), L('Paid holiday-work compensation mode only','เฉพาะโหมดชดเชยเป็นเงินเท่านั้น')),
-        field('', '')
-      )}
-      ${row2(
-        field(L('Check-out from (×1 rate)','เช็กเอาท์ตั้งแต่กี่โมงได้ ×1'), `<input id="set-late-thr1" type="time" value="${String(lateNightThresholdHourOf(s.allowances, 1)).padStart(2,'0')}:00" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 19:00','เช่น 19:00')),
-        field(L('Check-out from (×2 rate)','เช็กเอาท์ตั้งแต่กี่โมงได้ ×2'), `<input id="set-late-thr2" type="time" value="${String(lateNightThresholdHourOf(s.allowances, 2)).padStart(2,'0')}:00" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 20:00','เช่น 20:00'))
-      )}
-      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Diligence / Personal Car','เบี้ยขยัน / ค่าใช้รถส่วนตัว')}</div>
-      ${row2(
-        field(L('Diligence Allowance (฿/month)','เบี้ยขยัน (฿/เดือน)'), inp('set-diligence-amt', s.allowances.diligence, 'number'), L('who gets it is set in Allowance Eligibility below','ใครได้บ้างตั้งได้ที่สิทธิ์เบี้ยเลี้ยงด้านล่าง')),
-        field(L('Personal Car (฿/time)','ค่าใช้รถส่วนตัว (฿/ครั้ง)'), inp('set-personalcar-amt', s.allowances.personalCar, 'number'), L('also needs the per-employee eligibility checkbox','ต้องติ๊กสิทธิ์รายคนในหน้าข้อมูลพนักงานด้วย'))
-      )}
-      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Long Distance','Long Distance')}</div>
-      ${row2(
-        field(L('Allowance (฿/day)','เบี้ยเลี้ยง (฿/วัน)'), inp('set-longdistance-amt', s.allowances.longDistance, 'number')),
-        field(L('Minimum distance (km)','ระยะทางขั้นต่ำ (กม.)'), inp('set-longdistance-threshold', s.allowances.longDistanceThresholdKm, 'number'))
-      )}
-      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Phone Allowance','เบี้ยเลี้ยงค่าโทรศัพท์')}</div>
-      ${row2(
-        field(L('Phone Allowance (฿/month)','ค่าโทรศัพท์ (฿/เดือน)'), inp('set-phone-amt', s.allowances.phone, 'number'), L('also needs the per-employee eligibility checkbox','ต้องติ๊กสิทธิ์รายคนในหน้าข้อมูลพนักงานด้วย')),
-        field('', '')
-      )}
     `)}
 
     ${adminSection('time', '⏰', L('Late Arrival Deduction Policy','นโยบายหักวันลาจากการมาสาย'), `
