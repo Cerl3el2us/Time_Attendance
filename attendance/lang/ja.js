@@ -1423,6 +1423,12 @@ window.LANG_JA = {
   "Web check-out review": "Web退勤の確認",
   // 2026-10-02 (owner): the morning review -- the twin of the Web check-out review above.
   "Early morning review": "早朝出勤の確認",
+  "awaiting review": "確認待ち",
+  "not paid": "不支給",
+  "held until reviewed": "確認まで保留",
+  "reviewed and not paid": "確認済み・不支給",
+  "Allowed — undo": "支給済み — 取消",
+  "Not allowed — undo": "不支給 — 取消",
   "Genuine early start — pay the allowance": "本当に早朝出勤 — 手当を支給",
   "Not a real early start — set the real check-in time": "早朝出勤ではない — 実際の出勤時刻に修正",
   "❌ Not a real early start": "❌ 早朝出勤ではない",

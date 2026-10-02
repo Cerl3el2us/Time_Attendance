@@ -9612,7 +9612,25 @@ function renderAttendanceTable() {
         const bonus = mins <= (_ATallowances.earlyThreshold2Min || 390)
           ? `฿${_ATallowances.earlyMorning2 || 480}`
           : `฿${_ATallowances.earlyMorning1 || 240}`;
-        earlyBadge = attAllowIcon('🌅', `${L('Early Morning', 'Early Morning')} ${row.checkIn} (${bonus})`);
+        // 2026-10-02 (owner): the 🌅 kept its normal look while the money behind it was being
+        // held, so the row read as "paid" on a day nothing had been paid for. A held day says so
+        // on its face -- greyed, with (awaiting review) next to it -- and a refused one says that
+        // too, instead of both looking exactly like a day that paid.
+        const _mrState = row.morningReviewNeeded
+          ? (row.morningReview === 'allow' ? 'paid' : row.morningReview === 'deny' ? 'denied' : 'held')
+          : 'paid';
+        if (_mrState === 'paid') {
+          earlyBadge = attAllowIcon('🌅', `${L('Early Morning', 'Early Morning')} ${row.checkIn} (${bonus})`);
+        } else {
+          const _held = _mrState === 'held'
+            ? L('awaiting review', 'รอตรวจสอบ')
+            : L('not paid', 'ไม่จ่าย');
+          const _tip = _mrState === 'held'
+            ? `${L('Early Morning', 'Early Morning')} ${row.checkIn} (${bonus}) — ${L('held until reviewed', 'พักไว้จนกว่าจะตรวจสอบ')}`
+            : `${L('Early Morning', 'Early Morning')} ${row.checkIn} — ${L('reviewed and not paid', 'ตรวจสอบแล้ว ไม่จ่าย')}`;
+          earlyBadge = `<span class="att-allow-icon" style="opacity:.45" title="${escapeHtml(_tip)}">🌅</span>` +
+            `<span style="font-size:10px;color:#92400e;margin-left:2px;white-space:nowrap">(${escapeHtml(_held)})</span>`;
+        }
       }
       // Check-in before 06:00 is often a false read (e.g. a door scan while someone lingered
       // overnight, not a real early arrival) — flag it for MD/Accounting to verify manually.
