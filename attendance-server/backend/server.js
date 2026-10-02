@@ -4823,6 +4823,15 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
     }
     body.appSettings = merged;
   }
+  // 2026-10-02 (owner): the Early Morning times are only meaningful in order, and nothing further
+  // down notices when they are not -- the app simply starts paying the wrong rate, for everybody,
+  // until somebody spots it on a payslip. Checked against the MERGED settings above, so a request
+  // that changes only one of them is judged against the values it will actually sit beside. The
+  // Settings page runs the same function before it sends; this is the one that counts.
+  if (body.appSettings && body.appSettings.allowances) {
+    const ordErr = morningReviewSettingsError(body.appSettings.allowances, BUSINESS_DAY_START_MINS);
+    if (ordErr) return res.status(400).json({ success: false, message: ordErr });
+  }
   if (body.appSettings) {
     body.appSettings.updatedAt = new Date().toISOString();
   }
@@ -9275,6 +9284,25 @@ function deviceScanQualifiesForEarlyMorning(d, holidayWorkDateSet) {
 // That is a signal, not a proof -- somebody who genuinely started at 06:30 and stepped out for
 // breakfast looks identical -- so it raises a flag for Accounting rather than cutting the money.
 // The window is in Settings because the shape of a working morning is a business decision.
+// 2026-10-02 (owner): the Early Morning times only mean anything in a particular order, and
+// nothing in the app notices when they are not: it just starts paying the wrong rate. The order
+// is the business day start, then the x2 threshold, then x1, then the review window, which must
+// sit after the last time that still earns anything. Returns a message, or '' when it is sound.
+function morningReviewSettingsError(allowances, dayStartMins) {
+  const a = allowances || {};
+  const thr2 = a.earlyThreshold2Min, thr1 = a.earlyThreshold1Min;
+  const w = morningReviewWindowOf(a);
+  // its own formatter: minsToTime() is a client-side helper and this text has to be identical in
+  // both files for the dual-sync check to pass.
+  const hhmm = m => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  if (!Number.isFinite(thr2) || !Number.isFinite(thr1)) return 'Early Morning thresholds must both be times';
+  if (thr2 < dayStartMins) return `The x2 threshold cannot be earlier than the start of the working day (${hhmm(dayStartMins)})`;
+  if (thr2 >= thr1) return 'The x2 threshold must be earlier than the x1 threshold';
+  if (w.start <= thr1) return `The review window must start after the x1 threshold (${hhmm(thr1)})`;
+  if (w.start >= w.end) return 'The review window must end after it starts';
+  if (!Number.isFinite(w.minGap) || w.minGap < 0) return 'The minimum gap must be zero or more minutes';
+  return '';
+}
 function morningReviewWindowOf(allowances) {
   const a = allowances || {};
   const start = Number.isFinite(a.morningReviewWindowStartMin) ? a.morningReviewWindowStartMin : 480; // 08:00

@@ -42,7 +42,7 @@ function extractConstObject(src, name) {
 const FNS = ['isAllowanceEligible', 'isDeviceScanSource', 'isEarlyMorningDayStatus',
   'isFullDayPersonalLeaveStatus', 'isRestAttendanceDay', 'parseHHMMToMins',
   'morningReviewWindowOf', 'morningReviewTrigger', 'morningReviewDecisionFor',
-  'earlyMorningCheckInOk', 'deviceScanQualifiesForEarlyMorning'];
+  'earlyMorningCheckInOk', 'deviceScanQualifiesForEarlyMorning', 'morningReviewSettingsError'];
 function load(src) {
   const ctx = { HHMM_RE: /^([01][0-9]|2[0-3]):[0-5][0-9]$/ };
   vm.createContext(ctx);
@@ -167,6 +167,52 @@ test('the review window is configurable, and the defaults are 08:00-12:00', () =
   }
 });
 
+test('the rule can be switched off from Settings', () => {
+  for (const [side, X] of SIDES) {
+    const off = { ...S, allowances: { ...S.allowances, morningReviewEnabled: false } };
+    assert.strictEqual(X.morningReviewTrigger(day(), USER, off, ['06:30', '08:31'], null), false, `${side} off`);
+    const on = { ...S, allowances: { ...S.allowances, morningReviewEnabled: true } };
+    assert.strictEqual(X.morningReviewTrigger(day(), USER, on, ['06:30', '08:31'], null), true, `${side} on`);
+    assert.strictEqual(X.morningReviewTrigger(day(), USER, S, ['06:30', '08:31'], null), true, `${side} unset means on`);
+  }
+});
+
+// Stepping outside to take a delivery and coming straight back is not going home. Every flagged
+// day in the real history sat more than an hour apart, so 30 minutes loses none of them.
+test('a pass that comes back too soon is not treated as a return', () => {
+  for (const [side, X] of SIDES) {
+    const g = n => ({ ...S, allowances: { ...S.allowances, morningReviewMinGapMin: n } });
+    // 07:30 is the latest check-in that still earns, and the window opens at 08:00, so with
+    // today's values the smallest gap that can ever occur is exactly 30 minutes.
+    assert.strictEqual(X.morningReviewTrigger(day({ checkIn: '07:30' }), USER, g(45), ['07:30', '08:00'], null), false, `${side} 30 min is under a 45-minute gap`);
+    assert.strictEqual(X.morningReviewTrigger(day({ checkIn: '07:30' }), USER, g(30), ['07:30', '08:00'], null), true, `${side} exactly the gap counts`);
+    assert.strictEqual(X.morningReviewTrigger(day({ checkIn: '07:30' }), USER, g(0),  ['07:30', '08:00'], null), true, `${side} a zero gap keeps the old behaviour`);
+    assert.strictEqual(X.morningReviewTrigger(day({ checkIn: '06:30' }), USER, g(120), ['06:30', '08:10'], null), false, `${side} 100 min is under a two-hour gap`);
+    assert.strictEqual(X.morningReviewTrigger(day({ checkIn: '06:30' }), USER, g(120), ['06:30', '08:35'], null), true, `${side} 125 min clears it`);
+    const def = X.morningReviewWindowOf({});
+    assert.strictEqual(def.minGap, 30, `${side} default gap`);
+  }
+});
+
+console.log('Morning review: Settings that contradict each other');
+
+// Out of order, nothing errors on its own -- the app just starts paying the wrong rate, quietly,
+// for everyone. These are the only thing standing between a typo and a wrong payroll.
+test('the thresholds and the window are refused when they are out of order', () => {
+  for (const [side, X] of SIDES) {
+    const A = o => ({ earlyThreshold2Min: 390, earlyThreshold1Min: 450,
+      morningReviewWindowStartMin: 480, morningReviewWindowEndMin: 720, morningReviewMinGapMin: 30, ...o });
+    assert.strictEqual(X.morningReviewSettingsError(A(), 330), '', `${side} today's values are sound`);
+    assert.ok(X.morningReviewSettingsError(A({ earlyThreshold2Min: 480 }), 330), `${side} x2 after x1`);
+    assert.ok(X.morningReviewSettingsError(A({ earlyThreshold2Min: 450 }), 330), `${side} x2 equal to x1`);
+    assert.ok(X.morningReviewSettingsError(A({ earlyThreshold2Min: 300 }), 330), `${side} x2 before the day starts`);
+    assert.ok(X.morningReviewSettingsError(A({ morningReviewWindowStartMin: 420 }), 330), `${side} window starts before x1`);
+    assert.ok(X.morningReviewSettingsError(A({ morningReviewWindowStartMin: 700, morningReviewWindowEndMin: 600 }), 330), `${side} window ends before it starts`);
+    assert.ok(X.morningReviewSettingsError(A({ morningReviewMinGapMin: -5 }), 330), `${side} negative gap`);
+    assert.ok(X.morningReviewSettingsError(A({ earlyThreshold1Min: null }), 330), `${side} a threshold that is not a time`);
+  }
+});
+
 console.log('Morning review: what the decision does to the money');
 
 test('a decision only counts while it still describes the day it was made about', () => {
@@ -205,7 +251,8 @@ test('the scan path stops paying while a flag is open, and resumes when it is al
 
 test('every new rule is byte-identical in app.js and server.js', () => {
   ['morningReviewWindowOf', 'morningReviewTrigger', 'morningReviewDecisionFor',
-   'earlyMorningCheckInOk', 'deviceScanQualifiesForEarlyMorning'].forEach(sameSource);
+   'earlyMorningCheckInOk', 'deviceScanQualifiesForEarlyMorning',
+   'morningReviewSettingsError'].forEach(sameSource);
 });
 
 console.log(`  ${passed} passed, ${process.exitCode ? 'FAILURES' : '0 failed'}`);

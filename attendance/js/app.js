@@ -1561,6 +1561,25 @@ function deviceScanQualifiesForEarlyMorning(d, holidayWorkDateSet) {
 // That is a signal, not a proof -- somebody who genuinely started at 06:30 and stepped out for
 // breakfast looks identical -- so it raises a flag for Accounting rather than cutting the money.
 // The window is in Settings because the shape of a working morning is a business decision.
+// 2026-10-02 (owner): the Early Morning times only mean anything in a particular order, and
+// nothing in the app notices when they are not: it just starts paying the wrong rate. The order
+// is the business day start, then the x2 threshold, then x1, then the review window, which must
+// sit after the last time that still earns anything. Returns a message, or '' when it is sound.
+function morningReviewSettingsError(allowances, dayStartMins) {
+  const a = allowances || {};
+  const thr2 = a.earlyThreshold2Min, thr1 = a.earlyThreshold1Min;
+  const w = morningReviewWindowOf(a);
+  // its own formatter: minsToTime() is a client-side helper and this text has to be identical in
+  // both files for the dual-sync check to pass.
+  const hhmm = m => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  if (!Number.isFinite(thr2) || !Number.isFinite(thr1)) return 'Early Morning thresholds must both be times';
+  if (thr2 < dayStartMins) return `The x2 threshold cannot be earlier than the start of the working day (${hhmm(dayStartMins)})`;
+  if (thr2 >= thr1) return 'The x2 threshold must be earlier than the x1 threshold';
+  if (w.start <= thr1) return `The review window must start after the x1 threshold (${hhmm(thr1)})`;
+  if (w.start >= w.end) return 'The review window must end after it starts';
+  if (!Number.isFinite(w.minGap) || w.minGap < 0) return 'The minimum gap must be zero or more minutes';
+  return '';
+}
 function morningReviewWindowOf(allowances) {
   const a = allowances || {};
   const start = Number.isFinite(a.morningReviewWindowStartMin) ? a.morningReviewWindowStartMin : 480; // 08:00
@@ -4978,6 +4997,20 @@ function renderSettingsPage(_skipRefresh) {
         field(L('Check-in before (×1 rate)','เช็กอินก่อนกี่โมงได้ ×1'), `<input id="set-early-thr1" type="time" value="${minsToTime(s.allowances.earlyThreshold1Min)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 07:30','เช่น 07:30')),
         field(L('Check-in before (×2 rate)','เช็กอินก่อนกี่โมงได้ ×2'), `<input id="set-early-thr2" type="time" value="${minsToTime(s.allowances.earlyThreshold2Min)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 06:30','เช่น 06:30'))
       )}
+
+      <div style="font-size:12px;font-weight:600;color:#64748b;margin:14px 0 8px">⚠️ ${L('Early morning review','ตรวจสอบการมาเช้า')}</div>
+      <label style="display:flex;align-items:center;gap:8px;margin:0 0 12px;font-size:13px;font-weight:600;color:#374151;cursor:pointer">
+        <input id="set-mr-enabled" type="checkbox" ${s.allowances.morningReviewEnabled === false ? '' : 'checked'} style="width:18px;height:18px;cursor:pointer">
+        ${L('Hold the allowance for review when an early scan is followed by another door pass','พักเบี้ยไว้ตรวจสอบ เมื่อสแกนเช้าแล้วยังผ่านประตูอีกครั้ง')}
+      </label>
+      ${row2(
+        field(L('Look for another pass from','ตรวจการผ่านประตูตั้งแต่'), `<input id="set-mr-from" type="time" value="${minsToTime(morningReviewWindowOf(s.allowances).start)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 08:00','เช่น 08:00')),
+        field(L('until','ถึง'), `<input id="set-mr-to" type="time" value="${minsToTime(morningReviewWindowOf(s.allowances).end)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 12:00','เช่น 12:00'))
+      )}
+      ${row2(
+        field(L('Ignore a pass sooner than (minutes)','ไม่นับ ถ้าห่างจากเวลาเข้างานไม่ถึง (นาที)'), inp('set-mr-gap', morningReviewWindowOf(s.allowances).minGap, 'number', 'min="0" max="480" step="5"'), L('stepping out briefly is not going home','ออกไปแป๊บเดียวไม่ถือว่ากลับบ้าน')),
+        ''
+      )}
       <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Late Night Bonus','เบี้ยเลี้ยงกลับดึก')}</div>
       ${row2(
         field(L('×1 (late night) ฿','×1 (แจ้งกลับดึก) ฿'), inp('set-late1-amt', s.allowances.lateNight1, 'number')),
@@ -5723,6 +5756,25 @@ async function saveSettingsPage() {
   APP_SETTINGS.allowances.earlyMorning2        = fi('set-early2-amt');
   APP_SETTINGS.allowances.earlyThreshold1Min   = timeToMins(document.getElementById('set-early-thr1')?.value);
   APP_SETTINGS.allowances.earlyThreshold2Min   = timeToMins(document.getElementById('set-early-thr2')?.value);
+  // 2026-10-02 (owner): the morning-review knobs. The toggle is read the guarded way the geofence
+  // one is -- an absent element must leave the stored value alone rather than silently writing
+  // false -- and the two times and the gap only overwrite when they parse.
+  const mrToggle = document.getElementById('set-mr-enabled');
+  if (mrToggle) APP_SETTINGS.allowances.morningReviewEnabled = !!mrToggle.checked;
+  const mrFrom = timeToMins(document.getElementById('set-mr-from')?.value);
+  if (Number.isFinite(mrFrom)) APP_SETTINGS.allowances.morningReviewWindowStartMin = mrFrom;
+  const mrTo = timeToMins(document.getElementById('set-mr-to')?.value);
+  if (Number.isFinite(mrTo)) APP_SETTINGS.allowances.morningReviewWindowEndMin = mrTo;
+  const mrGap = Number(document.getElementById('set-mr-gap')?.value);
+  if (Number.isFinite(mrGap) && mrGap >= 0) APP_SETTINGS.allowances.morningReviewMinGapMin = Math.round(mrGap);
+
+  // 2026-10-02 (owner): these five times only mean anything in order. Typed out of order nothing
+  // errors -- the app simply pays the wrong rate from then on, quietly, for everybody. Checked
+  // here so the mistake is caught at the keyboard; the server checks the same thing again, since
+  // this screen is not the only way to reach the settings.
+  const _mrA = APP_SETTINGS.allowances;
+  const _ord = morningReviewSettingsError(_mrA, BUSINESS_DAY_START_MINS);
+  if (_ord) { showToast(_ord, 'warning'); return; }
   APP_SETTINGS.allowances.lateNight1            = fi('set-late1-amt');
   APP_SETTINGS.allowances.lateNight2            = fi('set-late2-amt');
   // 2026-09-24 (owner): `parseInt(...) || 19` discarded a midnight (0) threshold at the moment of
