@@ -160,6 +160,9 @@ test('the client renders the direction the server computed, and only then', () =
   assert.ok(/const d = hasRate \? bank\.dir : null;/.test(fn), 'direction comes from the server');
   assert.ok(/!d \? ''/.test(fn), 'no direction means no arrow, not a default one');
   assert.ok(/d === 'up' \? '▲' : '▼'/.test(fn));
+  // 2026-10-02 (owner): an unchanged republication reads as a dash. '=' sat right next to the
+  // rate and was being read as part of the number.
+  assert.ok(/d === 'same' \? '-'/.test(fn), "an unchanged rate must render '-', not '='");
   assert.ok(/typeof bank\.prev === 'number'/.test(fn), 'the delta needs a numeric previous');
   for (const b of ['smbc', 'mizuho', 'resona']) {
     assert.ok(APP_SRC.includes(`id="dash-rate-${b}-arrow"`), `${b} needs somewhere to render it`);

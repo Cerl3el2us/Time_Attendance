@@ -6412,12 +6412,14 @@ async function fetchExchangeRate() {
         if (arrowEl) {
           // Only from the second publication onwards -- before that there is nothing to compare
           // against and an arrow would be a guess. 'same' is rendered too, so a day where the
-          // bank republished an unchanged rate is not mistaken for missing data.
+          // bank republished an unchanged rate is not mistaken for missing data. 2026-10-02
+          // (owner): that case shows '-', not '=' -- a dash reads as "no movement" at a glance,
+          // while '=' was being read as part of the number next to it.
           const d = hasRate ? bank.dir : null;
           const delta = (hasRate && typeof bank.prev === 'number') ? bank.ttb - bank.prev : null;
           arrowEl.className = 'rate-arrow' + (d ? ' ' + d : '');
           arrowEl.textContent = !d ? ''
-            : d === 'same' ? '='
+            : d === 'same' ? '-'
             : (d === 'up' ? '▲' : '▼') + ' ' + Math.abs(delta).toFixed(2);
           arrowEl.title = !d ? '' : `${L('Previous', 'ครั้งก่อน')}: ${bank.prev.toFixed(2)}`;
         }
@@ -10930,8 +10932,8 @@ function renderLeaveBalanceCard(type, emoji, label, u, maxDays) {
     ${pendingNote}
     ${type === 'annual' ? annualLeaveCardNotesHtml(u, bal) : ''}
     <div class="detail" style="margin-top:5px;font-size:11px;color:${usedDays > 0 ? '#dc2626' : '#10b981'}">${usedDays > 0
-      ? (currentLang === 'ja' ? `<strong>${minToStr(bal.usedMin)}</strong> 使用済み` : L(`Used <strong>${minToStr(bal.usedMin)}</strong>`, `ใช้ไปแล้ว <strong>${minToStr(bal.usedMin)}</strong>`))
-      : (currentLang === 'ja' ? '未使用' : L('Not used yet', 'ยังไม่ได้ใช้สิทธิ์'))}</div>
+      ? (currentLang === 'ja' ? `休暇 <strong>${minToStr(bal.usedMin)}</strong> 使用済み` : L(`Leave used <strong>${minToStr(bal.usedMin)}</strong>`, `ใช้สิทธิ์ลาไปแล้ว <strong>${minToStr(bal.usedMin)}</strong>`))
+      : (currentLang === 'ja' ? '休暇未使用' : L('No leave used yet', 'ยังไม่ได้ใช้สิทธิ์ลา'))}</div>
     <div class="leave-card-spacer"></div>
     <div class="leave-bar"><div class="leave-bar-fill" style="width:${pct}%"></div></div>
   </div>`;
@@ -18565,9 +18567,14 @@ function renderLeaveBalanceSummary() {
           ? `遅刻 ${lateDeduct.count}回、控除 ${minToStr(lateDeduct.deductMin)}`
           : (currentLang === 'ja' ? `遅刻${lateDeduct.count}回、${minToStr(lateDeduct.deductMin)}控除` : L(`Late ${lateDeduct.count}×, deducted ${minToStr(lateDeduct.deductMin)}`, `มาสาย ${lateDeduct.count} ครั้ง หัก ${minToStr(lateDeduct.deductMin)}`))
         }</div>` : '';
+    // 2026-10-02 (owner): the two halves of this line used to disagree -- "ใช้ไปแล้ว" said nothing
+    // about WHAT was used while its empty-state counterpart said "สิทธิ์". Both now name the leave
+    // entitlement. The same pair is rendered on the profile card (renderLeaveBalanceCard) and the
+    // two must stay worded alike. The figure itself is untouched: minToStr() already prints only
+    // the units that are non-zero ("2 วัน 3 ชั่วโมง").
     const usedLabel = usedMin > 0
-      ? (currentLang === 'ja' ? `<strong>${usedStr}</strong> 使用済み` : L(`Used <strong>${usedStr}</strong>`, `ใช้ไปแล้ว <strong>${usedStr}</strong>`))
-      : (currentLang === 'ja' ? '未使用' : L('Not used yet', 'ยังไม่ได้ใช้สิทธิ์'));
+      ? (currentLang === 'ja' ? `休暇 <strong>${usedStr}</strong> 使用済み` : L(`Leave used <strong>${usedStr}</strong>`, `ใช้สิทธิ์ลาไปแล้ว <strong>${usedStr}</strong>`))
+      : (currentLang === 'ja' ? '休暇未使用' : L('No leave used yet', 'ยังไม่ได้ใช้สิทธิ์ลา'));
 
     return `<div class="leave-card ${cfg.cls}">
       <div class="emoji">${cfg.emoji}</div>
