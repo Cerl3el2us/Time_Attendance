@@ -5164,7 +5164,19 @@ function renderSettingsPage(_skipRefresh) {
     `)}
 
     ${adminSection('time', '🌅', L('Early morning review','ตรวจสอบการมาเช้า'), `
-      <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">${L('Checking whether an early scan was a real arrival is a question about attendance, not an allowance rate — the rate itself is set under Allowance Rates.','การตรวจว่าสแกนเช้าคือการมาทำงานจริงหรือไม่ เป็นเรื่องเวลาทำงาน ไม่ใช่อัตราเบี้ย — อัตราตั้งที่หัวข้อ อัตราเบี้ยเลี้ยง')}</div>
+      ${''/* 2026-10-02 (owner): the first window is not a field -- it is the business-day start
+           and the x1 threshold, so a separate setting could be left disagreeing with the rate and
+           quietly leave a paid day that nothing ever reviews. It is still worth SEEING, so it is
+           stated here, read-only, from the live values, next to the window that is editable. */}
+      <div style="font-size:12.5px;line-height:1.7;color:var(--text);background:var(--bg-soft,#f8fafc);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:12px">
+        ${currentLang === 'ja'
+          ? `<b>① 対象となる出勤</b>：${minsToTime(BUSINESS_DAY_START_MINS)}〜${minsToTime(s.allowances.earlyThreshold1Min)}（早朝手当の対象時間。下の閾値に連動）<br>
+             <b>② 再通過の確認</b>：${minsToTime(morningReviewWindowOf(s.allowances).start)}〜${minsToTime(morningReviewWindowOf(s.allowances).end)} に再びドアを通過した場合、その日の手当は確認まで保留されます`
+          : L(`<b>1. Days this looks at</b>: a check-in between ${minsToTime(BUSINESS_DAY_START_MINS)} and ${minsToTime(s.allowances.earlyThreshold1Min)} — the hours that earn the allowance. Not a setting: it follows the thresholds above, so no paid day can fall outside it.<br>
+               <b>2. What holds the allowance</b>: another door pass between ${minsToTime(morningReviewWindowOf(s.allowances).start)} and ${minsToTime(morningReviewWindowOf(s.allowances).end)}. That day's allowance is then held until somebody decides.`,
+              `<b>1. ตรวจวันไหนบ้าง</b>: วันที่เข้างานระหว่าง ${minsToTime(BUSINESS_DAY_START_MINS)}–${minsToTime(s.allowances.earlyThreshold1Min)} ซึ่งเป็นช่วงที่ได้เบี้ยมาเช้า — ตั้งค่าไม่ได้เพราะผูกกับเกณฑ์ด้านบน จะได้ไม่มีวันที่ได้เงินแล้วหลุดการตรวจ<br>
+               <b>2. อะไรทำให้พักเบี้ย</b>: ผ่านประตูอีกครั้งระหว่าง ${minsToTime(morningReviewWindowOf(s.allowances).start)}–${minsToTime(morningReviewWindowOf(s.allowances).end)} เบี้ยของวันนั้นจะถูกพักไว้จนกว่าจะมีคนตัดสิน`)}
+      </div>
       <label style="display:flex;align-items:center;gap:8px;margin:0 0 12px;font-size:13px;font-weight:600;color:#374151;cursor:pointer">
         <input id="set-mr-enabled" type="checkbox" ${s.allowances.morningReviewEnabled === false ? '' : 'checked'} style="width:18px;height:18px;cursor:pointer">
         ${L('Hold the allowance for review when an early scan is followed by another door pass','พักเบี้ยไว้ตรวจสอบ เมื่อสแกนเช้าแล้วยังผ่านประตูอีกครั้ง')}
