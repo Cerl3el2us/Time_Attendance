@@ -249,6 +249,45 @@ test('the scan path stops paying while a flag is open, and resumes when it is al
   }
 });
 
+console.log('Morning review: the four regressions found in review');
+
+// Each of these was a real failure found by reviewing the day's work, and each is invisible from
+// the outside -- a missing email, a tab that is always empty, a save that half-applies. Pinned by
+// reading the source, the way the rest of this suite pins its dual-sync rules.
+test('a refusal stays readable after the correction removes the flag', () => {
+  const fn = extractFunction(APP_SRC, 'morningReviewBoxItems');
+  assert.ok(/Object\.keys\(DATA_MORNING_REVIEWS/.test(fn),
+    'the reviewed list must come from the stored decisions, not from days that still trigger');
+  assert.ok(!/out\.reviewed\.push\(\{ user: u, day,/.test(fn),
+    'a reviewed row built from a live day disappears the moment the correction lands');
+});
+
+test('a decision can still be cleared once the day stops qualifying', () => {
+  const fn = extractFunction(SERVER_SRC, 'handlePutMorningReview');
+  assert.ok(/!day\.morningReviewNeeded && decision !== null/.test(fn),
+    'clearing must stay possible on a corrected day, or a mistaken refusal can never be undone');
+});
+
+test('the opt-in result email still goes out when a reviewer corrects a time', () => {
+  const fn = extractFunction(SERVER_SRC, 'notifyLeaveStatusChange');
+  const branch = fn.slice(0, fn.indexOf('if (leave.status ==='));
+  assert.ok(/sendResultEmail\(leave\)/.test(branch),
+    'the time-correction branch returns before the approved block, so it must send the email itself');
+});
+
+test('a refusal that was not recorded does not go on to change the time', () => {
+  const fn = extractFunction(APP_SRC, 'submitTimeCorrection');
+  assert.ok(/const recorded = await setMorningReview\(/.test(fn) && /if \(!recorded\) return;/.test(fn),
+    'the correction must stop when the decision was rejected (a 409 means the screen is stale)');
+});
+
+test('the settings order is judged before anything is written', () => {
+  const fn = extractFunction(APP_SRC, 'saveSettingsPage');
+  const head = fn.slice(0, fn.indexOf('APP_SETTINGS.'));
+  assert.ok(/morningReviewSettingsError\(/.test(head),
+    'the guard must run before the first write, or a refused save leaves the page half-updated');
+});
+
 test('every new rule is byte-identical in app.js and server.js', () => {
   ['morningReviewWindowOf', 'morningReviewTrigger', 'morningReviewDecisionFor',
    'earlyMorningCheckInOk', 'deviceScanQualifiesForEarlyMorning',

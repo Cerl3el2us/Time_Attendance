@@ -4998,47 +4998,6 @@ function renderSettingsPage(_skipRefresh) {
         field(L('Check-in before (×2 rate)','เช็กอินก่อนกี่โมงได้ ×2'), `<input id="set-early-thr2" type="time" value="${minsToTime(s.allowances.earlyThreshold2Min)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 06:30','เช่น 06:30'))
       )}
 
-      <div style="font-size:12px;font-weight:600;color:#64748b;margin:14px 0 8px">⚠️ ${L('Early morning review','ตรวจสอบการมาเช้า')}</div>
-      <label style="display:flex;align-items:center;gap:8px;margin:0 0 12px;font-size:13px;font-weight:600;color:#374151;cursor:pointer">
-        <input id="set-mr-enabled" type="checkbox" ${s.allowances.morningReviewEnabled === false ? '' : 'checked'} style="width:18px;height:18px;cursor:pointer">
-        ${L('Hold the allowance for review when an early scan is followed by another door pass','พักเบี้ยไว้ตรวจสอบ เมื่อสแกนเช้าแล้วยังผ่านประตูอีกครั้ง')}
-      </label>
-      ${row2(
-        field(L('Look for another pass from','ตรวจการผ่านประตูตั้งแต่'), `<input id="set-mr-from" type="time" value="${minsToTime(morningReviewWindowOf(s.allowances).start)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 08:00','เช่น 08:00')),
-        field(L('until','ถึง'), `<input id="set-mr-to" type="time" value="${minsToTime(morningReviewWindowOf(s.allowances).end)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 12:00','เช่น 12:00'))
-      )}
-      ${row2(
-        field(L('Ignore a pass sooner than (minutes)','ไม่นับ ถ้าห่างจากเวลาเข้างานไม่ถึง (นาที)'), inp('set-mr-gap', morningReviewWindowOf(s.allowances).minGap, 'number', 'min="0" max="480" step="5"'), L('stepping out briefly is not going home','ออกไปแป๊บเดียวไม่ถือว่ากลับบ้าน')),
-        ''
-      )}
-      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Late Night Bonus','เบี้ยเลี้ยงกลับดึก')}</div>
-      ${row2(
-        field(L('×1 (late night) ฿','×1 (แจ้งกลับดึก) ฿'), inp('set-late1-amt', s.allowances.lateNight1, 'number')),
-        field(L('×2 (very late night) ฿','×2 (แจ้งกลับดึกมาก) ฿'), inp('set-late2-amt', s.allowances.lateNight2, 'number'))
-      )}
-      ${row2(
-        field(L('Holiday transport (฿/day)','ค่าเดินทางวันหยุด (฿/วัน)'), inp('set-holiday-transport', s.allowances.holidayTransport != null ? s.allowances.holidayTransport : 500, 'number'), L('Paid holiday-work compensation mode only','เฉพาะโหมดชดเชยเป็นเงินเท่านั้น')),
-        field('', '')
-      )}
-      ${row2(
-        field(L('Check-out from (×1 rate)','เช็กเอาท์ตั้งแต่กี่โมงได้ ×1'), `<input id="set-late-thr1" type="time" value="${String(lateNightThresholdHourOf(s.allowances, 1)).padStart(2,'0')}:00" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 19:00','เช่น 19:00')),
-        field(L('Check-out from (×2 rate)','เช็กเอาท์ตั้งแต่กี่โมงได้ ×2'), `<input id="set-late-thr2" type="time" value="${String(lateNightThresholdHourOf(s.allowances, 2)).padStart(2,'0')}:00" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 20:00','เช่น 20:00'))
-      )}
-      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Diligence / Personal Car','เบี้ยขยัน / ค่าใช้รถส่วนตัว')}</div>
-      ${row2(
-        field(L('Diligence Allowance (฿/month)','เบี้ยขยัน (฿/เดือน)'), inp('set-diligence-amt', s.allowances.diligence, 'number'), L('who gets it is set in Allowance Eligibility below','ใครได้บ้างตั้งได้ที่สิทธิ์เบี้ยเลี้ยงด้านล่าง')),
-        field(L('Personal Car (฿/time)','ค่าใช้รถส่วนตัว (฿/ครั้ง)'), inp('set-personalcar-amt', s.allowances.personalCar, 'number'), L('also needs the per-employee eligibility checkbox','ต้องติ๊กสิทธิ์รายคนในหน้าข้อมูลพนักงานด้วย'))
-      )}
-      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Long Distance','Long Distance')}</div>
-      ${row2(
-        field(L('Allowance (฿/day)','เบี้ยเลี้ยง (฿/วัน)'), inp('set-longdistance-amt', s.allowances.longDistance, 'number')),
-        field(L('Minimum distance (km)','ระยะทางขั้นต่ำ (กม.)'), inp('set-longdistance-threshold', s.allowances.longDistanceThresholdKm, 'number'))
-      )}
-      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Phone Allowance','เบี้ยเลี้ยงค่าโทรศัพท์')}</div>
-      ${row2(
-        field(L('Phone Allowance (฿/month)','ค่าโทรศัพท์ (฿/เดือน)'), inp('set-phone-amt', s.allowances.phone, 'number'), L('also needs the per-employee eligibility checkbox','ต้องติ๊กสิทธิ์รายคนในหน้าข้อมูลพนักงานด้วย')),
-        field('', '')
-      )}
     `)}
 
     ${adminSection('allowance', '🎫', L('Allowance Eligibility by Role','สิทธิ์เบี้ยเลี้ยงตามระดับผู้ใช้'), `
@@ -5201,6 +5160,50 @@ function renderSettingsPage(_skipRefresh) {
         <input id="allowance-type-input" type="text" placeholder="${L('Category name...','ชื่อหมวดหมู่...')}" onkeydown="if(event.key==='Enter')addAllowanceType()" style="flex:1;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px">
         <button type="button" class="btn btn-primary btn-sm" onclick="addAllowanceType()">+ ${L('Add','เพิ่ม')}</button>
       </div>
+    `)}
+
+    ${adminSection('time', '🌅', L('Early morning review','ตรวจสอบการมาเช้า'), `
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">${L('Checking whether an early scan was a real arrival is a question about attendance, not an allowance rate — the rate itself is set under Allowance Rates.','การตรวจว่าสแกนเช้าคือการมาทำงานจริงหรือไม่ เป็นเรื่องเวลาทำงาน ไม่ใช่อัตราเบี้ย — อัตราตั้งที่หัวข้อ อัตราเบี้ยเลี้ยง')}</div>
+      <label style="display:flex;align-items:center;gap:8px;margin:0 0 12px;font-size:13px;font-weight:600;color:#374151;cursor:pointer">
+        <input id="set-mr-enabled" type="checkbox" ${s.allowances.morningReviewEnabled === false ? '' : 'checked'} style="width:18px;height:18px;cursor:pointer">
+        ${L('Hold the allowance for review when an early scan is followed by another door pass','พักเบี้ยไว้ตรวจสอบ เมื่อสแกนเช้าแล้วยังผ่านประตูอีกครั้ง')}
+      </label>
+      ${row2(
+        field(L('Look for another pass from','ตรวจการผ่านประตูตั้งแต่'), `<input id="set-mr-from" type="time" value="${minsToTime(morningReviewWindowOf(s.allowances).start)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 08:00','เช่น 08:00')),
+        field(L('until','ถึง'), `<input id="set-mr-to" type="time" value="${minsToTime(morningReviewWindowOf(s.allowances).end)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 12:00','เช่น 12:00'))
+      )}
+      ${row2(
+        field(L('Ignore a pass sooner than (minutes)','ไม่นับ ถ้าห่างจากเวลาเข้างานไม่ถึง (นาที)'), inp('set-mr-gap', morningReviewWindowOf(s.allowances).minGap, 'number', 'min="0" max="480" step="5"'), L('stepping out briefly is not going home','ออกไปแป๊บเดียวไม่ถือว่ากลับบ้าน')),
+        ''
+      )}
+      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Late Night Bonus','เบี้ยเลี้ยงกลับดึก')}</div>
+      ${row2(
+        field(L('×1 (late night) ฿','×1 (แจ้งกลับดึก) ฿'), inp('set-late1-amt', s.allowances.lateNight1, 'number')),
+        field(L('×2 (very late night) ฿','×2 (แจ้งกลับดึกมาก) ฿'), inp('set-late2-amt', s.allowances.lateNight2, 'number'))
+      )}
+      ${row2(
+        field(L('Holiday transport (฿/day)','ค่าเดินทางวันหยุด (฿/วัน)'), inp('set-holiday-transport', s.allowances.holidayTransport != null ? s.allowances.holidayTransport : 500, 'number'), L('Paid holiday-work compensation mode only','เฉพาะโหมดชดเชยเป็นเงินเท่านั้น')),
+        field('', '')
+      )}
+      ${row2(
+        field(L('Check-out from (×1 rate)','เช็กเอาท์ตั้งแต่กี่โมงได้ ×1'), `<input id="set-late-thr1" type="time" value="${String(lateNightThresholdHourOf(s.allowances, 1)).padStart(2,'0')}:00" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 19:00','เช่น 19:00')),
+        field(L('Check-out from (×2 rate)','เช็กเอาท์ตั้งแต่กี่โมงได้ ×2'), `<input id="set-late-thr2" type="time" value="${String(lateNightThresholdHourOf(s.allowances, 2)).padStart(2,'0')}:00" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 20:00','เช่น 20:00'))
+      )}
+      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Diligence / Personal Car','เบี้ยขยัน / ค่าใช้รถส่วนตัว')}</div>
+      ${row2(
+        field(L('Diligence Allowance (฿/month)','เบี้ยขยัน (฿/เดือน)'), inp('set-diligence-amt', s.allowances.diligence, 'number'), L('who gets it is set in Allowance Eligibility below','ใครได้บ้างตั้งได้ที่สิทธิ์เบี้ยเลี้ยงด้านล่าง')),
+        field(L('Personal Car (฿/time)','ค่าใช้รถส่วนตัว (฿/ครั้ง)'), inp('set-personalcar-amt', s.allowances.personalCar, 'number'), L('also needs the per-employee eligibility checkbox','ต้องติ๊กสิทธิ์รายคนในหน้าข้อมูลพนักงานด้วย'))
+      )}
+      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Long Distance','Long Distance')}</div>
+      ${row2(
+        field(L('Allowance (฿/day)','เบี้ยเลี้ยง (฿/วัน)'), inp('set-longdistance-amt', s.allowances.longDistance, 'number')),
+        field(L('Minimum distance (km)','ระยะทางขั้นต่ำ (กม.)'), inp('set-longdistance-threshold', s.allowances.longDistanceThresholdKm, 'number'))
+      )}
+      <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Phone Allowance','เบี้ยเลี้ยงค่าโทรศัพท์')}</div>
+      ${row2(
+        field(L('Phone Allowance (฿/month)','ค่าโทรศัพท์ (฿/เดือน)'), inp('set-phone-amt', s.allowances.phone, 'number'), L('also needs the per-employee eligibility checkbox','ต้องติ๊กสิทธิ์รายคนในหน้าข้อมูลพนักงานด้วย')),
+        field('', '')
+      )}
     `)}
 
     ${adminSection('time', '⏰', L('Late Arrival Deduction Policy','นโยบายหักวันลาจากการมาสาย'), `
@@ -5696,6 +5699,22 @@ async function saveMyNotifyPrefs(patch) {
 }
 
 async function saveSettingsPage() {
+  // 2026-10-02 (review finding 3): read and judge the Early Morning times BEFORE anything is
+  // written. The check used to sit halfway down this function, after APP_SETTINGS had already
+  // taken the rejected values and before the rest of the form was read -- so a refused save left
+  // the page showing numbers the server never accepted and silently dropped every edit below the
+  // guard (Late Night rates, upcountry, diligence, the eligibility matrix, geofence).
+  const _mrEl = document.getElementById('set-early-thr2');
+  if (_mrEl) {
+    const _ord = morningReviewSettingsError({
+      earlyThreshold2Min: timeToMins(_mrEl.value),
+      earlyThreshold1Min: timeToMins(document.getElementById('set-early-thr1')?.value),
+      morningReviewWindowStartMin: timeToMins(document.getElementById('set-mr-from')?.value),
+      morningReviewWindowEndMin: timeToMins(document.getElementById('set-mr-to')?.value),
+      morningReviewMinGapMin: Number(document.getElementById('set-mr-gap')?.value),
+    }, BUSINESS_DAY_START_MINS);
+    if (_ord) { showToast(_ord, 'warning'); return; }
+  }
   if (blockIfObserver()) return;
   if (!isMdAccountingView()) return;
 
@@ -5767,14 +5786,6 @@ async function saveSettingsPage() {
   if (Number.isFinite(mrTo)) APP_SETTINGS.allowances.morningReviewWindowEndMin = mrTo;
   const mrGap = Number(document.getElementById('set-mr-gap')?.value);
   if (Number.isFinite(mrGap) && mrGap >= 0) APP_SETTINGS.allowances.morningReviewMinGapMin = Math.round(mrGap);
-
-  // 2026-10-02 (owner): these five times only mean anything in order. Typed out of order nothing
-  // errors -- the app simply pays the wrong rate from then on, quietly, for everybody. Checked
-  // here so the mistake is caught at the keyboard; the server checks the same thing again, since
-  // this screen is not the only way to reach the settings.
-  const _mrA = APP_SETTINGS.allowances;
-  const _ord = morningReviewSettingsError(_mrA, BUSINESS_DAY_START_MINS);
-  if (_ord) { showToast(_ord, 'warning'); return; }
   APP_SETTINGS.allowances.lateNight1            = fi('set-late1-amt');
   APP_SETTINGS.allowances.lateNight2            = fi('set-late2-amt');
   // 2026-09-24 (owner): `parseInt(...) || 19` discarded a midnight (0) threshold at the moment of
@@ -14536,24 +14547,37 @@ function morningReviewBoxItems() {
   const users = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active !== false &&
     Number(u.id) !== Number(currentUser.id) &&
     isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'earlyLate'));
-  [0, 1].forEach(idx => {
-    const { start, end, isCurrent } = getPeriodBounds(idx);
+  const bounds = [0, 1].map(i => getPeriodBounds(i));
+  bounds.forEach(({ start, end, isCurrent }) => {
     users.forEach(u => {
       generatePeriodDays(start, end, isCurrent, u.id).forEach(day => {
-        if (!day.morningReviewNeeded) return;
-        const locked = payPeriodBlockedForDate(day.date, u.id).blocked;
-        if (day.morningReview) {
-          out.reviewed.push({ user: u, day, locked, review: DATA_MORNING_REVIEWS[attKey(u.id, day.date)] || null });
-        } else if (!locked) {
-          out.pending.push({ user: u, day });
-        }
+        if (!day.morningReviewNeeded || day.morningReview) return;
+        if (payPeriodBlockedForDate(day.date, u.id).blocked) return;
+        out.pending.push({ user: u, day });
       });
     });
   });
-  const byDateThenName = (a, b) => b.day.date.localeCompare(a.day.date) ||
-    String(a.user.name || '').localeCompare(String(b.user.name || ''));
-  out.pending.sort(byDateThenName);
-  out.reviewed.sort(byDateThenName);
+  // 2026-10-02 (review finding 1): the reviewed list is read from the stored decisions, not from
+  // the days that still trigger. A refusal always moves the check-in past the threshold, so the
+  // day stops triggering the moment the decision takes effect -- reading the list off live days
+  // meant every refusal vanished from this tab as soon as it was made, taking the reason with it,
+  // which is the one thing the tab exists for. Each row shows the facts as they stood when the
+  // decision was taken, which is what a decision should be read against.
+  const byId = new Map(users.map(u => [String(u.id), u]));
+  const inPeriod = d => bounds.some(b => d >= localDateStr(b.start) && d <= localDateStr(b.end));
+  Object.keys(DATA_MORNING_REVIEWS || {}).forEach(key => {
+    const m = /^(\d+)_(\d{4}-\d{2}-\d{2})$/.exec(key);
+    if (!m) return;
+    const u = byId.get(m[1]);
+    const review = DATA_MORNING_REVIEWS[key];
+    if (!u || !review || (review.decision !== 'allow' && review.decision !== 'deny')) return;
+    if (!inPeriod(m[2])) return;
+    out.reviewed.push({ user: u, date: m[2], review, locked: payPeriodBlockedForDate(m[2], u.id).blocked });
+  });
+  out.pending.sort((a, b) => b.day.date.localeCompare(a.day.date) ||
+    String(a.user.name || '').localeCompare(String(b.user.name || '')));
+  out.reviewed.sort((a, b) => b.date.localeCompare(a.date) ||
+    String(a.user.name || '').localeCompare(String(b.user.name || '')));
   return out;
 }
 
@@ -14589,23 +14613,33 @@ function morningReviewPendingRowsHtml(items) {
   }).join('');
 }
 
+// 2026-10-02 (review finding 1): rendered from the stored decision rather than from a live day.
+// A refusal moves the check-in past the threshold, so by the time it is read back the day no
+// longer qualifies and carries no decision at all -- the row has to show the facts the decision
+// was taken against, which is exactly what the record keeps.
 function morningReviewReviewedRowsHtml(items) {
-  return items.map(({ user, day, locked, review }) => {
+  return items.map(({ user, date, review, locked }) => {
     const uid = Number(user.id);
-    const d = escapeJsAttr(day.date);
-    const decision = day.morningReview === 'allow'
+    const d = escapeJsAttr(date);
+    const ci = review.checkIn || '';
+    const decision = review.decision === 'allow'
       ? `<span style="color:#166534;white-space:nowrap">${escapeHtml(L('✅ Allowed', '✅ จ่ายเบี้ย'))}</span>`
-      : `<span style="color:#991b1b;white-space:nowrap">${escapeHtml(L('❌ Not allowed', '❌ ไม่จ่าย'))}</span>`;
-    const atDate = review && review.at ? new Date(review.at) : null;
+      : `<span style="color:#991b1b;white-space:nowrap">${escapeHtml(L('✕ Not allowed', '✕ ไม่จ่าย'))}</span>`;
+    const atDate = review.at ? new Date(review.at) : null;
     const when = atDate && !isNaN(atDate.getTime()) ? fmtDateTime(atDate) : '';
-    const why = review && review.reason
+    const why = review.reason
       ? `<div style="font-size:11px;color:#64748b">${escapeHtml(review.reason)}</div>` : '';
-    const by = `${escapeHtml((review && review.by) || '—')}${when ? `<div style="font-size:11px;color:#64748b">${escapeHtml(when)}</div>` : ''}${why}`;
+    const by = `${escapeHtml(review.by || '—')}${when ? `<div style="font-size:11px;color:#64748b">${escapeHtml(when)}</div>` : ''}${why}`;
     const action = locked
       ? `<span style="font-size:12px;color:#64748b" title="${escapeHtml(L('Pay period is closed — read-only', 'งวดเงินเดือนปิดแล้ว — ดูได้อย่างเดียว'))}">🔒</span>`
-      : `<button class="btn btn-ghost btn-sm" style="color:#64748b" title="${escapeHtml(L('Undo review', 'ยกเลิกผลตรวจสอบ'))}" onclick="setMorningReview(${uid}, '${d}', null, '${escapeJsAttr(day.checkIn || '')}')">↩️</button>`;
+      : `<button class="btn btn-ghost btn-sm" style="color:#64748b" title="${escapeHtml(L('Undo review', 'ยกเลิกผลตรวจสอบ'))}" onclick="setMorningReview(${uid}, '${d}', null, '${escapeJsAttr(ci)}')">↩️</button>`;
+    // the pass times as they stood when the decision was taken, kept on the record itself
+    const later = (review.doorScans || []).filter(t => t > ci);
     return `<tr>
-      ${morningReviewDayCells(user, day)}
+      <td style="padding:6px 8px">${escapeHtml(user.name)}</td>
+      <td style="padding:6px 8px;white-space:nowrap">${escapeHtml(fmtDate(new Date(date + 'T12:00:00')))}</td>
+      <td style="padding:6px 8px;white-space:nowrap">🌅 ${escapeHtml(ci || '—')}</td>
+      <td style="padding:6px 8px;white-space:nowrap">🚪 ${later.length ? escapeHtml(later.join(', ')) : '<span style="color:#94a3b8">—</span>'}</td>
       <td style="padding:6px 8px">${decision}</td>
       <td style="padding:6px 8px">${by}</td>
       <td style="padding:6px 8px;white-space:nowrap;text-align:right">${action}</td>
@@ -14679,10 +14713,13 @@ function refreshMorningReviewPendingBox() {
 
 // Allow / undo. Deny goes through denyMorningReview() instead, because denying means naming the
 // real arrival time, not just withholding money.
+// Returns true only when the server accepted the decision. The refusal path depends on that:
+// it applies a time correction straight afterwards, and must not change anybody's hours on the
+// strength of a decision that was never recorded.
 async function setMorningReview(userId, dateStr, decision, checkIn, reason) {
-  if (blockIfObserver()) return;
+  if (blockIfObserver()) return false;
   const uid = Number(userId);
-  if (!currentUser || uid === Number(currentUser.id) || !isMdAccountingView()) return;
+  if (!currentUser || uid === Number(currentUser.id) || !isMdAccountingView()) return false;
   try {
     const res = await apiFetch('/api/morning-reviews', {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
@@ -14697,7 +14734,7 @@ async function setMorningReview(userId, dateStr, decision, checkIn, reason) {
         showToast(L('⚠️ Check-in time changed — reload and review again', '⚠️ เวลาเข้างานเปลี่ยนไปแล้ว — โหลดใหม่แล้วตรวจสอบอีกครั้ง'), 'warning');
         await Promise.all([loadAttendanceFromBackend(), loadMorningReviewsFromBackend()]);
         rerenderAfterCheckoutReviews();
-        return;
+        return false;
       }
       throw new Error(data.message || 'Server error');
     }
@@ -14706,8 +14743,10 @@ async function setMorningReview(userId, dateStr, decision, checkIn, reason) {
     if (decision === null) delete DATA_MORNING_REVIEWS[key];
     else DATA_MORNING_REVIEWS[key] = data.review;
     rerenderAfterCheckoutReviews();
+    return true;
   } catch (e) {
     showToast(L('❌ Could not save: ', '❌ ไม่สามารถบันทึกได้: ') + e.message, 'danger');
+    return false;
   }
 }
 
@@ -18978,8 +19017,12 @@ async function submitTimeCorrection() {
   // the server's stale-screen guard would then (correctly) refuse to record it. If the correction
   // below fails afterwards, the day is left refused and unpaid, which is the safe way round.
   if (_morningDenyTarget && _morningDenyTarget.date === date && field === 'checkIn') {
-    await setMorningReview(_morningDenyTarget.userId, _morningDenyTarget.date, 'deny',
+    const recorded = await setMorningReview(_morningDenyTarget.userId, _morningDenyTarget.date, 'deny',
       _morningDenyTarget.checkIn, reason);
+    // 2026-10-02 (review finding 4): stop if it was not recorded. The usual reason is a 409 saying
+    // the check-in moved while this dialog was open -- carrying on would change somebody's hours
+    // from a screen already known to be stale, and leave no decision or reason behind at all.
+    if (!recorded) return;
   }
   const originalRaw = field === 'checkIn'
     ? document.getElementById('tc-current-in').textContent

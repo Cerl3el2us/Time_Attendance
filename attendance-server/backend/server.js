@@ -575,6 +575,11 @@ function notifyLeaveStatusChange(oldStatus, leave) {
       },
       link: { page: 'attendance' },
     });
+    // 2026-10-02 (review finding 2): this branch returns before the approved/rejected block below,
+    // which is also where sendResultEmail lives -- so adding the push quietly took away the email
+    // an employee had opted in to. Sent here too: the push is a banner that can be missed, the
+    // email is the copy they keep.
+    sendResultEmail(leave).catch(e => console.error('[EMAIL] result notify error:', e.message));
     return;
   }
   if (leave.status === 'approved' || leave.status === 'rejected') {
@@ -3829,7 +3834,11 @@ function handlePutMorningReview(req, res) {
     const attLog = buildAttendanceLogForUser(target, dayStart, dayStart);
     const day = generatePeriodDays(dayStart, dayStart, false, target, attLog, leaves,
       getAppSettings(), {}, reviews)[0] || null;
-    if (!day || !day.morningReviewNeeded) {
+    // 2026-10-02 (review finding 1): a refusal always moves the check-in past the threshold, so the
+    // day stops triggering the moment the decision takes effect. Clearing one must therefore stay
+    // possible on a day that no longer qualifies -- otherwise a mistaken refusal can never be
+    // undone. Recording a NEW decision still requires a day that actually qualifies.
+    if (!day || (!day.morningReviewNeeded && decision !== null)) {
       return res.status(400).json({ success: false, message: 'This day has no early scan with a later door pass to review' });
     }
     // The reviewer judged a particular check-in. If a time correction or a later scan has moved it
@@ -4829,8 +4838,15 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
   // that changes only one of them is judged against the values it will actually sit beside. The
   // Settings page runs the same function before it sends; this is the one that counts.
   if (body.appSettings && body.appSettings.allowances) {
-    const ordErr = morningReviewSettingsError(body.appSettings.allowances, BUSINESS_DAY_START_MINS);
-    if (ordErr) return res.status(400).json({ success: false, message: ordErr });
+    // 2026-10-02 (review finding 5): only judge the order when both thresholds are actually there.
+    // A stored settings file without them is not "out of order", it simply has nothing to order --
+    // and failing the request would have refused somebody's approval-routing change with a message
+    // about Early Morning, a section they may not even be able to see.
+    const _ordA = body.appSettings.allowances;
+    if (Number.isFinite(_ordA.earlyThreshold1Min) && Number.isFinite(_ordA.earlyThreshold2Min)) {
+      const ordErr = morningReviewSettingsError(_ordA, BUSINESS_DAY_START_MINS);
+      if (ordErr) return res.status(400).json({ success: false, message: ordErr });
+    }
   }
   if (body.appSettings) {
     body.appSettings.updatedAt = new Date().toISOString();
