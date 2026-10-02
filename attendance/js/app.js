@@ -9628,6 +9628,16 @@ function renderAttendanceTable() {
       // because the allowance is paid all the way to 07:30 -- this covers the rest of that window
       // by asking a different question: was there another door pass later in the morning? The
       // tooltip carries the evidence, since a flag nobody can check is just noise.
+      if (row.morningReviewNeeded && row.morningReview && !isViewingSelf && isMdAccountingView()) {
+        // 2026-10-02 (owner): "I meant to press reject and pressed accept." Once decided the flag
+        // above stops rendering, so without this the row offered no way back at all -- the undo
+        // lived only in the Reviewed tab of the Approvals box, which is not where the mistake
+        // happens. Same call as that tab's, so every guard is shared.
+        const _done = row.morningReview === 'allow'
+          ? L('Allowed — undo', 'จ่ายเบี้ยแล้ว — กดเพื่อเพิกถอน')
+          : L('Not allowed — undo', 'ไม่จ่ายเบี้ย — กดเพื่อเพิกถอน');
+        earlyWarnBadge = ` <button class="btn btn-ghost btn-sm" style="color:#64748b" onclick="setMorningReview(${targetUserId}, '${escapeJsAttr(row.date)}', null, '${escapeJsAttr(row.checkIn)}')" title="${escapeHtml(_done)}">${row.morningReview === 'allow' ? '✅' : '❌'}↩️</button>`;
+      }
       if (row.morningReviewNeeded && !row.morningReview) {
         const _later = morningReviewLaterScans(targetUserId, row);
         const _why = currentLang === 'ja'
@@ -14382,19 +14392,39 @@ function checkoutReviewPendingBoxHtml(pending, reviewed) {
 // full renderApprovals(), since that clears `_approvalSelected` and redraws every Quick Table
 // checkbox, wiping out an MD's in-progress bulk selection whenever anyone scans in/out.
 // 2026-09-24: the box now shows whenever EITHER tab (awaiting / reviewed) has entries.
-function refreshCheckoutReviewPendingBox() {
+// 2026-10-02 (owner): the two review boxes share one row so the morning one sits beside the
+// evening one instead of pushing the whole Approvals page down. They wrap on a narrow screen.
+function reviewBoxesRow() {
   const summEl = document.getElementById('approval-summary-bar');
-  if (!summEl) return;
+  if (!summEl) return null;
+  let row = document.getElementById('review-boxes-row');
+  if (!row) {
+    row = document.createElement('div');
+    row.id = 'review-boxes-row';
+    row.style.cssText = 'display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start';
+    summEl.insertBefore(row, summEl.firstChild);
+  }
+  return row;
+}
+function dropReviewBoxesRowIfEmpty() {
+  const row = document.getElementById('review-boxes-row');
+  if (row && !row.children.length) row.remove();
+}
+function refreshCheckoutReviewPendingBox() {
+  const row = reviewBoxesRow();
+  if (!row) return;
   const { pending, reviewed } = checkoutReviewBoxItems();
   let box = document.getElementById('checkout-review-pending-box');
   if (!pending.length && !reviewed.length) {
     if (box) box.remove();
+    dropReviewBoxesRowIfEmpty();
     return;
   }
   if (!box) {
     box = document.createElement('div');
     box.id = 'checkout-review-pending-box';
-    summEl.insertBefore(box, summEl.firstChild);
+    box.style.cssText = 'flex:1 1 420px;min-width:0';
+    row.insertBefore(box, row.firstChild);
   }
   box.innerHTML = checkoutReviewPendingBoxHtml(pending, reviewed);
 }
@@ -14508,8 +14538,8 @@ function morningReviewPendingBoxHtml(pending, reviewed) {
   // Both numbers come from Settings, so the sentence follows a threshold change without an edit.
   const a = APP_SETTINGS.allowances || {};
   const w = morningReviewWindowOf(a);
-  const hint = L('Checked in early enough to earn the Early Morning allowance, then came through the door again between {from} and {to}. The allowance is held until someone decides. Not allowed = set the real check-in time, which also makes the day count as late.',
-    'เข้างานเช้าพอที่จะได้เบี้ยมาเช้า แล้วยังผ่านประตูอีกครั้งระหว่าง {from}–{to} — เบี้ยถูกพักไว้จนกว่าจะมีคนตัดสิน กด "ไม่จ่าย" คือการแก้เป็นเวลาที่มาจริง ซึ่งจะทำให้วันนั้นนับเป็นสายด้วย')
+  const hint = L('Early enough to earn the allowance, then another door pass between {from} and {to} — held until decided. ❌ sets the real check-in time, which also makes the day late.',
+    'เข้าเช้าพอได้เบี้ย แล้วผ่านประตูอีกช่วง {from}–{to} — พักเบี้ยไว้ก่อน ❌ คือแก้เป็นเวลาจริง วันนั้นจะนับเป็นสาย')
     .replace(/\{from\}/g, () => minsToTime(w.start)).replace(/\{to\}/g, () => minsToTime(w.end));
   const list = tab === 'reviewed' ? reviewed : pending;
   const common = th(L('Employee', 'ชื่อพนักงาน')) + th(L('Date', 'วันที่')) +
@@ -14538,18 +14568,20 @@ function morningReviewPendingBoxHtml(pending, reviewed) {
 // Same lifecycle as refreshCheckoutReviewPendingBox: create, update, or remove when empty,
 // without going through renderApprovals() (which would clear an in-progress bulk selection).
 function refreshMorningReviewPendingBox() {
-  const summEl = document.getElementById('approval-summary-bar');
-  if (!summEl) return;
+  const row = reviewBoxesRow();
+  if (!row) return;
   const { pending, reviewed } = morningReviewBoxItems();
   let box = document.getElementById('morning-review-pending-box');
   if (!pending.length && !reviewed.length) {
     if (box) box.remove();
+    dropReviewBoxesRowIfEmpty();
     return;
   }
   if (!box) {
     box = document.createElement('div');
     box.id = 'morning-review-pending-box';
-    summEl.insertBefore(box, summEl.firstChild);
+    box.style.cssText = 'flex:1 1 420px;min-width:0';
+    row.appendChild(box);
   }
   box.innerHTML = morningReviewPendingBoxHtml(pending, reviewed);
 }

@@ -1429,7 +1429,7 @@ window.LANG_JA = {
   "Came through again": "再通過",
   "No reviewed mornings in the current or previous pay period": "今期・前期に確認済みの早朝出勤はありません",
   "⚠️ Check-in time changed — reload and review again": "⚠️ 出勤時刻が変更されました — 再読み込みして確認し直してください",
-  "Checked in early enough to earn the Early Morning allowance, then came through the door again between {from} and {to}. The allowance is held until someone decides. Not allowed = set the real check-in time, which also makes the day count as late.": "早朝手当の対象となる時刻に出勤した後、{from}〜{to} に再度ドアを通過しています。確認されるまで手当は保留されます。「不支給」は実際の出勤時刻に修正することを意味し、その日は遅刻として扱われます。",
+  "Early enough to earn the allowance, then another door pass between {from} and {to} — held until decided. ❌ sets the real check-in time, which also makes the day late.": "手当の対象時刻に出勤後、{from}〜{to} に再度通過 — 確認まで保留。❌ は実際の出勤時刻に修正し、その日は遅刻となります。",
   "Awaiting review": "確認待ち",
   "Reviewed": "確認済み",
   "Reviewed by": "確認者",
