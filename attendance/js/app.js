@@ -14440,7 +14440,12 @@ function refreshCheckoutReviewPendingBox() {
   if (!box) {
     box = document.createElement('div');
     box.id = 'checkout-review-pending-box';
-    box.style.cssText = 'flex:1 1 0;min-width:320px';
+    // 2026-10-02 (owner): min-width:0 is what actually keeps the halves equal. Without it a
+    // flex item refuses to shrink below the width its content needs, so the card holding the
+    // longer names or the extra column quietly claimed more than its share and left the other
+    // one narrow. The table inside already scrolls sideways on its own when it has to.
+    // The 320px basis is what makes them wrap onto separate lines on a narrow screen.
+    box.style.cssText = 'flex:1 1 320px;min-width:0';
     row.insertBefore(box, row.firstChild);
   }
   box.innerHTML = checkoutReviewPendingBoxHtml(pending, reviewed);
@@ -14597,7 +14602,12 @@ function refreshMorningReviewPendingBox() {
   if (!box) {
     box = document.createElement('div');
     box.id = 'morning-review-pending-box';
-    box.style.cssText = 'flex:1 1 0;min-width:320px';
+    // 2026-10-02 (owner): min-width:0 is what actually keeps the halves equal. Without it a
+    // flex item refuses to shrink below the width its content needs, so the card holding the
+    // longer names or the extra column quietly claimed more than its share and left the other
+    // one narrow. The table inside already scrolls sideways on its own when it has to.
+    // The 320px basis is what makes them wrap onto separate lines on a narrow screen.
+    box.style.cssText = 'flex:1 1 320px;min-width:0';
     row.appendChild(box);
   }
   box.innerHTML = morningReviewPendingBoxHtml(pending, reviewed);
