@@ -4951,8 +4951,17 @@ function renderSettingsPage(_skipRefresh) {
       )}
       <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Early Morning Bonus','เบี้ยเลี้ยงมาเช้า')}</div>
       ${row2(
-        field(L('×1 (06:30–07:29) ฿','×1 (06:30–07:29) ฿'), inp('set-early1-amt', s.allowances.earlyMorning1, 'number')),
-        field(L('×2 (before 06:30) ฿','×2 (ก่อน 06:30) ฿'), inp('set-early2-amt', s.allowances.earlyMorning2, 'number'))
+        // 2026-10-02 (owner): both labels stated the bands wrong. x2 read "before 06:30" while
+        // the code pays x2 AT 06:30 (mins <= earlyThreshold2Min), and x1 read 06:30-07:29 when
+        // it is really 06:31-07:30. They are derived from the thresholds set right below them,
+        // and from the business-day start, so editing a threshold cannot leave a label behind
+        // describing bands the app stopped using.
+        field(L(`×1 (${minsToTime(s.allowances.earlyThreshold2Min + 1)}–${minsToTime(s.allowances.earlyThreshold1Min)}) ฿`,
+                `×1 (${minsToTime(s.allowances.earlyThreshold2Min + 1)}–${minsToTime(s.allowances.earlyThreshold1Min)}) ฿`),
+              inp('set-early1-amt', s.allowances.earlyMorning1, 'number')),
+        field(L(`×2 (${minsToTime(BUSINESS_DAY_START_MINS)}–${minsToTime(s.allowances.earlyThreshold2Min)}) ฿`,
+                `×2 (${minsToTime(BUSINESS_DAY_START_MINS)}–${minsToTime(s.allowances.earlyThreshold2Min)}) ฿`),
+              inp('set-early2-amt', s.allowances.earlyMorning2, 'number'))
       )}
       ${row2(
         field(L('Check-in before (×1 rate)','เช็กอินก่อนกี่โมงได้ ×1'), `<input id="set-early-thr1" type="time" value="${minsToTime(s.allowances.earlyThreshold1Min)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 07:30','เช่น 07:30')),
