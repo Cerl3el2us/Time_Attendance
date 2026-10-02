@@ -3768,6 +3768,13 @@ function handlePutMorningReview(req, res) {
     } else if (bodyCheckIn !== undefined && bodyCheckIn !== null && (typeof bodyCheckIn !== 'string' || !HHMM_RE.test(bodyCheckIn))) {
       return res.status(400).json({ success: false, message: 'checkIn must be in HH:MM format' });
     }
+    // The owner asked for the reason to be kept with the decision, so a refusal can be read back
+    // months later without reconstructing it from the time correction alone. Required on a deny,
+    // meaningless on an allow or a clear.
+    const reason = typeof body.reason === 'string' ? body.reason.trim().slice(0, 500) : '';
+    if (decision === 'deny' && !reason) {
+      return res.status(400).json({ success: false, message: 'reason is required when refusing' });
+    }
     if (userId === live.id) {
       return res.status(403).json({ success: false, message: 'You cannot review your own morning' });
     }
@@ -3811,6 +3818,7 @@ function handlePutMorningReview(req, res) {
     } else {
       review = {
         decision,
+        reason,
         checkIn: day.checkIn,
         doorScans: (attLog[dateStr] || {}).doorScans || [],
         by: String(live.name || live.username || 'User').slice(0, 120),
@@ -8942,6 +8950,29 @@ app.put('/api/finalize', requireRole('md', 'accounting'), blockSuperAdminPayroll
     }
     if (isPeriodLocked(periodStart)) {
       return res.status(409).json({ success:false, message:'This period is locked' });
+    }
+    // 2026-10-02 (owner): a period cannot be confirmed while a flagged morning is still waiting
+    // for a decision. Closing over one would hold that allowance permanently, with nothing left on
+    // screen to explain why -- the "quietly short-paid and nobody notices" outcome the owner ruled
+    // out when he asked for the flag in the first place. The dates come back in the message so
+    // Accounting is told which days to go and look at, not just that something is wrong.
+    if (value && value.confirmed === true) {
+      const openUsers = readUsers();
+      if (openUsers === null) return res.status(503).json({ success:false, message:'Service temporarily unavailable' });
+      const openTarget = openUsers.find(u => u.id === Number(km[2]));
+      const openReviews = readMorningReviews();
+      if (openReviews === null) return res.status(503).json({ success:false, message:'Service temporarily unavailable' });
+      if (openTarget) {
+        const periodEnd = new Date(periodStart.getFullYear(), periodStart.getMonth() + 1, periodStart.getDate() - 1);
+        const openLog = buildAttendanceLogForUser(openTarget, periodStart, periodEnd);
+        const openDays = generatePeriodDays(periodStart, periodEnd, false, openTarget, openLog,
+          readLeaves() || [], getAppSettings(), {}, openReviews);
+        const stillOpen = openDays.filter(d => d.morningReviewNeeded && !d.morningReview).map(d => d.date);
+        if (stillOpen.length) {
+          return res.status(409).json({ success:false, code:'MORNING_REVIEW_PENDING',
+            message: `Early morning review still open for ${stillOpen.join(', ')} — decide those before confirming` });
+        }
+      }
     }
     // VALIDATION FIX 2026-08-13 (re-audit): `value` used to be written verbatim with no shape
     // checking at all -- unlike PUT /api/settings (whitelisted/type-checked field by field), a

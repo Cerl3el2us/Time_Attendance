@@ -9623,6 +9623,21 @@ function renderAttendanceTable() {
           earlyWarnBadge += ` <button class="btn btn-ghost btn-sm" onclick="openQuickFixCheckIn('${escapeJsAttr(row.date)}', ${targetUserId}, '${escapeJsAttr(row.checkIn)}')" title="${L('Fix this check-in time now','แก้ไขเวลาเข้างานนี้ทันที')}">🔧</button>`;
         }
       }
+      // 2026-10-02 (owner): the same red flag, raised by the morning review instead of by the
+      // clock alone. The 06:00 rule above only ever covered two days in the whole scan history,
+      // because the allowance is paid all the way to 07:30 -- this covers the rest of that window
+      // by asking a different question: was there another door pass later in the morning? The
+      // tooltip carries the evidence, since a flag nobody can check is just noise.
+      if (row.morningReviewNeeded && !row.morningReview) {
+        const _later = morningReviewLaterScans(targetUserId, row);
+        const _why = L(`Scanned at ${row.checkIn}, came through again at ${_later.join(', ') || '—'} — the Early Morning allowance is held until this is reviewed`,
+          `สแกนตอน ${row.checkIn} แล้วผ่านประตูอีกตอน ${_later.join(', ') || '—'} — เบี้ยมาเช้าถูกพักไว้จนกว่าจะตรวจสอบ`);
+        earlyWarnBadge = `<span class="badge badge-danger" style="margin-left:4px" title="${escapeHtml(_why)}">⚠️ ${L('Verify','ตรวจสอบ')}</span>`;
+        if (!isViewingSelf && isMdAccountingView()) {
+          earlyWarnBadge += ` <button class="btn btn-ghost btn-sm" style="color:#059669" onclick="setMorningReview(${targetUserId}, '${escapeJsAttr(row.date)}', 'allow', '${escapeJsAttr(row.checkIn)}')" title="${L('Genuine early start — pay the allowance','มาทำงานแต่เช้าจริง — จ่ายเบี้ย')}">✅</button>`;
+          earlyWarnBadge += ` <button class="btn btn-ghost btn-sm" style="color:#dc2626" onclick="denyMorningReview(${targetUserId}, '${escapeJsAttr(row.date)}', '${escapeJsAttr(row.checkIn)}')" title="${L('Not a real early start — set the real check-in time','ไม่ได้มาทำงานแต่เช้าจริง — แก้เป็นเวลาที่มาจริง')}">❌</button>`;
+        }
+      }
     }
     let lateBadge = '';
     const _lnHwDates = new Set(DATA_LEAVES.filter(l =>
@@ -14270,6 +14285,7 @@ let _checkoutReviewTab = 'pending';
 function setCheckoutReviewTab(tab) {
   _checkoutReviewTab = tab === 'reviewed' ? 'reviewed' : 'pending';
   refreshCheckoutReviewPendingBox();
+  refreshMorningReviewPendingBox();
 }
 
 function checkoutReviewDayCells(user, day) {
@@ -14381,6 +14397,226 @@ function refreshCheckoutReviewPendingBox() {
   box.innerHTML = checkoutReviewPendingBoxHtml(pending, reviewed);
 }
 
+// ===== Morning review box (2026-10-02, owner) =====
+// The morning twin of the web check-out review box above. Same shape on purpose: Accounting
+// already reads one of these every week, and a second one that behaved differently would be a
+// second thing to learn. What differs is the evidence column -- the evening box shows one time,
+// this one has to show why the day was flagged at all, which is a pair of times: "scanned at
+// 06:56, came through again at 08:31, 10:25".
+function morningReviewLaterScans(uid, day) {
+  const scans = (attendanceLog[attKey(uid, day.date)] || {}).doorScans || [];
+  const inMins = parseHHMMToMins(day.checkIn);
+  const w = morningReviewWindowOf(APP_SETTINGS.allowances || {});
+  return scans.filter(t => {
+    const m = parseHHMMToMins(t);
+    return Number.isFinite(m) && m > inMins && m >= w.start && m <= w.end;
+  });
+}
+function morningReviewBoxItems() {
+  const out = { pending: [], reviewed: [] };
+  if (!currentUser || currentUser.isObserver || !isMdAccountingView()) return out;
+  const users = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active !== false &&
+    Number(u.id) !== Number(currentUser.id) &&
+    isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'earlyLate'));
+  [0, 1].forEach(idx => {
+    const { start, end, isCurrent } = getPeriodBounds(idx);
+    users.forEach(u => {
+      generatePeriodDays(start, end, isCurrent, u.id).forEach(day => {
+        if (!day.morningReviewNeeded) return;
+        const locked = payPeriodBlockedForDate(day.date, u.id).blocked;
+        if (day.morningReview) {
+          out.reviewed.push({ user: u, day, locked, review: DATA_MORNING_REVIEWS[attKey(u.id, day.date)] || null });
+        } else if (!locked) {
+          out.pending.push({ user: u, day });
+        }
+      });
+    });
+  });
+  const byDateThenName = (a, b) => b.day.date.localeCompare(a.day.date) ||
+    String(a.user.name || '').localeCompare(String(b.user.name || ''));
+  out.pending.sort(byDateThenName);
+  out.reviewed.sort(byDateThenName);
+  return out;
+}
+
+let _morningReviewTab = 'pending';
+function setMorningReviewTab(tab) {
+  _morningReviewTab = tab === 'reviewed' ? 'reviewed' : 'pending';
+  refreshMorningReviewPendingBox();
+}
+
+function morningReviewDayCells(user, day) {
+  const later = morningReviewLaterScans(Number(user.id), day);
+  const laterHtml = later.length
+    ? later.map(t => escapeHtml(t)).join(', ')
+    : '<span style="color:#94a3b8">—</span>';
+  return `<td style="padding:6px 8px">${escapeHtml(user.name)}</td>
+      <td style="padding:6px 8px;white-space:nowrap">${escapeHtml(fmtDate(new Date(day.date + 'T12:00:00')))}</td>
+      <td style="padding:6px 8px;white-space:nowrap">🌅 ${escapeHtml(day.checkIn || '—')}</td>
+      <td style="padding:6px 8px;white-space:nowrap">🚪 ${laterHtml}</td>`;
+}
+
+function morningReviewPendingRowsHtml(items) {
+  return items.map(({ user, day }) => {
+    const uid = Number(user.id);
+    const d = escapeJsAttr(day.date);
+    const ci = escapeJsAttr(day.checkIn || '');
+    return `<tr>
+      ${morningReviewDayCells(user, day)}
+      <td style="padding:6px 8px;white-space:nowrap;text-align:right">
+        <button class="btn btn-ghost btn-sm" style="color:#059669" title="${escapeHtml(L('Genuine early start — pay the allowance', 'มาทำงานแต่เช้าจริง — จ่ายเบี้ย'))}" onclick="setMorningReview(${uid}, '${d}', 'allow', '${ci}')">✅</button>
+        <button class="btn btn-ghost btn-sm" style="color:#dc2626" title="${escapeHtml(L('Not a real early start — set the real check-in time', 'ไม่ได้มาทำงานแต่เช้าจริง — แก้เป็นเวลาที่มาจริง'))}" onclick="denyMorningReview(${uid}, '${d}', '${ci}')">❌</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+function morningReviewReviewedRowsHtml(items) {
+  return items.map(({ user, day, locked, review }) => {
+    const uid = Number(user.id);
+    const d = escapeJsAttr(day.date);
+    const decision = day.morningReview === 'allow'
+      ? `<span style="color:#166534;white-space:nowrap">${escapeHtml(L('✅ Allowed', '✅ จ่ายเบี้ย'))}</span>`
+      : `<span style="color:#991b1b;white-space:nowrap">${escapeHtml(L('❌ Not allowed', '❌ ไม่จ่าย'))}</span>`;
+    const atDate = review && review.at ? new Date(review.at) : null;
+    const when = atDate && !isNaN(atDate.getTime()) ? fmtDateTime(atDate) : '';
+    const why = review && review.reason
+      ? `<div style="font-size:11px;color:#64748b">${escapeHtml(review.reason)}</div>` : '';
+    const by = `${escapeHtml((review && review.by) || '—')}${when ? `<div style="font-size:11px;color:#64748b">${escapeHtml(when)}</div>` : ''}${why}`;
+    const action = locked
+      ? `<span style="font-size:12px;color:#64748b" title="${escapeHtml(L('Pay period is closed — read-only', 'งวดเงินเดือนปิดแล้ว — ดูได้อย่างเดียว'))}">🔒</span>`
+      : `<button class="btn btn-ghost btn-sm" style="color:#64748b" title="${escapeHtml(L('Undo review', 'ยกเลิกผลตรวจสอบ'))}" onclick="setMorningReview(${uid}, '${d}', null, '${escapeJsAttr(day.checkIn || '')}')">↩️</button>`;
+    return `<tr>
+      ${morningReviewDayCells(user, day)}
+      <td style="padding:6px 8px">${decision}</td>
+      <td style="padding:6px 8px">${by}</td>
+      <td style="padding:6px 8px;white-space:nowrap;text-align:right">${action}</td>
+    </tr>`;
+  }).join('');
+}
+
+function morningReviewPendingBoxHtml(pending, reviewed) {
+  reviewed = reviewed || [];
+  const tab = _morningReviewTab === 'reviewed' ? 'reviewed' : 'pending';
+  const th = (text, align) => `<th style="padding:6px 8px;text-align:${align || 'left'};color:var(--text-muted)">${escapeHtml(text)}</th>`;
+  const tabBtn = (key, label, n) => {
+    const active = tab === key;
+    return `<button type="button" class="btn btn-sm ${active ? 'btn-primary' : 'btn-ghost'}" style="margin-right:6px" aria-pressed="${active}" onclick="setMorningReviewTab('${key}')">${escapeHtml(label)} (${n})</button>`;
+  };
+  // Both numbers come from Settings, so the sentence follows a threshold change without an edit.
+  const a = APP_SETTINGS.allowances || {};
+  const w = morningReviewWindowOf(a);
+  const hint = L('Checked in early enough to earn the Early Morning allowance, then came through the door again between {from} and {to}. The allowance is held until someone decides. Not allowed = set the real check-in time, which also makes the day count as late.',
+    'เข้างานเช้าพอที่จะได้เบี้ยมาเช้า แล้วยังผ่านประตูอีกครั้งระหว่าง {from}–{to} — เบี้ยถูกพักไว้จนกว่าจะมีคนตัดสิน กด "ไม่จ่าย" คือการแก้เป็นเวลาที่มาจริง ซึ่งจะทำให้วันนั้นนับเป็นสายด้วย')
+    .replace(/\{from\}/g, () => minsToTime(w.start)).replace(/\{to\}/g, () => minsToTime(w.end));
+  const list = tab === 'reviewed' ? reviewed : pending;
+  const common = th(L('Employee', 'ชื่อพนักงาน')) + th(L('Date', 'วันที่')) +
+    th(L('Checked in', 'เข้างาน')) + th(L('Came through again', 'ผ่านประตูอีก'));
+  const head = tab === 'reviewed'
+    ? common + th(L('Result', 'ผลตรวจสอบ')) + th(L('Reviewed by', 'ตรวจสอบโดย')) + th(L('Action', 'ดำเนินการ'), 'right')
+    : common + th(L('Action', 'ดำเนินการ'), 'right');
+  const body = !list.length
+    ? `<div style="font-size:13px;color:var(--text-muted);padding:6px 2px">${escapeHtml(tab === 'reviewed'
+      ? L('No reviewed mornings in the current or previous pay period', 'ไม่มีรายการที่ตรวจแล้วในงวดนี้และงวดก่อน')
+      : L('Nothing awaiting review', 'ไม่มีรายการรอตรวจสอบ'))}</div>`
+    : `<div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr>${head}</tr></thead>
+        <tbody>${tab === 'reviewed' ? morningReviewReviewedRowsHtml(list) : morningReviewPendingRowsHtml(list)}</tbody>
+      </table>
+    </div>`;
+  return `<div style="margin-bottom:14px;padding:12px 14px;border:1px solid #f59e0b;border-radius:10px;background:var(--bg-card)">
+    <div style="font-weight:700;color:var(--text);margin-bottom:4px">⚠️ ${escapeHtml(L('Early morning review', 'ตรวจสอบการมาเช้า'))}</div>
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">${escapeHtml(hint)}</div>
+    <div style="margin-bottom:8px">${tabBtn('pending', L('Awaiting review', 'รอตรวจสอบ'), pending.length)}${tabBtn('reviewed', L('Reviewed', 'ตรวจแล้ว'), reviewed.length)}</div>
+    ${body}
+  </div>`;
+}
+
+// Same lifecycle as refreshCheckoutReviewPendingBox: create, update, or remove when empty,
+// without going through renderApprovals() (which would clear an in-progress bulk selection).
+function refreshMorningReviewPendingBox() {
+  const summEl = document.getElementById('approval-summary-bar');
+  if (!summEl) return;
+  const { pending, reviewed } = morningReviewBoxItems();
+  let box = document.getElementById('morning-review-pending-box');
+  if (!pending.length && !reviewed.length) {
+    if (box) box.remove();
+    return;
+  }
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'morning-review-pending-box';
+    summEl.insertBefore(box, summEl.firstChild);
+  }
+  box.innerHTML = morningReviewPendingBoxHtml(pending, reviewed);
+}
+
+// Allow / undo. Deny goes through denyMorningReview() instead, because denying means naming the
+// real arrival time, not just withholding money.
+async function setMorningReview(userId, dateStr, decision, checkIn, reason) {
+  if (blockIfObserver()) return;
+  const uid = Number(userId);
+  if (!currentUser || uid === Number(currentUser.id) || !isMdAccountingView()) return;
+  try {
+    const res = await apiFetch('/api/morning-reviews', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: uid, date: dateStr, decision, checkIn: checkIn || undefined,
+        reason: reason || undefined }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      // Only a moved check-in means "reload and look again"; the other 409s are period-lock
+      // states whose own message must reach the user unchanged.
+      if (res.status === 409 && data.code === 'CHECKIN_CHANGED') {
+        showToast(L('⚠️ Check-in time changed — reload and review again', '⚠️ เวลาเข้างานเปลี่ยนไปแล้ว — โหลดใหม่แล้วตรวจสอบอีกครั้ง'), 'warning');
+        await Promise.all([loadAttendanceFromBackend(), loadMorningReviewsFromBackend()]);
+        rerenderAfterCheckoutReviews();
+        return;
+      }
+      throw new Error(data.message || 'Server error');
+    }
+    DATA_MORNING_REVIEWS = DATA_MORNING_REVIEWS || {};
+    const key = attKey(uid, dateStr);
+    if (decision === null) delete DATA_MORNING_REVIEWS[key];
+    else DATA_MORNING_REVIEWS[key] = data.review;
+    rerenderAfterCheckoutReviews();
+  } catch (e) {
+    showToast(L('❌ Could not save: ', '❌ ไม่สามารถบันทึกได้: ') + e.message, 'danger');
+  }
+}
+
+// Denying is two facts at once: this was not a real early start, and the real arrival was at
+// such-and-such a time. The second one is a time correction, which this app already has -- with
+// a reason box, an immediate effect for MD/Accounting, and the dependent-claim handling that
+// moving a check-in drags behind it. Reusing it means a denial cannot silently skip any of that.
+// The suggested time is the first door pass inside the review window, which is the arrival the
+// flag was raised about; Accounting can pick any of the day's times instead.
+let _morningDenyTarget = null;
+function denyMorningReview(userId, dateStr, checkIn) {
+  if (blockIfObserver()) return;
+  const uid = Number(userId);
+  if (!currentUser || uid === Number(currentUser.id) || !isMdAccountingView()) return;
+  const day = generatePeriodDays(new Date(dateStr + 'T12:00:00'), new Date(dateStr + 'T12:00:00'), false, uid)[0];
+  const later = day ? morningReviewLaterScans(uid, day) : [];
+  _morningDenyTarget = { userId: uid, date: dateStr, checkIn };
+  openQuickFixCheckIn(dateStr, uid, checkIn);
+  const suggested = later[0] || '';
+  if (suggested) {
+    const input = document.getElementById('tc-corrected-time');
+    if (input) input.value = suggested;
+  }
+  const banner = document.getElementById('tc-warning-banner');
+  if (banner) {
+    banner.className = 'alert alert-warning';
+    banner.innerHTML = escapeHtml(L(
+      `Scanned at ${checkIn}, then came through the door again at ${later.join(', ') || '—'}. Set the time this person really started, and say why — both are kept with the decision.`,
+      `สแกนตอน ${checkIn} แล้วยังผ่านประตูอีกตอน ${later.join(', ') || '—'} — ใส่เวลาที่มาทำงานจริงและเหตุผล ทั้งสองอย่างจะถูกเก็บไว้กับผลตรวจสอบ`));
+  }
+  const title = document.getElementById('tc-modal-title');
+  if (title) title.textContent = L('❌ Not a real early start', '❌ ไม่ได้มาทำงานแต่เช้าจริง');
+}
+
 function renderApprovals() {
   const catEl  = document.getElementById('approval-categories');
   const histEl = document.getElementById('approval-history-section');
@@ -14425,6 +14661,7 @@ function renderApprovals() {
   if (summEl) {
     // Web check-out Late Night reviews (MD/Accounting only; hidden when empty).
     refreshCheckoutReviewPendingBox();
+  refreshMorningReviewPendingBox();
     // Tab bar
     const tabBar = document.createElement('div');
     tabBar.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px';
@@ -18491,7 +18728,11 @@ function openTimeCorrectionModal(date, checkIn, checkOut) {
   document.getElementById('tc-submit-btn').textContent = L('📤 Submit Request', '📤 ยื่นคำร้อง');
   document.getElementById('time-correction-modal').classList.add('show');
 }
-function closeTimeCorrectionModal() { document.getElementById('time-correction-modal').classList.remove('show'); }
+function closeTimeCorrectionModal() {
+  // a cancelled modal must not leave a refusal armed for whatever is corrected next
+  _morningDenyTarget = null;
+  document.getElementById('time-correction-modal').classList.remove('show');
+}
 
 // Opened from the ⚠️ warning badge (table row or detail modal) — lets MD/Accounting fix a
 // suspicious check-in (< 06:00) immediately with no separate approval step, since they are
@@ -18536,6 +18777,15 @@ async function submitTimeCorrection() {
   if (!field)  { showToast(L('⚠️ Please choose check-in or check-out to edit', '⚠️ กรุณาเลือกว่าจะแก้ไขเวลาเข้าหรือออก'), 'warning'); return; }
   if (!time)   { showToast(L('⚠️ Please enter a valid time', '⚠️ กรุณาระบุเวลาที่ถูกต้อง'), 'warning'); return; }
   if (!reason) { showToast(L('⚠️ Please specify the reason', '⚠️ กรุณาระบุเหตุผล'), 'warning'); return; }
+  // 2026-10-02 (owner): refusing a flagged morning is two facts -- "this was not a real early
+  // start" and "the real arrival was at X" -- and X is applied through this very correction. The
+  // refusal is recorded FIRST, because the correction moves the check-in the decision is about and
+  // the server's stale-screen guard would then (correctly) refuse to record it. If the correction
+  // below fails afterwards, the day is left refused and unpaid, which is the safe way round.
+  if (_morningDenyTarget && _morningDenyTarget.date === date && field === 'checkIn') {
+    await setMorningReview(_morningDenyTarget.userId, _morningDenyTarget.date, 'deny',
+      _morningDenyTarget.checkIn, reason);
+  }
   const originalRaw = field === 'checkIn'
     ? document.getElementById('tc-current-in').textContent
     : document.getElementById('tc-current-out').textContent;
@@ -18575,6 +18825,7 @@ async function submitTimeCorrection() {
   }
   const quickFixName = _tcQuickFixTarget?.name || '';
   _tcQuickFixTarget = null;
+  _morningDenyTarget = null;
   updateMyRequestsBadge();
   updateApprovalBadge();
   closeTimeCorrectionModal();
@@ -20833,7 +21084,7 @@ function processLiveScanEvent(ev) {
   // FIX (re-review): was calling the full renderApprovals(), which clears `_approvalSelected` and
   // redraws every Quick Table checkbox -- any live scan (from ANY employee) while an MD had a
   // bulk selection in progress silently wiped it. Refresh only the pending-review box instead.
-  if (currentPage === 'approval') refreshCheckoutReviewPendingBox();
+  if (currentPage === 'approval') { refreshCheckoutReviewPendingBox(); refreshMorningReviewPendingBox(); }
   renderDashboard();
   // If event is for the current user, refresh both the checkin page's button state AND the
   // today's log timeline — previously only updateScanButton() was called here, so a live device
@@ -21780,12 +22031,16 @@ function renderAuditLog() {
       const dtStr = escapeHtml(_fmtDtStr(r.serverCreatedAt || r.submittedAt || r.dateFrom));
 
       let period = '';
+      // 2026-10-02 (owner): this column printed the raw YYYY-MM-DD while every other date on the
+      // same page is formatted, so one row read "1 ต.ค. 2026 11:13" next to "2026-09-30".
+      // fmtDate() follows the chosen language, which the raw string never did.
+      const _audDate = v => v ? escapeHtml(fmtDate(new Date(v + 'T12:00:00'))) : '';
       if (r.type === 'time-correction') {
-        period = `${escapeHtml(r.dateFrom)} · ${r.correctionField==='checkIn'?L('Check In','เข้างาน'):L('Check Out','ออกงาน')} ${escapeHtml(r.originalTime||'')}→${escapeHtml(r.correctedTime||'')}`;
+        period = `${_audDate(r.dateFrom)} · ${r.correctionField==='checkIn'?L('Check In','เข้างาน'):L('Check Out','ออกงาน')} ${escapeHtml(r.originalTime||'')}→${escapeHtml(r.correctedTime||'')}`;
       } else if (r.dateFrom === r.dateTo || !r.dateTo) {
-        period = escapeHtml(r.dateFrom || '');
+        period = _audDate(r.dateFrom);
       } else {
-        period = `${escapeHtml(r.dateFrom)} – ${escapeHtml(r.dateTo)}${r.days ? ` (${Number(r.days)||0}d)` : ''}`;
+        period = `${_audDate(r.dateFrom)} – ${_audDate(r.dateTo)}${r.days ? ` (${Number(r.days)||0}d)` : ''}`;
       }
 
       const reasonRaw = r.reason || r.note || '';
