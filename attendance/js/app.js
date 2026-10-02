@@ -21945,6 +21945,45 @@ function renderAuditLog() {
     });
   }
 
+  // 2026-10-02 (owner): the month filter was an <input type="month"> -- an empty box with no
+  // placeholder, which nobody could guess the purpose of, and which still had to be typed into
+  // segment by segment. It lists the months that actually have records instead, newest first,
+  // with how many, so picking one is a single click and an empty month cannot be chosen at all.
+  // Rebuilt on every render because records arrive after the first one; the current choice is
+  // kept, and kept even if its month has just emptied, so the list cannot silently re-filter.
+  const monthSel = document.getElementById('audit-filter-month');
+  if (monthSel) {
+    const counts = new Map();
+    DATA_LEAVES.forEach(r => {
+      const d = String(r.serverCreatedAt || r.submittedAt || r.dateFrom || '').substring(0, 7);
+      if (/^\d{4}-\d{2}$/.test(d)) counts.set(d, (counts.get(d) || 0) + 1);
+    });
+    const want = [...counts.keys()].sort().reverse();
+    const have = [...monthSel.options].slice(1).map(o => o.value);
+    // the month NAMES follow the chosen language, so a language switch has to rebuild the list
+    // too -- otherwise an English UI keeps showing Thai months until a record happens to arrive.
+    const staleLang = monthSel.dataset.lang !== currentLang;
+    if (staleLang || want.join(',') !== have.join(',')) {
+      monthSel.dataset.lang = currentLang;
+      const keep = monthSel.value;
+      [...monthSel.options].slice(1).forEach(o => o.remove());
+      want.forEach(m => {
+        const o = document.createElement('option');
+        o.value = m;
+        const [y, mm] = m.split('-');
+        o.textContent = `${_monthNames()[Number(mm) - 1]} ${y} (${counts.get(m)})`;
+        monthSel.appendChild(o);
+      });
+      if (keep && !want.includes(keep)) {
+        const o = document.createElement('option');
+        o.value = keep;
+        const [y, mm] = keep.split('-');
+        o.textContent = `${_monthNames()[Number(mm) - 1]} ${y} (0)`;
+        monthSel.appendChild(o);
+      }
+      monthSel.value = keep;
+    }
+  }
   const filterUser   = userSel ? userSel.value : '';
   const filterType   = document.getElementById('audit-filter-type')?.value  || '';
   const filterStatus = document.getElementById('audit-filter-status')?.value || '';
