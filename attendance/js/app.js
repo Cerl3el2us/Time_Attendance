@@ -14688,18 +14688,22 @@ function denyMorningReview(userId, dateStr, checkIn) {
   if (picks) {
     const all = (attendanceLog[attKey(uid, dateStr)] || {}).doorScans || [];
     if (all.length) {
+      // 2026-10-02 (owner): these were 12px chips and read as a footnote, when choosing one of
+      // them is the actual decision being made in this dialog. Sized like buttons, with the
+      // suggested one filled rather than merely outlined.
       const btns = all.map(t => {
         const isSuggested = t === suggested;
         const isCheckIn = t === checkIn;
-        const tag = isCheckIn ? L(' (checked in)', ' (เวลาเข้างานเดิม)')
-          : isSuggested ? L(' (suggested)', ' (ที่แนะนำ)') : '';
+        const tag = isCheckIn ? L('checked in', 'เวลาเดิม')
+          : isSuggested ? L('suggested', 'แนะนำ') : '';
         const style = isSuggested
-          ? 'border:1px solid #2563eb;background:#eff6ff;color:#1d4ed8'
-          : isCheckIn ? 'border:1px solid #e2e8f0;background:#f8fafc;color:#94a3b8'
-          : 'border:1px solid #e2e8f0;background:var(--bg-card);color:var(--text)';
-        return `<button type="button" onclick="pickCorrectedTime('${escapeJsAttr(t)}')" style="${style};border-radius:6px;padding:4px 8px;margin:0 4px 4px 0;font-size:12px;cursor:pointer">${escapeHtml(t)}${escapeHtml(tag)}</button>`;
+          ? 'border:2px solid #1d4ed8;background:#2563eb;color:#fff;box-shadow:0 1px 3px rgba(37,99,235,.4)'
+          : isCheckIn ? 'border:1px solid #e2e8f0;background:#f1f5f9;color:#94a3b8'
+          : 'border:1px solid #cbd5e1;background:var(--bg-card);color:var(--text)';
+        const sub = tag ? `<div style="font-size:10px;font-weight:600;opacity:.85;margin-top:1px">${escapeHtml(tag)}</div>` : '';
+        return `<button type="button" onclick="pickCorrectedTime('${escapeJsAttr(t)}')" style="${style};border-radius:8px;padding:8px 14px;margin:0 8px 8px 0;font-size:17px;font-weight:700;line-height:1.1;cursor:pointer;min-width:70px">${escapeHtml(t)}${sub}</button>`;
       }).join('');
-      picks.innerHTML = `<div style="font-size:11px;color:var(--text-muted);margin-bottom:3px">${escapeHtml(L('Door passes on this day — pick the real arrival', 'เวลาที่ผ่านประตูของวันนี้ — เลือกเวลาที่มาจริง'))}</div>${btns}`;
+      picks.innerHTML = `<div style="font-size:13px;font-weight:700;color:var(--text);margin:8px 0 6px">🚪 ${escapeHtml(L('Door passes on this day — pick the real arrival', 'เวลาที่ผ่านประตูของวันนี้ — เลือกเวลาที่มาจริง'))}</div>${btns}`;
       picks.style.display = '';
     }
   }
