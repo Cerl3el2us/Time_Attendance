@@ -85,7 +85,7 @@ function makeServer(world) {
     isAllowanceEligible: () => true, bangkokDateStr: () => '2026-12-31',
     attendanceDayForUser: (u, d) => (world.att[d] ? { date: d, status: 'present', ...world.att[d] } : null),
     buildAttendanceLogForUser: () => ({}), readJSON: () => ({}), readLeaves: () => world.leaves,
-    readCheckoutReviews: () => ({}), generatePeriodDays: () => world.pDays, getFinalizeKey: () => 'k',
+    readCheckoutReviews: () => ({}), readMorningReviews: () => ({}), generatePeriodDays: () => world.pDays, getFinalizeKey: () => 'k',
     calcAnnualTax: () => 0,
   };
   ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;

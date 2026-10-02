@@ -1786,6 +1786,9 @@ let DATA_LEAVES = [];
 // "<userId>_<YYYY-MM-DD>" (same format as attKey). GET /api/checkout-reviews is scoped server-side:
 // md/accounting/manager get all, everyone else only their own.
 let DATA_CHECKOUT_REVIEWS = {};
+// 2026-10-02 (owner): the morning twin -- Accounting's allow/deny on an early scan that was
+// followed by another door pass. Same shape, same scoping rules, same key (`<userId>_<date>`).
+let DATA_MORNING_REVIEWS = {};
 let DATA_ANNOUNCEMENTS = [];
 let _editingAnnouncementId = null;
 let nextLeaveId = 1;
@@ -6452,10 +6455,23 @@ function generatePeriodDays(start, end, isCurrent, userId) {
     // 2026-09-23: after the overlay, so a review counts only for the effective (corrected) web
     // check-out it was made on. Dual-sync twin in server.js.
     const checkOutReview = uid ? checkoutReviewDecisionFor(DATA_CHECKOUT_REVIEWS[attKey(uid, dateStr)], checkOut, checkOutSource) : null;
+    // 2026-10-02 (owner): the morning mirror of the review above. An early scan that earns the
+    // allowance, followed by another door pass in the working morning, waits for Accounting
+    // before it pays. The pass times live on the attendance log, not on the row, so they are read
+    // from there. The decision is only looked up for a day that is actually flagged -- a stored
+    // decision for a day that no longer triggers must not quietly linger on the row.
+    // DUAL-SYNC: twin block in server.js generatePeriodDays().
+    const _mrUser = uid ? DATA_USERS.find(u => Number(u.id) === Number(uid)) : null;
+    const morningReviewNeeded = !!_mrUser && morningReviewTrigger(
+      { date: dateStr, status, checkIn, checkInSource, isFuture, isWeekend, isPubHoliday },
+      _mrUser, APP_SETTINGS, (attendanceLog[attKey(uid, dateStr)] || {}).doorScans,
+      hasHolidayWorkClaimOnDate(dateStr, uid, true) ? new Set([dateStr]) : null);
+    const morningReview = morningReviewNeeded
+      ? morningReviewDecisionFor(DATA_MORNING_REVIEWS[attKey(uid, dateStr)], checkIn) : null;
     // 2026-09-24 (owner): scan instants + GPS zone, for the display-only local time on Abroad days.
     const _abroadRec = (status === 'abroad' && uid) ? attendanceLog[attKey(uid, dateStr)] : null;
     const abroadScan = _abroadRec ? { inAt: _abroadRec.checkInAt || null, inTz: _abroadRec.checkInGpsTz || null, outAt: _abroadRec.checkOutAt || null, outTz: _abroadRec.checkOutGpsTz || null } : null;
-    days.push({ date: dateStr, dayName: dayNamesEn[d.getDay()], isWeekend, isPubHoliday, isFuture, isToday, status, checkIn, checkOut, earlyIn, lateOut, upcountry, longDistance, longDistanceKm, longDistanceAllowance, checkInSource, checkOutSource, earlyApproved, lateApproved, checkInGPS, checkOutGPS, checkInGpsAcc, checkOutGpsAcc, holidayName, firstScanAfterCutoff, partialLeave, checkOutReview, rawCheckOut, abroadScan, excused, excusedReason });
+    days.push({ date: dateStr, dayName: dayNamesEn[d.getDay()], isWeekend, isPubHoliday, isFuture, isToday, status, checkIn, checkOut, earlyIn, lateOut, upcountry, longDistance, longDistanceKm, longDistanceAllowance, checkInSource, checkOutSource, earlyApproved, lateApproved, checkInGPS, checkOutGPS, checkInGpsAcc, checkOutGpsAcc, holidayName, firstScanAfterCutoff, partialLeave, checkOutReview, morningReviewNeeded, morningReview, rawCheckOut, abroadScan, excused, excusedReason });
     d.setDate(d.getDate() + 1);
   }
   return days;
@@ -6532,6 +6548,23 @@ async function loadLeavesFromBackend() {
 
 // On failure the previous map is kept (initially {} = nothing allowed), so the browser never shows
 // a web check-out as paid that the server has not confirmed. The server engine is authoritative.
+// The morning twin. Same failure behaviour: on failure the previous map is kept, so a flagged
+// day is never shown as paid on a decision the server has not confirmed.
+async function loadMorningReviewsFromBackend() {
+  try {
+    const res = await apiFetch('/api/morning-reviews');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    if (!data || !data.success || !data.reviews || typeof data.reviews !== 'object' || Array.isArray(data.reviews)) {
+      throw new Error('bad payload');
+    }
+    DATA_MORNING_REVIEWS = data.reviews;
+    return true;
+  } catch(e) {
+    console.error('[APP] loadMorningReviewsFromBackend error:', e.message);
+    return false;
+  }
+}
 async function loadCheckoutReviewsFromBackend() {
   try {
     const res = await apiFetch('/api/checkout-reviews');
@@ -6913,6 +6946,7 @@ async function logout() {
   // MD/Accounting user's full review map (visible to isLeaveFullAccess roles) lingers in memory
   // for the next user who logs into this same tab/browser.
   DATA_CHECKOUT_REVIEWS = {};
+  DATA_MORNING_REVIEWS = {};
   // 2026-09-24 (round 7): the next user of this tab must not see this user's inbox.
   resetNotifications();
   // 2026-09-24 (review M-3): nor land on this user's Approvals history view.
@@ -7234,6 +7268,7 @@ function initApp(startPage) {
     initNotificationPolling();
   });
   loadCheckoutReviewsFromBackend().then(ok => { if (ok) rerenderAfterCheckoutReviews(); });
+  loadMorningReviewsFromBackend().then(ok => { if (ok) rerenderAfterCheckoutReviews(); });
   if (currentPage === 'dashboard') fetchExchangeRate();
   loadAttendanceFromBackend().then(ok => {
     if (ok) {
@@ -9109,7 +9144,7 @@ async function setCheckoutReview(userId, dateStr, decision, checkOut) {
         // re-fetch both attendance (the real check-out moved) and reviews, then re-render,
         // instead of leaving a stale row/chip on screen.
         showToast(L('⚠️ Check-out time changed — reload and review again', '⚠️ เวลาออกเปลี่ยนไปแล้ว — โหลดใหม่แล้วตรวจสอบอีกครั้ง'), 'warning');
-        await Promise.all([loadAttendanceFromBackend(), loadCheckoutReviewsFromBackend()]);
+        await Promise.all([loadAttendanceFromBackend(), loadCheckoutReviewsFromBackend(), loadMorningReviewsFromBackend()]);
         rerenderAfterCheckoutReviews();
         return;
       }
@@ -20888,10 +20923,14 @@ function initHikvisionLive() {
           }).catch(() => {});
         }
       }
+      if (data.type === 'MORNING_REVIEWS_UPDATED') {
+        loadMorningReviewsFromBackend().then(ok => { if (ok) rerenderAfterCheckoutReviews(); });
+      }
       if (data.type === 'CHECKOUT_REVIEWS_UPDATED') {
         // Payload-less by design: re-fetch through the role-scoped GET so an employee's socket
         // never carries anyone else's review.
         loadCheckoutReviewsFromBackend().then(ok => { if (ok) rerenderAfterCheckoutReviews(); });
+        loadMorningReviewsFromBackend().then(ok => { if (ok) rerenderAfterCheckoutReviews(); });
       }
       if (data.type === 'USER_CREATED') {
         // SECURITY FIX 2026-08-04: the backend now broadcasts a stripped public projection (no

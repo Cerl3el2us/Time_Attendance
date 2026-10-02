@@ -3709,6 +3709,127 @@ function handlePutCheckoutReview(req, res) {
 }
 app.get('/api/checkout-reviews', handleGetCheckoutReviews);
 app.put('/api/checkout-reviews', requireRole('md', 'accounting'), withCheckoutReviewsLock(handlePutCheckoutReview));
+// 2026-10-02 (owner): the morning twin of the check-out review above. Same storage shape, same
+// scoping, same guards -- what differs is only which time is being judged. Kept as its own file
+// and its own endpoints rather than a mode flag on the evening ones, because the two answer
+// different questions ("was this web check-out real?" vs "was this early scan a real arrival?")
+// and merging them would make every guard read "if morning ... else ...".
+const MORNING_REVIEWS_FILE = 'morning-reviews.json';
+const MORNING_REVIEWS_UNAVAILABLE = 'Service temporarily unavailable';
+const withMorningReviewsLock = makeHandlerLock('MORNING_REVIEWS');
+function readMorningReviews() {
+  const data = readJSON(MORNING_REVIEWS_FILE, {});
+  if (data === null) return null;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  return data;
+}
+// Full-access roles see every review; everyone else only their own "<id>_" keys.
+function handleGetMorningReviews(req, res) {
+  const users = readUsers();
+  if (users === null) return res.status(503).json({ success: false, message: MORNING_REVIEWS_UNAVAILABLE });
+  const live = users.find(u => u.id === req.user.sub);
+  if (!live) return res.status(403).json({ success: false, message: 'Forbidden' });
+  const all = readMorningReviews();
+  if (all === null) return res.status(503).json({ success: false, message: MORNING_REVIEWS_UNAVAILABLE });
+  if (isLeaveFullAccess(live)) return res.json({ success: true, reviews: all });
+  const prefix = `${live.id}_`;
+  const own = {};
+  Object.keys(all).forEach(k => { if (k.startsWith(prefix)) own[k] = all[k]; });
+  return res.json({ success: true, reviews: own });
+}
+// Accounting/MD Allow / Deny / clear (decision:null) a flagged morning. Never on one's own record;
+// never in a locked / Accounting-confirmed / MD-approved period, including a clear. The check-in
+// is re-derived here and never taken from the client: the body's checkIn is only used to catch a
+// screen that went stale, exactly as the evening side does with the check-out.
+function handlePutMorningReview(req, res) {
+  try {
+    const users = readUsers();
+    if (users === null) return res.status(503).json({ success: false, message: MORNING_REVIEWS_UNAVAILABLE });
+    const live = users.find(u => u.id === req.user.sub);
+    if (!live) return res.status(403).json({ success: false, message: 'Forbidden: user record not found' });
+    const body = parseBody(req) || {};
+    const userId = Number(body.userId);
+    const dateStr = body.date;
+    const decision = body.decision;
+    if (!Number.isInteger(userId) || userId <= 0) {
+      return res.status(400).json({ success: false, message: 'userId is required' });
+    }
+    if (typeof dateStr !== 'string' || !isValidDateStr(dateStr)) {
+      return res.status(400).json({ success: false, message: 'date must be a valid YYYY-MM-DD date' });
+    }
+    if (decision !== 'allow' && decision !== 'deny' && decision !== null) {
+      return res.status(400).json({ success: false, message: "decision must be 'allow', 'deny' or null" });
+    }
+    const bodyCheckIn = body.checkIn;
+    if (decision === 'allow' || decision === 'deny') {
+      if (typeof bodyCheckIn !== 'string' || !HHMM_RE.test(bodyCheckIn)) {
+        return res.status(400).json({ success: false, message: 'checkIn is required and must be in HH:MM format' });
+      }
+    } else if (bodyCheckIn !== undefined && bodyCheckIn !== null && (typeof bodyCheckIn !== 'string' || !HHMM_RE.test(bodyCheckIn))) {
+      return res.status(400).json({ success: false, message: 'checkIn must be in HH:MM format' });
+    }
+    if (userId === live.id) {
+      return res.status(403).json({ success: false, message: 'You cannot review your own morning' });
+    }
+    const target = users.find(u => u.id === userId);
+    if (!target || isSuperAdminUser(target)) {
+      return res.status(404).json({ success: false, message: 'Employee not found' });
+    }
+    if (readJSON('settings.json', {}) === null) {
+      return res.status(503).json({ success: false, message: MORNING_REVIEWS_UNAVAILABLE });
+    }
+    if (lockedPeriodInRange(dateStr, dateStr)) {
+      return res.status(400).json({ success: false, message: 'This pay period is locked' });
+    }
+    if (accountingConfirmedInRange(dateStr, dateStr, userId)) {
+      return res.status(409).json({ success: false, message: 'Accounting has already confirmed tax for this period — unconfirm before making changes' });
+    }
+    if (mdApprovedPeriodInRange(dateStr, dateStr, userId)) {
+      return res.status(409).json({ success: false, message: 'Payroll for this period has already been approved by the Managing Director -- ask them to revoke approval first' });
+    }
+    const reviews = readMorningReviews();
+    if (reviews === null) return res.status(503).json({ success: false, message: MORNING_REVIEWS_UNAVAILABLE });
+    const leaves = readLeaves();
+    if (leaves === null) return res.status(503).json({ success: false, message: MORNING_REVIEWS_UNAVAILABLE });
+    const dayStart = new Date(dateStr + 'T12:00:00');
+    const attLog = buildAttendanceLogForUser(target, dayStart, dayStart);
+    const day = generatePeriodDays(dayStart, dayStart, false, target, attLog, leaves,
+      getAppSettings(), {}, reviews)[0] || null;
+    if (!day || !day.morningReviewNeeded) {
+      return res.status(400).json({ success: false, message: 'This day has no early scan with a later door pass to review' });
+    }
+    // The reviewer judged a particular check-in. If a time correction or a later scan has moved it
+    // since their screen loaded, refuse rather than record a decision about a morning that no
+    // longer exists -- the same stale-screen guard the evening review uses.
+    if ((decision === 'allow' || decision === 'deny') && bodyCheckIn !== day.checkIn) {
+      return res.status(409).json({ success: false, code: 'CHECKIN_CHANGED', message: 'Check-in time changed — reload and review again' });
+    }
+    const key = `${userId}_${dateStr}`;
+    let review = null;
+    if (decision === null) {
+      delete reviews[key];
+    } else {
+      review = {
+        decision,
+        checkIn: day.checkIn,
+        doorScans: (attLog[dateStr] || {}).doorScans || [],
+        by: String(live.name || live.username || 'User').slice(0, 120),
+        byId: live.id,
+        at: new Date().toISOString(),
+      };
+      reviews[key] = review;
+    }
+    writeJSON(MORNING_REVIEWS_FILE, reviews);
+    broadcast({ type: 'MORNING_REVIEWS_UPDATED' });
+    return res.json({ success: true, review });
+  } catch (e) {
+    const unavailable = !!(e && e.message === MORNING_REVIEWS_UNAVAILABLE);
+    console.error('[MORNING_REVIEWS] PUT failed:', e && e.message);
+    return res.status(unavailable ? 503 : 500).json({ success: false, message: unavailable ? MORNING_REVIEWS_UNAVAILABLE : 'Server error' });
+  }
+}
+app.get('/api/morning-reviews', handleGetMorningReviews);
+app.put('/api/morning-reviews', requireRole('md', 'accounting'), withMorningReviewsLock(handlePutMorningReview));
 
 // Was missing entirely — GET/PUT /api/settings referenced these but they were never defined,
 // throwing ReferenceError on every call. This silently broke Approval Routing persistence
@@ -4974,12 +5095,12 @@ function validateHolidayWorkLocation(locations) {
 }
 // `reviews`: the checkout-reviews map (PUT /api/checkout-reviews passes it so the derived day
 // carries checkOutReview). Other callers do not need review decisions and pass nothing.
-function attendanceDayForUser(user, dateStr, reviews = {}) {
+function attendanceDayForUser(user, dateStr, reviews = {}, morningReviews = {}) {
   const dayStart = new Date(dateStr + 'T12:00:00');
   const attLog = buildAttendanceLogForUser(user, dayStart, dayStart);
   const leaves = readLeaves() || [];
   const S = getAppSettings();
-  const days = generatePeriodDays(dayStart, dayStart, false, user, attLog, leaves, S, reviews);
+  const days = generatePeriodDays(dayStart, dayStart, false, user, attLog, leaves, S, reviews, morningReviews);
   return days[0] || null;
 }
 function holidayWorkSubmitBlockReason(user, dateStr) {
@@ -9585,7 +9706,7 @@ function lateReferenceMin(row, stdStartMin) {
   return (plStartMin <= stdStartMin && plEndMin > stdStartMin) ? plEndMin : stdStartMin;
 }
 
-function generatePeriodDays(start, end, isCurrent, user, attLog, leaves, appSettings, reviews = {}) {
+function generatePeriodDays(start, end, isCurrent, user, attLog, leaves, appSettings, reviews = {}, morningReviewMap = {}) {
   const uid = user.id;
   const reviewMap = reviews || {};
   const days = [];
@@ -9750,6 +9871,19 @@ function generatePeriodDays(start, end, isCurrent, user, attLog, leaves, appSett
     // 2026-09-23: after the overlay, so a review counts only for the effective (corrected) web
     // check-out it was made on. Dual-sync twin in app.js.
     const checkOutReview = checkoutReviewDecisionFor(reviewMap[`${uid}_${dateStr}`], checkOut, checkOutSource);
+    // 2026-10-02 (owner): the morning mirror of the review above. An early scan that earns the
+    // allowance, followed by another door pass in the working morning, waits for Accounting
+    // before it pays. The pass times live on the attendance log, not on the row, so they are read
+    // from there. The decision is only looked up for a day that is actually flagged -- a stored
+    // decision for a day that no longer triggers must not quietly linger on the row.
+    // DUAL-SYNC: twin block in app.js generatePeriodDays().
+    const morningReviewNeeded = morningReviewTrigger(
+      { date: dateStr, status, checkIn, checkInSource, isFuture, isWeekend, isPubHoliday },
+      user, appSettings, (attLog[dateStr] || {}).doorScans,
+      (leaves || []).some(l => l.userId == uid && l.type === 'holiday-work' &&
+        l.status === 'approved' && l.dateFrom === dateStr) ? new Set([dateStr]) : null);
+    const morningReview = morningReviewNeeded
+      ? morningReviewDecisionFor(morningReviewMap[`${uid}_${dateStr}`], checkIn) : null;
     // 2026-09-28 (owner): EXCUSED ATTENDANCE -- MD/Accounting forgives a late arrival or a whole
     // missing day for a force-majeure event ("น้ำท่วมไม่ได้ท่วมทุกบ้านพร้อมกัน", so it is granted per
     // employee per date, never company-wide). Its own pass AFTER the leave overlays above, so the
@@ -9771,7 +9905,7 @@ function generatePeriodDays(start, end, isCurrent, user, attLog, leaves, appSett
         status = status === 'late' ? 'present' : 'excused';
       }
     }
-    days.push({ date: dateStr, isWeekend, isPubHoliday, isFuture, status, checkIn, checkOut, lateOut, upcountry, longDistance, longDistanceKm, longDistanceAllowance, lateApproved, firstScanAfterCutoff, partialLeave, checkInSource, checkOutSource, checkOutReview, rawCheckOut, excused, excusedReason });
+    days.push({ date: dateStr, isWeekend, isPubHoliday, isFuture, status, checkIn, checkOut, lateOut, upcountry, longDistance, longDistanceKm, longDistanceAllowance, lateApproved, firstScanAfterCutoff, partialLeave, checkInSource, checkOutSource, checkOutReview, morningReviewNeeded, morningReview, rawCheckOut, excused, excusedReason });
     d.setDate(d.getDate() + 1);
   }
   return days;
@@ -9790,11 +9924,13 @@ function lateOutSubmitBlockReason(user, dateStr, lateOutTime) {
   }
   const reviews = readCheckoutReviews();
   if (reviews === null) return CHECKOUT_REVIEWS_UNAVAILABLE;
+  const morningReviews = readMorningReviews();
+  if (morningReviews === null) return CHECKOUT_REVIEWS_UNAVAILABLE;
   const S = getAppSettings();
   const dayStart = new Date(dateStr + 'T12:00:00');
   const attLog = buildAttendanceLogForUser(user, dayStart, dayStart);
   const leaves = readLeaves() || [];
-  const days = generatePeriodDays(dayStart, dayStart, false, user, attLog, leaves, S, reviews);
+  const days = generatePeriodDays(dayStart, dayStart, false, user, attLog, leaves, S, reviews, morningReviews);
   const day = days[0];
   if (isFullDayPersonalLeaveStatus(day && day.status)) {
     return fullDayPersonalLeaveNoClaimMessage();
@@ -9893,7 +10029,11 @@ function computePayroll(user, start, end, periodIndex) {
   // treat an unreadable reviews file as "no reviews" -- that would silently change payroll.
   const reviews = readCheckoutReviews();
   if (reviews === null) throw new Error('Service temporarily unavailable');
-  const pDays = generatePeriodDays(start, end, isCurrent, user, attLog, leaves, S, reviews);
+  // 2026-10-02: the morning decisions are read the same way and for the same reason -- treating an
+  // unreadable file as "no decisions" would hold every flagged allowance, silently changing pay.
+  const morningReviews = readMorningReviews();
+  if (morningReviews === null) throw new Error('Service temporarily unavailable');
+  const pDays = generatePeriodDays(start, end, isCurrent, user, attLog, leaves, S, reviews, morningReviews);
 
   const canUpcountry = isAllowanceEligible(S.allowanceEligibility, user.role, 'upcountry');
   const canEarlyLate = isAllowanceEligible(S.allowanceEligibility, user.role, 'earlyLate');

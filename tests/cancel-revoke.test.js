@@ -100,7 +100,7 @@ function makeServer(w) {
     getAppSettings: () => SETTINGS,
     isCompanyTripDay: () => false, isPublicHoliday: () => false, isAllowanceEligible: () => true,
     bangkokDateStr: () => TODAY, buildAttendanceLogForUser: () => ({}), readJSON: () => ({}),
-    readLeaves: () => w.leaves, readCheckoutReviews: () => ({}), generatePeriodDays: () => w.pDays,
+    readLeaves: () => w.leaves, readCheckoutReviews: () => ({}), readMorningReviews: () => ({}), generatePeriodDays: () => w.pDays,
     getFinalizeKey: () => 'k', calcAnnualTax: () => 0, businessLeaveEntitlementDays: () => 3,
     annualLateDeductMinutes: () => 0,
   };
