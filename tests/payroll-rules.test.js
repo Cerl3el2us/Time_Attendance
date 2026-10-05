@@ -56,7 +56,7 @@ const SHARED = ['isVoidLeaveStatus', 'round2HalfUp', 'round1HalfUp', 'deriveOffi
   'hasUpcountryLocation', 'holidayTransportForRecord',
   'lateNightPoints', 'holidayWorkTooLong'];
 const CLIENT_FNS = [...SHARED, 'scanWindowError', 'getApprovedHolidayWorkDays', 'abroadTravelCreditDays',
-  'otEndCrossesMidnight', 'isSuperAdmin', 'effectiveRole', 'gateRoleFor', 'canSubmitHolidayWorkForDate', 'standardOtMultiplier', 'otPayAmountFromLeave'];
+  'otEndCrossesMidnight', 'loggedInUser', 'isSuperAdmin', 'effectiveRole', 'gateRoleFor', 'canSubmitHolidayWorkForDate', 'standardOtMultiplier', 'otPayAmountFromLeave'];
 const SERVER_FNS = [...SHARED, 'scanWindowError', 'getApprovedHolidayWorkAnnualLeaveDays', 'abroadTravelCreditDays',
   'isCompanyTripClaimBlocked', 'companyTripNoClaimMessage', 'standardOtMultiplier'];
 
@@ -64,7 +64,7 @@ const SERVER_FNS = [...SHARED, 'scanWindowError', 'getApprovedHolidayWorkAnnualL
 function makeClient(world) {
   const ctx = {
     HHMM_RE, APP_SETTINGS: SETTINGS, DATA_LEAVES: world.leaves, DATA_COMPANY_TRIP_DATES: TRIPS,
-    DATA_USERS: [world.user], currentUser: world.user, editingLeaveId: null, finalizeData: {},
+    DATA_USERS: [world.user], currentUser: world.user, realUser: world.user, editingLeaveId: null, finalizeData: {},
     isCompanyTripDay: d => TRIPS.includes(d), isPublicHoliday: () => false,
     isAllowanceEligible: () => true, isApprovedAbroadDate: () => false, isAbroadTravelDay: () => false,
     payPeriodBlockedForDate: () => ({ blocked: false }), bangkokDateStr: () => '2026-12-31',

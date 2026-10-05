@@ -39,9 +39,11 @@ function test(name, fn) {
 // A sandbox holding the real preview helpers plus gateRoleFor.
 // `who` is the logged-in user; `preview` is what the role-preview dropdown is set to.
 function world(who, preview) {
-  const ctx = { console, currentUser: who, previewRole: preview || '' };
+  // realUser is the account that logged in; currentUser is who the screen renders as. Nothing here
+  // impersonates, so they are the same — these tests are about the role preview, not impersonation.
+  const ctx = { console, realUser: who, currentUser: who, previewRole: preview || '' };
   vm.createContext(ctx);
-  ['isSuperAdmin', 'effectiveRole', 'gateRoleFor'].forEach(n =>
+  ['loggedInUser', 'isSuperAdmin', 'effectiveRole', 'gateRoleFor'].forEach(n =>
     vm.runInContext(extractFunction(APP_SRC, n), ctx));
   return ctx;
 }

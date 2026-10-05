@@ -886,7 +886,9 @@ test('geofenceUiState never blocks a press that would not be a new check-in, eve
   ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   ctx.previewRole = '';
-  vm.runInContext(extractFunction(APP_SRC, 'isSuperAdmin') + ';' +
+  ctx.realUser = ctx.currentUser || null;
+  vm.runInContext(extractFunction(APP_SRC, 'loggedInUser') + ';' +
+    extractFunction(APP_SRC, 'isSuperAdmin') + ';' +
     extractFunction(APP_SRC, 'effectiveRole') + ';' +
     extractFunction(APP_SRC, 'geofenceUiState'), ctx);
   const st = ctx.geofenceUiState();
@@ -913,7 +915,9 @@ test('geofenceUiState still blocks an actual check-in standing at the office, wi
   ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   ctx.previewRole = '';
-  vm.runInContext(extractFunction(APP_SRC, 'isSuperAdmin') + ';' +
+  ctx.realUser = ctx.currentUser || null;
+  vm.runInContext(extractFunction(APP_SRC, 'loggedInUser') + ';' +
+    extractFunction(APP_SRC, 'isSuperAdmin') + ';' +
     extractFunction(APP_SRC, 'effectiveRole') + ';' +
     extractFunction(APP_SRC, 'geofenceUiState'), ctx);
   const st = ctx.geofenceUiState();
@@ -942,7 +946,9 @@ test('geofenceUiState fails OPEN when settings have not loaded fresh this sessio
   ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   ctx.previewRole = '';
-  vm.runInContext(extractFunction(APP_SRC, 'isSuperAdmin') + ';' +
+  ctx.realUser = ctx.currentUser || null;
+  vm.runInContext(extractFunction(APP_SRC, 'loggedInUser') + ';' +
+    extractFunction(APP_SRC, 'isSuperAdmin') + ';' +
     extractFunction(APP_SRC, 'effectiveRole') + ';' +
     extractFunction(APP_SRC, 'geofenceUiState'), ctx);
   const st = ctx.geofenceUiState();
@@ -965,7 +971,9 @@ test('geofenceUiState fails OPEN when attendance has not loaded fresh this sessi
   ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   ctx.previewRole = '';
-  vm.runInContext(extractFunction(APP_SRC, 'isSuperAdmin') + ';' +
+  ctx.realUser = ctx.currentUser || null;
+  vm.runInContext(extractFunction(APP_SRC, 'loggedInUser') + ';' +
+    extractFunction(APP_SRC, 'isSuperAdmin') + ';' +
     extractFunction(APP_SRC, 'effectiveRole') + ';' +
     extractFunction(APP_SRC, 'geofenceUiState'), ctx);
   const st = ctx.geofenceUiState();
@@ -990,7 +998,9 @@ test('geofenceUiState (Critical 1): a stale GPS fix is treated as no position, n
   ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   ctx.previewRole = '';
-  vm.runInContext(extractFunction(APP_SRC, 'isSuperAdmin') + ';' +
+  ctx.realUser = ctx.currentUser || null;
+  vm.runInContext(extractFunction(APP_SRC, 'loggedInUser') + ';' +
+    extractFunction(APP_SRC, 'isSuperAdmin') + ';' +
     extractFunction(APP_SRC, 'effectiveRole') + ';' +
     extractFunction(APP_SRC, 'geofenceUiState'), ctx);
   const st = ctx.geofenceUiState();

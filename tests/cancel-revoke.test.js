@@ -66,7 +66,7 @@ const SHARED = ['isVoidLeaveStatus', 'round2HalfUp', 'round1HalfUp', 'lateNightC
   'isAnnualLeaveUnlocked', 'annualLeaveEntitlementDays', 'hourlyLeaveChargedMinutes', 'carryForwardExpiryEnabled',
   'carryForwardExpiryDateStr', 'leaveMinutesOnOrBefore', 'carryForwardForfeitMinutes',
   'annualLeaveEarnedPoolDays'];
-const CLIENT_FNS = [...SHARED, 'getApprovedHolidayWorkDays', 'isSuperAdmin', 'effectiveRole', 'gateRoleFor', 'canSubmitHolidayWorkForDate', 'leaveRecordMinutes',
+const CLIENT_FNS = [...SHARED, 'getApprovedHolidayWorkDays', 'loggedInUser', 'isSuperAdmin', 'effectiveRole', 'gateRoleFor', 'canSubmitHolidayWorkForDate', 'leaveRecordMinutes',
   'pendingLeaveMinutes', 'getCarryForwardKey', 'getCarryForwardCompKey', 'getCarryForwardDays',
   'getCarryForwardCompDays', 'getOpeningUsedKey', 'getOpeningUsedDays', 'computeLeaveBalance', 'localDateStr',
   'isWithdrawnLeaveStatus'];
@@ -77,7 +77,7 @@ const SERVER_FNS = [...SHARED, 'getApprovedHolidayWorkAnnualLeaveDays', 'findOve
 const TODAY = '2026-12-31';
 function makeClient(w) {
   const ctx = {
-    HHMM_RE, APP_SETTINGS: SETTINGS, DATA_LEAVES: w.leaves, DATA_USERS: [w.user], currentUser: w.user,
+    HHMM_RE, APP_SETTINGS: SETTINGS, DATA_LEAVES: w.leaves, DATA_USERS: [w.user], currentUser: w.user, realUser: w.user,
     editingLeaveId: null, finalizeData: {}, LEAVE_CARRY_FORWARD: {}, LEAVE_OPENING_USED: {},
     DEFAULT_ANNUAL_LEAVE_TIERS: TIERS,
     isCompanyTripDay: () => false, isPublicHoliday: () => false, isAllowanceEligible: () => true,

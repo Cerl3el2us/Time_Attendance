@@ -115,7 +115,9 @@ document.documentElement.lang = currentLang === 'en' ? 'en' : currentLang === 'j
 // Secret: no other user may learn that this login exists (login page, role
 // dropdowns, toasts, API errors). Banner/preview UI is for this session only.
 function isEmployeeRecord(u) { return !!(u && !u.isSystemAccount); }
-function isSuperAdmin() { return !!(currentUser && currentUser.role === 'superadmin' && currentUser.isSystemAccount); }
+// Always the REAL account: the write gate, the banner and the preview UI hang off this, and an
+// impersonated employee must never make them disappear.
+function isSuperAdmin() { const u = loggedInUser(); return !!(u && u.role === 'superadmin' && u.isSystemAccount); }
 let previewRole = localStorage.getItem('ta_preview_role') || '';
 function effectiveRole() {
   if (!isSuperAdmin()) return currentUser?.role || 'user';
@@ -6418,7 +6420,23 @@ function computeNextStatus(type, currentStatus, approvingRole, storedRoute) {
   return ROLE_TO_STATUS[route[idx + 1]];
 }
 
+// 2026-10-05 (owner, person impersonation — step 1 of 3): `currentUser` is about to become "the
+// person the screen is rendering as", which for the system account may be an employee it is
+// inspecting. `realUser` stays the account that actually logged in and holds the token.
+//
+// Three things must follow the REAL account, never the impersonated one, and each is dangerous in
+// its own way if it drifts:
+//   1. isSuperAdmin()  — the write gate and the banner hang off it. Reading an impersonated
+//      employee would silently remove the gate from every write.
+//   2. saveSession()   — persisting the impersonated record would leave the browser logged in as
+//      somebody else after a reload.
+//   3. the auth token  — unchanged, so the server always sees who is really calling.
+// This step only introduces realUser and points those three at it. Impersonation itself comes next,
+// so behaviour here is identical: realUser and currentUser are the same object until step 2.
 let currentUser = null;
+let realUser = null;
+// The account that logged in, whatever the screen is currently rendering as.
+function loggedInUser() { return realUser || currentUser; }
 let currentPage = 'checkin';
 let clockInterval = null;
 let currentGPS = null;
@@ -7157,7 +7175,9 @@ async function loadAttendanceFromBackend() {
 // Stored in localStorage so login persists across browser closes until explicit logout
 function saveSession() {
   try {
-    localStorage.setItem('ta_user',      JSON.stringify(currentUser));
+    // The real account, never the impersonated one -- otherwise a reload comes back logged in as
+    // whoever was being inspected.
+    localStorage.setItem('ta_user',      JSON.stringify(loggedInUser()));
     localStorage.setItem('ta_checkedIn', JSON.stringify(checkedIn));
     localStorage.setItem('ta_page',      currentPage);
     localStorage.setItem('ta_token',     AUTH_TOKEN || '');
@@ -7198,6 +7218,9 @@ async function login() {
       errEl.style.display = 'flex';
       return;
     }
+    // Step 1: the two are the same until impersonation exists. Keeping both assignments together
+    // is what stops them drifting when it does.
+    realUser = data.user;
     currentUser = data.user;
     AUTH_TOKEN = data.token;
     // A session can end without logout() ever running -- token expiry, a closed tab, a crash -- so
@@ -7303,6 +7326,7 @@ async function logout() {
   await clearApiCache();
   clearSession();
   currentUser = null;
+  realUser = null;
   AUTH_TOKEN = null;
   REMEMBER_ME = false;
   checkedIn = false;
@@ -20969,6 +20993,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       const saved = JSON.parse(savedUserStr);
       if (saved && (saved.active !== false || saved.isObserver === true)) {
+        realUser = saved;
         currentUser = saved;
         AUTH_TOKEN = localStorage.getItem('ta_token') || null;
         REMEMBER_ME = localStorage.getItem('ta_remember') === '1';
@@ -20984,7 +21009,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Refresh user list then attendance from backend
         loadUsersFromBackend().then(() => {
           const fresh = DATA_USERS.find(u => u.id === currentUser.id);
-          if (fresh) { currentUser = fresh; updateUserUI(); applyRolePermissions(); }
+          if (fresh) { realUser = fresh; currentUser = fresh; updateUserUI(); applyRolePermissions(); }
           maybeShowForcePasswordGate(); // re-check against server-fresh data (idempotent if already shown)
           if (currentPage === 'employees') renderEmployeesTable();
           if (currentPage === 'payslip') { renderPayslipEmployeeList(); renderPayslip(); }
