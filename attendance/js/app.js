@@ -18157,6 +18157,13 @@ async function submitLateOut() {
   if (blockIfCompanyTrip(date)) return;
   if (blockIfAbroadDay(date, 'late-out')) return;
   if (!_lateOutSelected){ showToast(L('⚠️ Please select a return time', '⚠️ กรุณาเลือกเวลาที่กลับ'), 'warning'); return; }
+  // 2026-10-05 (owner): the reason is what the approver judges the claim on, so it is required.
+  if (!reason) {
+    showToast(currentLang === 'ja'
+      ? '⚠️ 残業の理由・作業内容を入力してください'
+      : L('⚠️ Please say what you were working on', '⚠️ กรุณาระบุเหตุผลหรืองานที่ทำ'), 'warning');
+    return;
+  }
   const timeLabel = `${String(_lateOutSelected).padStart(2,'0')}:00`;
   const allowance = lateOutAllowanceForHour(_lateOutSelected);
   const leaveData = {

@@ -1506,7 +1506,9 @@
         </div>
       </div>
       <div class="form-field" style="margin-bottom:0">
-        <label><span data-en="Reason / Work done">เหตุผล / งานที่ทำ</span> <span style="font-size:11px;color:#94a3b8;font-weight:400" data-en="(if any)">(ถ้ามี)</span></label>
+        <!-- 2026-10-05 (owner): required now. The approver has to judge whether the late night was
+             real, and a blank reason stored as "-" tells them nothing. It was optional, so it was skipped. -->
+        <label><span data-en="Reason / Work done">เหตุผล / งานที่ทำ</span> <span style="color:#ef4444">*</span></label>
         <textarea id="lateout-reason" rows="3" placeholder="อธิบายงานที่ต้องทำจนดึก..." data-en-ph="Describe the work you did late..."></textarea>
       </div>
       <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:10px 14px;font-size:13px;color:#1e40af">
@@ -2799,6 +2801,6 @@
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ja.js" integrity="sha384-mKor8U8jwukUkfxaFPCsxKF9S62PXq4gG7zcZ5yQ2x3KL1msprJZeFlKFEDeeb5V" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/th.js" integrity="sha384-E6OVFg1zUc/pckGxry0YZ6VeZ1E17l7Jl8ZQx58jbEfxxkz9LqknQhiIrA9zg/8b" crossorigin="anonymous"></script>
 
-<script src="js/app.js?v=20261005y"></script>
+<script src="js/app.js?v=20261005z"></script>
 </body>
 </html>

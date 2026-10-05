@@ -6616,6 +6616,12 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
       return res.status(400).json({ success:false, message: abroadNoClaimMessage() });
     }
     if (type === 'late-out') {
+      // 2026-10-05 (owner): the reason is what the approver judges a late-night claim on, so it is
+      // required. The form marks it required; this is what makes it true. Matches how abroad and
+      // excused already treat their own reason field.
+      if (!String(body.reason == null ? '' : body.reason).trim() || String(body.reason).trim() === '-') {
+        return res.status(400).json({ success:false, message:'reason is required for late night out requests' });
+      }
       const lateOutErr = lateOutSubmitBlockReason(targetUser, body.dateFrom, body.lateOutTime);
       if (lateOutErr === CHECKOUT_REVIEWS_UNAVAILABLE) return res.status(503).json({ success:false, message: lateOutErr });
       if (lateOutErr) return res.status(400).json({ success:false, message: lateOutErr });
