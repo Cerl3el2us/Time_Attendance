@@ -1,75 +1,76 @@
-# Holiday Work for managers, without the cash option
+# สิทธิ์ทำงานวันหยุดของ manager แบบไม่ให้เลือกรับเป็นเงิน
 
-**Date:** 2026-10-05
-**Status:** approved by the owner, ready to plan
+**วันที่:** 2026-10-05
+**สถานะ:** เจ้าของอนุมัติดีไซน์แล้ว รอทำแผนลงมือ
 
-## The problem
+> หมายเหตุสำหรับ AI ที่มาอ่านต่อ: เอกสารนี้เขียนภาษาไทยตามคำขอของเจ้าของโปรเจกต์
+> ชื่อฟังก์ชัน ชื่อคีย์ และชื่อไฟล์ คงเป็นภาษาอังกฤษตามโค้ดจริง
 
-`allowanceEligibility.holidayWork` is `['user']` in the live settings, so only staff can file a
-Holiday Work request. The owner wants managers to be able to file one, but managers must only be
-able to take the compensation as **one extra annual-leave day** — never as money (OT + holiday
-transport).
+## ปัญหา
 
-The compensation mode is a field on the request (`compensationMode`: `annual-leave` | `paid`), and
-today any eligible role can pick either.
+ค่าที่บันทึกไว้จริงตอนนี้คือ `allowanceEligibility.holidayWork = ['user']` แปลว่ามีแค่พนักงานระดับ
+`user` ที่ยื่นคำขอทำงานวันหยุดได้ เจ้าของต้องการเปิดให้ manager ยื่นได้ด้วย **แต่ manager ต้องรับ
+การชดเชยเป็นวันลาพักร้อนเพิ่ม 1 วันเท่านั้น ห้ามเลือกรับเป็นเงิน** (OT + ค่าเดินทางวันหยุด)
 
-## Decision
+รูปแบบการชดเชยเก็บอยู่ในฟิลด์ `compensationMode` ของคำขอ มีสองค่าคือ `annual-leave` กับ `paid`
+ทุกวันนี้ใครก็ตามที่มีสิทธิ์ยื่น เลือกได้ทั้งสองแบบ
 
-Add a second role list beside the existing one, in the same Settings table, and gate the `paid`
-mode on it.
+## สิ่งที่ตัดสินใจ
 
-| Eligibility key | Means | Ticked for |
+เพิ่มรายการ role ชุดที่สองไว้ในตารางสิทธิ์เดิมในหน้า Settings แล้วใช้มันคุมโหมด `paid`
+
+| คีย์สิทธิ์ | ความหมาย | ติ๊กให้ใคร |
 |---|---|---|
-| `holidayWork` (exists) | may file a Holiday Work request | add `manager` |
-| `holidayWorkPaid` (new) | may choose "ชดเชยเป็นเงิน" | `user` only |
+| `holidayWork` (มีอยู่แล้ว) | ยื่นคำขอทำงานวันหยุดได้ | เพิ่ม `manager` |
+| `holidayWorkPaid` (ใหม่) | เลือกโหมด "ชดเชยเป็นเงิน" ได้ | เฉพาะ `user` |
 
-Read as a sentence: *a manager may file a Holiday Work request, but may not take it as money.*
+อ่านรวมกันเป็นประโยคได้ว่า *manager ยื่นคำขอทำงานวันหยุดได้ แต่เลือกรับเป็นเงินไม่ได้*
 
-### Why a role list and not a per-employee flag
+### ทำไมถึงใช้รายการ role ไม่ใช่ติ๊กรายคน
 
-The owner asked whether to copy the phone-allowance pattern (a role list plus a per-employee
-checkbox, `user.phoneAllowanceEligible`). We are not copying it.
+เจ้าของถามว่าควรทำแบบเดียวกับเบี้ยเลี้ยงค่าโทรศัพท์ไหม (เปิด role ไว้กว้าง แล้วติ๊กรายคนอีกชั้นผ่าน
+`user.phoneAllowanceEligible`) — คำตอบคือไม่
 
-The code comment on the phone allowance explains why that one went per-employee: phone allowance
-"has zero real correlation with role" — within one role some people get it and some do not. The rule
-here is the opposite: it is a statement about the rank. A per-employee flag would mean somebody has
-to remember to tick it for every new manager, and forgetting it silently grants the cash option.
+คอมเมนต์ในโค้ดของค่าโทรศัพท์อธิบายไว้เองว่าทำไมอันนั้นต้องเป็นรายคน: ค่าโทรศัพท์ "ไม่มีความสัมพันธ์
+กับตำแหน่งเลย" คือในกลุ่ม role เดียวกัน บางคนได้บางคนไม่ได้ แต่กฎที่กำลังจะตั้งนี้ตรงข้าม มันเป็น
+กฎที่ผูกกับระดับตำแหน่งตรงๆ ถ้าทำเป็นรายคน ทุกครั้งที่รับ manager ใหม่จะต้องมีคนจำให้ได้ว่าต้องไป
+ติ๊กช่องนี้ และถ้าลืม คนนั้นจะเลือกรับเป็นเงินได้ทันทีโดยไม่มีใครรู้
 
-A per-employee layer can be added on top later if a real exception appears. Nothing in this design
-blocks that.
+ถ้าวันหน้ามีเคสจริงที่ manager สองคนต้องได้ต่างกัน ค่อยเพิ่มชั้นรายคนทับลงไปได้ ดีไซน์นี้ไม่ได้ปิดทาง
 
-### Why this table
+### ทำไมถึงวางไว้ในตารางนี้
 
-`allowanceEligibility` is already a map of key → list of roles, already validated server-side, and
-already rendered as a role×allowance checkbox grid under Settings → 🎫 สิทธิ์เบี้ยเลี้ยงตามระดับผู้ใช้.
-A new key costs one row and no new machinery. The existing warning on that screen — changes only
-affect pay periods the MD has not yet approved — applies to the new row unchanged.
+`allowanceEligibility` เป็น map ของ คีย์ → รายชื่อ role อยู่แล้ว ฝั่งเซิร์ฟเวอร์ตรวจค่าให้อยู่แล้ว และ
+หน้า Settings ก็เรนเดอร์มันเป็นตารางติ๊กช่อง role × เบี้ยเลี้ยง อยู่แล้วใต้หัวข้อ
+🎫 สิทธิ์เบี้ยเลี้ยงตามระดับผู้ใช้ การเพิ่มคีย์ใหม่จึงเสียแค่หนึ่งแถว ไม่ต้องสร้างกลไกใหม่เลย
 
-## The sub-row and its dependency
+คำเตือนสีเหลืองที่มีอยู่แล้วในหน้านั้น — การแก้สิทธิ์มีผลเฉพาะงวดที่ MD ยังไม่อนุมัติ — ใช้กับแถวใหม่นี้
+ด้วยโดยไม่ต้องแก้อะไร
 
-`holidayWorkPaid` is meaningless unless `holidayWork` is also ticked for that role. The UI must say
-so, and the logic must not depend on the UI saying so.
+## แถวลูกกับความสัมพันธ์กับแถวแม่
 
-**1. Visual.** The new row renders indented under its parent with a `└` connector and the hint
-"ต้องเปิดสิทธิ์ยื่นด้านบนก่อน". It reads as a sub-row, not a sibling.
+`holidayWorkPaid` ไม่มีความหมายเลยถ้า `holidayWork` ของ role นั้นไม่ได้ติ๊ก หน้าจอต้องบอกเรื่องนี้
+และตรรกะต้องไม่พึ่งว่าหน้าจอบอกแล้ว
 
-**2. Interactive.** Both directions are handled live, before any save:
+**1. สายตา** แถวใหม่เยื้องเข้าไปอยู่ใต้แถวแม่ มีเส้น `└` โยง และมีคำอธิบายใต้ชื่อว่า
+"ต้องเปิดสิทธิ์ยื่นด้านบนก่อน" อ่านแล้วรู้ทันทีว่าเป็นลูก ไม่ใช่แถวคู่ขนาน
 
-| Action | Result |
+**2. การใช้งาน** จัดการทั้งสองทิศทางทันทีก่อนกดบันทึก
+
+| ทำอะไร | เกิดอะไรขึ้น |
 |---|---|
-| tick child while parent is unticked | parent is ticked too, **and the change is made visible** |
-| untick parent while child is ticked | child is unticked too (no announcement needed) |
-| tick parent alone | child does not move |
+| ติ๊กลูก ตอนแม่ยังไม่ติ๊ก | ติ๊กแม่ให้ด้วย **และต้องแสดงให้เห็นว่าเปลี่ยน** |
+| ปลดติ๊กแม่ ตอนลูกติ๊กอยู่ | ปลดลูกให้ด้วย (ไม่ต้องแจ้ง) |
+| ติ๊กแม่เฉยๆ | ลูกไม่ขยับ |
 
-The auto-tick must not be silent. Ticking the narrower permission grants the broader one as a side
-effect; the person setting it must see that more changed than they clicked. A brief highlight on the
-parent checkbox or a one-line note ("เปิดสิทธิ์ยื่นทำงานวันหยุดให้ด้วยแล้ว") is enough.
+**การติ๊กอัตโนมัติห้ามเงียบ** เพราะการติ๊กช่องลูกคือการขอสิทธิ์ที่แคบกว่า แต่ผลที่ตามมาคือได้สิทธิ์ที่
+กว้างกว่าไปด้วย คนตั้งค่าต้องเห็นว่ามีอะไรเปลี่ยนมากกว่าที่กด ใช้แค่ให้ช่องแถวแม่กะพริบสั้นๆ หรือขึ้น
+ข้อความเล็กๆ ว่า "เปิดสิทธิ์ยื่นทำงานวันหยุดให้ด้วยแล้ว" ก็พอ
 
-An earlier draft disabled the child checkbox until the parent was ticked. The owner rejected it:
-a dead control makes the person hunt for the reason. Auto-ticking expresses the same intent in one
-click.
+ดีไซน์ร่างแรกใช้วิธีปิดช่องลูกไว้จนกว่าจะติ๊กแม่ เจ้าของไม่เอา เพราะช่องที่กดไม่ได้ทำให้คนต้องมางมหา
+เหตุผลเอง การติ๊กอัตโนมัติสื่อเจตนาเดียวกันด้วยการกดครั้งเดียว
 
-**3. Logic.** The paid-mode check always requires the parent too:
+**3. ตรรกะ** การเช็คสิทธิ์โหมดเงินต้องเช็คสิทธิ์แม่ควบไปด้วยเสมอ
 
 ```
 mayChoosePaidHolidayWork(role) =
@@ -77,50 +78,52 @@ mayChoosePaidHolidayWork(role) =
   isAllowanceEligible(S.allowanceEligibility, role, 'holidayWorkPaid')
 ```
 
-This is the layer that matters. Settings can be edited outside this screen — by hand in
-`settings.json`, or by an older client that does not know about the sub-row — and inconsistent data
-must not grant anything. Without this, the grid could look right while the system quietly allowed
-the cash option.
+ชั้นนี้สำคัญที่สุด เพราะค่าตั้งค่าแก้จากทางอื่นได้ เช่น มีคนแก้ `settings.json` ตรงๆ หรือไคลเอนต์
+เวอร์ชันเก่าที่ไม่รู้จักแถวลูกมาบันทึกทับ ถ้าข้อมูลไม่สอดคล้องกันต้องไม่ให้สิทธิ์อะไรทั้งนั้น ถ้าไม่มีชั้นนี้
+ตารางบนหน้าจออาจดูถูกต้องแต่ระบบให้สิทธิ์จริงอยู่เงียบๆ
 
-## What changes on screen
+## สิ่งที่เปลี่ยนบนหน้าจอ
 
-**Holiday Work request form.** When the submitter may not choose `paid`:
+**ฟอร์มขอทำงานวันหยุด** เมื่อคนยื่นไม่มีสิทธิ์เลือกโหมดเงิน
 
-- the Compensation Mode `<select>` offers only "ลาพักร้อน +1 วัน"
-- the two-card pay comparison (`#hw-pay-compare`) is hidden — one card alone looks broken
-- the hint line under the select says the leave-day outcome only
+- ช่อง "รูปแบบการชดเชย" เหลือตัวเลือกเดียวคือ "ลาพักร้อน +1 วัน"
+- ซ่อนการ์ดเปรียบเทียบสองโหมด (`#hw-pay-compare`) เพราะเหลือใบเดียวจะดูเหมือนระบบพัง
+- ข้อความอธิบายใต้ช่องพูดถึงผลแบบวันลาอย่างเดียว
 
-**Settings.** One new row in the eligibility grid, indented under `ทำงานวันหยุด`.
+**หน้า Settings** เพิ่มหนึ่งแถวในตารางสิทธิ์ เยื้องอยู่ใต้ `ทำงานวันหยุด`
 
-## Server
+## ฝั่งเซิร์ฟเวอร์
 
-`server.js` validates `compensationMode` as `annual-leave | paid` on create and edit. It must also
-reject `paid` from a submitter whose role fails `mayChoosePaidHolidayWork`. The client hiding the
-option is a convenience, not a control.
+`server.js` ตรวจ `compensationMode` ว่าเป็น `annual-leave` หรือ `paid` อยู่แล้วทั้งตอนสร้างและตอนแก้
+ต้องเพิ่มการปฏิเสธ `paid` เมื่อ role ของคนยื่นไม่ผ่าน `mayChoosePaidHolidayWork` ด้วย
 
-## Data
+การซ่อนตัวเลือกบนหน้าเว็บเป็นแค่ความสะดวก ไม่ใช่การควบคุม ใครก็ยิง request ตรงได้
 
-No migration. Every existing Holiday Work record belongs to a `user`-role employee (verified live on
-2026-10-05: one record, user id 7, role `user`), so no stored request contradicts the new rule.
+## ข้อมูลเดิม
 
-## Dual-sync
+ไม่ต้องย้ายข้อมูล ตรวจจากระบบจริงวันที่ 2026-10-05 แล้ว คำขอทำงานวันหยุดที่มีอยู่ทั้งหมดเป็นของ
+พนักงาน role `user` (มี 1 รายการ เป็นของ user id 7) ไม่มีคำขอเดิมใบไหนขัดกับกฎใหม่
 
-`isAllowanceEligible` and the new `mayChoosePaidHolidayWork` exist in both `attendance/js/app.js` and
-`attendance-server/backend/server.js` and must stay identical. `ALLOWANCE_KEYS`, the
-`DEFAULT_ALLOWANCE_ELIGIBILITY` map, and the hardcoded Settings table rows must all gain the new key
-— there is an existing comment in `app.js` warning that a key present in `ALLOWANCE_KEYS` but absent
-from the table silently saves as `[]` (nobody eligible) on the next save.
+## กฎ dual-sync
 
-## Tests
+`isAllowanceEligible` และ `mayChoosePaidHolidayWork` ตัวใหม่ ต้องมีอยู่ทั้งใน
+`attendance/js/app.js` และ `attendance-server/backend/server.js` และต้องเหมือนกันเป๊ะ
 
-- `mayChoosePaidHolidayWork` is false when either list omits the role, true only when both include it
-- a `paid` request from a role without the permission is refused by the server
-- an `annual-leave` request from a manager is accepted
-- ticking the child in Settings also ticks the parent; unticking the parent also unticks the child
-- a settings file with `holidayWorkPaid` ticked and `holidayWork` not ticked grants nothing
+คีย์ใหม่ต้องเพิ่มใน `ALLOWANCE_KEYS`, ใน `DEFAULT_ALLOWANCE_ELIGIBILITY` ทั้งสองฝั่ง และใน
+รายการแถวที่เขียนตายตัวในตารางหน้า Settings ด้วย — ในโค้ดมีคอมเมนต์เตือนไว้แล้วว่าถ้าคีย์อยู่ใน
+`ALLOWANCE_KEYS` แต่ไม่มีแถวในตาราง การกดบันทึกครั้งถัดไปจะเซฟคีย์นั้นเป็น `[]` คือไม่มีใครมีสิทธิ์
+แบบเงียบๆ
 
-## Out of scope
+## เทสต์ที่ต้องมี
 
-- a per-employee override
-- giving MD or any other role Holiday Work
-- changing how either compensation mode is calculated
+- `mayChoosePaidHolidayWork` เป็นเท็จถ้าขาดรายการใดรายการหนึ่ง และเป็นจริงเฉพาะเมื่อมีครบทั้งสอง
+- เซิร์ฟเวอร์ปฏิเสธคำขอโหมด `paid` จาก role ที่ไม่มีสิทธิ์
+- เซิร์ฟเวอร์รับคำขอโหมด `annual-leave` จาก manager
+- ติ๊กช่องลูกในหน้า Settings แล้วแม่ถูกติ๊กด้วย และปลดแม่แล้วลูกถูกปลดด้วย
+- ไฟล์ตั้งค่าที่ติ๊ก `holidayWorkPaid` ไว้แต่ไม่ได้ติ๊ก `holidayWork` ต้องไม่ให้สิทธิ์อะไรเลย
+
+## ไม่อยู่ในขอบเขตงานนี้
+
+- การติ๊กสิทธิ์รายคน
+- การเปิดสิทธิ์ทำงานวันหยุดให้ MD หรือ role อื่น
+- การเปลี่ยนวิธีคำนวณเงินของโหมดใดโหมดหนึ่ง
