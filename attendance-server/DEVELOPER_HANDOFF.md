@@ -33,7 +33,7 @@ static HTML/CSS/JS frontend, both served from one Synology NAS.
 | Path (on NAS, mapped as `Z:\` via Samba) | What | Version control |
 |---|---|---|
 | `Z:\Time_Attendance\attendance\` | Frontend — static HTML/CSS/JS, served directly, edits are live immediately (no build step) | **git-tracked**, `master` branch, this checkout |
-| `Z:\Time_Attendance\attendance-server\backend\` | Backend — `server.js` (Express + WS), `data\*.json` (live production data: users/leaves/events/settings — **not sample data**), `node_modules\` | **NOT in git** — this is the single biggest risk in this whole setup. `server.js` is currently ~6000+ lines with zero commit history. If you do nothing else after reading this file, `git init` this folder and start committing. |
+| `Z:\Time_Attendance\attendance-server\backend\` | Backend — `server.js` (Express + WS), `data\*.json` (live production data: users/leaves/events/settings — **not sample data**), `node_modules\` | **In git since 2026-08-31** (`33e1994`, "Initial commit") — `server.js` is ~11,800 lines and now has real commit history; corrected here 2026-10-05, this cell used to say the opposite. What is still **not** in git is `data/*.json`: it is gitignored and lives only on the NAS, so the live data has no version history. That is now the biggest risk in this setup — see the Backups section. |
 | `Z:\claude_memory\` | Claude Code's own working memory (project history, decisions, gotchas) — useful background reading even without Claude Code itself, but not authoritative once this file exists | n/a |
 | `Z:\Time_Attendance\attendance-server\scripts\deploy\` | `deploy_backend.py` — the only supported way to restart the backend after editing `server.js` | n/a |
 | `Z:\Time_Attendance\attendance-server\ngrok\`, `Z:\Time_Attendance\attendance-server\cloudflared\` | Tunnel binaries. cloudflared is what's actually live now; ngrok is a dormant fallback | n/a |
@@ -220,8 +220,12 @@ on it blindly.
 
 ## Recommended next steps for whoever inherits this
 
-1. `git init` the backend and start committing — see above, this is the
-   biggest single gap.
+1. Get the history off this one disk. (Superseded 2026-10-05: the original
+   item here was "`git init` the backend" — that is **done**, the backend has
+   been committed since 2026-08-31.) What remains is that `main` is far ahead
+   of its only remote and nothing has been pushed in a long time — check with
+   `git -C Z:/Time_Attendance rev-list --count origin/main..main`. Until that
+   is resolved, every commit ever made exists on exactly one disk.
 2. Set up a real backup schedule for `data/*.json` — see the Backups section
    above, currently there is none.
 3. Decide whether to move Samba/SSH/`deploy_backend.py` access off the
@@ -229,11 +233,18 @@ on it blindly.
    documented rotation runbook) — the one NAS directory that mattered most for
    this was already fixed (see Access & credentials above), but the rest of
    NAS access is still tied to one person's account.
-4. Read the security-audit trail in `claude_memory` before making backend
-   changes — this codebase has been through many rounds of security hardening
-   (auth, XSS, settings-endpoint merge safety, leave-data scoping); it's easy
-   to reintroduce an already-fixed class of bug if you're not aware of the
-   history.
+4. Read the security-audit trail before making backend changes — this
+   codebase has been through many rounds of security hardening (auth, XSS,
+   settings-endpoint merge safety, leave-data scoping); it's easy to
+   reintroduce an already-fixed class of bug if you're not aware of the
+   history. The part that travels with the code is `git log` — the commit
+   messages here are written to be read. The fuller trail sits in
+   `Z:\claude_memory\` on the NAS, but **be aware it contains real
+   credentials, so it cannot simply be handed to an outside party**; anything
+   in there that a future maintainer genuinely needs (why a business rule is
+   the way it is, what was tried and reverted) has to be moved into this repo
+   as documentation rather than left there. Treat that migration as part of
+   handing over, not an afterthought.
 
 ## Developer system account (`superadmin`)
 
@@ -246,7 +257,8 @@ appear in employee lists, payslips, reports, or the login page hint text.
 | Password | Set on your **Windows dev machine** via `setx SUPERADMIN_PASSWORD "..."` in **cmd.exe** (not PowerShell), then restart backend with `deploy_backend.py` — the deploy script forwards this env var to the NAS Node process. Change later only by logging in as `superadmin` → Profile → Change Password |
 | Protection | `backend/systemAccount.js` — re-created on every backend start if removed from `users.json`; API blocks role/password/admin edits by others |
 | Can do | View every page (incl. Finalize + 50 ทวิ), export payslip/50-Tawi xlsx, approve requests (with CONFIRM prompt), edit employees/settings, role preview dropdown |
-| Cannot do | Finalize confirm, MD payroll approve, email payslip, save 50-Tawi overrides, check-in, submit own leave |
+| Cannot do, acting as itself | Finalize confirm, MD payroll approve, email payslip, save 50-Tawi overrides |
+| Can exercise while writing nothing | Since 2026-10-05 it can impersonate a **specific employee**, not just a role. While impersonating, the pages closed to superadmin itself — check-in and Leave — open, because the page gate reads the impersonated person's role. Every write is then refused by the server and turned into a dry run that reports what would have happened. So check-in and submitting leave can be walked end to end without one row changing. (This row replaces an older one that listed check-in and submitting leave as flatly impossible.) |
 
 **Secret:** staff must not know this login exists. Never show it in employee
 lists, the login page, role dropdowns, or API errors (use generic
