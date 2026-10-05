@@ -13,7 +13,7 @@ this file.
 
 **Open your editor / agent on a worktree folder, not on `Z:\Time_Attendance`.**
 
-A worktree is an ordinary local folder (e.g. `C:\Users\tairo\ta-cursor`) that contains the whole
+A worktree is an ordinary local folder (e.g. `C:\Users\<your-windows-user>\ta-work`) that contains the whole
 project, including this file. Working there means the live site is not even reachable from your
 workspace, so no mistake you make can reach employees mid-edit. Section 3 has the four commands that
 create one; the person setting you up normally runs them before opening the editor.
@@ -44,12 +44,13 @@ browsers exactly as they sit on disk. There is no bundler, no transpiler, no dis
 ### The git remote is stale — do not work from it
 
 `origin` points at `https://origin.cursor.com/teerawat-rungraung/Time_Attendance.git`, but `main` is
-**ahead of `origin/main` by ~147 commits**. Nothing has been pushed in a long time. If you clone or
-pull from `origin` you will get very old code.
+**far ahead of `origin/main`** and nothing has been pushed in a long time. Ask git for the number
+rather than trusting one written here: `git -C Z:/Time_Attendance rev-list --count origin/main..main`.
+If you clone or pull from `origin` you will get very old code.
 
 **The authoritative source is `Z:\Time_Attendance`, branch `main`.** Branch from there.
 
-Do not `git push` without asking the owner first — pushing ~147 commits to that remote is a
+Do not `git push` without asking the owner first — pushing that whole backlog to that remote is a
 decision, not a chore.
 
 ---
@@ -70,32 +71,53 @@ Work in a git worktree. Merge into `main` only when the work is finished and ver
 
 ## 3. Set up your workspace
 
-Pick a folder name for your task. Run these four, in order:
+Start with `git -C Z:/Time_Attendance worktree list` and **use the row whose path matches the
+machine you are sitting at.** If yours is missing, run these four, in order, substituting your own
+Windows user for `<you>`:
 
 ```bash
-git -C Z:/Time_Attendance worktree add C:/Users/tairo/ta-myfeature -b feat/my-feature main
+git -C Z:/Time_Attendance worktree add C:/Users/<you>/ta-myfeature -b feat/my-feature main
 ```
 
 ```bash
-git config --global --add safe.directory C:/Users/tairo/ta-myfeature
+git config --global --add safe.directory C:/Users/<you>/ta-myfeature
 ```
 
 ```bash
-git -C C:/Users/tairo/ta-myfeature config core.autocrlf input
+git -C C:/Users/<you>/ta-myfeature config core.autocrlf input
 ```
 
 ```bash
-cd C:/Users/tairo/ta-myfeature && npm ci
+cd C:/Users/<you>/ta-myfeature && npm ci
 ```
 
 Why the middle two are not optional on Windows:
 
 - the worktree's gitdir lives on the SMB share, so git refuses it as "dubious ownership" without
   `safe.directory`
-- without `core.autocrlf input` you will commit a diff where every line changed
+- without `core.autocrlf input` you will commit a diff where every line changed (it is already set
+  at repo level and every worktree inherits it, so this one is belt-and-braces)
 
-`git -C Z:/Time_Attendance worktree list` shows what already exists — reuse one rather than piling up
-stale worktrees.
+Finish by running `npm run check` in the brand-new worktree **before editing anything**. A fresh
+checkout on Windows can come out as CRLF while the repo's blobs are LF, and roughly a dozen of this
+project's tests read the source as text and slice it on `'\n'` — they fail on a tree
+that is otherwise perfectly fine, and `git status` stays clean, so the failure looks like a real bug.
+
+### Never point two machines at one worktree name
+
+The repo lives on the NAS, so `.git/worktrees/<name>/` — which holds that worktree's **HEAD and
+index** — sits on the share and is reachable from every machine that mounts `Z:`. Two folders on two
+machines must never claim the same worktree name.
+
+A worktree registered to another machine's path shows up here as `prunable`. **That is normal and is
+not a reason to prune it.** Leave other machines' rows alone and add your own.
+
+This has already bitten once (2026-10-05). A second machine had a folder whose `.git` pointed at the
+first machine's worktree admin dir. Its files were a week-old checkout while the shared HEAD had
+moved on, so `git status` there reported 33 files changed and 5,037 deletions — whole test files and
+`CLAUDE.md` / `AGENTS.md` listed as deleted. None of it was real: `git diff <that commit>` was empty
+and there were no untracked files. But `git add -A && git commit` in that folder would have silently
+reverted a week of the other machine's work.
 
 ---
 
@@ -114,8 +136,9 @@ node --check attendance/js/app.js
 npm run check
 ```
 
-That runs `eslint` over the frontend and backend, then `node tests/run-all.js` (16 test files). It
-should end with `=== 16/16 test files passed ===`.
+That runs `eslint` over the frontend and backend, then `node tests/run-all.js`. It must end with
+`=== N/N test files passed ===` — every file, no failures. The count grows as tests are added, so
+compare it against what the same command prints on `main`, not against a number written here.
 
 ESLint will not catch a temporal-dead-zone error (`const` used above its declaration). `node --check`
 will not either. If the app goes blank after your change, that is the first thing to look for.
@@ -237,6 +260,37 @@ succeeds.** Verify with `git log --oneline -1` and move on.
 
 ---
 
+## 7a. The `superadmin` account — do not touch it while fixing something else
+
+There is a protected non-employee login, `superadmin`, whose whole purpose is post-handover QA: it
+can look at the app as any role so a developer can test without borrowing a real employee's or the
+MD's account.
+
+**No AI (Claude, Cursor, Copilot, GPT, Gemini, or any other) may edit the superadmin path, the
+role-preview UI, or any `isSuperAdmin()` / impersonation branch unless the human asked for a
+superadmin change in that same message.** Fixing an unrelated bug is not permission. The reason is
+blunt: this is developer access, and an agent that "tidies" it away locks the owner out of their own
+diagnostic tooling.
+
+Three properties that look like bugs but are deliberate, so do not "fix" them:
+
+- **It is not an employee.** It must never appear in รายชื่อพนักงาน, payslips, reports, role
+  dropdowns or the login hint. Keep every `isEmployeeRecord` / `employeeRecords` filter in place.
+- **It writes nothing while impersonating a person.** Writes are refused by the *server*, not just
+  hidden in the UI, and the client turns the attempt into a dry run that reports what would have
+  happened. Both halves must stay: the client gate is a convenience, the server is the control.
+- **Everything it does write goes through one gate** inside `apiFetch`, which is what asks for the
+  typed CONFIRM. Do not add a `POST`/`PUT`/`DELETE` that bypasses it — a test asserts this by
+  reading the source, and that test exists so the rule fails loudly instead of eroding.
+
+Authoritative copies, in order of detail: the header comment in `attendance/js/app.js` (search
+`AI POLICY`), `attendance-server/backend/systemAccount.js`, `.cursor/rules/superadmin-do-not-touch.mdc`,
+and the account's own section in `attendance-server/DEVELOPER_HANDOFF.md`. The design and the
+owner's decisions behind the current behaviour are in
+`docs/superpowers/specs/2026-10-05-superadmin-inspector-design.md`.
+
+---
+
 ## 8. Commit and comment conventions
 
 Read `git log --oneline -20` before writing your first commit message. The house style is
@@ -265,7 +319,7 @@ agent does not undo your work by accident. Example from `app.js`:
 ## 9. Finishing
 
 1. `node --check attendance/js/app.js`
-2. `npm run check` — must be 16/16
+2. `npm run check` — every test file must pass (`=== N/N test files passed ===`)
 3. bump the `?v=` cache-buster for anything you changed under `attendance/`
 4. commit in your worktree
 5. `git -C Z:/Time_Attendance status --short` — clear anything uncommitted
