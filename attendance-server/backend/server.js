@@ -5177,14 +5177,20 @@ function attendanceDayForUser(user, dateStr, reviews = {}, morningReviews = {}) 
   const days = generatePeriodDays(dayStart, dayStart, false, user, attLog, leaves, S, reviews, morningReviews);
   return days[0] || null;
 }
-// 2026-10-05 (owner): managers may file Holiday Work but only for the annual-leave day. The form
-// hides the money option for them; this is the control that actually enforces it, since a request
-// can be posted straight at the API. Returns null when there is nothing to block -- including when
-// no mode was sent at all, which the field validator handles separately.
-function paidHolidayWorkBlockReason(S, user, compensationMode) {
-  if (compensationMode !== 'paid') return null;
-  if (mayChoosePaidHolidayWork(S && S.allowanceEligibility, user && user.role)) return null;
-  return 'Your role cannot take holiday work compensation as money — choose the annual-leave day instead';
+// 2026-10-05 (owner): each role is allowed a set of compensation modes. The form offers only those
+// modes; this is the control that actually enforces it, since a request can be posted straight at
+// the API. Returns null when there is nothing to block.
+function holidayWorkModeBlockReason(S, user, compensationMode) {
+  const cfg = S && S.allowanceEligibility;
+  const role = user && user.role;
+  const allowed = holidayWorkModesFor(cfg, role);
+  // No mode at all: the parent permission is on but neither compensation is, which is not a usable
+  // configuration. Refuse rather than create a request nobody can be paid for.
+  if (allowed.length === 0) return 'Your role has no holiday work compensation enabled — ask for the Settings to be corrected';
+  // An absent mode is the field validator's business, not this one's.
+  if (compensationMode === undefined || compensationMode === '') return null;
+  if (mayChooseHolidayWorkMode(cfg, role, compensationMode)) return null;
+  return `Your role cannot take holiday work compensation as "${compensationMode}" — allowed: ${allowed.join(', ')}`;
 }
 function holidayWorkSubmitBlockReason(user, dateStr, compensationMode) {
   if (!user || !dateStr || !isValidDateStr(dateStr)) {
@@ -5197,8 +5203,8 @@ function holidayWorkSubmitBlockReason(user, dateStr, compensationMode) {
   if (!isAllowanceEligible(S.allowanceEligibility, user.role, 'holidayWork')) {
     return 'You are not eligible to submit holiday work requests';
   }
-  const paidErr = paidHolidayWorkBlockReason(S, user, compensationMode);
-  if (paidErr) return paidErr;
+  const modeErr = holidayWorkModeBlockReason(S, user, compensationMode);
+  if (modeErr) return modeErr;
   if (!isHolidayWorkDay(dateStr)) {
     return 'dateFrom must be a day you actually worked, and a weekend or public holiday (not Company Trip)';
   }
@@ -9272,10 +9278,12 @@ const DEFAULT_ALLOWANCE_ELIGIBILITY = {
   earlyLate:    ['md', 'manager', 'user', 'driver'],
   ot:           ['md', 'manager', 'user', 'driver'],
   holidayWork:  ['md', 'manager', 'user'],
-  // 2026-10-05: sub-permission of holidayWork -- who may take the compensation as money rather
-  // than the annual-leave day. MUST exist here: isAllowanceEligible() falls back to
-  // DEFAULT_ALLOWANCE_ELIGIBILITY[key] when the live settings have no such key, and a missing key
-  // throws. Default excludes manager, which is the rule this key was added for.
+  // 2026-10-05: the two Holiday Work compensation modes, each a sub-permission of holidayWork.
+  // BOTH MUST EXIST here: isAllowanceEligible() falls back to DEFAULT_ALLOWANCE_ELIGIBILITY[key]
+  // when the live settings have no such key, and a missing key throws. holidayWorkLeave matches
+  // holidayWork so settings written before this key existed keep the leave day for everyone who
+  // could already file; holidayWorkPaid excludes manager, the rule these keys were added for.
+  holidayWorkLeave: ['md', 'manager', 'user'],
   holidayWorkPaid: ['md', 'user'],
   // 2026-07-31: phone allowance has zero real correlation with role (only 1 of 4 'user'-role
   // employees ever had it) -- this default is intentionally permissive since the actual gate is
@@ -9295,14 +9303,23 @@ function isAllowanceEligible(allowanceEligibilityConfig, role, key) {
   return Array.isArray(list) ? list.includes(role) : DEFAULT_ALLOWANCE_ELIGIBILITY[key].includes(role);
 }
 // 2026-10-05 (owner): managers may file Holiday Work but must take the annual-leave day, never the
-// money. Two keys, both required: holidayWork says who may file at all, holidayWorkPaid says who may
-// pick compensationMode 'paid'. Requiring the parent here is the real control -- settings.json can
-// be edited by hand or by an older client, and a holidayWorkPaid tick without its parent must grant
-// nothing rather than quietly allowing the cash option.
+// money. holidayWork says who may file at all; holidayWorkLeave and holidayWorkPaid say which
+// compensation each role may pick. Requiring the parent here is the real control -- settings.json
+// can be edited by hand or by an older client, and a mode tick without its parent must grant
+// nothing rather than quietly allowing that mode.
 // STANDING RULE (dual-sync): this function exists in BOTH app.js and server.js.
-function mayChoosePaidHolidayWork(allowanceEligibilityConfig, role) {
+const HOLIDAY_WORK_MODE_KEYS = { 'annual-leave': 'holidayWorkLeave', paid: 'holidayWorkPaid' };
+function mayChooseHolidayWorkMode(allowanceEligibilityConfig, role, mode) {
+  const key = HOLIDAY_WORK_MODE_KEYS[mode];
+  if (!key) return false;
   return isAllowanceEligible(allowanceEligibilityConfig, role, 'holidayWork') &&
-         isAllowanceEligible(allowanceEligibilityConfig, role, 'holidayWorkPaid');
+         isAllowanceEligible(allowanceEligibilityConfig, role, key);
+}
+// The modes this role may actually pick, in the order the form offers them. Empty means the role
+// cannot file at all, however the parent permission is set -- a request with no available
+// compensation is not a request.
+function holidayWorkModesFor(allowanceEligibilityConfig, role) {
+  return ['annual-leave', 'paid'].filter(m => mayChooseHolidayWorkMode(allowanceEligibilityConfig, role, m));
 }
 // 2026-08-27: Early Morning / Late Night money is tied to a face-scanner event, not a web
 // Check In / Check Out button. Missing source (time-correction overlay with no scan) must not

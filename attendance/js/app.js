@@ -1421,9 +1421,11 @@ let APP_SETTINGS = {
     ot:           ['md', 'manager', 'user', 'driver'],
     phone:        ['md', 'manager', 'accounting', 'user', 'marketing', 'driver'],
     holidayWork:  ['md', 'manager', 'user'],
-    // 2026-10-05 (owner): who may take Holiday Work compensation as money (OT + holiday transport)
-    // instead of one annual-leave day. A sub-permission of holidayWork above --
-    // mayChoosePaidHolidayWork() requires BOTH, so ticking this alone grants nothing.
+    // 2026-10-05 (owner): the two compensation modes, each its own sub-permission of holidayWork
+    // above. Both are needed to read the table as a sentence -- with only the paid row, the
+    // leave-day mode came free and invisibly, and nobody could tell what ticking the parent gave.
+    // mayChooseHolidayWorkMode() requires the parent too, so ticking one alone grants nothing.
+    holidayWorkLeave: ['md', 'manager', 'user'],
     holidayWorkPaid: ['md', 'user'],
   },
   map: { cartoApiKey: '' }
@@ -1469,7 +1471,7 @@ let TAWI50_OVERRIDES = {};
 // thrown a whole extra hour onto the previous day without failing a single test. Every site now
 // compares minutes-since-midnight against this one constant.
 const BUSINESS_DAY_START_MINS = 330; // 05:30
-const ALLOWANCE_KEYS = ['diligence', 'longDistance', 'personalCar', 'upcountry', 'earlyLate', 'ot', 'phone', 'holidayWork', 'holidayWorkPaid', 'abroad'];
+const ALLOWANCE_KEYS = ['diligence', 'longDistance', 'personalCar', 'upcountry', 'earlyLate', 'ot', 'phone', 'holidayWork', 'holidayWorkLeave', 'holidayWorkPaid', 'abroad'];
 const ROLE_KEYS = ['md', 'manager', 'accounting', 'user', 'marketing', 'driver'];
 const DEFAULT_ALLOWANCE_ELIGIBILITY = {
   diligence:    ['driver'],
@@ -1479,10 +1481,12 @@ const DEFAULT_ALLOWANCE_ELIGIBILITY = {
   earlyLate:    ['md', 'manager', 'user', 'driver'],
   ot:           ['md', 'manager', 'user', 'driver'],
   holidayWork:  ['md', 'manager', 'user'],
-  // 2026-10-05: sub-permission of holidayWork -- who may take the compensation as money rather
-  // than the annual-leave day. MUST exist here: isAllowanceEligible() falls back to
-  // DEFAULT_ALLOWANCE_ELIGIBILITY[key] when the live settings have no such key, and a missing key
-  // throws. Default excludes manager, which is the rule this key was added for.
+  // 2026-10-05: the two Holiday Work compensation modes, each a sub-permission of holidayWork.
+  // BOTH MUST EXIST here: isAllowanceEligible() falls back to DEFAULT_ALLOWANCE_ELIGIBILITY[key]
+  // when the live settings have no such key, and a missing key throws. holidayWorkLeave matches
+  // holidayWork so settings written before this key existed keep the leave day for everyone who
+  // could already file; holidayWorkPaid excludes manager, the rule these keys were added for.
+  holidayWorkLeave: ['md', 'manager', 'user'],
   holidayWorkPaid: ['md', 'user'],
   // 2026-07-31: phone allowance has zero real correlation with role (only 1 of 4 'user'-role
   // employees ever had it) -- this default is intentionally permissive since the actual gate is
@@ -1502,14 +1506,23 @@ function isAllowanceEligible(allowanceEligibilityConfig, role, key) {
   return Array.isArray(list) ? list.includes(role) : DEFAULT_ALLOWANCE_ELIGIBILITY[key].includes(role);
 }
 // 2026-10-05 (owner): managers may file Holiday Work but must take the annual-leave day, never the
-// money. Two keys, both required: holidayWork says who may file at all, holidayWorkPaid says who may
-// pick compensationMode 'paid'. Requiring the parent here is the real control -- settings.json can
-// be edited by hand or by an older client, and a holidayWorkPaid tick without its parent must grant
-// nothing rather than quietly allowing the cash option.
+// money. holidayWork says who may file at all; holidayWorkLeave and holidayWorkPaid say which
+// compensation each role may pick. Requiring the parent here is the real control -- settings.json
+// can be edited by hand or by an older client, and a mode tick without its parent must grant
+// nothing rather than quietly allowing that mode.
 // STANDING RULE (dual-sync): this function exists in BOTH app.js and server.js.
-function mayChoosePaidHolidayWork(allowanceEligibilityConfig, role) {
+const HOLIDAY_WORK_MODE_KEYS = { 'annual-leave': 'holidayWorkLeave', paid: 'holidayWorkPaid' };
+function mayChooseHolidayWorkMode(allowanceEligibilityConfig, role, mode) {
+  const key = HOLIDAY_WORK_MODE_KEYS[mode];
+  if (!key) return false;
   return isAllowanceEligible(allowanceEligibilityConfig, role, 'holidayWork') &&
-         isAllowanceEligible(allowanceEligibilityConfig, role, 'holidayWorkPaid');
+         isAllowanceEligible(allowanceEligibilityConfig, role, key);
+}
+// The modes this role may actually pick, in the order the form offers them. Empty means the role
+// cannot file at all, however the parent permission is set -- a request with no available
+// compensation is not a request.
+function holidayWorkModesFor(allowanceEligibilityConfig, role) {
+  return ['annual-leave', 'paid'].filter(m => mayChooseHolidayWorkMode(allowanceEligibilityConfig, role, m));
 }
 // 2026-08-27: Early Morning / Late Night money is tied to a face-scanner event, not a web
 // Check In / Check Out button. Missing source (time-correction overlay with no scan) must not
@@ -5086,10 +5099,12 @@ function renderSettingsPage(_skipRefresh) {
               ['upcountry',    L('Upcountry Allowance','เบี้ยเลี้ยงเดินทางไปต่างจังหวัด'), L('rate set above (Allowance Rates)','ใช้อัตรากลางด้านบน')],
               ['earlyLate',    L('Early Morning / Late Night','เบี้ยเลี้ยงมาเช้า/กลับดึก'), L('rate set above (Allowance Rates)','ใช้อัตรากลางด้านบน')],
               ['holidayWork',  L('Holiday Work','ทำงานวันหยุด'), L('weekend/public-holiday work requests','คำขอทำงานวันเสาร์-อาทิตย์/วันหยุด')],
-              // 2026-10-05 (owner): a sub-permission of the row above, not a sibling -- the label
-              // carries the indent marker and the cell is padded (see the `key ===` test below), so
-              // it reads as belonging to Holiday Work rather than as another allowance.
-              ['holidayWorkPaid', `<span style="color:#94a3b8">└</span> ${L('choose cash compensation','เลือกรับเป็นเงิน')}`, L('needs the row above; ticking this ticks it too','ต้องเปิดสิทธิ์ยื่นด้านบนก่อน — ติ๊กช่องนี้จะติ๊กให้เอง')],
+              // 2026-10-05 (owner): the two compensation modes, sub-rows of the row above rather
+              // than siblings -- the label carries the indent marker and the cell is padded (see
+              // the HW_MODE_ROWS test below). Both are listed so the table reads as a sentence:
+              // with only the paid row, the leave day came free and invisibly.
+              ['holidayWorkLeave', `<span style="color:#94a3b8">└</span> ${L('choose the annual-leave day','เลือกรับเป็นวันลา')}`, L('+1 annual leave day','ลาพักร้อน +1 วัน')],
+              ['holidayWorkPaid', `<span style="color:#94a3b8">└</span> ${L('choose cash compensation','เลือกรับเป็นเงิน')}`, L('OT + holiday transport','OT + ค่าเดินทางวันหยุด')],
               // 2026-09-21: this table is a HARDCODED list while saveSettings() loops ALLOWANCE_KEYS
               // to read the checkboxes back -- so a key present in ALLOWANCE_KEYS but missing a row
               // here silently saves as [] (nobody eligible) on the next Settings save. Any future
@@ -5099,12 +5114,12 @@ function renderSettingsPage(_skipRefresh) {
               ['phone',        L('Phone Allowance','เบี้ยเลี้ยงค่าโทรศัพท์'), L('rate set above; enabled per employee','ใช้อัตรากลางด้านบน + ต้องติ๊กสิทธิ์รายคน')],
             ].map(([key, label, hint]) => `
               <tr style="border-bottom:1px solid #f1f5f9">
-                <td style="padding:8px 10px${key === 'holidayWorkPaid' ? ';padding-left:26px' : ''}">
+                <td style="padding:8px 10px${HW_MODE_ROWS.includes(key) ? ';padding-left:26px' : ''}">
                   <div style="font-weight:600;color:#1e293b">${label}</div>
                   <div style="font-size:10.5px;color:#94a3b8">${hint}</div>
                 </td>
                 ${ROLE_KEYS.map(role => `<td style="text-align:center;padding:8px 6px">
-                  <input type="checkbox" id="set-elig-${key}-${role}" ${isAllowanceEligible(s.allowanceEligibility, role, key) ? 'checked' : ''} ${key === 'holidayWorkPaid' ? `onchange="onHolidayWorkPaidToggle('${role}')"` : key === 'holidayWork' ? `onchange="onHolidayWorkParentToggle('${role}')"` : ''} style="width:16px;height:16px;cursor:pointer">
+                  <input type="checkbox" id="set-elig-${key}-${role}" ${isAllowanceEligible(s.allowanceEligibility, role, key) ? 'checked' : ''} ${HW_MODE_ROWS.includes(key) ? `onchange="onHolidayWorkModeToggle('${role}','${key}')"` : key === 'holidayWork' ? `onchange="onHolidayWorkParentToggle('${role}')"` : ''} style="width:16px;height:16px;cursor:pointer">
                 </td>`).join('')}
               </tr>`).join('')}
           </tbody>
@@ -5749,30 +5764,43 @@ async function saveMyNotifyPrefs(patch) {
   }
 }
 
-// 2026-10-05 (owner): "เลือกรับเป็นเงิน" is a sub-permission of "ทำงานวันหยุด" and means nothing
-// without it. Ticking the child ticks the parent, because that is plainly the intent and a disabled
-// checkbox just makes people hunt for the reason (the first draft disabled it; the owner rejected
-// that). The auto-tick is announced: the click asked for the narrower permission and granted the
-// broader one with it, so the person must see that more changed than they pressed.
-// mayChoosePaidHolidayWork() requires both regardless, so this is convenience, not the control.
-function onHolidayWorkPaidToggle(role) {
-  const child = document.getElementById(`set-elig-holidayWorkPaid-${role}`);
-  const parent = document.getElementById(`set-elig-holidayWork-${role}`);
-  if (!child || !parent || !child.checked || parent.checked) return;
-  parent.checked = true;
-  parent.style.outline = '2px solid #f59e0b';
-  setTimeout(() => { parent.style.outline = ''; }, 1600);
-  showToast(currentLang === 'ja'
-    ? '休日出勤の申請権限も有効にしました'
-    : L('Permission to file Holiday Work was switched on too',
-        'เปิดสิทธิ์ยื่นทำงานวันหยุดให้ด้วยแล้ว'), 'info');
+// 2026-10-05 (owner): the two compensation modes are sub-permissions of "ทำงานวันหยุด" and mean
+// nothing without it, so the parent and its children are kept consistent live, before any save.
+// Ticking a mode ticks the parent, because that is plainly the intent and a disabled checkbox just
+// makes people hunt for the reason (the first draft disabled it; the owner rejected that). The
+// auto-tick is announced: the click asked for the narrower permission and granted the broader one
+// with it, so the person must see that more changed than they pressed.
+// Unticking the last remaining mode unticks the parent, and ticking the parent with no mode on
+// turns the leave day on -- between them, "may file but can choose nothing" cannot be reached from
+// this screen at all. holidayWorkModesFor() still refuses that state if it arrives another way.
+const HW_MODE_ROWS = ['holidayWorkLeave', 'holidayWorkPaid'];
+function hwEligBox(role, key) { return document.getElementById(`set-elig-${key}-${role}`); }
+function onHolidayWorkModeToggle(role, key) {
+  const self = hwEligBox(role, key);
+  const other = hwEligBox(role, HW_MODE_ROWS.find(k => k !== key));
+  const parent = hwEligBox(role, 'holidayWork');
+  if (!self || !parent) return;
+  if (self.checked) {
+    if (parent.checked) return;
+    parent.checked = true;
+    parent.style.outline = '2px solid #f59e0b';
+    setTimeout(() => { parent.style.outline = ''; }, 1600);
+    showToast(currentLang === 'ja'
+      ? '休日出勤の申請権限も有効にしました'
+      : L('Permission to file Holiday Work was switched on too',
+          'เปิดสิทธิ์ยื่นทำงานวันหยุดให้ด้วยแล้ว'), 'info');
+    return;
+  }
+  // last mode off -> the parent means nothing any more
+  if (other && !other.checked && parent.checked) parent.checked = false;
 }
-// The other direction only ever narrows, so it needs no announcement.
 function onHolidayWorkParentToggle(role) {
-  const parent = document.getElementById(`set-elig-holidayWork-${role}`);
-  const child = document.getElementById(`set-elig-holidayWorkPaid-${role}`);
-  if (!parent || !child || parent.checked) return;
-  child.checked = false;
+  const parent = hwEligBox(role, 'holidayWork');
+  const boxes = HW_MODE_ROWS.map(k => hwEligBox(role, k));
+  if (!parent || boxes.some(b => !b)) return;
+  if (!parent.checked) { boxes.forEach(b => { b.checked = false; }); return; }
+  // ticked with no mode on: give the leave day, which is what filing used to mean on its own
+  if (boxes.every(b => !b.checked)) boxes[0].checked = true;
 }
 
 async function saveSettingsPage() {
@@ -5917,14 +5945,15 @@ async function saveSettingsPage() {
         affected = DATA_USERS.filter(u => u.role === role && u.active !== false && u[flagField] === true);
       } else if (key === 'diligence' || key === 'earlyLate') {
         affected = DATA_USERS.filter(u => u.role === role && u.active !== false);
-      } else if (key === 'holidayWorkPaid') {
-        // 2026-10-05: taking this away turns approved PAID holiday work into nothing payable, so
-        // only the paid-mode records of this period count -- the generic branch below matches on
-        // type alone and would also warn about annual-leave-mode records, which are unaffected.
+      } else if (HW_MODE_ROWS.includes(key)) {
+        // 2026-10-05: taking a mode away stops paying the approved holiday work that used THAT
+        // mode, so only those records of this period count -- the generic branch below matches on
+        // request type alone and would also warn about the other mode, which is unaffected.
+        const mode = key === 'holidayWorkPaid' ? 'paid' : 'annual-leave';
         const roleUserIds = new Set(DATA_USERS.filter(u => u.role === role && u.active !== false).map(u => u.id));
         const affectedIds = new Set(DATA_LEAVES.filter(l =>
           roleUserIds.has(l.userId) && l.type === 'holiday-work' && l.status === 'approved' &&
-          l.compensationMode === 'paid' && l.dateFrom >= curStartStr && l.dateFrom <= curEndStr
+          l.compensationMode === mode && l.dateFrom >= curStartStr && l.dateFrom <= curEndStr
         ).map(l => l.userId));
         affected = DATA_USERS.filter(u => affectedIds.has(u.id));
       } else {
@@ -16608,8 +16637,9 @@ function editLeaveRequest(id) {
     document.getElementById('holiday-work-end-time').value = l.workEndTime || '';
     document.getElementById('holiday-work-comp-mode').value = l.compensationMode || 'annual-leave';
     document.getElementById('holiday-work-reason').value = l.reason || '';
-    applyHolidayWorkCompModePermission();
+    const _hwPerm = applyHolidayWorkCompModePermission();
     refreshHolidayWorkCompHint();
+    noteHolidayWorkCompModeMoved(_hwPerm);
   } else if (l.type === 'early-morning') {
     openEarlyMorningModal(l.dateFrom);
     if (l.earlyMorningTier) selectEarlyMorningTier(Number(l.earlyMorningTier), true);
@@ -18186,21 +18216,47 @@ async function submitDriverOT() {
 }
 
 // ===== HOLIDAY WORK =====
-// 2026-10-05 (owner): a role that may file Holiday Work but may not take the money sees one option
-// only. The two-card pay comparison is hidden with it -- a single card alone reads as a broken
-// layout. The server refuses 'paid' from these roles regardless (paidHolidayWorkBlockReason), so
-// this is presentation, not the control.
+// 2026-10-05 (owner): the form offers only the compensation modes this role may take. The server
+// refuses the rest regardless (holidayWorkModeBlockReason), so this is presentation, not control.
+//
+// Both `disabled` AND `hidden` are set on a mode that is not allowed. `hidden` alone was the first
+// version and is wrong on iOS: Safari ignores hidden on an <option> and still lists it in the
+// native picker, so a manager on an iPhone -- and this app ships an "install on iPhone" flow --
+// could pick the money option and only find out it was refused after submitting, in English.
+// `disabled` is honoured everywhere.
+//
+// Returns the mode it ended up on, so the caller can tell whether it had to move the selection.
 function applyHolidayWorkCompModePermission() {
   const sel = document.getElementById('holiday-work-comp-mode');
-  if (!sel || !currentUser) return;
-  const mayPaid = mayChoosePaidHolidayWork(APP_SETTINGS.allowanceEligibility, effectiveRole());
-  const paidOpt = sel.querySelector('option[value="paid"]');
-  if (paidOpt) paidOpt.hidden = !mayPaid;
-  if (!mayPaid) {
-    sel.value = 'annual-leave';
+  if (!sel || !currentUser) return null;
+  const allowed = holidayWorkModesFor(APP_SETTINGS.allowanceEligibility, effectiveRole());
+  [...sel.options].forEach(opt => {
+    const ok = allowed.includes(opt.value);
+    opt.disabled = !ok;
+    opt.hidden = !ok;
+  });
+  const wanted = sel.value;
+  if (!allowed.includes(wanted)) sel.value = allowed[0] || 'annual-leave';
+  if (!allowed.includes('paid')) {
     const cmp = document.getElementById('hw-pay-compare');
     if (cmp) cmp.style.display = 'none';
   }
+  return { allowed, movedFrom: allowed.includes(wanted) ? null : wanted, now: sel.value };
+}
+// 2026-10-05: say so when opening a form moved the stored compensation. Editing an old request
+// whose mode the role may no longer take used to switch it silently -- somebody fixing a typo in
+// the reason could change their own compensation from money to a leave day and never know.
+function noteHolidayWorkCompModeMoved(result) {
+  const note = document.getElementById('holiday-work-comp-hint');
+  if (!result || !result.movedFrom || !note) return;
+  const wasPaid = result.movedFrom === 'paid';
+  const msg = currentLang === 'ja'
+    ? (wasPaid ? '⚠️ この役職は現金での補償を選べないため、年次有給休暇 +1日 に変更しました。' : '⚠️ この役職は年次有給休暇での補償を選べないため、現金に変更しました。')
+    : L(wasPaid ? '⚠️ Your role cannot take this as money, so it was changed to the annual-leave day. Saving will store that.'
+                : '⚠️ Your role cannot take this as an annual-leave day, so it was changed to paid. Saving will store that.',
+        wasPaid ? '⚠️ ตำแหน่งของคุณรับเป็นเงินไม่ได้ ระบบเปลี่ยนเป็นลาพักร้อน +1 วันให้แล้ว ถ้ากดบันทึกจะถูกเก็บตามนี้'
+                : '⚠️ ตำแหน่งของคุณรับเป็นวันลาไม่ได้ ระบบเปลี่ยนเป็นชดเชยเป็นเงินให้แล้ว ถ้ากดบันทึกจะถูกเก็บตามนี้');
+  note.innerHTML = `<span style="color:#b45309;font-weight:600">${escapeHtml(msg)}</span>`;
 }
 function refreshHolidayWorkCompHint() {
   const el = document.getElementById('holiday-work-comp-hint');
@@ -18283,7 +18339,7 @@ function refreshHolidayWorkPayCompare() {
   if (!wrap) return;
   // 2026-10-05: this function sets wrap.style.display itself, so without this it would undo
   // applyHolidayWorkCompModePermission() on the next date/time edit and put the comparison back.
-  if (currentUser && !mayChoosePaidHolidayWork(APP_SETTINGS.allowanceEligibility, effectiveRole())) {
+  if (currentUser && !mayChooseHolidayWorkMode(APP_SETTINGS.allowanceEligibility, effectiveRole(), 'paid')) {
     wrap.style.display = 'none';
     return;
   }
