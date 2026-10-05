@@ -1970,9 +1970,23 @@ function lateNightCheckoutOk(d) {
   if (!d) return false;
   return isDeviceScanSource(d.checkOutSource) || (d.checkOutSource === 'web' && d.checkOutReview === 'allow');
 }
-// A day Accounting/MD must review: a web check-out at/after the Late Night x1 time, on a worked
-// day that is not full-day personal leave / Company Trip / Abroad, for a role eligible for earlyLate.
-function checkoutReviewTrigger(day, user, S) {
+// 2026-10-05 (owner): one predicate used to answer two different questions, and that is what made
+// the review box a rubber stamp. Split in two.
+//
+// checkoutReviewEligible  — "could this day be granted?"   -> the approve/deny control on the
+//                           attendance row, and the server guard. UNCHANGED logic.
+// checkoutReviewQueued    — "should this day be queued?"   -> the review box on the approval page.
+//                           Eligible AND the policy switched on.
+//
+// Why: the owner reported that almost every case ought to be denied, but MD allowed them all
+// without reading, because a queue demands to be cleared. With the policy off nothing is queued,
+// so nothing demands anything -- a web check-out simply does not earn Late Night, which is the
+// company rule it always was. The grant is still possible for the genuine exception; somebody has
+// to go and find the day, which means they meant it.
+//
+// A day Accounting/MD could grant: a web check-out at/after the Late Night x1 time, on a worked day
+// that is not full-day personal leave / Company Trip / Abroad, for a role eligible for earlyLate.
+function checkoutReviewEligible(day, user, S) {
   if (!day || !user || !S || !day.checkIn || !day.checkOut || day.isFuture) return false;
   if (day.checkOutSource !== 'web') return false;
   if (isFullDayPersonalLeaveStatus(day.status) || day.status === 'company-trip' ||
@@ -1982,6 +1996,14 @@ function checkoutReviewTrigger(day, user, S) {
   const thr1 = lateNightThresholdHourOf(a, 1);
   const mins = lateNightCheckoutMins(day.checkOut);
   return Number.isFinite(mins) && mins >= lateNightThresholdMins(thr1);
+}
+// Default OFF: the company rule is that Late Night needs a face-scan check-out. The review was the
+// exception, so the exception is what has to be switched on.
+function checkoutReviewEnabled(S) {
+  return ((S && S.allowances) || {}).checkoutReviewEnabled === true;
+}
+function checkoutReviewQueued(day, user, S) {
+  return checkoutReviewEnabled(S) && checkoutReviewEligible(day, user, S);
 }
 // Late night pay: device check-out (or an Accounting/MD-allowed web check-out) + approved
 // late-out. Rest days also need approved holiday-work.
@@ -5442,6 +5464,16 @@ function renderSettingsPage(_skipRefresh) {
         <input id="set-mr-enabled" type="checkbox" ${s.allowances.morningReviewEnabled === false ? '' : 'checked'} style="width:18px;height:18px;cursor:pointer">
         ${L('Hold the allowance for review when an early scan is followed by another door pass','พักเบี้ยไว้ตรวจสอบ เมื่อสแกนเช้าแล้วยังผ่านประตูอีกครั้ง')}
       </label>
+      <!-- 2026-10-05 (owner): the evening twin of the switch above. Default OFF — the company rule
+           is that Late Night needs a face-scan check-out, so the review is the exception and has to
+           be switched on deliberately. Left on, it became a rubber stamp: almost every case ought to
+           have been denied, but a queue demands clearing, so they were allowed without being read. -->
+      <label style="display:flex;align-items:flex-start;gap:8px;margin:0 0 12px;font-size:13px;font-weight:600;color:#374151;cursor:pointer">
+        <input id="set-cr-enabled" type="checkbox" ${checkoutReviewEnabled(s) ? 'checked' : ''} style="width:18px;height:18px;cursor:pointer;margin-top:2px">
+        <span>${L('Queue web check-outs for Late Night review','ส่งการเช็กเอาท์ผ่านเว็บเข้าคิวตรวจค่าทำงานดึก')}
+          <span style="display:block;font-weight:400;color:#64748b;font-size:11.5px;margin-top:3px;line-height:1.5">${L('Off: a web check-out does not earn Late Night at all. Accounting/MD can still allow a one-off case from the attendance table.','ปิด: เช็กเอาท์ผ่านเว็บจะไม่ได้ค่าทำงานดึกเลย — บัญชี/MD ยังอนุญาตเป็นรายกรณีได้จากตารางลงเวลา')}</span>
+        </span>
+      </label>
       ${row2(
         field(L('Look for another pass from','ตรวจการผ่านประตูตั้งแต่'), `<input id="set-mr-from" type="time" value="${minsToTime(morningReviewWindowOf(s.allowances).start)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 08:00','เช่น 08:00')),
         field(L('until','ถึง'), `<input id="set-mr-to" type="time" value="${minsToTime(morningReviewWindowOf(s.allowances).end)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 12:00','เช่น 12:00'))
@@ -6183,6 +6215,9 @@ async function saveSettingsPage() {
   // false -- and the two times and the gap only overwrite when they parse.
   const mrToggle = document.getElementById('set-mr-enabled');
   if (mrToggle) APP_SETTINGS.allowances.morningReviewEnabled = !!mrToggle.checked;
+  // Same guarded read: an absent element must leave the stored value alone, not write false.
+  const crToggle = document.getElementById('set-cr-enabled');
+  if (crToggle) APP_SETTINGS.allowances.checkoutReviewEnabled = !!crToggle.checked;
   const mrFrom = timeToMins(document.getElementById('set-mr-from')?.value);
   if (Number.isFinite(mrFrom)) APP_SETTINGS.allowances.morningReviewWindowStartMin = mrFrom;
   const mrTo = timeToMins(document.getElementById('set-mr-to')?.value);
@@ -9593,7 +9628,7 @@ function canReviewCheckoutFor(targetUser) {
 // allowed / not allowed (+ "🌙 not paid" if a 🌙 exists). Anyone else: reviewer wording; buttons
 // only when canReviewCheckoutFor() and the pay period is still open.
 function buildCheckoutReviewHtml(row, targetUser, withButtons) {
-  if (!row || !targetUser || !checkoutReviewTrigger(row, targetUser, APP_SETTINGS)) return '';
+  if (!row || !targetUser || !checkoutReviewEligible(row, targetUser, APP_SETTINGS)) return '';
   const decision = row.checkOutReview;
   const chip = (bg, fg, text) => `<span class="badge" style="display:inline-block;margin-top:3px;background:${bg};color:${fg};font-size:10px">${escapeHtml(text)}</span>`;
   const isSelf = !!currentUser && Number(targetUser.id) === Number(currentUser.id);
@@ -9607,6 +9642,14 @@ function buildCheckoutReviewHtml(row, targetUser, withButtons) {
         ? `<div style="font-size:10px;color:#991b1b;margin-top:2px">${escapeHtml(L('🌙 not paid — check-out not allowed', '🌙 ไม่จ่าย — เวลาออกไม่ได้รับอนุญาต'))}</div>`
         : '';
       return `<div class="checkout-review">${chip('#fee2e2', '#991b1b', L('❌ Not allowed', '❌ ไม่อนุญาต'))}${notPaid}</div>`;
+    }
+    // 2026-10-05 (owner): only say "awaiting review" when a review is actually coming. With the
+    // policy off nothing is queued, so this employee would have sat waiting for a decision nobody
+    // was ever going to make. State the rule instead.
+    if (!checkoutReviewQueued(row, targetUser, APP_SETTINGS)) {
+      return `<div class="checkout-review">${chip('#fee2e2', '#991b1b', currentLang === 'ja'
+        ? '❌ 顔認証での退勤が必要'
+        : L('❌ Needs a face-scanner check-out', '❌ ต้องสแกนออกที่เครื่อง'))}</div>`;
     }
     return `<div class="checkout-review">${chip('#fef3c7', '#92400e', L('⏳ Awaiting Accounting review', '⏳ รอบัญชีตรวจสอบ'))}</div>`;
   }
@@ -10148,7 +10191,7 @@ function renderAttendanceTable() {
         if (row.morningReviewNeeded && row.morningReview !== 'allow') {
           const _tip = `${L('Early Morning', 'Early Morning')} ${row.checkIn} (${bonus}) — ${L('held until reviewed', 'พักไว้จนกว่าจะตรวจสอบ')}`;
           earlyBadge = `<span class="att-allow-icon" style="opacity:.45" title="${escapeHtml(_tip)}">🌅</span>` +
-            `<span style="font-size:10px;color:#92400e;margin-left:2px;white-space:nowrap">(${escapeHtml(L('awaiting review', 'รอตรวจสอบ'))})</span>`;
+            `<span style="font-size:10px;color:#92400e;margin-left:2px;white-space:nowrap">(${escapeHtml(L('Awaiting Review', 'รอตรวจสอบ'))})</span>`;
         } else {
           earlyBadge = attAllowIcon('🌅', `${L('Early Morning', 'Early Morning')} ${row.checkIn} (${bonus})`);
         }
@@ -14824,7 +14867,7 @@ function checkoutReviewBoxItems() {
     const { start, end, isCurrent } = getPeriodBounds(idx);
     users.forEach(u => {
       generatePeriodDays(start, end, isCurrent, u.id).forEach(day => {
-        if (!checkoutReviewTrigger(day, u, APP_SETTINGS)) return;
+        if (!checkoutReviewQueued(day, u, APP_SETTINGS)) return;
         const locked = payPeriodBlockedForDate(day.date, u.id).blocked;
         if (day.checkOutReview) {
           out.reviewed.push({ user: u, day, locked, review: DATA_CHECKOUT_REVIEWS[attKey(u.id, day.date)] || null });
@@ -17860,8 +17903,15 @@ function canSubmitLateNightForDate(dateStr, userId, opts) {
     // on the actual trigger predicate so the reason matches what Accounting/MD would ever be asked
     // to review, and report the real, specific reason otherwise. (company-trip/abroad are now
     // handled above, before this branch is ever reached.)
-    if (checkoutReviewTrigger(row, user, APP_SETTINGS)) {
+    // 2026-10-05: three different situations, three different things to say. "Waiting for review"
+    // is only true while the policy is on and somebody really is going to look; with it off nobody
+    // is, and telling the person to wait would leave them waiting forever. Falling through to
+    // 'no-checkout' would be worse still -- it says they never checked out, which is false.
+    if (checkoutReviewQueued(row, user, APP_SETTINGS) || row.checkOutReview) {
       return { ok: false, reason: row.checkOutReview === 'deny' ? 'web-denied' : 'web-pending', row, thr1 };
+    }
+    if (checkoutReviewEligible(row, user, APP_SETTINGS)) {
+      return { ok: false, reason: 'web-not-allowed', row, thr1 };
     }
     return { ok: false, reason: 'no-checkout' };
   }
@@ -17917,6 +17967,14 @@ function lateNightSubmitBlockedMessage(result) {
   if (result.reason === 'web-denied') {
     return L('Accounting/MD did not allow this web check-out — 🌙 cannot be claimed',
       'บัญชี/MD ไม่อนุญาตเวลาเช็กเอาท์ผ่านเว็บนี้ — ยื่น 🌙 ไม่ได้');
+  }
+  // 2026-10-05 (owner): the review policy is off, so this day will never be reviewed. Say what the
+  // rule actually is rather than leaving the person waiting for a decision nobody will make.
+  if (result.reason === 'web-not-allowed') {
+    return currentLang === 'ja'
+      ? '深夜手当は顔認証端末での退勤打刻が必要です — Web の退勤では申請できません'
+      : L('Late Night needs a check-out at the face scanner — a web check-out does not qualify',
+          'ค่าทำงานดึกต้องสแกนออกที่เครื่องเท่านั้น — เช็กเอาท์ผ่านเว็บยื่นไม่ได้');
   }
   if (result.reason === 'no-checkin') {
     return L('Late Night Out requires a check-in first', 'ต้องเช็กอินก่อนจึงจะแจ้งกลับดึกได้');
@@ -18572,10 +18630,9 @@ function applyHolidayWorkCompModePermission() {
   });
   const wanted = sel.value;
   if (!allowed.includes(wanted)) sel.value = allowed[0] || 'annual-leave';
-  if (!allowed.includes('paid')) {
-    const cmp = document.getElementById('hw-pay-compare');
-    if (cmp) cmp.style.display = 'none';
-  }
+  // 2026-10-05 (owner): the breakdown is not hidden any more when a mode is unavailable — only the
+  // card for the mode they cannot take is. refreshHolidayWorkPayCompare() does that, and hiding the
+  // whole block here would have left a manager unable to see what their one option actually pays.
   return { allowed, movedFrom: allowed.includes(wanted) ? null : wanted, now: sel.value };
 }
 // 2026-10-05: say so when opening a form moved the stored compensation. Editing an old request
@@ -18672,12 +18729,14 @@ function selectHwCompMode(mode) {
 function refreshHolidayWorkPayCompare() {
   const wrap = document.getElementById('hw-pay-compare');
   if (!wrap) return;
-  // 2026-10-05: this function sets wrap.style.display itself, so without this it would undo
-  // applyHolidayWorkCompModePermission() on the next date/time edit and put the comparison back.
-  if (currentUser && !mayChooseHolidayWorkMode(APP_SETTINGS.allowanceEligibility, effectiveRole(), 'paid')) {
-    wrap.style.display = 'none';
-    return;
-  }
+  // 2026-10-05 (owner): a role with only one mode available still has to be told what that mode
+  // actually pays. The first version hid the whole block, which removed the breakdown along with
+  // the comparison — a manager filing holiday work could not tell whether they got a leave day,
+  // allowances, or both. The card for a mode they cannot take is hidden instead, so what remains is
+  // a summary of what they DO get rather than half of a comparison.
+  const allowedModes = currentUser
+    ? holidayWorkModesFor(APP_SETTINGS.allowanceEligibility, effectiveRole())
+    : ['annual-leave', 'paid'];
   const paidCard = document.getElementById('hw-pay-card-paid');
   const leaveCard = document.getElementById('hw-pay-card-leave');
   const mode = document.getElementById('holiday-work-comp-mode')?.value || 'annual-leave';
@@ -18700,6 +18759,10 @@ function refreshHolidayWorkPayCompare() {
   leaveCard.innerHTML = hwPayCardHtml(leave, { title: `🌴 ${L('Take a leave day', 'รับเป็นวันลา')}`, selected: mode === 'annual-leave' });
   paidCard.style.borderColor = mode === 'paid' ? selBorder : 'var(--border)';
   leaveCard.style.borderColor = mode === 'annual-leave' ? selBorder : 'var(--border)';
+  // Hide only the card for a mode this role cannot take. What is left is a statement of what they
+  // get, not an offer of a choice they do not have.
+  paidCard.style.display  = allowedModes.includes('paid') ? '' : 'none';
+  leaveCard.style.display = allowedModes.includes('annual-leave') ? '' : 'none';
   // Warnings belong to the mode actually selected -- showing the paid-mode OT clash while the
   // employee is looking at the leave option would be noise.
   const warnEl = document.getElementById('hw-pay-warnings');
@@ -19872,6 +19935,10 @@ function getLEAVE_TYPE_CFG() {
     upcountry:         { icon:'🗺️', label:L('Upcountry','Upcountry'),         badgeClass:'badge-info'    },
     'long-distance': { icon:'🚗', label:L('Long Distance','แจ้ง Long Distance'),  badgeClass:'badge-purple'  },
     'clear-attachments': { icon:'🗑️', label:L('Clear Old Attachments','ล้างไฟล์แนบเก่า'), badgeClass:'badge-amber' },
+    // 2026-10-05 (owner spotted this): these two were missing, so every screen that falls back to
+    // the raw key showed "personal-car" where a request title belongs. Icons match LEAVE_TYPE_ICON.
+    'personal-car':  { icon:'🚙', label:L('Personal Car','ขอใช้รถส่วนตัว'),      badgeClass:'badge-amber'   },
+    abroad:          { icon:'✈️', label:L('Work Abroad','ทำงานต่างประเทศ'),     badgeClass:'badge-info'    },
   };
 }
 

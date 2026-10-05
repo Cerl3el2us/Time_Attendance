@@ -38,7 +38,7 @@ function extractConstObject(src, name) {
 }
 
 const FNS = ['isAllowanceEligible', 'isDeviceScanSource', 'isFullDayPersonalLeaveStatus',
-  'lateNightCheckoutMins', 'lateNightThresholdMins', 'lateNightThresholdHourOf', 'checkoutReviewDecisionFor', 'lateNightCheckoutOk', 'checkoutReviewTrigger'];
+  'lateNightCheckoutMins', 'lateNightThresholdMins', 'lateNightThresholdHourOf', 'checkoutReviewDecisionFor', 'lateNightCheckoutOk', 'checkoutReviewEligible'];
 function load(src) {
   const ctx = {};
   ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
@@ -109,24 +109,24 @@ test('a review counts only for the exact web check-out it was made on', () => {
   }
 });
 
-console.log('checkoutReviewTrigger');
+console.log('checkoutReviewEligible');
 test('web check-out at/after the Late Night x1 time triggers a review', () => {
   for (const [side, X] of SIDES) {
-    assert.strictEqual(X.checkoutReviewTrigger(day({ checkOut: '19:00' }), USER, S), true, `${side} exactly 19:00`);
-    assert.strictEqual(X.checkoutReviewTrigger(day({ checkOut: '18:59' }), USER, S), false, `${side} 18:59`);
-    assert.strictEqual(X.checkoutReviewTrigger(day({ checkOut: '01:15' }), USER, S), true, `${side} after midnight`);
-    assert.strictEqual(X.checkoutReviewTrigger(day({ checkOut: '05:29' }), USER, S), true, `${side} 05:29 still last night`);
-    assert.strictEqual(X.checkoutReviewTrigger(day({ checkOut: '05:30' }), USER, S), false, `${side} 05:30 is morning`);
+    assert.strictEqual(X.checkoutReviewEligible(day({ checkOut: '19:00' }), USER, S), true, `${side} exactly 19:00`);
+    assert.strictEqual(X.checkoutReviewEligible(day({ checkOut: '18:59' }), USER, S), false, `${side} 18:59`);
+    assert.strictEqual(X.checkoutReviewEligible(day({ checkOut: '01:15' }), USER, S), true, `${side} after midnight`);
+    assert.strictEqual(X.checkoutReviewEligible(day({ checkOut: '05:29' }), USER, S), true, `${side} 05:29 still last night`);
+    assert.strictEqual(X.checkoutReviewEligible(day({ checkOut: '05:30' }), USER, S), false, `${side} 05:30 is morning`);
     const s20 = { ...S, allowances: { lateNightThreshold1Hour: 20 } };
-    assert.strictEqual(X.checkoutReviewTrigger(day({ checkOut: '19:30' }), USER, s20), false, `${side} threshold 20`);
+    assert.strictEqual(X.checkoutReviewEligible(day({ checkOut: '19:30' }), USER, s20), false, `${side} threshold 20`);
     const legacy = { ...S, allowances: { lateNightThresholdHour: 21 } };
-    assert.strictEqual(X.checkoutReviewTrigger(day({ checkOut: '20:30' }), USER, legacy), false, `${side} legacy key`);
-    assert.strictEqual(X.checkoutReviewTrigger(day({ checkOut: '19:30' }), USER, { allowanceEligibility: {} }), true, `${side} default 19`);
+    assert.strictEqual(X.checkoutReviewEligible(day({ checkOut: '20:30' }), USER, legacy), false, `${side} legacy key`);
+    assert.strictEqual(X.checkoutReviewEligible(day({ checkOut: '19:30' }), USER, { allowanceEligibility: {} }), true, `${side} default 19`);
   }
 });
 test('no trigger for device / missing times / future / leave / Company Trip / Abroad / ineligible role', () => {
   for (const [side, X] of SIDES) {
-    const no = (d, u, s, why) => assert.strictEqual(X.checkoutReviewTrigger(d, u || USER, s || S), false, `${side} ${why}`);
+    const no = (d, u, s, why) => assert.strictEqual(X.checkoutReviewEligible(d, u || USER, s || S), false, `${side} ${why}`);
     no(day({ checkOutSource: 'device' }), null, null, 'device');
     no(day({ checkOutSource: undefined }), null, null, 'no source');
     no(day({ checkIn: null }), null, null, 'no check-in');
@@ -139,8 +139,8 @@ test('no trigger for device / missing times / future / leave / Company Trip / Ab
     no(day(), { role: undefined }, null, 'no role');
   }
   for (const [side, X] of SIDES) {
-    assert.strictEqual(X.checkoutReviewTrigger(day({ status: 'late' }), USER, S), true, `${side} late day still reviewed`);
-    assert.strictEqual(X.checkoutReviewTrigger(day({ status: 'weekend', isWeekend: true }), USER, S), true, `${side} weekend web check-out`);
+    assert.strictEqual(X.checkoutReviewEligible(day({ status: 'late' }), USER, S), true, `${side} late day still reviewed`);
+    assert.strictEqual(X.checkoutReviewEligible(day({ status: 'weekend', isWeekend: true }), USER, S), true, `${side} weekend web check-out`);
   }
 });
 test('client and server agree on a grid of check-out times', () => {
@@ -149,7 +149,7 @@ test('client and server agree on a grid of check-out times', () => {
     for (const m of ['00', '29', '59']) {
       const t = `${String(h).padStart(2, '0')}:${m}`;
       assert.strictEqual(C.lateNightCheckoutMins(t), Sv.lateNightCheckoutMins(t), t);
-      assert.strictEqual(C.checkoutReviewTrigger(day({ checkOut: t }), USER, S), Sv.checkoutReviewTrigger(day({ checkOut: t }), USER, S), t);
+      assert.strictEqual(C.checkoutReviewEligible(day({ checkOut: t }), USER, S), Sv.checkoutReviewEligible(day({ checkOut: t }), USER, S), t);
     }
   }
 });

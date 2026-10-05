@@ -3752,7 +3752,9 @@ function handlePutCheckoutReview(req, res) {
     const reviews = readCheckoutReviews();
     if (reviews === null) return res.status(503).json({ success: false, message: CHECKOUT_REVIEWS_UNAVAILABLE });
     const day = attendanceDayForUser(target, dateStr, reviews);
-    if (!checkoutReviewTrigger(day, target, getAppSettings())) {
+    // Eligible, not queued: with the policy off nothing is queued, but the genuine exception must
+    // still be grantable from the attendance row.
+    if (!checkoutReviewEligible(day, target, getAppSettings())) {
       return res.status(400).json({ success: false, message: 'This day has no web check-out at or after the Late Night time to review' });
     }
     // FIX (final review, T10/concurrency): re-derive the real check-out and compare against what
@@ -9539,9 +9541,23 @@ function lateNightCheckoutOk(d) {
   if (!d) return false;
   return isDeviceScanSource(d.checkOutSource) || (d.checkOutSource === 'web' && d.checkOutReview === 'allow');
 }
-// A day Accounting/MD must review: a web check-out at/after the Late Night x1 time, on a worked
-// day that is not full-day personal leave / Company Trip / Abroad, for a role eligible for earlyLate.
-function checkoutReviewTrigger(day, user, S) {
+// 2026-10-05 (owner): one predicate used to answer two different questions, and that is what made
+// the review box a rubber stamp. Split in two.
+//
+// checkoutReviewEligible  — "could this day be granted?"   -> the approve/deny control on the
+//                           attendance row, and the server guard. UNCHANGED logic.
+// checkoutReviewQueued    — "should this day be queued?"   -> the review box on the approval page.
+//                           Eligible AND the policy switched on.
+//
+// Why: the owner reported that almost every case ought to be denied, but MD allowed them all
+// without reading, because a queue demands to be cleared. With the policy off nothing is queued,
+// so nothing demands anything -- a web check-out simply does not earn Late Night, which is the
+// company rule it always was. The grant is still possible for the genuine exception; somebody has
+// to go and find the day, which means they meant it.
+//
+// A day Accounting/MD could grant: a web check-out at/after the Late Night x1 time, on a worked day
+// that is not full-day personal leave / Company Trip / Abroad, for a role eligible for earlyLate.
+function checkoutReviewEligible(day, user, S) {
   if (!day || !user || !S || !day.checkIn || !day.checkOut || day.isFuture) return false;
   if (day.checkOutSource !== 'web') return false;
   if (isFullDayPersonalLeaveStatus(day.status) || day.status === 'company-trip' ||
@@ -9551,6 +9567,14 @@ function checkoutReviewTrigger(day, user, S) {
   const thr1 = lateNightThresholdHourOf(a, 1);
   const mins = lateNightCheckoutMins(day.checkOut);
   return Number.isFinite(mins) && mins >= lateNightThresholdMins(thr1);
+}
+// Default OFF: the company rule is that Late Night needs a face-scan check-out. The review was the
+// exception, so the exception is what has to be switched on.
+function checkoutReviewEnabled(S) {
+  return ((S && S.allowances) || {}).checkoutReviewEnabled === true;
+}
+function checkoutReviewQueued(day, user, S) {
+  return checkoutReviewEnabled(S) && checkoutReviewEligible(day, user, S);
 }
 // Late night pay: device check-out (or an Accounting/MD-allowed web check-out) + approved
 // late-out. Rest days also need approved holiday-work.
@@ -10187,10 +10211,14 @@ function lateOutSubmitBlockReason(user, dateStr, lateOutTime) {
     // not merely `checkOutSource === 'web'` -- keeps this consistent with app.js and with
     // whatever day.status exclusions checkoutReviewTrigger() applies (future-proof if that list
     // changes) instead of duplicating the exclusion list here.
-    if (checkoutReviewTrigger(day, user, S)) {
+    if (checkoutReviewQueued(day, user, S) || day.checkOutReview) {
       return day.checkOutReview === 'deny'
         ? 'This web check-out was not allowed by Accounting/MD -- Late Night Out cannot be claimed'
         : 'This web check-out is waiting for Accounting/MD review before Late Night Out can be submitted';
+    }
+    // Policy off: nobody is going to review it, so do not tell them to wait.
+    if (checkoutReviewEligible(day, user, S)) {
+      return 'Late Night Out requires check-out at the face scanner -- a web check-out does not qualify';
     }
     return 'Late Night Out requires check-out at the face scanner, not the web app';
   }

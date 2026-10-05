@@ -539,7 +539,7 @@ test('navigateTo(approval) shows the queue; only openVoidHistoryForDate keeps th
   assert.ok(/resetNotifications\(\);[\s\S]{0,120}resetApprovalViewState\(\);/.test(extractFunction(APP_SRC, 'logout')), 'logout');
 });
 test('lateNightThresholdMins / lateNightPoints identical both sides; a threshold before 05 is after midnight', () => {
-  ['lateNightThresholdMins', 'lateNightPoints', 'checkoutReviewTrigger'].forEach(sameSource);
+  ['lateNightThresholdMins', 'lateNightPoints', 'checkoutReviewEligible'].forEach(sameSource);
   const names = ['lateNightCheckoutMins', 'lateNightThresholdMins', 'lateNightThresholdHourOf', 'lateNightPoints'];
   for (const [side, X] of [['client', sandbox(APP_SRC, names, {})], ['server', sandbox(SERVER_SRC, names, {})]]) {
     assert.strictEqual(X.lateNightThresholdMins(19), 19 * 60, side);
@@ -561,14 +561,14 @@ test('lateNightThresholdMins / lateNightPoints identical both sides; a threshold
     assert.strictEqual(X.lateNightPoints('04:59', 1), 2, side);
   }
   const trig = ['client', 'server'].map(side => sandbox(side === 'client' ? APP_SRC : SERVER_SRC,
-    ['lateNightCheckoutMins', 'lateNightThresholdMins', 'lateNightThresholdHourOf', 'checkoutReviewTrigger'], {
+    ['lateNightCheckoutMins', 'lateNightThresholdMins', 'lateNightThresholdHourOf', 'checkoutReviewEligible'], {
       isFullDayPersonalLeaveStatus: () => false, isAllowanceEligible: () => true }));
   const S1 = thr => ({ allowances: { lateNightThreshold1Hour: thr }, allowanceEligibility: {} });
   const day = out => ({ checkIn: '08:30', checkOut: out, checkOutSource: 'web', status: 'present' });
   for (const X of trig) {
-    assert.strictEqual(X.checkoutReviewTrigger(day('19:00'), { role: 'user' }, S1(19)), true);
-    assert.strictEqual(X.checkoutReviewTrigger(day('23:00'), { role: 'user' }, S1(1)), false, 'x1 from 01:00: 23:00 is not yet');
-    assert.strictEqual(X.checkoutReviewTrigger(day('01:10'), { role: 'user' }, S1(1)), true);
+    assert.strictEqual(X.checkoutReviewEligible(day('19:00'), { role: 'user' }, S1(19)), true);
+    assert.strictEqual(X.checkoutReviewEligible(day('23:00'), { role: 'user' }, S1(1)), false, 'x1 from 01:00: 23:00 is not yet');
+    assert.strictEqual(X.checkoutReviewEligible(day('01:10'), { role: 'user' }, S1(1)), true);
   }
 });
 
