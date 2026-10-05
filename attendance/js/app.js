@@ -2851,12 +2851,10 @@ function updateAbroadEntryVisibility() {
   const eligible = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, effectiveRole(), 'abroad');
   el.style.display = eligible ? '' : 'none';
 }
-// Takes the employee the row/record belongs to (NOT the logged-in account), matching
-// canUseHolidayWork() -- request buttons follow the selected employee in QA mode.
-function canUseAbroad(user) {
-  if (!user) return false;
-  return isAllowanceEligible(APP_SETTINGS.allowanceEligibility, user.role, 'abroad');
-}
+// 2026-10-05: canUseAbroad(user) was removed here. It had no callers anywhere in the project
+// (grep over *.js and *.html, client and server, 2026-10-05) — the Abroad paths are gated by
+// updateAbroadEntryVisibility() and submitAbroad(), both of which ask effectiveRole() directly.
+// Kept as a note rather than silence so nobody re-adds it believing it was ever wired up.
 
 // Last working day of the month — moves back if Saturday, Sunday, or company holiday
 function getPayDay(periodEnd) {
@@ -4802,8 +4800,22 @@ function populateTawi50YearDropdown() {
 }
 
 // ===== DATA BACKUP =====
-function exportDataBackup(role) {
-  const isMd = role === 'md' || currentUser?.role === 'md';
+// 2026-10-05 (owner): one backup, one file, everything in it.
+//
+// There used to be two buttons -- "Full Backup (Managing Director)" and "Payroll Backup
+// (Accounting)" -- which read as a permission boundary. There was none: the flavour came from a
+// literal baked into each button (`exportDataBackup('md')`), so Accounting pressing the first
+// button already got the full file. A split that exists only in the labels is worse than no split,
+// because somebody reading the screen believes a boundary is being enforced.
+//
+// The owner's decision: MD, Accounting and the system account all get everything. MD is a post that
+// rotates; Accounting is who actually stays with the system, so Accounting cannot be the lesser of
+// the two. The section is only rendered for those roles (adminSection, gated on isMdAccountingView).
+//
+// Note while merging the two branches: the old "full" branch never included appSettings -- only the
+// payroll one did. Collapsing to the full branch alone would have quietly dropped the entire system
+// configuration out of the only backup anyone takes.
+function exportDataBackup() {
   // 2026-08-16 (Opus audit L-6): APP_SETTINGS.emailConfig.pass is the live Resend/SMTP API key --
   // was being serialized straight into the downloaded JSON in cleartext. Strip it the same way
   // the backend already strips it for non-admins (stripSensitiveSettingsForRole()), since a
@@ -4813,24 +4825,29 @@ function exportDataBackup(role) {
   // stripSensitiveSettingsForRole() (server.js) which strips both pass AND smtpUser -- the export
   // was only mirroring half of that.
   const _safeAppSettings = { ...APP_SETTINGS, emailConfig: { ...APP_SETTINGS.emailConfig, pass: undefined, smtpUser: undefined } };
-  const data = {};
-  if (isMd) {
-    data.users    = DATA_USERS;
-    data.leaves   = DATA_LEAVES;
-    data.settings = { periodLocks: PERIOD_LOCKS, leaveCarryForward: LEAVE_CARRY_FORWARD, leaveOpeningUsed: LEAVE_OPENING_USED, tawi50Overrides: TAWI50_OVERRIDES, appSettings: _safeAppSettings };
-    data.finalize = finalizeData;
-    data.checkoutReviews = DATA_CHECKOUT_REVIEWS;
-  } else {
-    data.finalize = finalizeData;
-    data.settings = { appSettings: _safeAppSettings, tawi50Overrides: TAWI50_OVERRIDES };
-    data.checkoutReviews = DATA_CHECKOUT_REVIEWS;
-  }
+  const data = {
+    users: DATA_USERS,
+    leaves: DATA_LEAVES,
+    finalize: finalizeData,
+    checkoutReviews: DATA_CHECKOUT_REVIEWS,
+    settings: {
+      periodLocks: PERIOD_LOCKS,
+      leaveCarryForward: LEAVE_CARRY_FORWARD,
+      leaveOpeningUsed: LEAVE_OPENING_USED,
+      tawi50Overrides: TAWI50_OVERRIDES,
+      appSettings: _safeAppSettings,
+    },
+  };
   const json = JSON.stringify(data, null, 2);
   const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `backup_${isMd ? 'full' : 'payroll'}_${new Date().toISOString().slice(0,10)}.json`;
+  a.href = url;
+  a.download = `backup_full_${new Date().toISOString().slice(0,10)}.json`;
   a.click();
+  // The object URL was never released here; one per press is small but it is held for the life of
+  // the tab, and releasing it costs one line.
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
   showToast(L('✅ Backup downloaded', '✅ ดาวน์โหลด Backup เรียบร้อย'), 'success');
 }
 
@@ -5520,12 +5537,13 @@ function renderSettingsPage(_skipRefresh) {
         ${L('Download a JSON snapshot of application data.','ดาวน์โหลดข้อมูลในรูปแบบ JSON')}
       </p>
       <div style="display:flex;gap:10px;flex-wrap:wrap">
-        <button class="btn btn-primary btn-sm" onclick="exportDataBackup('md')">
-          📦 ${L('Full Backup (Managing Director)', 'Backup ทั้งหมด (Managing Director)')}
+        <button class="btn btn-primary btn-sm" onclick="exportDataBackup()">
+          📦 ${L('Download Full Backup', 'ดาวน์โหลด Backup ทั้งหมด')}
         </button>
-        <button class="btn btn-outline btn-sm" onclick="exportDataBackup('accounting')">
-          💰 ${L('Payroll Backup (Accounting)', 'Backup Payroll (Accounting)')}
-        </button>
+      </div>
+      <div style="margin-top:10px;font-size:12px;color:#92400e;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:9px 11px;line-height:1.6">
+        ⚠️ ${L('The file contains every employee record, salary and leave history. Treat the download like a payroll printout — it is readable by anyone who opens it.',
+               'ไฟล์นี้มีข้อมูลพนักงาน เงินเดือน และประวัติการลาทั้งบริษัท ใครเปิดไฟล์ก็อ่านได้ทั้งหมด เก็บเหมือนเอกสารเงินเดือนที่พิมพ์ออกมา')}
       </div>
     `)}
   `;
