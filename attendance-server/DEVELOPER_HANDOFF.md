@@ -33,7 +33,8 @@ static HTML/CSS/JS frontend, both served from one Synology NAS.
 | Path (on NAS, mapped as `Z:\` via Samba) | What | Version control |
 |---|---|---|
 | `Z:\Time_Attendance\attendance\` | Frontend — static HTML/CSS/JS, served directly, edits are live immediately (no build step) | **git-tracked**, `master` branch, this checkout |
-| `Z:\Time_Attendance\attendance-server\backend\` | Backend — `server.js` (Express + WS), `data\*.json` (live production data: users/leaves/events/settings — **not sample data**), `node_modules\` | **In git since 2026-08-31** (`33e1994`, "Initial commit") — `server.js` is ~11,800 lines and now has real commit history; corrected here 2026-10-05, this cell used to say the opposite. What is still **not** in git is `data/*.json`: it is gitignored and lives only on the NAS, so the live data has no version history. That is now the biggest risk in this setup — see the Backups section. |
+| `Z:\Time_Attendance\attendance-server\backend\` | Backend — `server.js` (Express + WS), `data\*.json` (live production data: users/leaves/events/settings — **not sample data**), `node_modules\` | **In git since 2026-08-31** (`33e1994`, "Initial commit") — `server.js` is ~11,800 lines and now has real commit history; corrected here 2026-10-05, this cell used to say the opposite. What is still **not** in git is `data/*.json`: it is gitignored and lives only on the NAS, so the live data has no version history. Restoring it means pulling a prior version out of Hyper Backup — see the
+Backups section. |
 | `Z:\claude_memory\` | Claude Code's own working memory (project history, decisions, gotchas) — useful background reading even without Claude Code itself, but not authoritative once this file exists | n/a |
 | `Z:\Time_Attendance\attendance-server\scripts\deploy\` | `deploy_backend.py` — the only supported way to restart the backend after editing `server.js` | n/a |
 | `Z:\Time_Attendance\attendance-server\ngrok\`, `Z:\Time_Attendance\attendance-server\cloudflared\` | Tunnel binaries. cloudflared is what's actually live now; ngrok is a dormant fallback | n/a |
@@ -171,18 +172,35 @@ Related: after editing `app.js` or any `lang/*.js` file, bump the `?v=`
 cache-buster query string on that script tag in `index.html`, or browsers
 will keep serving the old file even on a hard reload.
 
-## Backups — there is no real procedure, know this before your first mistake
+## Backups — the NAS is backed up; your own change is still your problem
 
-Production data (`data/*.json` — users, leaves, attendance events, settings)
-is not in git and has no scheduled backup. What exists is ad-hoc: occasional
-manually-made copies like `server.js.bak_20260810_*` and
-`data/_backup_20260731\` left behind from specific past sessions, not a
-routine. If you break live data, there is currently **no documented recovery
-path** beyond "hope one of these one-off snapshots is recent enough and
-covers what you touched." Until this is fixed properly (e.g. a scheduled
-`rsync`/tar snapshot of `data/` to somewhere off this NAS), manually copy
-`data/*.json` somewhere safe before any change that touches production data
-directly (SSH edits, migrations, bulk fixes) — not just before code deploys.
+**Corrected 2026-10-05.** This section used to say there was no backup at all and
+told the reader to go set one up. That was wrong, and it had the owner repeating
+the correction to every new agent. The NAS runs **Synology Hyper Backup to an
+attached HDD and to cloud storage, keeping multiple versions** (stated by the
+owner). Do not propose building a backup system, and do not tell anyone this
+project has no backups.
+
+What is *not* established, so ask rather than assume: the schedule, how many
+versions are retained, which cloud destination, whether the job's scope covers
+`Z:\Time_Attendance\` (both the git repo and `attendance-server/backend/data/`),
+and whether a restore has ever actually been exercised.
+
+What this does and does not save you from:
+
+- A dead disk, a deleted folder, ransomware — covered by Hyper Backup.
+- **A bad write you make yourself — not covered in any useful timeframe.**
+  `data/*.json` is gitignored, so it has no commit history: there is no
+  `git checkout` to undo a botched migration. Recovery means opening Hyper
+  Backup and restoring a prior version, which costs real time and loses every
+  legitimate change employees made since that version.
+
+So the standing rule is unchanged, for a different reason than before: **copy
+`data/*.json` somewhere safe before any change that writes production data
+directly** (SSH edits, migrations, bulk fixes) — not just before code deploys.
+Some ad-hoc copies from past sessions are still lying about
+(`server.js.bak_20260810_*`, `data/_backup_20260731/`); they are leftovers, not
+a system, and not something to rely on.
 
 ## Where to learn the business rules
 
@@ -224,10 +242,13 @@ on it blindly.
    item here was "`git init` the backend" — that is **done**, the backend has
    been committed since 2026-08-31.) What remains is that `main` is far ahead
    of its only remote and nothing has been pushed in a long time — check with
-   `git -C Z:/Time_Attendance rev-list --count origin/main..main`. Until that
-   is resolved, every commit ever made exists on exactly one disk.
-2. Set up a real backup schedule for `data/*.json` — see the Backups section
-   above, currently there is none.
+   `git -C Z:/Time_Attendance rev-list --count origin/main..main`. This is not
+   a data-loss risk — the NAS is backed up (see Backups) — it is a succession
+   risk: the history is reachable only by someone with access to this NAS.
+2. Confirm what the NAS Hyper Backup job actually covers — see the Backups
+   section above. The backup exists; what nobody has written down is whether
+   its scope includes this project's folder and whether a restore has been
+   tested. That is a half-hour of checking, not a system to build.
 3. Decide whether to move Samba/SSH/`deploy_backend.py` access off the
    personal-account model too (shared NAS service account, or at minimum a
    documented rotation runbook) — the one NAS directory that mattered most for
