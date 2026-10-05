@@ -16062,7 +16062,13 @@ function loadPdfJs() {
       const sc = document.createElement('script');
       sc.src = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VER}/build/pdf.min.js`;
       sc.onload = () => {
-        window.pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VER}/build/pdf.worker.min.js`;
+        // 2026-10-05 (review): the worker is served from THIS origin, not the CDN. A Worker script
+        // must be same-origin (HTML spec) -- a cdn.jsdelivr.net URL throws SecurityError in the
+        // Worker constructor no matter what worker-src says, and pdf.js then quietly parses on the
+        // main thread instead, freezing the page while a list of PDF attachments renders.
+        // js/vendor/pdf.worker.min.js is pinned to PDFJS_VER and must be re-downloaded from
+        // jsDelivr whenever that constant moves -- a worker/API version mismatch makes pdf.js throw.
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'js/vendor/pdf.worker.min.js';
         resolve(window.pdfjsLib);
       };
       sc.onerror = () => { _pdfjsPromise = null; reject(new Error('pdf.js failed to load')); };

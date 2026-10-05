@@ -25,6 +25,13 @@ const thirdParty = {
 
 module.exports = [
   {
+    // 2026-10-05: third-party code we only host, never edit. attendance/js/vendor/ holds
+    // pdf.worker.min.js, which has to be served from this origin because a Worker script cannot be
+    // cross-origin. It is minified library code: linting it reports nothing we can act on and
+    // buries the findings that matter.
+    ignores: ['attendance/js/vendor/**'],
+  },
+  {
     // Frontend: browser scripts, no modules, shared global scope across files.
     files: ['attendance/js/**/*.js', 'attendance/lang/**/*.js'],
     languageOptions: {
