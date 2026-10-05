@@ -104,4 +104,32 @@ test('geofenceUiState follows the preview like every other check-in gate', () =>
     'geofenceUiState must not read the raw role — the geofence could then never be exercised from a preview');
 });
 
+console.log('\nRole preview: starting clean, and saying so');
+
+// 2026-10-05 (owner): every login must land at Full access. The preview lives in localStorage and
+// survives a closed browser, so without this you can spend a morning reading the system from
+// somebody else's seat and conclude it is broken.
+test('login resets the role preview', () => {
+  const login = /_sessionExpiredShown = false;[\s\S]{0,900}?saveSession\(\);/.exec(APP_SRC);
+  assert.ok(login, 'could not find the login success path');
+  assert.ok(/resetRolePreview\(\)/.test(login[0]),
+    "the login path must call resetRolePreview() — otherwise yesterday's impersonation is still on");
+});
+test('the reset is on the way IN, not on every page load', () => {
+  // Clearing at load would drop the role under test every time the page is refreshed mid-inspection.
+  assert.ok(!/DOMContentLoaded[\s\S]{0,4000}?resetRolePreview\(\)/.test(APP_SRC),
+    'restoring an existing session must NOT clear the preview');
+});
+test('the banner names the impersonated role and offers a way out', () => {
+  const fn = extractFunction(APP_SRC, 'updateSystemAccountUI');
+  assert.ok(/system-account-live-state/.test(fn), 'the banner must have a live state element');
+  assert.ok(/exitRolePreview\(\)/.test(fn), 'the banner must offer one-click exit');
+  assert.ok(/roleLabel\(previewRole\)/.test(fn), 'it must name the role, not just say "preview"');
+});
+test('exiting goes through the same path as the dropdown', () => {
+  const fn = extractFunction(APP_SRC, 'exitRolePreview');
+  assert.ok(/onRolePreviewChange\(/.test(fn),
+    'exit must reuse onRolePreviewChange so badges, nav and the page re-render identically');
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ', 0 failed'}`);

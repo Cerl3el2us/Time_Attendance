@@ -170,6 +170,22 @@ async function requireSuperAdminConfirm(actionLabel) {
   const typed = prompt(L(`System account — type CONFIRM to ${actionLabel}`, `บัญชีระบบ — พิมพ์ CONFIRM เพื่อ${actionLabel}`));
   return typed === 'CONFIRM';
 }
+// 2026-10-05: the same role→label map was written out in three render functions; the preview banner
+// needed a fourth, so it became a function instead. The three existing copies are left alone — this
+// is not the change to go reshaping unrelated renderers in.
+function roleLabel(role) {
+  const labels = { md:t('role_md'), manager:t('role_manager'), accounting:t('role_accounting'),
+    user:t('role_user'), driver:t('role_driver'), marketing:t('role_marketing'), superadmin:t('role_superadmin') };
+  return labels[role] || role || '';
+}
+// One click back to Full access, from the banner that says you are not in it. Goes through
+// onRolePreviewChange() rather than clearing state directly, so the badges, nav and current page
+// all re-render exactly as they do when the dropdown is used.
+function exitRolePreview() {
+  const sel = document.getElementById('role-preview-select');
+  if (sel) sel.value = '';
+  onRolePreviewChange('');
+}
 function updateSystemAccountUI() {
   const banner = document.getElementById('system-account-banner');
   const preview = document.getElementById('role-preview-wrap');
@@ -177,8 +193,32 @@ function updateSystemAccountUI() {
   if (preview) preview.style.display = isSuperAdmin() ? 'flex' : 'none';
   const sel = document.getElementById('role-preview-select');
   if (sel && isSuperAdmin()) sel.value = previewRole || '';
+  // 2026-10-05 (owner): while a preview is on, the banner must say so loudly and offer the way out
+  // in one click. The risk this guards is not a wrong click -- it is reading the whole system from
+  // somebody else's seat for ten minutes and concluding it is broken. The banner also turns red, so
+  // "am I impersonating?" is answerable from the corner of the eye.
+  const live = document.getElementById('system-account-live-state');
+  if (banner && live) {
+    const on = isSuperAdmin() && !!previewRole;
+    banner.style.background = on ? '#fef2f2' : '#fff7ed';
+    banner.style.borderBottomColor = on ? '#fecaca' : '#fed7aa';
+    banner.style.color = on ? '#991b1b' : '#9a3412';
+    live.innerHTML = on
+      ? `<span style="padding:2px 10px;border-radius:999px;background:#991b1b;color:#fff;font-weight:800">${escapeHtml(
+          currentLang === 'ja' ? `${roleLabel(previewRole)} として表示中` :
+          L(`Viewing as ${roleLabel(previewRole)}`, `กำลังดูเป็น ${roleLabel(previewRole)}`))}</span>
+         <button onclick="exitRolePreview()" style="padding:3px 12px;border-radius:999px;border:1px solid #991b1b;background:#fff;color:#991b1b;font-size:12px;font-weight:800;cursor:pointer">${escapeHtml(
+          currentLang === 'ja' ? '解除' : L('Exit', 'ออกจากโหมดนี้'))}</button>`
+      : '';
+  }
   const userBtn = document.querySelector('.topbar-user-btn');
   if (userBtn) userBtn.onclick = () => navigateTo(isSuperAdmin() ? 'dashboard' : 'checkin');
+}
+// 2026-10-05 (owner): back to Full access, used on every login. Kept next to the only other writer
+// of ta_preview_role so the two can never drift.
+function resetRolePreview() {
+  previewRole = '';
+  try { localStorage.removeItem('ta_preview_role'); } catch (e) { /* private mode */ }
 }
 function onRolePreviewChange(val) {
   previewRole = val || '';
@@ -7066,6 +7106,12 @@ async function login() {
     // state no longer applies, and any queued logout from before this login must not fire.
     _sessionExpiredShown = false;
     clearTimeout(_pendingLogoutTimer);
+    // 2026-10-05 (owner): every login starts at Full access. The role preview lives in
+    // localStorage so it survives a closed browser, and sitting inside yesterday's impersonation
+    // without noticing is the most dangerous thing this account can do -- you read the system from
+    // somebody else's seat and conclude it is broken. Cleared on the way IN, not on page load: a
+    // reload mid-inspection must not drop the role being tested.
+    resetRolePreview();
     REMEMBER_ME = remember;
     saveSession();
     document.getElementById('login-page').style.display = 'none';

@@ -240,6 +240,9 @@
 
     <div id="system-account-banner" style="display:none;align-items:center;gap:10px;padding:10px 16px;background:#fff7ed;border-bottom:1px solid #fed7aa;color:#9a3412;font-size:13px;font-weight:600">
       <span>🛠️</span>
+      <!-- 2026-10-05: filled by updateSystemAccountUI() — says which role is being impersonated and
+           offers the way out. Empty (and the banner stays orange) at Full access. -->
+      <span id="system-account-live-state" style="display:flex;align-items:center;gap:8px"></span>
       <span data-en="Developer system account — not an employee. Payroll lock actions (Finalize confirm, MD approve, email payslip, save 50-Tawi) are disabled. Approvals require typing CONFIRM.">บัญชีระบบสำหรับนักพัฒนา — ไม่ใช่พนักงาน การล็อก payroll (ยืนยัน Finalize, MD approve, ส่งสลิป, บันทึก 50 ทวิ) ถูกปิดไว้ การอนุมัติต้องพิมพ์ CONFIRM</span>
     </div>
 
@@ -2789,6 +2792,6 @@
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ja.js" integrity="sha384-mKor8U8jwukUkfxaFPCsxKF9S62PXq4gG7zcZ5yQ2x3KL1msprJZeFlKFEDeeb5V" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/th.js" integrity="sha384-E6OVFg1zUc/pckGxry0YZ6VeZ1E17l7Jl8ZQx58jbEfxxkz9LqknQhiIrA9zg/8b" crossorigin="anonymous"></script>
 
-<script src="js/app.js?v=20261005n"></script>
+<script src="js/app.js?v=20261005p"></script>
 </body>
 </html>
