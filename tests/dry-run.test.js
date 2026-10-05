@@ -63,6 +63,31 @@ test('no live update reaches a colleague with the page open', () => {
   assert.ok(/if \(isDryRun\(\)\) return;/.test(fn), 'broadcast must bail out');
 });
 
+test('no raw file write or delete escapes the dry run', () => {
+  // The failure this guards against was found in review and was the worst kind: atomicWrite covers
+  // the JSON data files, but uploaded BYTES are written straight to disk and old files are unlinked
+  // straight from disk. A dry run of "upload photo" wrote the new file, skipped the record update,
+  // then deleted the employee's previous photo — and a dry run of "clear old attachments" deleted
+  // every attachment for real. Data loss during an operation that reports changing nothing.
+  //
+  // Startup code (seeding empty files, the JWT secret) runs before any request and is exempt.
+  const lines = SERVER_SRC.split('\n');
+  const STARTUP = /^(if \(!fs\.existsSync|\s*fs\.writeFileSync\(JWT_SECRET_FILE|\s*fs\.writeFileSync\(HIK_SECRET_FILE|\s*fs\.writeFileSync\(holidaysPath)/;
+  const offenders = [];
+  lines.forEach((line, i) => {
+    if (/^\s*(\/\/|\*)/.test(line)) return;                   // comments
+    if (!/fs\.(writeFileSync|unlinkSync)\(/.test(line)) return;
+    if (STARTUP.test(line)) return;
+    // The two helpers themselves are where the real call legitimately lives.
+    const near = lines.slice(Math.max(0, i - 3), i + 1).join('\n');
+    if (/function (writeFileUnlessDryRun|unlinkUnlessDryRun)|function atomicWrite/.test(near)) return;
+    offenders.push(i + 1);
+  });
+  assert.deepStrictEqual(offenders, [],
+    `raw fs write/delete at line(s) ${offenders.join(', ')} — route them through ` +
+    'writeFileUnlessDryRun()/unlinkUnlessDryRun() or a dry run will touch real files');
+});
+
 console.log('\nDry run: who may ask for one');
 
 test('the identity grants it, not the header', () => {

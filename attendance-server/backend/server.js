@@ -106,6 +106,21 @@ const dryRunStore = new AsyncLocalStorage();
 function isDryRun() { return dryRunStore.getStore() === true; }
 function runAsDryRun(fn) { return dryRunStore.run(true, fn); }
 
+// 2026-10-05 (found in review): atomicWrite() covers the JSON data files, but uploaded BYTES are
+// written straight to disk and old files are unlinked straight from disk. A dry run was therefore
+// writing a photo, skipping the record update, and then DELETING the employee's previous photo —
+// data loss during an operation that reports changing nothing, which is worse than having no dry
+// run at all. Named helpers rather than inline guards so `grep DryRun` finds every raw file
+// operation that had to be taught about this.
+function writeFileUnlessDryRun(filePath, data) {
+  if (isDryRun()) return;
+  fs.writeFileSync(filePath, data);
+}
+function unlinkUnlessDryRun(filePath) {
+  if (isDryRun()) return;
+  try { fs.unlinkSync(filePath); } catch (_) { /* already gone */ }
+}
+
 function atomicWrite(filePath, str, sensitive) {
   if (isDryRun()) return;   // the whole point: validate everything, persist nothing
   const tmp = filePath + '.tmp' + process.pid;
@@ -2887,14 +2902,16 @@ app.post('/api/users/id/:id/photo', photoUploadLimiter, withUsersLock((req, res)
     if (!dest.startsWith(PHOTOS_DIR + path.sep)) {
       return res.status(400).json({ success: false, message: 'Invalid path' });
     }
-    fs.writeFileSync(dest, buf);
+    writeFileUnlessDryRun(dest, buf);
     const rel = `images/employees/${filename}`;
     users[idx].facePhoto = rel;
     writeJSON('users.json', users);
 
     for (const f of fs.readdirSync(PHOTOS_DIR)) {
       if (f.startsWith(`emp_${id}_up_`) && f !== filename) {
-        try { fs.unlinkSync(path.join(PHOTOS_DIR, f)); } catch (_) {}
+        // Never during a dry run: the record update above was skipped, so deleting the old file
+        // would leave the employee pointing at a photo that no longer exists.
+        unlinkUnlessDryRun(path.join(PHOTOS_DIR, f));
       }
     }
     console.log(`[PHOTO] user ${id} photo replaced by ${req.user.sub} -> ${rel} (${buf.length} bytes)`);
@@ -2934,7 +2951,8 @@ app.delete('/api/users/id/:id/photo', photoUploadLimiter, withUsersLock((req, re
   try {
     for (const f of fs.readdirSync(PHOTOS_DIR)) {
       if (f.startsWith(`emp_${id}_up_`)) {
-        try { fs.unlinkSync(path.join(PHOTOS_DIR, f)); } catch (_) {}
+        // A dry run of "remove photo" must not actually remove the photo.
+        unlinkUnlessDryRun(path.join(PHOTOS_DIR, f));
       }
     }
   } catch (_) {}
@@ -3272,7 +3290,7 @@ app.post('/api/users/sync-hikvision', requireRole('md', 'accounting', 'manager')
           if (!err2 && status2 === 200 && photoBuf && photoBuf.length > 500) {
             try {
               if (!fs.existsSync(PHOTOS_DIR)) fs.mkdirSync(PHOTOS_DIR, { recursive: true });
-              fs.writeFileSync(photoFile, photoBuf);
+              writeFileUnlessDryRun(photoFile, photoBuf);
               console.log(`[SYNC] Photo saved: emp_${empNo}.jpg (${photoBuf.length} bytes)`);
               finalizeUser(true);
             } catch(e) { console.error('[SYNC] Photo save error:', e.message); finalizeUser(false); }
@@ -8816,7 +8834,8 @@ app.post('/api/upload', uploadLimiter, withUploadOwnersLock((req, res) => {
     // filename land in the same millisecond, silently overwriting the first file on disk. An 8-hex
     // -char random component makes that practically impossible without adding any locking.
     const filename = `${Date.now()}_${randomBytes(4).toString('hex')}_${orig}`;
-    fs.writeFileSync(path.join(UPLOADS_DIR, filename), req.body);
+    // A dry run must not leave an orphan in the uploads folder every time somebody tests a form.
+    writeFileUnlessDryRun(path.join(UPLOADS_DIR, filename), req.body);
     // SECURITY FIX 2026-08-13 (F-A, Opus-flagged during the leaves-whitelist plan): record who
     // actually uploaded this file, at the ONE place that can't be spoofed (req.user.sub comes from
     // the verified JWT, not the request body). GET /api/upload/:filename below now trusts THIS
@@ -8961,7 +8980,9 @@ app.post('/api/attachments/clear', requireRole('md'), withLeavesLock((req, res) 
     if (requestedIds.has(l.id) && l.attachment && l.type !== 'clear-attachments' && l.dateFrom < cutoff) {
       const safeName = path.basename(l.attachment);
       const fp = path.join(UPLOADS_DIR, safeName);
-      try { if (fs.existsSync(fp)) fs.unlinkSync(fp); } catch(e) {}
+      // The worst one to get wrong: a dry run of "clear old attachments" would have deleted every
+      // one of them for real while the records that point at them were left untouched.
+      if (fs.existsSync(fp)) unlinkUnlessDryRun(fp);
       deletedFilenames.add(safeName);
     }
   });
