@@ -170,6 +170,47 @@ async function requireSuperAdminConfirm(actionLabel) {
   const typed = prompt(L(`System account — type CONFIRM to ${actionLabel}`, `บัญชีระบบ — พิมพ์ CONFIRM เพื่อ${actionLabel}`));
   return typed === 'CONFIRM';
 }
+
+// ===== WRITE GATE =====
+// 2026-10-05 (owner): the system account is for inspecting, not changing. Every write it makes must
+// be deliberate, so it types CONFIRM first.
+//
+// This lives inside apiFetch() rather than at the call sites on purpose. All 62 writes in this app
+// already go through apiFetch (verified 2026-10-05: the only raw fetch() calls are login and two
+// GETs), so putting the gate there makes it the single road out. Somebody adding a save button next
+// year inherits the rule without having to know it exists -- which is the only kind of rule that
+// survives. Guarding the call sites instead would have meant 62 places to forget.
+//
+// The gate asks once per WRITE, not once per button. An action that uploads a file and then posts a
+// record asks twice, because it really is writing twice. No grace window: a window would mean a
+// second, unrelated write slipping through on the strength of a CONFIRM typed for something else.
+//
+// Deliberately NOT a security control. Anyone who can run JS in this page can call fetch() directly;
+// the server is what actually decides. This stops the accidental write by the person whose job today
+// is to look around.
+function writeGateLabel(path, method) {
+  const p = String(path || '');
+  if (p.startsWith('/api/upload')) return L('upload this file', 'อัปโหลดไฟล์นี้');
+  if (p.startsWith('/api/settings')) return L('change system settings', 'แก้การตั้งค่าระบบ');
+  if (p.startsWith('/api/users')) return L('change employee data', 'แก้ข้อมูลพนักงาน');
+  if (p.startsWith('/api/leaves')) return L('change a request', 'แก้คำขอ');
+  if (p.startsWith('/api/attendance')) return L('change attendance data', 'แก้ข้อมูลลงเวลา');
+  if (method === 'DELETE') return L('delete data', 'ลบข้อมูล');
+  return L('write data', 'เขียนข้อมูล');
+}
+// Returns null to let the request through, or a Response the caller handles like any refusal.
+async function writeGateRefusal(path, method) {
+  if (!isSuperAdmin()) return null;
+  if (await requireSuperAdminConfirm(writeGateLabel(path, method))) return null;
+  const message = L('Cancelled — nothing was saved', 'ยกเลิกแล้ว ไม่มีการบันทึก');
+  return new Response(JSON.stringify({ success: false, message }), {
+    status: 403, headers: { 'Content-Type': 'application/json' },
+  });
+}
+function isWriteMethod(method) {
+  const m = String(method || 'GET').toUpperCase();
+  return m === 'POST' || m === 'PUT' || m === 'PATCH' || m === 'DELETE';
+}
 // 2026-10-05: the same role→label map was written out in three render functions; the preview banner
 // needed a fourth, so it became a function instead. The three existing copies are left alone — this
 // is not the change to go reshaping unrelated renderers in.
@@ -1382,6 +1423,12 @@ window.addEventListener('online', () => {
 });
 
 async function apiFetch(path, opts = {}) {
+  // 2026-10-05: the write gate. See the block above requireSuperAdminConfirm() for why it is here
+  // and not at the 62 call sites.
+  if (isWriteMethod(opts.method)) {
+    const refused = await writeGateRefusal(path, opts.method);
+    if (refused) return refused;
+  }
   const headers = { ...(opts.headers || {}) };
   if (AUTH_TOKEN) headers['Authorization'] = `Bearer ${AUTH_TOKEN}`;
   let res;
@@ -15434,10 +15481,8 @@ async function approveAllFiltered() {
 async function approveMockLeaveInternal(id) {
   const l = DATA_LEAVES.find(x => x.id === id);
   if (!l) return false;
-  if (isSuperAdmin()) {
-    const ok = await requireSuperAdminConfirm(L('approve/reject this request', 'อนุมัติ/ปฏิเสธคำขอนี้'));
-    if (!ok) { showToast(L('Cancelled — type CONFIRM to proceed on system account', 'ยกเลิก — บัญชีระบบต้องพิมพ์ CONFIRM'), 'warning'); return false; }
-  }
+  // 2026-10-05: the CONFIRM prompt that used to sit here is now in apiFetch()'s write gate, which
+  // covers every write rather than this one. Asking here as well would prompt twice for one action.
   // Block approval when the leave's pay period is locked
   if (l.dateFrom) {
     const ps = getPeriodStartForDate(l.dateFrom);
