@@ -233,6 +233,19 @@ function isWriteMethod(method) {
   const m = String(method || 'GET').toUpperCase();
   return m === 'POST' || m === 'PUT' || m === 'PATCH' || m === 'DELETE';
 }
+// 2026-10-05 (found while reviewing the gate): a few writes are machine housekeeping that runs with
+// nobody at the keyboard — the Hikvision employee sync and the push-subscription registration both
+// fire on login AND on restoring a session at page load. Gated like everything else, they popped a
+// modal CONFIRM over a page the person had only just opened, for something they had not asked for,
+// and blocked the app until it was answered.
+//
+// They opt out by passing `systemSync: true`, at the call site, in the open. Deliberately not an
+// allowlist of paths kept somewhere else: the exemption belongs next to the call that needs it, so
+// it is read by whoever is reading that call, and `grep systemSync` lists every one of them.
+// The server still applies its own role checks to these endpoints; nothing here grants access.
+function isSystemSyncWrite(opts) {
+  return !!(opts && opts.systemSync);
+}
 // 2026-10-05: the same role→label map was written out in three render functions; the preview banner
 // needed a fourth, so it became a function instead. The three existing copies are left alone — this
 // is not the change to go reshaping unrelated renderers in.
@@ -1447,7 +1460,7 @@ window.addEventListener('online', () => {
 async function apiFetch(path, opts = {}) {
   // 2026-10-05: the write gate. See the block above requireSuperAdminConfirm() for why it is here
   // and not at the 62 call sites.
-  if (isWriteMethod(opts.method)) {
+  if (isWriteMethod(opts.method) && !isSystemSyncWrite(opts)) {
     const refused = await writeGateRefusal(path, opts.method);
     if (refused) return refused;
   }
@@ -1891,7 +1904,9 @@ async function syncHikvisionEmployees(silent = false) {
   const btn = document.getElementById('btn-sync-hikvision');
   if (btn) { btn.disabled = true; btn.textContent = L('⏳ Syncing...', '⏳ กำลัง Sync...'); }
   try {
-    const res  = await apiFetch(`/api/users/sync-hikvision`, { method:'POST' });
+    // systemSync only when it fires by itself (login / session restore). Pressing the Auto-sync
+    // button is a real decision and goes through the CONFIRM gate like any other write.
+    const res  = await apiFetch(`/api/users/sync-hikvision`, { method:'POST', systemSync: silent });
     const data = await res.json();
     if (data.success) {
       if (data.added > 0) {
@@ -7275,7 +7290,9 @@ async function logout() {
       const sub = await window._swReg.pushManager.getSubscription();
       if (sub) {
         apiFetch('/api/push-subscribe', {
-          method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+          // Unbinding this browser on the way out, so the next person at a shared machine does not
+          // inherit the previous user's notifications. Logout must never stop to ask a question.
+          method: 'DELETE', systemSync: true, headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ endpoint: sub.endpoint })
         }).catch(() => {});
       }
@@ -7372,6 +7389,9 @@ async function syncPushSubscription() {
     }
     await apiFetch('/api/push-subscribe', {
       method: 'POST',
+      // Registering this browser for notifications is device housekeeping, not a change to anyone's
+      // records, and it fires on login and on session restore with nobody asking for it.
+      systemSync: true,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ subscription: sub.toJSON() })
     });

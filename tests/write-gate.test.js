@@ -62,6 +62,31 @@ test('reads are not gated', () => {
     assert.strictEqual(ctx.isWriteMethod(m), false, `${m} must pass straight through`));
 });
 
+console.log('\nWrite gate: machine housekeeping is exempt, in the open');
+
+test('apiFetch lets a declared system sync past the gate', () => {
+  const fn = extractFunction(APP_SRC, 'apiFetch');
+  assert.ok(/isSystemSyncWrite\(opts\)/.test(fn),
+    'apiFetch must honour the systemSync opt-out — otherwise a modal CONFIRM pops over a page the ' +
+    'person has only just opened, for a sync they never asked for');
+});
+test('only housekeeping is exempt, and every exemption is greppable', () => {
+  // These run with nobody at the keyboard: both fire on login AND on restoring a session at load.
+  // If this list grows, that is a decision someone should have to make on purpose.
+  // Count real call sites only — the comment above isSystemSyncWrite() quotes the syntax.
+  const sites = APP_SRC.split('\n')
+    .filter(line => !/^\s*(\/\/|\*)/.test(line))
+    .filter(line => /systemSync:\s*(true|silent)/.test(line)).length;
+  assert.strictEqual(sites, 3,
+    'expected exactly three system-sync writes (hikvision sync, push subscribe, push unsubscribe) — ' +
+    'a new one means a write was quietly taken out of the gate');
+});
+test('the Auto-sync BUTTON is still gated', () => {
+  const fn = extractFunction(APP_SRC, 'syncHikvisionEmployees');
+  assert.ok(/systemSync:\s*silent/.test(fn),
+    'the exemption must follow the silent flag — pressing Auto-sync is a real decision and must ask');
+});
+
 console.log('\nWrite gate: it lives in apiFetch, the single road out');
 
 test('apiFetch gates writes before the request is sent', () => {
