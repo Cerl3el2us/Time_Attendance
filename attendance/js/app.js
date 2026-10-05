@@ -9634,7 +9634,7 @@ function buildCheckoutReviewHtml(row, targetUser, withButtons) {
   const isSelf = !!currentUser && Number(targetUser.id) === Number(currentUser.id);
   if (isSelf) {
     if (decision === 'allow') {
-      return `<div class="checkout-review">${chip('#dcfce7', '#166534', L('✅ Reviewed — you can submit 🌙', '✅ ตรวจแล้ว ยื่น 🌙 ได้'))}</div>`;
+      return `<div class="checkout-review">${chip('#dcfce7', '#166534', L('✅ Reviewed — You can submit 🌙', '✅ ตรวจแล้ว ยื่น 🌙 ได้'))}</div>`;
     }
     if (decision === 'deny') {
       const hasLateOut = DATA_LEAVES.some(l => l.userId === targetUser.id && l.type === 'late-out' && l.dateFrom === row.date && !isVoidLeaveStatus(l.status));
