@@ -9244,6 +9244,11 @@ const DEFAULT_ALLOWANCE_ELIGIBILITY = {
   earlyLate:    ['md', 'manager', 'user', 'driver'],
   ot:           ['md', 'manager', 'user', 'driver'],
   holidayWork:  ['md', 'manager', 'user'],
+  // 2026-10-05: sub-permission of holidayWork -- who may take the compensation as money rather
+  // than the annual-leave day. MUST exist here: isAllowanceEligible() falls back to
+  // DEFAULT_ALLOWANCE_ELIGIBILITY[key] when the live settings have no such key, and a missing key
+  // throws. Default excludes manager, which is the rule this key was added for.
+  holidayWorkPaid: ['md', 'user'],
   // 2026-07-31: phone allowance has zero real correlation with role (only 1 of 4 'user'-role
   // employees ever had it) -- this default is intentionally permissive since the actual gate is
   // the per-employee user.phoneAllowanceEligible flag (see computePayroll), same pattern as
@@ -9260,6 +9265,16 @@ const DEFAULT_ALLOWANCE_ELIGIBILITY = {
 function isAllowanceEligible(allowanceEligibilityConfig, role, key) {
   const list = allowanceEligibilityConfig && allowanceEligibilityConfig[key];
   return Array.isArray(list) ? list.includes(role) : DEFAULT_ALLOWANCE_ELIGIBILITY[key].includes(role);
+}
+// 2026-10-05 (owner): managers may file Holiday Work but must take the annual-leave day, never the
+// money. Two keys, both required: holidayWork says who may file at all, holidayWorkPaid says who may
+// pick compensationMode 'paid'. Requiring the parent here is the real control -- settings.json can
+// be edited by hand or by an older client, and a holidayWorkPaid tick without its parent must grant
+// nothing rather than quietly allowing the cash option.
+// STANDING RULE (dual-sync): this function exists in BOTH app.js and server.js.
+function mayChoosePaidHolidayWork(allowanceEligibilityConfig, role) {
+  return isAllowanceEligible(allowanceEligibilityConfig, role, 'holidayWork') &&
+         isAllowanceEligible(allowanceEligibilityConfig, role, 'holidayWorkPaid');
 }
 // 2026-08-27: Early Morning / Late Night money is tied to a face-scanner event, not a web
 // Check In / Check Out button. Missing source (time-correction overlay with no scan) must not

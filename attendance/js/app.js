@@ -1421,6 +1421,10 @@ let APP_SETTINGS = {
     ot:           ['md', 'manager', 'user', 'driver'],
     phone:        ['md', 'manager', 'accounting', 'user', 'marketing', 'driver'],
     holidayWork:  ['md', 'manager', 'user'],
+    // 2026-10-05 (owner): who may take Holiday Work compensation as money (OT + holiday transport)
+    // instead of one annual-leave day. A sub-permission of holidayWork above --
+    // mayChoosePaidHolidayWork() requires BOTH, so ticking this alone grants nothing.
+    holidayWorkPaid: ['md', 'user'],
   },
   map: { cartoApiKey: '' }
 };
@@ -1465,7 +1469,7 @@ let TAWI50_OVERRIDES = {};
 // thrown a whole extra hour onto the previous day without failing a single test. Every site now
 // compares minutes-since-midnight against this one constant.
 const BUSINESS_DAY_START_MINS = 330; // 05:30
-const ALLOWANCE_KEYS = ['diligence', 'longDistance', 'personalCar', 'upcountry', 'earlyLate', 'ot', 'phone', 'holidayWork', 'abroad'];
+const ALLOWANCE_KEYS = ['diligence', 'longDistance', 'personalCar', 'upcountry', 'earlyLate', 'ot', 'phone', 'holidayWork', 'holidayWorkPaid', 'abroad'];
 const ROLE_KEYS = ['md', 'manager', 'accounting', 'user', 'marketing', 'driver'];
 const DEFAULT_ALLOWANCE_ELIGIBILITY = {
   diligence:    ['driver'],
@@ -1475,6 +1479,11 @@ const DEFAULT_ALLOWANCE_ELIGIBILITY = {
   earlyLate:    ['md', 'manager', 'user', 'driver'],
   ot:           ['md', 'manager', 'user', 'driver'],
   holidayWork:  ['md', 'manager', 'user'],
+  // 2026-10-05: sub-permission of holidayWork -- who may take the compensation as money rather
+  // than the annual-leave day. MUST exist here: isAllowanceEligible() falls back to
+  // DEFAULT_ALLOWANCE_ELIGIBILITY[key] when the live settings have no such key, and a missing key
+  // throws. Default excludes manager, which is the rule this key was added for.
+  holidayWorkPaid: ['md', 'user'],
   // 2026-07-31: phone allowance has zero real correlation with role (only 1 of 4 'user'-role
   // employees ever had it) -- this default is intentionally permissive since the actual gate is
   // the per-employee user.phoneAllowanceEligible flag (see computePayroll), same pattern as
@@ -1491,6 +1500,16 @@ const DEFAULT_ALLOWANCE_ELIGIBILITY = {
 function isAllowanceEligible(allowanceEligibilityConfig, role, key) {
   const list = allowanceEligibilityConfig && allowanceEligibilityConfig[key];
   return Array.isArray(list) ? list.includes(role) : DEFAULT_ALLOWANCE_ELIGIBILITY[key].includes(role);
+}
+// 2026-10-05 (owner): managers may file Holiday Work but must take the annual-leave day, never the
+// money. Two keys, both required: holidayWork says who may file at all, holidayWorkPaid says who may
+// pick compensationMode 'paid'. Requiring the parent here is the real control -- settings.json can
+// be edited by hand or by an older client, and a holidayWorkPaid tick without its parent must grant
+// nothing rather than quietly allowing the cash option.
+// STANDING RULE (dual-sync): this function exists in BOTH app.js and server.js.
+function mayChoosePaidHolidayWork(allowanceEligibilityConfig, role) {
+  return isAllowanceEligible(allowanceEligibilityConfig, role, 'holidayWork') &&
+         isAllowanceEligible(allowanceEligibilityConfig, role, 'holidayWorkPaid');
 }
 // 2026-08-27: Early Morning / Late Night money is tied to a face-scanner event, not a web
 // Check In / Check Out button. Missing source (time-correction overlay with no scan) must not
