@@ -885,7 +885,10 @@ test('geofenceUiState never blocks a press that would not be a new check-in, eve
   };
   ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
-  vm.runInContext(extractFunction(APP_SRC, 'geofenceUiState'), ctx);
+  ctx.previewRole = '';
+  vm.runInContext(extractFunction(APP_SRC, 'isSuperAdmin') + ';' +
+    extractFunction(APP_SRC, 'effectiveRole') + ';' +
+    extractFunction(APP_SRC, 'geofenceUiState'), ctx);
   const st = ctx.geofenceUiState();
   // Field-by-field, not deepStrictEqual: `st` is an object literal built INSIDE the vm sandbox,
   // so it carries that realm's Object.prototype -- deepStrictEqual across realms fails on
@@ -909,7 +912,10 @@ test('geofenceUiState still blocks an actual check-in standing at the office, wi
   };
   ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
-  vm.runInContext(extractFunction(APP_SRC, 'geofenceUiState'), ctx);
+  ctx.previewRole = '';
+  vm.runInContext(extractFunction(APP_SRC, 'isSuperAdmin') + ';' +
+    extractFunction(APP_SRC, 'effectiveRole') + ';' +
+    extractFunction(APP_SRC, 'geofenceUiState'), ctx);
   const st = ctx.geofenceUiState();
   assert.strictEqual(st.blocked, true);
   assert.strictEqual(st.reason, 'geofence-inside');
@@ -935,7 +941,10 @@ test('geofenceUiState fails OPEN when settings have not loaded fresh this sessio
   };
   ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
-  vm.runInContext(extractFunction(APP_SRC, 'geofenceUiState'), ctx);
+  ctx.previewRole = '';
+  vm.runInContext(extractFunction(APP_SRC, 'isSuperAdmin') + ';' +
+    extractFunction(APP_SRC, 'effectiveRole') + ';' +
+    extractFunction(APP_SRC, 'geofenceUiState'), ctx);
   const st = ctx.geofenceUiState();
   assert.strictEqual(st.blocked, false, 'must fail open when GET /api/settings has not succeeded this session');
   assert.strictEqual(st.reason, '');
@@ -955,7 +964,10 @@ test('geofenceUiState fails OPEN when attendance has not loaded fresh this sessi
   };
   ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
-  vm.runInContext(extractFunction(APP_SRC, 'geofenceUiState'), ctx);
+  ctx.previewRole = '';
+  vm.runInContext(extractFunction(APP_SRC, 'isSuperAdmin') + ';' +
+    extractFunction(APP_SRC, 'effectiveRole') + ';' +
+    extractFunction(APP_SRC, 'geofenceUiState'), ctx);
   const st = ctx.geofenceUiState();
   assert.strictEqual(st.blocked, false, 'must fail open when GET /api/events has not succeeded this session -- a real check-out must never look like an unknown first scan');
 });
@@ -977,7 +989,10 @@ test('geofenceUiState (Critical 1): a stale GPS fix is treated as no position, n
   };
   ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
-  vm.runInContext(extractFunction(APP_SRC, 'geofenceUiState'), ctx);
+  ctx.previewRole = '';
+  vm.runInContext(extractFunction(APP_SRC, 'isSuperAdmin') + ';' +
+    extractFunction(APP_SRC, 'effectiveRole') + ';' +
+    extractFunction(APP_SRC, 'geofenceUiState'), ctx);
   const st = ctx.geofenceUiState();
   assert.ok(Number.isNaN(seenLat) && Number.isNaN(seenLng), 'a stale fix must be passed through as NaN/NaN, not the real coordinates');
   assert.strictEqual(st.blocked, true);

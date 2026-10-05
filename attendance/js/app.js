@@ -1090,15 +1090,29 @@ function checkedInDateBlockedMessage(result) {
   }
   return L('Cannot submit for this date', 'ไม่สามารถยื่นคำขอวันนี้ได้');
 }
+// 2026-10-05 (owner): which role a "can I submit this?" gate must judge by.
+//
+// These gates serve two jobs: asked with no userId they answer about the logged-in person, asked
+// with one they answer about somebody else. Only the first should follow the superadmin's role
+// preview. Judging the self case by the raw role is what made request buttons appear and then
+// refuse every date: the button layer asks effectiveRole() (e.g. 'user', eligible → button shown)
+// while the gate asked currentUser.role ('superadmin', which appears in no eligibility list →
+// {ok:false, reason:'ineligible'}). The owner hit this on Holiday Work; it affected every request
+// type. The other-person case keeps that person's own stored role, which is not ours to reinterpret.
+function gateRoleFor(user, uid) {
+  if (currentUser && Number(uid) === Number(currentUser.id)) return effectiveRole();
+  return user && user.role;
+}
 function canSubmitOTForDate(dateStr, userId) {
   const uid = userId || (currentUser && currentUser.id);
   const user = DATA_USERS.find(u => u.id === uid) || currentUser;
   if (!user) return { ok: false, reason: 'missing' };
-  if (!isAllowanceEligible(APP_SETTINGS.allowanceEligibility, user.role, 'ot')) {
+  const gateRole = gateRoleFor(user, uid);
+  if (!isAllowanceEligible(APP_SETTINGS.allowanceEligibility, gateRole, 'ot')) {
     return { ok: false, reason: 'ineligible' };
   }
   return canSelectCheckedInDate(dateStr, uid, (ds, id, times) => {
-    if (user.role === 'driver') return { ok: true };
+    if (gateRole === 'driver') return { ok: true };
     if (isNonWorkDayForComp(ds)) return { ok: false, reason: 'holiday-ot' };
     const dup = DATA_LEAVES.some(l =>
       l.userId === id && l.type === 'ot' && l.dateFrom === ds && !isVoidLeaveStatus(l.status) &&
@@ -1126,7 +1140,7 @@ function canSubmitOTForDate(dateStr, userId) {
 function canSubmitDriverOTForDate(dateStr, userId) {
   const uid = userId || (currentUser && currentUser.id);
   const user = DATA_USERS.find(u => u.id === uid) || currentUser;
-  if (!user || user.role !== 'driver') return { ok: false, reason: 'not-driver' };
+  if (!user || gateRoleFor(user, uid) !== 'driver') return { ok: false, reason: 'not-driver' };
   return canSubmitOTForDate(dateStr, uid);
 }
 function canUseHolidayWork(user) {
@@ -1137,7 +1151,7 @@ function canSubmitUpcountryForDate(dateStr, userId) {
   const uid = userId || (currentUser && currentUser.id);
   const user = DATA_USERS.find(u => u.id === uid) || currentUser;
   if (!user) return { ok: false, reason: 'missing' };
-  if (!isAllowanceEligible(APP_SETTINGS.allowanceEligibility, user.role, 'upcountry')) {
+  if (!isAllowanceEligible(APP_SETTINGS.allowanceEligibility, gateRoleFor(user, uid), 'upcountry')) {
     return { ok: false, reason: 'ineligible' };
   }
   if (isCompanyTripDay(dateStr)) return { ok: false, reason: 'company-trip' };
@@ -1160,7 +1174,7 @@ function canSubmitLongDistanceForDate(dateStr, userId) {
   const uid = userId || (currentUser && currentUser.id);
   const user = DATA_USERS.find(u => u.id === uid) || currentUser;
   if (!user) return { ok: false, reason: 'missing' };
-  if (!isAllowanceEligible(APP_SETTINGS.allowanceEligibility, user.role, 'longDistance')) {
+  if (!isAllowanceEligible(APP_SETTINGS.allowanceEligibility, gateRoleFor(user, uid), 'longDistance')) {
     return { ok: false, reason: 'ineligible' };
   }
   return canSelectCheckedInDate(dateStr, uid, (ds, id) => {
@@ -2584,8 +2598,9 @@ function canSubmitHolidayWorkForDate(dateStr, userId) {
   if (!uid || !dateStr) return { ok: false, reason: 'missing' };
   const user = DATA_USERS.find(u => u.id === uid) || currentUser;
   if (!user) return { ok: false, reason: 'missing' };
-  if (user.role === 'driver') return { ok: false, reason: 'driver' };
-  if (!isAllowanceEligible(APP_SETTINGS.allowanceEligibility, user.role, 'holidayWork')) {
+  const gateRole = gateRoleFor(user, uid);
+  if (gateRole === 'driver') return { ok: false, reason: 'driver' };
+  if (!isAllowanceEligible(APP_SETTINGS.allowanceEligibility, gateRole, 'holidayWork')) {
     return { ok: false, reason: 'ineligible' };
   }
   // 2026-09-24 (owner): a Company Trip day pays no allowance of any kind, so no Holiday Work.
@@ -2698,7 +2713,7 @@ function canSubmitEarlyMorningForDate(dateStr, userId) {
   if (!uid || !dateStr) return { ok: false, reason: 'missing' };
   const user = DATA_USERS.find(u => u.id === uid) || currentUser;
   if (!user) return { ok: false, reason: 'missing' };
-  if (!isAllowanceEligible(APP_SETTINGS.allowanceEligibility, user.role, 'earlyLate')) {
+  if (!isAllowanceEligible(APP_SETTINGS.allowanceEligibility, gateRoleFor(user, uid), 'earlyLate')) {
     return { ok: false, reason: 'ineligible' };
   }
   const pp = payPeriodBlockedForDate(dateStr, uid);
@@ -8061,7 +8076,11 @@ function geofenceUiState() {
   // attendance, never refuse locally -- let the server's own 403 decide instead. See
   // _geofenceSettingsFresh/_geofenceAttendanceFresh's own comment above.
   if (!_geofenceSettingsFresh || !_geofenceAttendanceFresh) return { blocked: false, reason: '', text: '' };
-  const role = currentUser && currentUser.role;
+  // 2026-10-05: this answers "would MY press be refused", so it follows the role preview like every
+  // other check-in gate on this page (refreshHolidayWorkCheckinBtn, updateEarlyMorningEntry-
+  // Visibility, updateAbroadEntryVisibility, doScan). Reading the raw role made the geofence the one
+  // rule that could not be exercised from a preview at all.
+  const role = effectiveRole();
   // Critical #1: a stale fix (see gpsIsFresh()'s own comment) must be treated as no position at
   // all -- same reason code as never having gotten a fix in the first place.
   const fresh = currentGPS && gpsIsFresh(currentGPS, Date.now()) ? currentGPS : null;
@@ -11145,8 +11164,10 @@ function renderMyProfile() {
       </div>
     </div>
 
-    <!-- Leave Balance — MD doesn't take leave, so this section is meaningless for that role -->
-    ${u.role === 'md' ? '' : `
+    <!-- Leave Balance — MD doesn't take leave, so this section is meaningless for that role.
+         2026-10-05: judged by the acting role, since this is my own profile and hiding it is a
+         "what do I see" decision. renderLeaveBalanceCard() next door already works this way. -->
+    ${effectiveRole() === 'md' ? '' : `
     <div class="card mb-4">
       <div class="card-header"><h3>🗓️ ${L('Leave Balance This Year', 'วันลาคงเหลือปีนี้')}</h3></div>
       <div class="card-body">
@@ -17501,7 +17522,7 @@ function canSubmitLateNightForDate(dateStr, userId, opts) {
   if (!uid || !dateStr) return { ok: false, reason: 'missing' };
   const user = DATA_USERS.find(u => u.id === uid) || currentUser;
   if (!user) return { ok: false, reason: 'missing' };
-  if (!isAllowanceEligible(APP_SETTINGS.allowanceEligibility, user.role, 'earlyLate')) {
+  if (!isAllowanceEligible(APP_SETTINGS.allowanceEligibility, gateRoleFor(user, uid), 'earlyLate')) {
     return { ok: false, reason: 'ineligible' };
   }
   const pp = payPeriodBlockedForDate(dateStr, uid);
@@ -21797,7 +21818,12 @@ function initHikvisionLive() {
         // 2026-09-24 (owner): a plain user does not keep a colleague's cancelled / revoked record
         // (the server no longer sends it -- GET /api/leaves, broadcastLeaveUpdated); drop it.
         // Round 7 (owner): rejected too (server isHiddenFromColleaguesStatus).
-        const seesAllLeaves = !!currentUser && (['md', 'accounting', 'manager'].includes(currentUser.role) || isSuperAdmin());
+        // 2026-10-05: "do I get to keep seeing a colleague's withdrawn record" is a what-I-see
+        // decision, so it follows the role preview. The raw list plus `|| isSuperAdmin()` kept every
+        // colleague's withdrawn leave in the local cache even while previewing Staff, so the preview
+        // silently showed records a real Staff login would have dropped — on every page that renders
+        // from DATA_LEAVES, not just this one.
+        const seesAllLeaves = !!currentUser && (isMdAccountingView() || actingRoles().includes('manager'));
         const hiddenFromColleagues = isWithdrawnLeaveStatus(data.leave?.status) || data.leave?.status === 'rejected';
         if (lIdx >= 0 && hiddenFromColleagues && !seesAllLeaves && data.leave.userId !== currentUser?.id) {
           DATA_LEAVES.splice(lIdx, 1);

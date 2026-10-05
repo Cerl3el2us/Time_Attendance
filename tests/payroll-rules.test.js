@@ -56,7 +56,7 @@ const SHARED = ['isVoidLeaveStatus', 'round2HalfUp', 'round1HalfUp', 'deriveOffi
   'hasUpcountryLocation', 'holidayTransportForRecord',
   'lateNightPoints', 'holidayWorkTooLong'];
 const CLIENT_FNS = [...SHARED, 'scanWindowError', 'getApprovedHolidayWorkDays', 'abroadTravelCreditDays',
-  'otEndCrossesMidnight', 'canSubmitHolidayWorkForDate', 'standardOtMultiplier', 'otPayAmountFromLeave'];
+  'otEndCrossesMidnight', 'isSuperAdmin', 'effectiveRole', 'gateRoleFor', 'canSubmitHolidayWorkForDate', 'standardOtMultiplier', 'otPayAmountFromLeave'];
 const SERVER_FNS = [...SHARED, 'scanWindowError', 'getApprovedHolidayWorkAnnualLeaveDays', 'abroadTravelCreditDays',
   'isCompanyTripClaimBlocked', 'companyTripNoClaimMessage', 'standardOtMultiplier'];
 
