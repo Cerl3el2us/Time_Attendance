@@ -14312,6 +14312,13 @@ function buildApprovalCard(l, role) {
     detail     = `<div style="font-size:13px;color:var(--text);margin-top:6px">🚗 ${L('Mileage','เลขไมล์')}: <strong>${Number(l.mileageStart||0).toLocaleString()}</strong> → <strong>${Number(l.mileageEnd||0).toLocaleString()}</strong> | ${L('Distance','ระยะทาง')}: <strong>${Number(l.distanceKm||0).toLocaleString()} ${L('km','กม.')}</strong></div>`;
     reasonLine = `<div style="font-size:13px;color:${l.longDistanceAllowance > 0 ? (document.documentElement.getAttribute('data-theme')==='dark' ? '#4ade80' : '#166534') : 'var(--text-muted)'};margin-top:4px">${l.longDistanceAllowance > 0 ? `✅ ${L('Allowance','เบี้ยเลี้ยง')} +฿${l.longDistanceAllowance}` : `❌ ${(()=>{const th=APP_SETTINGS.allowances.longDistanceThresholdKm||LONG_DISTANCE_THRESHOLD_KM; return currentLang === 'ja' ? `${th}km未満` : L(`Under ${th} km`,`ไม่ถึง ${th} กม.`);})()}`}</div>`;
   } else {
+    // 2026-10-05 (owner): a holiday-work card must say WHERE the work was, and when. The location
+    // is required at submit time (l.locations[0].name) but the card never showed it.
+    if (l.type === 'holiday-work') {
+      const hwLoc = (Array.isArray(l.locations) && l.locations[0] && l.locations[0].name) ? escapeHtml(l.locations[0].name) : '';
+      const hwTimes = (l.workStartTime && l.workEndTime) ? holidayWorkTimesLabel(l) : '';
+      detail = `<div style="font-size:13px;color:var(--text);margin-top:6px">📍 ${L('Location', 'สถานที่')}: <strong>${hwLoc || '—'}</strong>${hwTimes ? ` &nbsp;·&nbsp; ⏱️ ${escapeHtml(hwTimes)}` : ''}</div>`;
+    }
     reasonLine  = `<div style="font-size:13px;color:var(--text-muted);margin-top:4px">📝 ${escapeHtml(l.reason)}</div>`;
   }
   // This card (default Card View) had no attachment display at all — showApprovalDetail()'s
@@ -16010,29 +16017,63 @@ function buildAttachmentLinkHtml(l) {
       : `<a href="javascript:void(0)" class="att-open-link" data-attachment="${attAttr}" data-attachment-name="${nameAttr}" style="color:#3b82f6;text-decoration:underline">📄 ${nameAttr}</a>`;
 }
 
-// Blob URLs of PDF thumbnails already fetched this session, so re-rendering the approval list
-// doesn't re-download every PDF. Kept for the page's lifetime (a handful of small files).
+// Rendered PDF thumbnails (data URLs) already built this session, so re-rendering the approval
+// list doesn't re-download every PDF.
+// 2026-10-05: the first version embedded the PDF in an <iframe>, which showed Chrome's viewer
+// toolbar and only the top of the page. pdf.js (jsDelivr is already in script-src) draws the WHOLE
+// first page onto a canvas scaled to fit the 180x120 box instead.
+const PDFJS_VER = '3.11.174';
 const _pdfThumbCache = new Map();
+let _pdfjsPromise = null;
+function loadPdfJs() {
+  if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  if (!_pdfjsPromise) {
+    _pdfjsPromise = new Promise((resolve, reject) => {
+      const sc = document.createElement('script');
+      sc.src = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VER}/build/pdf.min.js`;
+      sc.onload = () => {
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VER}/build/pdf.worker.min.js`;
+        resolve(window.pdfjsLib);
+      };
+      sc.onerror = () => { _pdfjsPromise = null; reject(new Error('pdf.js failed to load')); };
+      document.head.appendChild(sc);
+    });
+  }
+  return _pdfjsPromise;
+}
 async function hydratePdfThumb(imgEl) {
   const box = imgEl.closest('.att-pdf-thumb');
   const filename = imgEl.dataset.attachment;
   if (!box || !filename || box.dataset.hydrated) return;
   box.dataset.hydrated = '1';
   try {
-    let url = _pdfThumbCache.get(filename);
-    if (!url) {
+    let dataUrl = _pdfThumbCache.get(filename);
+    if (!dataUrl) {
       const res = await apiFetch(`/api/upload/${encodeURIComponent(filename)}`);
       if (!res.ok) return;
-      url = URL.createObjectURL(new Blob([await res.blob()], { type: 'application/pdf' }));
-      _pdfThumbCache.set(filename, url);
+      const buf = await res.arrayBuffer();
+      const pdfjs = await loadPdfJs();
+      const doc = await pdfjs.getDocument({ data: buf }).promise;
+      const page = await doc.getPage(1);
+      const base = page.getViewport({ scale: 1 });
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      // contain: the whole page fits inside 180x120, never cropped
+      const scale = Math.min(180 / base.width, 120 / base.height) * dpr;
+      const vp = page.getViewport({ scale });
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.ceil(vp.width); canvas.height = Math.ceil(vp.height);
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+      dataUrl = canvas.toDataURL('image/png');
+      _pdfThumbCache.set(filename, dataUrl);
+      doc.destroy();
     }
     box.querySelector('.att-pdf-thumb-fallback')?.remove();
-    const f = document.createElement('iframe');
-    f.src = url + '#toolbar=0&navpanes=0&scrollbar=0&view=FitH';
-    f.tabIndex = -1;
-    f.setAttribute('aria-hidden', 'true');
-    f.style.cssText = 'width:100%;height:100%;border:0;pointer-events:none;background:#fff';
-    box.appendChild(f);
+    const im = document.createElement('img');
+    im.src = dataUrl; im.alt = '';
+    im.style.cssText = 'position:absolute;inset:0;margin:auto;max-width:100%;max-height:100%;background:#fff;box-shadow:0 0 0 1px #e2e8f0';
+    box.appendChild(im);
   } catch (e) { /* keep the 📄 fallback */ }
 }
 
