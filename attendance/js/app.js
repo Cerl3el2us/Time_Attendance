@@ -14970,11 +14970,12 @@ function renderApprovals() {
     // to toggle Accounting stand-in for whichever request types Manager's own route covers.
     if (canQuickApprove && pendingFiltered.length === 0) {
       const settingsBtn = document.createElement('div');
-      // align-self:stretch — the parent #approval-summary-bar is a column flex with
-      // align-items:flex-start (deliberate: it keeps the tall check-out review box at its own
-      // width, which the owner asked for). Without this override every child shrinks to content
-      // width too, and justify-content:flex-end then has no room to push these buttons right.
-      settingsBtn.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-bottom:8px;align-self:stretch';
+      // 2026-10-05 (owner): these sat right-aligned (justify-content:flex-end + align-self:stretch)
+      // while the filter chips above them start at the left, so neither edge lined up with
+      // anything. They now start at the left like everything else on the page, level with the
+      // "All" chip. No stretch needed: the parent #approval-summary-bar is a column flex with
+      // align-items:flex-start, so a plain content-width row already begins at the left edge.
+      settingsBtn.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px';
       settingsBtn.innerHTML = `
         <button onclick="openApprovalFlowChart()" style="padding:6px 14px;border-radius:8px;background:var(--bg-card);border:1px solid var(--border);color:var(--text-muted);font-size:12px;font-weight:700;cursor:pointer">${L('📊 Flow Chart', '📊 ผังการอนุมัติ')}</button>
         <button onclick="openClearAttachmentsModal()" style="padding:6px 14px;border-radius:8px;background:var(--bg-card);border:1px solid var(--border);color:var(--text-muted);font-size:12px;font-weight:700;cursor:pointer">🗑️ ${L('Clear Old Attachments', 'ล้างไฟล์แนบเก่า')}</button>
