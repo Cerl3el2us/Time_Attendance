@@ -16557,6 +16557,7 @@ function editLeaveRequest(id) {
     document.getElementById('holiday-work-end-time').value = l.workEndTime || '';
     document.getElementById('holiday-work-comp-mode').value = l.compensationMode || 'annual-leave';
     document.getElementById('holiday-work-reason').value = l.reason || '';
+    applyHolidayWorkCompModePermission();
     refreshHolidayWorkCompHint();
   } else if (l.type === 'early-morning') {
     openEarlyMorningModal(l.dateFrom);
@@ -18134,6 +18135,22 @@ async function submitDriverOT() {
 }
 
 // ===== HOLIDAY WORK =====
+// 2026-10-05 (owner): a role that may file Holiday Work but may not take the money sees one option
+// only. The two-card pay comparison is hidden with it -- a single card alone reads as a broken
+// layout. The server refuses 'paid' from these roles regardless (paidHolidayWorkBlockReason), so
+// this is presentation, not the control.
+function applyHolidayWorkCompModePermission() {
+  const sel = document.getElementById('holiday-work-comp-mode');
+  if (!sel || !currentUser) return;
+  const mayPaid = mayChoosePaidHolidayWork(APP_SETTINGS.allowanceEligibility, effectiveRole());
+  const paidOpt = sel.querySelector('option[value="paid"]');
+  if (paidOpt) paidOpt.hidden = !mayPaid;
+  if (!mayPaid) {
+    sel.value = 'annual-leave';
+    const cmp = document.getElementById('hw-pay-compare');
+    if (cmp) cmp.style.display = 'none';
+  }
+}
 function refreshHolidayWorkCompHint() {
   const el = document.getElementById('holiday-work-comp-hint');
   const sel = document.getElementById('holiday-work-comp-mode');
@@ -18213,6 +18230,12 @@ function selectHwCompMode(mode) {
 function refreshHolidayWorkPayCompare() {
   const wrap = document.getElementById('hw-pay-compare');
   if (!wrap) return;
+  // 2026-10-05: this function sets wrap.style.display itself, so without this it would undo
+  // applyHolidayWorkCompModePermission() on the next date/time edit and put the comparison back.
+  if (currentUser && !mayChoosePaidHolidayWork(APP_SETTINGS.allowanceEligibility, effectiveRole())) {
+    wrap.style.display = 'none';
+    return;
+  }
   const paidCard = document.getElementById('hw-pay-card-paid');
   const leaveCard = document.getElementById('hw-pay-card-leave');
   const mode = document.getElementById('holiday-work-comp-mode')?.value || 'annual-leave';
@@ -18385,6 +18408,7 @@ function openHolidayWorkModal(date) {
   clearHolidayWorkFile();
   const noteEl = document.getElementById('holiday-work-approval-note');
   if (noteEl) noteEl.textContent = approvalRouteNoteText('holiday-work');
+  applyHolidayWorkCompModePermission();
   refreshHolidayWorkCompHint();
   refreshHolidayWorkGate();
   document.getElementById('holiday-work-modal').classList.add('show');
