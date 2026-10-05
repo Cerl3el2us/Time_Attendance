@@ -9,6 +9,23 @@ this file.
 
 ---
 
+## 0. Where to point your editor — read this first
+
+**Open your editor / agent on a worktree folder, not on `Z:\Time_Attendance`.**
+
+A worktree is an ordinary local folder (e.g. `C:\Users\tairo\ta-cursor`) that contains the whole
+project, including this file. Working there means the live site is not even reachable from your
+workspace, so no mistake you make can reach employees mid-edit. Section 3 has the four commands that
+create one; the person setting you up normally runs them before opening the editor.
+
+If you were started on `Z:\Time_Attendance` anyway: **stop, create a worktree, move there, and work
+from it.** Do not start editing where you landed.
+
+You can still drive the repo on `Z:` by path from inside your worktree — that is how merging works
+(`git -C Z:/Time_Attendance merge ...`). You do not need it as your workspace for anything.
+
+---
+
 ## 1. What this is, and where it lives
 
 Time Attendance — an attendance / leave / payroll web app for Tozai Boeki Kaisha (Thailand) Ltd.
