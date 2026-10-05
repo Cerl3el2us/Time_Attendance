@@ -1977,7 +1977,7 @@ app.post('/api/hikvision/event', hikAuth, webScanLimiter, withEventsLock((req, r
           // #geofence-modal (see app.js's geofenceMessage()) and only ever shows this raw English
           // text if `reason` itself somehow goes missing.
           'geofence-inside': 'Company policy: check-in must be made with the face scanner at the office. Please scan at the device, or submit a time-correction request if you cannot.',
-          'geofence-no-position': 'Web check-in requires your location.',
+          'geofence-no-position': 'Clocking in or out from the web requires your location.',
         };
         return res.status(403).json({ success: false, reason, message: messages[reason] });
       }
@@ -9799,12 +9799,18 @@ function geofenceDistanceM(lat1, lng1, lat2, lng2) {
 // Returns '' to allow, or the reason code to refuse. Order matters: the caller must already have
 // established that this scan would become a CHECK-IN -- check-out is never gated.
 function geofenceCheckinReason(G, role, lat, lng) {
-  if (!G || typeof G !== 'object' || G.enabled !== true) return '';
-  const exempt = Array.isArray(G.exemptRoles) ? G.exemptRoles : [];
-  if (exempt.includes(role)) return '';
+  // 2026-10-05 (owner): a position is required of EVERYONE -- including the roles the distance
+  // rule exempts, and whether or not the fence itself is switched on. The reason is not fencing
+  // but accounting: a web scan carrying no position cannot be checked afterwards against where
+  // the employee says they were. The exemption below therefore waives only the distance test,
+  // which is why this block now sits above both the master switch and the exemption. Drivers
+  // used to pass here with no position at all, leaving the most mobile staff with no location.
   if (lat == null || lng == null) return 'geofence-no-position';
   const la = Number(lat), ln = Number(lng);
   if (!Number.isFinite(la) || !Number.isFinite(ln)) return 'geofence-no-position';
+  if (!G || typeof G !== 'object' || G.enabled !== true) return '';
+  const exempt = Array.isArray(G.exemptRoles) ? G.exemptRoles : [];
+  if (exempt.includes(role)) return '';
   let radius = 150;
   if (Number.isFinite(Number(G.radiusM))) radius = Number(G.radiusM);
   if (radius === 0) return '';
@@ -9920,18 +9926,22 @@ function webScanWouldBeCheckIn(user, eventTimeIso) {
 // cache-buster bump in the same commit). Any value that IS present, however malformed, is judged
 // exactly like a genuinely stale fix -- no position at all.
 function webScanGateReason(hikUser, eventTimeIso, gps, gpsAgeSecRaw) {
-  // M2 fix (2026-09-25 review): read the master switch first and return '' immediately when
-  // disabled -- geofenceCheckinReason() would return '' anyway once it gets there, but
-  // webScanWouldBeCheckIn() -> buildAttendanceLogForUser() does a full readEvents() + log build on
-  // every single web scan (check-outs included), which is wasted work when the answer can never
-  // be anything but ''. Observable behaviour is unchanged.
-  const G = getAppSettings().geofence;
-  if (!G || typeof G !== 'object' || G.enabled !== true) return '';
-  if (!webScanWouldBeCheckIn(hikUser, eventTimeIso)) return '';
+  // 2026-10-05 (owner): EVERY web scan must carry a position -- check-OUT included, driver or
+  // not, fence on or off -- so Accounting can check afterwards where the employee actually was.
+  // It runs before the master switch and before the check-in test because neither of those has
+  // anything to say about it. Both steps here are cheap string work.
   const gpsAgeSec = sanitizeGpsAge(gpsAgeSecRaw);
   const stale = gpsAgeSecRaw !== undefined && (gpsAgeSec === null || gpsAgeSec > 60);
   const coords = (!stale && gps) ? parseGpsCoords(gps) : null;
-  return geofenceCheckinReason(G, hikUser.role, coords ? coords.lat : NaN, coords ? coords.lng : NaN);
+  if (!coords) return 'geofence-no-position';
+  // M2 fix (2026-09-25 review): still read the master switch before webScanWouldBeCheckIn() --
+  // that call goes through buildAttendanceLogForUser() -> a full readEvents() + log build on
+  // every single web scan (check-outs included), which is wasted work when the distance rule
+  // cannot refuse anything anyway. Only the position check above now runs ahead of it.
+  const G = getAppSettings().geofence;
+  if (!G || typeof G !== 'object' || G.enabled !== true) return '';
+  if (!webScanWouldBeCheckIn(hikUser, eventTimeIso)) return '';
+  return geofenceCheckinReason(G, hikUser.role, coords.lat, coords.lng);
 }
 
 // Port of app.js generatePeriodDays() (~line 2206) — day-by-day status derivation. Takes

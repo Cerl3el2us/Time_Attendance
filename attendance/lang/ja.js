@@ -1496,11 +1496,11 @@ window.LANG_JA = {
   // never disables the scan button any more; a blocked press (or a 403 that slips through) opens
   // this modal instead. The accuracy ceiling ('geofence-accuracy', "not precise enough") was
   // removed earlier the same day -- that reason code and its strings no longer exist either.
-  "⚠️ Web Check-in Not Allowed": "Web出勤打刻はご利用いただけません",
+  "⚠️ Web Clock-in/out Not Allowed": "Webでの出退勤打刻はご利用いただけません",
   "Company policy: check-in must be made with the face scanner at the office. Please scan at the device, or submit a time-correction request if you cannot.":
     "会社規定により、出勤打刻はオフィスの顔認証端末でのみ行えます。顔認証端末で打刻してください。打刻できない場合は時刻修正を申請してください。",
-  "Web check-in requires your location — please allow location access, or use the face scanner at the office.":
-    "Web出勤打刻には位置情報が必要です。ブラウザで位置情報を許可するか、オフィスの顔認証端末をご利用ください。",
+  "Clocking in or out from the web requires your location, which is recorded with the scan — please allow location access, or use the face scanner at the office.":
+    "Webでの出退勤打刻には位置情報が必要で、打刻記録と共に保存されます。ブラウザで位置情報を許可するか、オフィスの顔認証端末をご利用ください。",
   // 2026-09-25: Settings page card for the geofence (MD/Accounting can edit the office area).
   "Area where web check-in is blocked": "Web打刻を禁止するエリア",
   "Block web check-in inside this area": "このエリア内ではWeb打刻を禁止する",

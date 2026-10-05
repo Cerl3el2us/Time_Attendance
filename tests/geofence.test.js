@@ -128,16 +128,23 @@ test('a position 700 km away is allowed, with or without any accuracy value', ()
   assert.strictEqual(S.geofenceCheckinReason(G, 'user', FAR.lat, FAR.lng, 100000), '');
 });
 
-test('a driver is allowed everywhere, including with no position at all', () => {
+test('a driver skips the distance rule but still has to report a position', () => {
   assert.strictEqual(S.geofenceCheckinReason(G, 'driver', PASO.lat, PASO.lng), '');
-  assert.strictEqual(S.geofenceCheckinReason(G, 'driver', null, null), '');
+  // 2026-10-05 (owner): drivers must switch location on to clock in or out like everyone else.
+  // The exemption waives the DISTANCE test only. This assertion used to expect '' -- it was
+  // changed deliberately on the owner's instruction, not because the rule drifted.
+  assert.strictEqual(S.geofenceCheckinReason(G, 'driver', null, null), 'geofence-no-position');
 });
 
-test('the master switch restores the old behaviour exactly', () => {
+test('the master switch turns off the distance rule, not the position requirement', () => {
   const off = { ...G, enabled: false };
   assert.strictEqual(S.geofenceCheckinReason(off, 'user', PASO.lat, PASO.lng), '');
-  assert.strictEqual(S.geofenceCheckinReason(off, 'user', null, null), '');
   assert.strictEqual(S.geofenceCheckinReason(undefined, 'user', PASO.lat, PASO.lng), '');
+  // 2026-10-05 (owner): the position exists for the audit trail, which has nothing to do with
+  // fencing -- so switching the fence off must not switch the position requirement off with it.
+  // Both of these used to return ''.
+  assert.strictEqual(S.geofenceCheckinReason(off, 'user', null, null), 'geofence-no-position');
+  assert.strictEqual(S.geofenceCheckinReason(undefined, 'user', null, null), 'geofence-no-position');
 });
 
 test('a radius of 0 is honoured, not replaced by a default', () => {
@@ -260,23 +267,29 @@ test('an employee who already checked in today is not gated again', () => {
 // saveEvent") so a dropped `return` or a bypassed check-in test makes an assertion fail, not just
 // a text pattern go missing.
 
-test('webScanGateReason: a check-out is never asked for GPS', () => {
-  // M2 (2026-09-25 review) moved getAppSettings() to run first (to short-circuit on the master
-  // switch before the expensive log build) -- it now legitimately runs for a check-out too, so
-  // this stub returns a normal enabled settings object instead of throwing on any call.
+test('webScanGateReason: a check-out still needs a position, and is still never distance-gated', () => {
+  // 2026-10-05 (owner): a check-out used to skip the gate entirely and was never asked for GPS.
+  // It now has to carry a position -- Accounting must be able to check afterwards where the
+  // employee was -- while the distance rule still never applies to it, so someone leaving the
+  // office in the evening is never refused for being at the office.
   let geofenceCalls = 0;
-  const ctx = {
-    webScanWouldBeCheckIn: () => false,
-    getAppSettings: () => ({ geofence: { enabled: true } }),
-    parseGpsCoords: () => { throw new Error('parseGpsCoords must not run for a check-out'); },
-    geofenceCheckinReason: () => { geofenceCalls++; return 'geofence-inside'; },
+  const run = (gps, age) => {
+    const ctx = {
+      webScanWouldBeCheckIn: () => false,
+      getAppSettings: () => ({ geofence: { enabled: true } }),
+      sanitizeGpsAge: v => (typeof v === 'number' && v >= 0 ? v : null),
+      parseGpsCoords: str => (str ? { lat: 13.7, lng: 100.5 } : null),
+      geofenceCheckinReason: () => { geofenceCalls++; return 'geofence-inside'; },
+    };
+    ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
+    vm.createContext(ctx);
+    vm.runInContext(extractFunction(SERVER_SRC, 'webScanGateReason'), ctx);
+    return ctx.webScanGateReason({ role: 'user' }, '2026-09-25T17:40:00', gps, age);
   };
-  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
-  vm.createContext(ctx);
-  vm.runInContext(extractFunction(SERVER_SRC, 'webScanGateReason'), ctx);
-  const result = ctx.webScanGateReason({ role: 'user' }, '2026-09-25T17:40:00', '13.7,100.5');
-  assert.strictEqual(result, '', 'a check-out must never be gated');
-  assert.strictEqual(geofenceCalls, 0, 'geofenceCheckinReason must not run when the check-in test says no');
+  assert.strictEqual(run('13.7,100.5'), '', 'a check-out carrying a position is allowed');
+  assert.strictEqual(run(''), 'geofence-no-position', 'a check-out with no position is refused');
+  assert.strictEqual(run('13.7,100.5', 999), 'geofence-no-position', 'a stale fix counts as no position');
+  assert.strictEqual(geofenceCalls, 0, 'the distance rule must still never run for a check-out');
 });
 
 // M2 fix (2026-09-25 review): webScanGateReason() used to call webScanWouldBeCheckIn() --
@@ -286,17 +299,24 @@ test('webScanGateReason: a check-out is never asked for GPS', () => {
 // actually happens (not just that the final answer is still ''), by making every downstream
 // collaborator throw if it is ever reached.
 test('webScanGateReason: the master switch is checked first, without running the expensive log build', () => {
+  // 2026-10-05: parseGpsCoords/sanitizeGpsAge now run BEFORE the master switch, because the
+  // position requirement outlives the fence -- both are cheap string work. The expensive
+  // collaborator this test exists for, webScanWouldBeCheckIn() -> readEvents(), must still be
+  // skipped, and so must the distance rule.
   const ctx = {
     webScanWouldBeCheckIn: () => { throw new Error('webScanWouldBeCheckIn (and its readEvents() log build) must not run when geofence.enabled is false'); },
     getAppSettings: () => ({ geofence: { enabled: false } }),
-    parseGpsCoords: () => { throw new Error('parseGpsCoords must not run when disabled'); },
+    sanitizeGpsAge: v => (typeof v === 'number' && v >= 0 ? v : null),
+    parseGpsCoords: str => (str ? { lat: 13.7, lng: 100.5 } : null),
     geofenceCheckinReason: () => { throw new Error('geofenceCheckinReason must not run when disabled'); },
   };
   ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   vm.runInContext(extractFunction(SERVER_SRC, 'webScanGateReason'), ctx);
-  const result = ctx.webScanGateReason({ role: 'user' }, '2026-09-25T08:25:00', '13.7,100.5');
-  assert.strictEqual(result, '', 'a disabled geofence must always allow the scan');
+  assert.strictEqual(ctx.webScanGateReason({ role: 'user' }, '2026-09-25T08:25:00', '13.7,100.5'), '',
+    'a disabled geofence allows a scan that carries a position');
+  assert.strictEqual(ctx.webScanGateReason({ role: 'user' }, '2026-09-25T08:25:00', ''), 'geofence-no-position',
+    'a disabled geofence still refuses a scan carrying no position at all');
 });
 
 // 2026-09-26: webScanGateReason() no longer receives or forwards a gpsAccuracy argument at all --
@@ -322,10 +342,11 @@ test('webScanGateReason: a check-in defers entirely to geofenceCheckinReason, wi
   assert.deepStrictEqual(calls[0], [G, 'manager', 13.7, 100.5],
     'must pass the settings object, hikUser.role and the parsed coords through unchanged, with no accuracy argument');
 
-  // No gps at all: coords stay null, and NaN/NaN reach geofenceCheckinReason (its own
-  // "lat == null" check does not apply to NaN, so this must be NaN, not null or undefined).
-  ctx.webScanGateReason({ role: 'user' }, '2026-09-25T08:25:00', '');
-  assert.deepStrictEqual(calls[1], [G, 'user', NaN, NaN]);
+  // 2026-10-05 (owner): no gps at all no longer reaches geofenceCheckinReason -- webScanGateReason
+  // refuses it itself, for a check-OUT as much as a check-in, so the position requirement cannot
+  // be lost by a later change to the distance rule. This used to assert NaN/NaN were passed down.
+  assert.strictEqual(ctx.webScanGateReason({ role: 'user' }, '2026-09-25T08:25:00', ''), 'geofence-no-position');
+  assert.strictEqual(calls.length, 1, 'the distance rule is not consulted when there is no position');
 });
 
 function extractWebscanGateWiring(routeBody) {
@@ -450,15 +471,18 @@ function runWebScanGateReasonStaleness({ role, gps, gpsAgeSec, wouldBeCheckIn })
   vm.createContext(ctx);
   vm.runInContext(`${extractFunction(SERVER_SRC, 'sanitizeGpsAge')}\n${extractFunction(SERVER_SRC, 'webScanGateReason')}`, ctx);
   // gpsAgeSec here is the RAW value, exactly as the route now forwards body.gpsAgeSec unsanitized.
-  ctx.webScanGateReason({ role }, '2026-09-25T08:25:00', gps, gpsAgeSec);
-  return { G, calls };
+  const result = ctx.webScanGateReason({ role }, '2026-09-25T08:25:00', gps, gpsAgeSec);
+  return { G, calls, result };
 }
 
 test('webScanGateReason: a PRESENT, stale gpsAgeSec (>60s) is treated as no position, even with real in-office coords', () => {
-  const { G, calls } = runWebScanGateReasonStaleness({ role: 'user', gps: '13.7268315,100.52847', gpsAgeSec: 61, wouldBeCheckIn: true });
-  assert.strictEqual(calls.length, 1);
-  assert.deepStrictEqual(calls[0], [G, 'user', NaN, NaN],
-    'a stale fix must reach geofenceCheckinReason as NaN/NaN -- exactly like no position at all, not the real (in-office) coords');
+  const { calls, result } = runWebScanGateReasonStaleness({ role: 'user', gps: '13.7268315,100.52847', gpsAgeSec: 61, wouldBeCheckIn: true });
+  // 2026-10-05 (owner): a stale fix used to be handed down to geofenceCheckinReason as NaN/NaN
+  // and refused there. webScanGateReason now refuses it itself, before the distance rule is
+  // consulted at all, because the position is required of a check-OUT too -- which never reaches
+  // that rule. Same refusal, decided one level up.
+  assert.strictEqual(result, 'geofence-no-position');
+  assert.strictEqual(calls.length, 0, 'the distance rule must not be consulted without a usable position');
 });
 
 test('webScanGateReason: a PRESENT, fresh gpsAgeSec (<=60s) still uses the real coords', () => {
@@ -482,9 +506,13 @@ test('webScanGateReason: an ABSENT gpsAgeSec (key never sent -- older client) fa
 // same as a genuinely stale fix.
 test('webScanGateReason: a PRESENT-but-unusable gpsAgeSec (negative, absurd, string, boolean, array, explicit null) is treated as no position, never as absent', () => {
   for (const badValue of [-1, 90000, 'x', true, [], null]) {
-    const { G, calls } = runWebScanGateReasonStaleness({ role: 'user', gps: '13.7268315,100.52847', gpsAgeSec: badValue, wouldBeCheckIn: true });
-    assert.deepStrictEqual(calls[0], [G, 'user', NaN, NaN],
+    const { calls, result } = runWebScanGateReasonStaleness({ role: 'user', gps: '13.7268315,100.52847', gpsAgeSec: badValue, wouldBeCheckIn: true });
+    // 2026-10-05: refused one level up now (see the stale-age test above) instead of being
+    // handed down as NaN/NaN. The point of the test is unchanged: PRESENT-but-unusable must
+    // never fall through to the real in-office coords.
+    assert.strictEqual(result, 'geofence-no-position',
       `gpsAgeSec: ${JSON.stringify(badValue)} is PRESENT but unusable -- must be treated as no position, not fall through to the real coords`);
+    assert.strictEqual(calls.length, 0, 'the distance rule must not be consulted without a usable position');
   }
 });
 
@@ -876,7 +904,11 @@ test('geofenceUiState never blocks a press that would not be a new check-in, eve
     webCheckinWouldBeCheckIn: () => false,
     geofenceCheckinReason: () => { throw new Error('geofenceCheckinReason must not run -- this press is not a check-in'); },
     geofenceMessage: () => { throw new Error('geofenceMessage must not run -- this press is not a check-in'); },
-    gpsIsFresh: () => { throw new Error('gpsIsFresh must not run -- returned before reaching it'); },
+    // 2026-10-05 (owner): the position check now runs FIRST, for a check-out as much as a
+    // check-in, so gpsIsFresh() is legitimately reached here -- it used to throw to prove the
+    // early return happened before it. A fresh fix is stubbed so this test still isolates the
+    // webCheckinWouldBeCheckIn() branch; the no-position branch has its own test.
+    gpsIsFresh: () => true,
     currentUser: { role: 'user' },
     currentGPS: { latRaw: PASO.lat, lngRaw: PASO.lng, accuracy: 10 },
     APP_SETTINGS: { geofence: G },
@@ -983,10 +1015,13 @@ test('geofenceUiState fails OPEN when attendance has not loaded fresh this sessi
 // 2026-09-26 (CRITICAL #1): a stale fix must reach geofenceCheckinReason as NaN/NaN -- exactly
 // like no position at all -- never the real (possibly in-office) coordinates.
 test('geofenceUiState (Critical 1): a stale GPS fix is treated as no position, not the real coords', () => {
-  let seenLat, seenLng;
   const ctx = {
     webCheckinWouldBeCheckIn: () => true,
-    geofenceCheckinReason: (_G, _role, lat, lng) => { seenLat = lat; seenLng = lng; return 'geofence-no-position'; },
+    // 2026-10-05 (owner): a stale fix is refused by geofenceUiState() itself now, before the
+    // distance rule is consulted -- it used to be handed down as NaN/NaN and refused there.
+    // Same refusal, decided one level up, and it has to be, because a check-OUT needs the same
+    // position requirement and never reaches the distance rule at all.
+    geofenceCheckinReason: () => { throw new Error('geofenceCheckinReason must not run -- a stale fix is refused before the distance rule'); },
     geofenceMessage: reason => `msg:${reason}`,
     gpsIsFresh: () => false, // stale
     currentUser: { role: 'user' },
@@ -1004,7 +1039,6 @@ test('geofenceUiState (Critical 1): a stale GPS fix is treated as no position, n
     extractFunction(APP_SRC, 'effectiveRole') + ';' +
     extractFunction(APP_SRC, 'geofenceUiState'), ctx);
   const st = ctx.geofenceUiState();
-  assert.ok(Number.isNaN(seenLat) && Number.isNaN(seenLng), 'a stale fix must be passed through as NaN/NaN, not the real coordinates');
   assert.strictEqual(st.blocked, true);
   assert.strictEqual(st.reason, 'geofence-no-position');
 });

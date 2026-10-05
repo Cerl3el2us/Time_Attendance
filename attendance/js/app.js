@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 85;
+const APP_BUILD = 86;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -7151,12 +7151,18 @@ function geofenceDistanceM(lat1, lng1, lat2, lng2) {
 // Returns '' to allow, or the reason code to refuse. Order matters: the caller must already have
 // established that this scan would become a CHECK-IN -- check-out is never gated.
 function geofenceCheckinReason(G, role, lat, lng) {
-  if (!G || typeof G !== 'object' || G.enabled !== true) return '';
-  const exempt = Array.isArray(G.exemptRoles) ? G.exemptRoles : [];
-  if (exempt.includes(role)) return '';
+  // 2026-10-05 (owner): a position is required of EVERYONE -- including the roles the distance
+  // rule exempts, and whether or not the fence itself is switched on. The reason is not fencing
+  // but accounting: a web scan carrying no position cannot be checked afterwards against where
+  // the employee says they were. The exemption below therefore waives only the distance test,
+  // which is why this block now sits above both the master switch and the exemption. Drivers
+  // used to pass here with no position at all, leaving the most mobile staff with no location.
   if (lat == null || lng == null) return 'geofence-no-position';
   const la = Number(lat), ln = Number(lng);
   if (!Number.isFinite(la) || !Number.isFinite(ln)) return 'geofence-no-position';
+  if (!G || typeof G !== 'object' || G.enabled !== true) return '';
+  const exempt = Array.isArray(G.exemptRoles) ? G.exemptRoles : [];
+  if (exempt.includes(role)) return '';
   let radius = 150;
   if (Number.isFinite(Number(G.radiusM))) radius = Number(G.radiusM);
   if (radius === 0) return '';
@@ -8399,8 +8405,8 @@ function geofenceMessage(reason) {
   if (reason === 'geofence-no-position') {
     // Also covers a fix that went stale (GPS went quiet -- see gpsIsFresh()): the remedy reads
     // the same either way -- allow location access (or wait for a fresh fix), or use the scanner.
-    return L('Web check-in requires your location — please allow location access, or use the face scanner at the office.',
-             'เช็คอินผ่านเว็บต้องระบุตำแหน่ง — กรุณาอนุญาตให้เข้าถึงตำแหน่งในเบราว์เซอร์ หรือสแกนใบหน้าที่เครื่องในออฟฟิศ');
+    return L('Clocking in or out from the web requires your location, which is recorded with the scan — please allow location access, or use the face scanner at the office.',
+             'การลงเวลาเข้า–ออกผ่านเว็บต้องระบุตำแหน่ง และตำแหน่งจะถูกบันทึกไว้กับรายการลงเวลา — กรุณาอนุญาตให้เข้าถึงตำแหน่งในเบราว์เซอร์ หรือสแกนใบหน้าที่เครื่องในออฟฟิศ');
   }
   return '';
 }
@@ -8408,9 +8414,22 @@ function geofenceMessage(reason) {
 // caller -- is only ever reachable after login (geofenceUiState() has no load-time caller of its
 // own now that applyGeofenceToScanButton() is gone; the guard just costs nothing to keep).
 function geofenceUiState() {
-  // Critical: only a press that would actually be a NEW check-in may ever be gated -- the server
-  // never gates a check-out, so an on-site employee checking out in the evening (or a late-night
-  // return, or a first press after CHECKIN_CUTOFF) must never be refused here.
+  // Critical #1: a stale fix (see gpsIsFresh()'s own comment) must be treated as no position at
+  // all -- same reason code as never having gotten a fix in the first place.
+  const fresh = currentGPS && gpsIsFresh(currentGPS, Date.now()) ? currentGPS : null;
+  // 2026-10-05 (owner): a position is required for a check-OUT as well, so Accounting can check
+  // afterwards where the employee was. This is the one part of the gate that depends on neither
+  // the geofence settings nor the direction of the press, so it is judged first and deliberately
+  // sits outside the fail-open guard below: the server refuses a position-less scan either way,
+  // and refusing here first is what lets doScan() fetch one fresh fix before giving up (see its
+  // 'geofence-no-position' retry).
+  if (!fresh) {
+    return { blocked: true, reason: 'geofence-no-position', text: geofenceMessage('geofence-no-position') };
+  }
+  // Critical: only a press that would actually be a NEW check-in may ever be gated on DISTANCE --
+  // the server never applies the distance rule to a check-out, so an on-site employee checking out
+  // in the evening (or a late-night return, or a first press after CHECKIN_CUTOFF) must never be
+  // refused for being at the office.
   if (!webCheckinWouldBeCheckIn()) return { blocked: false, reason: '', text: '' };
   // Important #2a/#2b (fail OPEN): until this session has genuinely fresh settings AND fresh
   // attendance, never refuse locally -- let the server's own 403 decide instead. See
@@ -8421,13 +8440,8 @@ function geofenceUiState() {
   // Visibility, updateAbroadEntryVisibility, doScan). Reading the raw role made the geofence the one
   // rule that could not be exercised from a preview at all.
   const role = effectiveRole();
-  // Critical #1: a stale fix (see gpsIsFresh()'s own comment) must be treated as no position at
-  // all -- same reason code as never having gotten a fix in the first place.
-  const fresh = currentGPS && gpsIsFresh(currentGPS, Date.now()) ? currentGPS : null;
   const reason = geofenceCheckinReason(
-    APP_SETTINGS.geofence, role,
-    fresh ? Number(fresh.latRaw) : NaN,
-    fresh ? Number(fresh.lngRaw) : NaN
+    APP_SETTINGS.geofence, role, Number(fresh.latRaw), Number(fresh.lngRaw)
   );
   return { blocked: !!reason, reason, text: reason ? geofenceMessage(reason) : '' };
 }
