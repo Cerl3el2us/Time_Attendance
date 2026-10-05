@@ -14323,8 +14323,11 @@ function buildApprovalCard(l, role) {
     // is required at submit time (l.locations[0].name) but the card never showed it.
     if (l.type === 'holiday-work') {
       const hwLoc = holidayWorkLocationLabel(l);
+      // holidayWorkTimesLabel() returns HTML it has already escaped -- escaping it again here would
+      // double-encode anything it adds (the "(next day)" suffix), and reads as though the helper
+      // returned raw text.
       const hwTimes = (l.workStartTime && l.workEndTime) ? holidayWorkTimesLabel(l) : '';
-      detail = `<div style="font-size:13px;color:var(--text);margin-top:6px">📍 ${L('Location', 'สถานที่')}: <strong>${hwLoc || '—'}</strong>${hwTimes ? ` &nbsp;·&nbsp; ⏱️ ${escapeHtml(hwTimes)}` : ''}</div>`;
+      detail = `<div style="font-size:13px;color:var(--text);margin-top:6px">📍 ${L('Location', 'สถานที่')}: <strong>${hwLoc || '—'}</strong>${hwTimes ? ` &nbsp;·&nbsp; ⏱️ ${hwTimes}` : ''}</div>`;
     }
     reasonLine  = `<div style="font-size:13px;color:var(--text-muted);margin-top:4px">📝 ${escapeHtml(l.reason)}</div>`;
   }
@@ -16039,7 +16042,18 @@ function buildAttachmentLinkHtml(l) {
 // toolbar and only the top of the page. pdf.js (jsDelivr is already in script-src) draws the WHOLE
 // first page onto a canvas scaled to fit the 180x120 box instead.
 const PDFJS_VER = '3.11.174';
+// 2026-10-05 (review): bounded. Each entry is a 360x240 PNG as a base64 data URL (tens of KB), and
+// an approver who leaves the app open all day scrolling through requests would otherwise accumulate
+// every thumbnail ever rendered until the page is reloaded. Map preserves insertion order, so the
+// oldest key is the first one -- plain FIFO, which is enough for a list people scroll through once.
+const PDF_THUMB_CACHE_MAX = 40;
 const _pdfThumbCache = new Map();
+function cachePdfThumb(filename, dataUrl) {
+  _pdfThumbCache.set(filename, dataUrl);
+  while (_pdfThumbCache.size > PDF_THUMB_CACHE_MAX) {
+    _pdfThumbCache.delete(_pdfThumbCache.keys().next().value);
+  }
+}
 let _pdfjsPromise = null;
 function loadPdfJs() {
   if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
@@ -16070,20 +16084,26 @@ async function hydratePdfThumb(imgEl) {
       const buf = await res.arrayBuffer();
       const pdfjs = await loadPdfJs();
       const doc = await pdfjs.getDocument({ data: buf }).promise;
-      const page = await doc.getPage(1);
-      const base = page.getViewport({ scale: 1 });
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      // contain: the whole page fits inside 180x120, never cropped
-      const scale = Math.min(180 / base.width, 120 / base.height) * dpr;
-      const vp = page.getViewport({ scale });
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.ceil(vp.width); canvas.height = Math.ceil(vp.height);
-      const ctx = canvas.getContext('2d');
-      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
-      await page.render({ canvasContext: ctx, viewport: vp }).promise;
-      dataUrl = canvas.toDataURL('image/png');
-      _pdfThumbCache.set(filename, dataUrl);
-      doc.destroy();
+      // 2026-10-05 (review): destroy in a finally. A damaged or password-protected PDF makes
+      // page.render() reject, and the old code jumped straight to the outer catch with the
+      // document still alive -- pdf.js kept its buffers until the page was reloaded.
+      try {
+        const page = await doc.getPage(1);
+        const base = page.getViewport({ scale: 1 });
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        // contain: the whole page fits inside 180x120, never cropped
+        const scale = Math.min(180 / base.width, 120 / base.height) * dpr;
+        const vp = page.getViewport({ scale });
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.ceil(vp.width); canvas.height = Math.ceil(vp.height);
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+        await page.render({ canvasContext: ctx, viewport: vp }).promise;
+        dataUrl = canvas.toDataURL('image/png');
+        cachePdfThumb(filename, dataUrl);
+      } finally {
+        doc.destroy();
+      }
     }
     box.querySelector('.att-pdf-thumb-fallback')?.remove();
     const im = document.createElement('img');
