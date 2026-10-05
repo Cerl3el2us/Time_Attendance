@@ -16001,13 +16001,50 @@ function buildAttachmentLinkHtml(l) {
   const nameAttr = escapeHtml(l.attachmentName || l.attachment);
   return isImg
     ? `<a href="javascript:void(0)" class="att-open-link" data-attachment="${attAttr}" data-attachment-name="${nameAttr}" style="display:block;margin-top:4px"><img src="${_attUrl}" data-attachment="${attAttr}" onerror="hydrateAttachmentImg(this)" style="max-width:100%;max-height:200px;border-radius:8px;border:1px solid #e2e8f0"></a>`
-    : `<a href="javascript:void(0)" class="att-open-link" data-attachment="${attAttr}" data-attachment-name="${nameAttr}" style="color:#3b82f6;text-decoration:underline">📄 ${nameAttr}</a>`;
+    : ext === 'pdf'
+      // 2026-10-05: small first-page thumbnail. The 1x1 gif's onload kicks off hydratePdfThumb()
+      // (same inline-handler trick as the image onerror above, since these links are inserted via
+      // innerHTML in many places with no shared re-render hook). The whole <a> stays the click
+      // target; the iframe inside has pointer-events:none so it can't swallow the click.
+      ? `<a href="javascript:void(0)" class="att-open-link" data-attachment="${attAttr}" data-attachment-name="${nameAttr}" style="display:inline-block;margin-top:4px;color:#3b82f6;text-decoration:none"><span class="att-pdf-thumb" style="display:block;width:180px;height:120px;overflow:hidden;border:1px solid #e2e8f0;border-radius:8px;background:#f1f5f9;position:relative"><img src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==" data-attachment="${attAttr}" onload="hydratePdfThumb(this)" alt="" style="position:absolute;width:1px;height:1px;opacity:0"><span class="att-pdf-thumb-fallback" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:28px">📄</span></span><span style="display:block;margin-top:2px;font-size:12px;text-decoration:underline;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${nameAttr}</span></a>`
+      : `<a href="javascript:void(0)" class="att-open-link" data-attachment="${attAttr}" data-attachment-name="${nameAttr}" style="color:#3b82f6;text-decoration:underline">📄 ${nameAttr}</a>`;
+}
+
+// Blob URLs of PDF thumbnails already fetched this session, so re-rendering the approval list
+// doesn't re-download every PDF. Kept for the page's lifetime (a handful of small files).
+const _pdfThumbCache = new Map();
+async function hydratePdfThumb(imgEl) {
+  const box = imgEl.closest('.att-pdf-thumb');
+  const filename = imgEl.dataset.attachment;
+  if (!box || !filename || box.dataset.hydrated) return;
+  box.dataset.hydrated = '1';
+  try {
+    let url = _pdfThumbCache.get(filename);
+    if (!url) {
+      const res = await apiFetch(`/api/upload/${encodeURIComponent(filename)}`);
+      if (!res.ok) return;
+      url = URL.createObjectURL(new Blob([await res.blob()], { type: 'application/pdf' }));
+      _pdfThumbCache.set(filename, url);
+    }
+    box.querySelector('.att-pdf-thumb-fallback')?.remove();
+    const f = document.createElement('iframe');
+    f.src = url + '#toolbar=0&navpanes=0&scrollbar=0&view=FitH';
+    f.tabIndex = -1;
+    f.setAttribute('aria-hidden', 'true');
+    f.style.cssText = 'width:100%;height:100%;border:0;pointer-events:none;background:#fff';
+    box.appendChild(f);
+  } catch (e) { /* keep the 📄 fallback */ }
 }
 
 // Fetches an attachment through apiFetch() (so the auth header actually gets attached, see the
 // comment above buildAttachmentLinkHtml) and opens it as a blob: URL in a new tab. Revoked after a
 // minute -- long enough for the new tab to finish loading it, short enough not to leak memory on a
 // long session with many attachments opened.
+// 2026-10-05 (owner request): PDFs and images now open in an in-app preview modal
+// (#attachment-viewer-modal) instead of a new tab / download. Other types (Word, Excel...) can't
+// be rendered by a browser, so those are still downloaded under their original filename.
+// The blob URL lives as long as the modal is open and is revoked in closeAttachmentViewer().
+let _attViewerUrl = null;
 async function openAttachment(filename, displayName) {
   if (!filename) return;
   try {
@@ -16016,13 +16053,46 @@ async function openAttachment(filename, displayName) {
       showToast(L('❌ Could not open the attachment', '❌ ไม่สามารถเปิดไฟล์แนบได้'), 'danger');
       return;
     }
-    const blob = await res.blob();
+    const raw = await res.blob();
+    const name = displayName || filename;
+    const ext = name.split('.').pop().toLowerCase();
+    const isPdf = ext === 'pdf';
+    const isImg = ['jpg','jpeg','png','gif','webp'].includes(ext);
+    // Re-type the blob from the extension: an application/octet-stream blob would make the
+    // iframe download the PDF instead of rendering it.
+    const type = isPdf ? 'application/pdf'
+      : isImg ? (ext === 'jpg' ? 'image/jpeg' : 'image/' + ext)
+      : raw.type;
+    const blob = new Blob([raw], { type });
     const url = URL.createObjectURL(blob);
-    window.open(url, '_blank');
-    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    if (!isPdf && !isImg) {
+      const a = document.createElement('a');
+      a.href = url; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      return;
+    }
+    closeAttachmentViewer();
+    _attViewerUrl = url;
+    document.getElementById('att-viewer-title').textContent = name;
+    const dl = document.getElementById('att-viewer-download');
+    dl.href = url; dl.download = name;
+    const body = document.getElementById('att-viewer-body');
+    body.innerHTML = isPdf
+      ? `<iframe src="${url}" title="${escapeHtml(name)}" style="width:100%;height:100%;border:0;background:#fff"></iframe>`
+      : `<img src="${url}" alt="${escapeHtml(name)}" style="max-width:100%;max-height:100%;object-fit:contain;display:block;margin:auto">`;
+    document.getElementById('attachment-viewer-modal').classList.add('show');
   } catch (e) {
     showToast(L('❌ Could not open the attachment', '❌ ไม่สามารถเปิดไฟล์แนบได้'), 'danger');
   }
+}
+
+function closeAttachmentViewer() {
+  const m = document.getElementById('attachment-viewer-modal');
+  if (m) m.classList.remove('show');
+  const body = document.getElementById('att-viewer-body');
+  if (body) body.innerHTML = '';
+  if (_attViewerUrl) { URL.revokeObjectURL(_attViewerUrl); _attViewerUrl = null; }
 }
 
 // Same idea as openAttachment() but for the inline image thumbnail -- swaps the <img>'s src to an
@@ -16043,12 +16113,18 @@ async function hydrateAttachmentImg(imgEl) {
 // Delegated click handler for every `.att-open-link` rendered by buildAttachmentLinkHtml() --
 // added once here (not per-render) since these links get inserted via innerHTML in several
 // different places (approval detail views, My Requests cards) with no single shared re-render hook.
+// 2026-10-05 BUG FIX: registered in the CAPTURE phase. The approval card wraps its attachment
+// link in `<div onclick="event.stopPropagation()">` (so the click doesn't also open the card's
+// detail modal), which meant a bubbling listener on document never saw the click -- the link was
+// dead on the card and only worked inside the detail modal. Capturing sees it first; we then
+// stop it so the card's own onclick doesn't fire underneath the viewer.
 document.addEventListener('click', (e) => {
   const el = e.target.closest('.att-open-link');
   if (!el) return;
   e.preventDefault();
+  e.stopPropagation();
   openAttachment(el.dataset.attachment, el.dataset.attachmentName);
-});
+}, true);
 
 // 2026-08-17 (M-4): Escape closes whichever modal is open, the same way tapping the backdrop
 // does -- .click() on the overlay itself makes event.target===this true, so it reuses each

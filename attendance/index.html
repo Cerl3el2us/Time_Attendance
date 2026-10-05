@@ -2520,6 +2520,20 @@
   </div>
 </div>
 
+<!-- ===== ATTACHMENT VIEWER MODAL (2026-10-05) — z-index above the approval detail modal it opens from ===== -->
+<div class="modal-overlay" id="attachment-viewer-modal" style="z-index:2000" onclick="if(event.target===this)closeAttachmentViewer()">
+  <div class="modal" style="max-width:1000px;width:95%;height:90vh;height:90dvh;max-height:90dvh">
+    <div class="modal-header">
+      <h3 id="att-viewer-title" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0"></h3>
+      <div style="display:flex;gap:8px;align-items:center;flex-shrink:0">
+        <a id="att-viewer-download" class="btn btn-ghost btn-sm" download data-en="⬇️ Download">⬇️ ดาวน์โหลด</a>
+        <button class="btn btn-ghost btn-sm" onclick="closeAttachmentViewer()">✕</button>
+      </div>
+    </div>
+    <div id="att-viewer-body" style="flex:1;min-height:0;overflow:auto;background:#f1f5f9;display:flex"></div>
+  </div>
+</div>
+
 <!-- ===== CLEAR OLD ATTACHMENTS MODAL ===== -->
 <div class="modal-overlay" id="clear-attachments-modal" onclick="if(event.target===this)closeClearAttachmentsModal()">
   <div class="modal modal-wide" style="max-width:760px;max-height:88vh;max-height:88dvh;overflow-y:auto">
@@ -2770,6 +2784,6 @@
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ja.js" integrity="sha384-mKor8U8jwukUkfxaFPCsxKF9S62PXq4gG7zcZ5yQ2x3KL1msprJZeFlKFEDeeb5V" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/th.js" integrity="sha384-E6OVFg1zUc/pckGxry0YZ6VeZ1E17l7Jl8ZQx58jbEfxxkz9LqknQhiIrA9zg/8b" crossorigin="anonymous"></script>
 
-<script src="js/app.js?v=20261002w"></script>
+<script src="js/app.js?v=20261005b"></script>
 </body>
 </html>
