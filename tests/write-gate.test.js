@@ -95,21 +95,32 @@ test('the one-off CONFIRM at the approval call site is gone', () => {
     'approveMockLeaveInternal must rely on the gate, not ask again itself');
 });
 
+// Read the TTL out of the source so the test cannot drift from the value that ships.
+const CONFIRMED_TTL = Number(/const CONFIRMED_GESTURE_TTL_MS = (\d+);/.exec(APP_SRC)[1]);
+
 console.log('\nWrite gate: what it does to a write');
 
 (async () => {
   const mk = (isSuper, typed) => {
     const c = {
-      console, Response,
+      console, Response, Date,
       L: (en) => en,
       isSuperAdmin: () => isSuper,
-      prompt: () => typed,
+      prompts: 0,
       t: k => k,
       currentLang: 'en',
     };
+    c.prompt = () => { c.prompts++; return typed; };
     vm.createContext(c);
-    ['requireSuperAdminConfirm', 'writeGateLabel', 'writeGateRefusal'].forEach(n =>
-      vm.runInContext(extractFunction(APP_SRC, n), c));
+    // The gesture counter is module state in app.js, bumped by a capture-phase listener there.
+    // There is no document here, so the tests drive it directly — which is also the point: the
+    // decision must depend only on "which press is this", nothing else.
+    vm.runInContext('let _gestureSeq = 0; let _confirmedGesture = -1; let _confirmedGestureAt = 0;' +
+      'const CONFIRMED_GESTURE_TTL_MS = 120000;' +
+      'function press() { _gestureSeq++; }' +
+      'function ageConfirmation(ms) { _confirmedGestureAt -= ms; }', c);
+    ['gestureAlreadyConfirmed', 'requireSuperAdminConfirm', 'writeGateLabel', 'writeGateRefusal']
+      .forEach(n => vm.runInContext(extractFunction(APP_SRC, n), c));
     return c;
   };
 
@@ -143,6 +154,42 @@ console.log('\nWrite gate: what it does to a write');
       assert.ok(c.writeGateLabel(p, 'PUT').toLowerCase().includes(word),
         `${p} should be described with "${word}" — a prompt that does not say what it is confirming trains people to type CONFIRM blind`);
     }
+  });
+
+  console.log('\nWrite gate: one press, one question');
+
+  await atest('three writes from a single press ask once', async () => {
+    const c = mk(true, 'CONFIRM');
+    c.press();
+    for (const p of ['/api/settings', '/api/settings', '/api/users/5']) {
+      assert.strictEqual(await c.writeGateRefusal(p, 'PUT'), null, `${p} should pass`);
+    }
+    assert.strictEqual(c.prompts, 1,
+      'saving Settings is three requests but one decision — asking three times trains people to type CONFIRM without reading');
+  });
+  await atest('a second press asks again', async () => {
+    const c = mk(true, 'CONFIRM');
+    c.press();
+    await c.writeGateRefusal('/api/settings', 'PUT');
+    c.press();
+    await c.writeGateRefusal('/api/users/5', 'PUT');
+    assert.strictEqual(c.prompts, 2, 'a CONFIRM must never carry over to the next thing pressed');
+  });
+  await atest('cancelling leaves nothing confirmed, so the next write asks again', async () => {
+    const c = mk(true, null);
+    c.press();
+    assert.ok(await c.writeGateRefusal('/api/settings', 'PUT'), 'first write refused');
+    assert.ok(await c.writeGateRefusal('/api/settings', 'PUT'), 'still refused within the same press');
+    assert.strictEqual(c.prompts, 2, 'a cancel must not be remembered as an answer');
+  });
+  await atest('a confirmation expires, so a later background write is not covered by it', async () => {
+    const c = mk(true, 'CONFIRM');
+    c.press();
+    await c.writeGateRefusal('/api/settings', 'PUT');
+    c.ageConfirmation(CONFIRMED_TTL + 1);
+    await c.writeGateRefusal('/api/settings', 'PUT');
+    assert.strictEqual(c.prompts, 2,
+      'a websocket or timer firing a write minutes later must not ride on an old CONFIRM');
   });
 
   console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ', 0 failed'}`);

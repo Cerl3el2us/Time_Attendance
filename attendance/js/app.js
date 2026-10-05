@@ -181,9 +181,14 @@ async function requireSuperAdminConfirm(actionLabel) {
 // year inherits the rule without having to know it exists -- which is the only kind of rule that
 // survives. Guarding the call sites instead would have meant 62 places to forget.
 //
-// The gate asks once per WRITE, not once per button. An action that uploads a file and then posts a
-// record asks twice, because it really is writing twice. No grace window: a window would mean a
-// second, unrelated write slipping through on the strength of a CONFIRM typed for something else.
+// The gate asks once per PRESS (owner, 2026-10-05): press Save once, answer once, however many
+// writes that press turns into — saving Settings is three requests but one decision. The scope is
+// the user's gesture, not a stretch of time: every click or key press starts a new one, so a
+// CONFIRM can never carry over to something pressed afterwards. A time window was the obvious
+// alternative and is worse: it authorises whatever happens to fire next.
+//
+// _confirmedGesture also expires, so a confirmed gesture cannot sit around authorising a write that
+// a timer or a websocket fires minutes later with no one at the keyboard.
 //
 // Deliberately NOT a security control. Anyone who can run JS in this page can call fetch() directly;
 // the server is what actually decides. This stops the accidental write by the person whose job today
@@ -198,10 +203,27 @@ function writeGateLabel(path, method) {
   if (method === 'DELETE') return L('delete data', 'ลบข้อมูล');
   return L('write data', 'เขียนข้อมูล');
 }
+// One press = one gesture. Counted in the capture phase so it is bumped before any handler runs,
+// which means every write a handler starts carries the id of the press that started it.
+let _gestureSeq = 0;
+let _confirmedGesture = -1;
+let _confirmedGestureAt = 0;
+const CONFIRMED_GESTURE_TTL_MS = 120000;
+['click', 'keydown'].forEach(evt =>
+  document.addEventListener(evt, () => { _gestureSeq++; }, true));
+function gestureAlreadyConfirmed() {
+  return _confirmedGesture === _gestureSeq &&
+         Date.now() - _confirmedGestureAt < CONFIRMED_GESTURE_TTL_MS;
+}
 // Returns null to let the request through, or a Response the caller handles like any refusal.
 async function writeGateRefusal(path, method) {
   if (!isSuperAdmin()) return null;
-  if (await requireSuperAdminConfirm(writeGateLabel(path, method))) return null;
+  if (gestureAlreadyConfirmed()) return null;
+  if (await requireSuperAdminConfirm(writeGateLabel(path, method))) {
+    _confirmedGesture = _gestureSeq;
+    _confirmedGestureAt = Date.now();
+    return null;
+  }
   const message = L('Cancelled — nothing was saved', 'ยกเลิกแล้ว ไม่มีการบันทึก');
   return new Response(JSON.stringify({ success: false, message }), {
     status: 403, headers: { 'Content-Type': 'application/json' },
