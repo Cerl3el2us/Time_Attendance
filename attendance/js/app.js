@@ -7148,8 +7148,11 @@ function geofenceDistanceM(lat1, lng1, lat2, lng2) {
   const a = Math.sin(dp / 2) * Math.sin(dp / 2) + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) * Math.sin(dl / 2);
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
 }
-// Returns '' to allow, or the reason code to refuse. Order matters: the caller must already have
-// established that this scan would become a CHECK-IN -- check-out is never gated.
+// Returns '' to allow, or the reason code to refuse. Order matters, and it changed on 2026-10-05:
+// the POSITION test runs first and applies to every web scan, so a caller may hand a check-out
+// straight to this function. Everything below the master switch -- the exemption and the distance
+// test -- is still check-in only, so a caller that has NOT established the scan would be a
+// check-in must not act on 'geofence-inside' from here.
 function geofenceCheckinReason(G, role, lat, lng) {
   // 2026-10-05 (owner): a position is required of EVERYONE -- including the roles the distance
   // rule exempts, and whether or not the fence itself is switched on. The reason is not fencing
