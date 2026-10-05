@@ -14685,8 +14685,16 @@ function morningReviewPendingBoxHtml(pending, reviewed) {
   // Both numbers come from Settings, so the sentence follows a threshold change without an edit.
   const a = APP_SETTINGS.allowances || {};
   const w = morningReviewWindowOf(a);
-  const hint = L('Early enough to earn the allowance, then another door pass between {from} and {to} — held until decided. ❌ sets the real check-in time, which also makes the day late.',
-    'เข้าเช้าพอได้เบี้ย แล้วผ่านประตูอีกช่วง {from}–{to} — พักเบี้ยไว้ก่อน ❌ คือแก้เป็นเวลาจริง วันนั้นจะนับเป็นสาย')
+  // 2026-10-05 (owner): the Thai read as clipped notes rather than a sentence, and it said ❌ "sets
+  // the real check-in time" as though it happened by itself -- denyMorningReview() opens the
+  // correction dialog and the reviewer chooses which of that day's door passes was the real start,
+  // so the day becoming late is a consequence of that choice, not automatic. Japanese was missing
+  // altogether and fell through to English; written out here because the sentence interpolates
+  // times and so cannot be keyed in ja.js.
+  const hint = (currentLang === 'ja'
+    ? '手当が付くほど早く出勤した後、{from}〜{to} に再度ドアを通過しています。その日の手当は判断があるまで保留されます。本当に早朝から勤務していた場合は ✅、そうでない場合は ❌ を押して実際の勤務開始時刻を選んでください（その日は遅刻扱いになることがあります）。'
+    : L('Checked in early enough to earn the allowance, then came through the door again between {from} and {to}, so that day\'s allowance is held until somebody decides. ✅ if the early start was genuine. ❌ to pick the time they really started — which may make the day late.',
+        'เข้างานเช้าพอที่จะได้เบี้ย แต่ผ่านประตูอีกครั้งในช่วง {from}–{to} เบี้ยของวันนั้นจึงถูกพักไว้จนกว่าจะมีคนตัดสิน กด ✅ ถ้ามาทำงานแต่เช้าจริง หรือกด ❌ เพื่อเลือกเวลาที่เริ่มงานจริง ซึ่งอาจทำให้วันนั้นนับเป็นสาย'))
     .replace(/\{from\}/g, () => minsToTime(w.start)).replace(/\{to\}/g, () => minsToTime(w.end));
   const list = tab === 'reviewed' ? reviewed : pending;
   const common = th(L('Employee', 'ชื่อพนักงาน')) + th(L('Date', 'วันที่')) +
