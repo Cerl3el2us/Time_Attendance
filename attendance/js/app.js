@@ -3146,10 +3146,18 @@ async function savePayrollSettings() {
       }
       return { success: true };
     }
-    return { success: false };
+    // 2026-10-05 (owner hit this): the server's own explanation used to be dropped on the floor and
+    // the caller showed a bare "could not save" with no reason, which is unactionable for whoever
+    // is configuring and undiagnosable for whoever is asked about it afterwards. The validator
+    // messages are specific ("appSettings.allowanceEligibility.X must be an array of known roles",
+    // "unknown appSettings field ...") -- pass them through.
+    let message = '';
+    try { message = (await res.json())?.message || ''; } catch (e) { /* non-JSON body */ }
+    console.error('[settings] savePayrollSettings HTTP', res.status, message);
+    return { success: false, status: res.status, message };
   } catch(e) {
     console.error('[settings] savePayrollSettings failed:', e.message);
-    return { success: false };
+    return { success: false, message: e.message };
   }
 }
 
@@ -6027,7 +6035,10 @@ async function saveSettingsPage() {
   const payrollSave = await savePayrollSettings();
   if (!payrollSave || payrollSave.success !== true) {
     if (payrollSave && payrollSave.conflict) return;
-    showToast(L('⚠️ Could not save payroll settings', '⚠️ บันทึกการตั้งค่าเงินเดือนไม่สำเร็จ'), 'danger');
+    // Show WHY. The reason comes from the server's validator and is English; it is still far more
+    // use than a bare failure, and it is what gets quoted when somebody asks what went wrong.
+    const why = payrollSave && payrollSave.message ? ` — ${payrollSave.message}` : '';
+    showToast(L('⚠️ Could not save payroll settings', '⚠️ บันทึกการตั้งค่าเงินเดือนไม่สำเร็จ') + why, 'danger');
     return;
   }
   try {
