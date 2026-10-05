@@ -4706,7 +4706,21 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
       if (Object.keys(A.allowances).length > 50) {
         return res.status(400).json({ success: false, message: 'appSettings.allowances must have 50 or fewer entries' });
       }
+      // 2026-10-05 (owner hit this): `allowances` is mostly money and thresholds, but the morning
+      // review put an on/off flag in there too (morningReviewEnabled). This loop demanded a number
+      // from EVERY key, so once that checkbox had been saved once, every later Settings save was
+      // refused -- the whole page, not just that field. It went unnoticed because the client threw
+      // the reason away and showed a bare "could not save".
+      // Flags are matched by the `...Enabled` suffix rather than a hardcoded list, so the next
+      // toggle added here does not reopen the same hole.
+      const isFlagKey = k => /Enabled$/.test(k);
       for (const [k, v] of Object.entries(A.allowances)) {
+        if (isFlagKey(k)) {
+          if (typeof v !== 'boolean') {
+            return res.status(400).json({ success: false, message: `appSettings.allowances.${k} must be true or false` });
+          }
+          continue;
+        }
         if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 100000) {
           return res.status(400).json({ success: false, message: `appSettings.allowances.${k} must be a number 0-100000` });
         }
