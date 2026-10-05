@@ -5119,7 +5119,7 @@ function renderSettingsPage(_skipRefresh) {
                   <div style="font-size:10.5px;color:#94a3b8">${hint}</div>
                 </td>
                 ${ROLE_KEYS.map(role => `<td style="text-align:center;padding:8px 6px">
-                  <input type="checkbox" id="set-elig-${key}-${role}" ${isAllowanceEligible(s.allowanceEligibility, role, key) ? 'checked' : ''} ${HW_MODE_ROWS.includes(key) ? `onchange="onHolidayWorkModeToggle('${role}','${key}')"` : key === 'holidayWork' ? `onchange="onHolidayWorkParentToggle('${role}')"` : ''} style="width:16px;height:16px;cursor:pointer">
+                  <input type="checkbox" id="set-elig-${key}-${role}" ${hwEligRowChecked(s.allowanceEligibility, role, key) ? 'checked' : ''} ${HW_MODE_ROWS.includes(key) ? `onchange="onHolidayWorkModeToggle('${role}','${key}')"` : key === 'holidayWork' ? `onchange="onHolidayWorkParentToggle('${role}')"` : ''} style="width:16px;height:16px;cursor:pointer">
                 </td>`).join('')}
               </tr>`).join('')}
           </tbody>
@@ -5774,6 +5774,17 @@ async function saveMyNotifyPrefs(patch) {
 // turns the leave day on -- between them, "may file but can choose nothing" cannot be reached from
 // this screen at all. holidayWorkModesFor() still refuses that state if it arrives another way.
 const HW_MODE_ROWS = ['holidayWorkLeave', 'holidayWorkPaid'];
+// 2026-10-05 (owner spotted this): the grid must draw the EFFECTIVE permission, not the raw key.
+// A mode row read its own key straight out of the settings, and a settings file written before
+// these keys existed has no entry for them -- so isAllowanceEligible() fell back to the built-in
+// default and drew a tick for a role whose parent row was unticked. That is precisely the state the
+// handlers exist to prevent, contradicting the rule on screen. A mode is shown as granted only when
+// the parent grants it too, which is what mayChooseHolidayWorkMode() decides everywhere else.
+function hwEligRowChecked(cfg, role, key) {
+  if (!HW_MODE_ROWS.includes(key)) return isAllowanceEligible(cfg, role, key);
+  const mode = key === 'holidayWorkPaid' ? 'paid' : 'annual-leave';
+  return mayChooseHolidayWorkMode(cfg, role, mode);
+}
 function hwEligBox(role, key) { return document.getElementById(`set-elig-${key}-${role}`); }
 function onHolidayWorkModeToggle(role, key) {
   const self = hwEligBox(role, key);
