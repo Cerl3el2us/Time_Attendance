@@ -95,4 +95,26 @@ test('the shipped defaults let user take the money and keep manager off it', () 
   assert.strictEqual(both(undefined, 'manager'), false);
 });
 
+console.log('\nServer: refusing a paid request from a role without the permission');
+
+vm.runInContext(extractFunction(SERVER_SRC, 'paidHolidayWorkBlockReason'), SERVER);
+const S = { allowanceEligibility: { holidayWork: ['user', 'manager'], holidayWorkPaid: ['user'] } };
+
+test('manager asking for paid is refused', () => {
+  const r = SERVER.paidHolidayWorkBlockReason(S, { role: 'manager' }, 'paid');
+  assert.ok(typeof r === 'string' && r.length > 0, 'expected a refusal message, got ' + JSON.stringify(r));
+});
+test('manager asking for the annual-leave day is accepted', () => {
+  assert.strictEqual(SERVER.paidHolidayWorkBlockReason(S, { role: 'manager' }, 'annual-leave'), null);
+});
+test('user asking for paid is accepted', () => {
+  assert.strictEqual(SERVER.paidHolidayWorkBlockReason(S, { role: 'user' }, 'paid'), null);
+});
+test('an absent compensationMode is not this check\'s business', () => {
+  assert.strictEqual(SERVER.paidHolidayWorkBlockReason(S, { role: 'manager' }, undefined), null);
+});
+test('a missing user or settings object does not throw', () => {
+  assert.strictEqual(typeof SERVER.paidHolidayWorkBlockReason(undefined, undefined, 'paid'), 'string');
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ', 0 failed'}`);

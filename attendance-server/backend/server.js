@@ -5163,7 +5163,16 @@ function attendanceDayForUser(user, dateStr, reviews = {}, morningReviews = {}) 
   const days = generatePeriodDays(dayStart, dayStart, false, user, attLog, leaves, S, reviews, morningReviews);
   return days[0] || null;
 }
-function holidayWorkSubmitBlockReason(user, dateStr) {
+// 2026-10-05 (owner): managers may file Holiday Work but only for the annual-leave day. The form
+// hides the money option for them; this is the control that actually enforces it, since a request
+// can be posted straight at the API. Returns null when there is nothing to block -- including when
+// no mode was sent at all, which the field validator handles separately.
+function paidHolidayWorkBlockReason(S, user, compensationMode) {
+  if (compensationMode !== 'paid') return null;
+  if (mayChoosePaidHolidayWork(S && S.allowanceEligibility, user && user.role)) return null;
+  return 'Your role cannot take holiday work compensation as money — choose the annual-leave day instead';
+}
+function holidayWorkSubmitBlockReason(user, dateStr, compensationMode) {
   if (!user || !dateStr || !isValidDateStr(dateStr)) {
     return 'dateFrom must be a valid YYYY-MM-DD date';
   }
@@ -5174,6 +5183,8 @@ function holidayWorkSubmitBlockReason(user, dateStr) {
   if (!isAllowanceEligible(S.allowanceEligibility, user.role, 'holidayWork')) {
     return 'You are not eligible to submit holiday work requests';
   }
+  const paidErr = paidHolidayWorkBlockReason(S, user, compensationMode);
+  if (paidErr) return paidErr;
   if (!isHolidayWorkDay(dateStr)) {
     return 'dateFrom must be a day you actually worked, and a weekend or public holiday (not Company Trip)';
   }
@@ -6519,7 +6530,7 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
       if (lateOutErr) return res.status(400).json({ success:false, message: lateOutErr });
     }
     if (type === 'holiday-work') {
-      const hwErr = holidayWorkSubmitBlockReason(targetUser, body.dateFrom);
+      const hwErr = holidayWorkSubmitBlockReason(targetUser, body.dateFrom, body.compensationMode);
       if (hwErr) return res.status(400).json({ success:false, message: hwErr });
       const hwScanErr = scanWindowError(targetUser, body.dateFrom, body.workStartTime, body.workEndTime);
       if (hwScanErr) return res.status(400).json({ success:false, message: hwScanErr });
@@ -7042,7 +7053,10 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
       return res.status(400).json({ success:false, message: abroadNoClaimMessage() });
     }
     if (newType === 'holiday-work') {
-      const hwErrPut = holidayWorkSubmitBlockReason(ownerUser || live, resolvedDateFromForLock);
+      // The edit path must check the mode the record will END UP with, not only the one sent --
+      // otherwise an edit that leaves compensationMode alone would skip the permission entirely.
+      const hwErrPut = holidayWorkSubmitBlockReason(ownerUser || live, resolvedDateFromForLock,
+        updates.compensationMode !== undefined ? updates.compensationMode : leave.compensationMode);
       if (hwErrPut) return res.status(400).json({ success:false, message: hwErrPut });
       const hwScanErrPut = scanWindowError(ownerUser || live, resolvedDateFromForLock,
         updates.workStartTime !== undefined ? updates.workStartTime : leave.workStartTime,
