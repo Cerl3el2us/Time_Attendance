@@ -2225,6 +2225,13 @@ function holidayWorkTimesLabel(l) {
   const nextDay = holidayWorkEndMins(l.workStartTime, l.workEndTime) >= 24 * 60;
   return `${escapeHtml(l.workStartTime)}–${escapeHtml(l.workEndTime)}${nextDay ? ` (${L('next day', 'วันถัดไป')})` : ''}`;
 }
+// 2026-10-05 (owner): the work location of a Holiday Work record, HTML-escaped, '' when absent.
+// One source for all three views that show it (approval card, approval detail modal, My Requests)
+// so the requester sees exactly what the approver sees -- they did not before.
+function holidayWorkLocationLabel(l) {
+  const name = (Array.isArray(l?.locations) && l.locations[0] && l.locations[0].name) || '';
+  return name ? escapeHtml(String(name).trim()) : '';
+}
 // HTML-escaped OT end time, marked "next day" when it is after midnight.
 function otEndTimeLabel(hhmm) {
   if (!hhmm) return '';
@@ -14315,7 +14322,7 @@ function buildApprovalCard(l, role) {
     // 2026-10-05 (owner): a holiday-work card must say WHERE the work was, and when. The location
     // is required at submit time (l.locations[0].name) but the card never showed it.
     if (l.type === 'holiday-work') {
-      const hwLoc = (Array.isArray(l.locations) && l.locations[0] && l.locations[0].name) ? escapeHtml(l.locations[0].name) : '';
+      const hwLoc = holidayWorkLocationLabel(l);
       const hwTimes = (l.workStartTime && l.workEndTime) ? holidayWorkTimesLabel(l) : '';
       detail = `<div style="font-size:13px;color:var(--text);margin-top:6px">📍 ${L('Location', 'สถานที่')}: <strong>${hwLoc || '—'}</strong>${hwTimes ? ` &nbsp;·&nbsp; ⏱️ ${escapeHtml(hwTimes)}` : ''}</div>`;
     }
@@ -16238,7 +16245,7 @@ function showApprovalDetail(id) {
     const mode = l.compensationMode === 'paid'
       ? L('Paid compensation (OT + transport)', 'ชดเชยเป็นเงิน (OT + ค่าเดินทาง)')
       : L('➕ Add 1 annual leave day', '➕ เพิ่ม 1 วันลาพักร้อน');
-    const loc = (Array.isArray(l.locations) && l.locations[0] && l.locations[0].name) ? escapeHtml(l.locations[0].name) : '—';
+    const loc = holidayWorkLocationLabel(l) || '—';
     const times = (l.workStartTime && l.workEndTime) ? holidayWorkTimesLabel(l) : '—';
     detailHtml = row(L('Worked Time', 'เวลาทำงาน'), `⏱️ ${times}`)
       + row(L('Location', 'สถานที่'), loc)
@@ -20715,7 +20722,10 @@ function renderMyRequests() {
       ? (() => {
           const times = (l.workStartTime && l.workEndTime) ? holidayWorkTimesLabel(l) : escapeHtml(l.dateFrom);
           const mode = l.compensationMode === 'paid' ? L('Paid', 'เงิน') : L('Annual leave', 'ลาพักร้อน');
-          return currentLang === 'ja' ? `📅 ${times} (${mode})` : L(`📅 ${times} (${mode})`, `📅 ${times} (${mode})`);
+          // 2026-10-05 (owner): the requester's card left the work location out, so the person who
+          // filed the request could not see what the approver was looking at. Same field, same order.
+          const loc = holidayWorkLocationLabel(l);
+          return `${loc ? `📍 <strong>${loc}</strong> &nbsp;·&nbsp; ` : ''}📅 ${times} (${mode})`;
         })()
       : l.type === 'early-morning'
       ? (currentLang === 'ja' ? `🌅 ×${Number(l.earlyMorningTier)||0}` : L(`🌅 ×${Number(l.earlyMorningTier)||0}`, `🌅 ×${Number(l.earlyMorningTier)||0}`))
