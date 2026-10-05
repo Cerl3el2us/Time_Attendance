@@ -5078,6 +5078,10 @@ function renderSettingsPage(_skipRefresh) {
               ['upcountry',    L('Upcountry Allowance','เบี้ยเลี้ยงเดินทางไปต่างจังหวัด'), L('rate set above (Allowance Rates)','ใช้อัตรากลางด้านบน')],
               ['earlyLate',    L('Early Morning / Late Night','เบี้ยเลี้ยงมาเช้า/กลับดึก'), L('rate set above (Allowance Rates)','ใช้อัตรากลางด้านบน')],
               ['holidayWork',  L('Holiday Work','ทำงานวันหยุด'), L('weekend/public-holiday work requests','คำขอทำงานวันเสาร์-อาทิตย์/วันหยุด')],
+              // 2026-10-05 (owner): a sub-permission of the row above, not a sibling -- the label
+              // carries the indent marker and the cell is padded (see the `key ===` test below), so
+              // it reads as belonging to Holiday Work rather than as another allowance.
+              ['holidayWorkPaid', `<span style="color:#94a3b8">└</span> ${L('choose cash compensation','เลือกรับเป็นเงิน')}`, L('needs the row above; ticking this ticks it too','ต้องเปิดสิทธิ์ยื่นด้านบนก่อน — ติ๊กช่องนี้จะติ๊กให้เอง')],
               // 2026-09-21: this table is a HARDCODED list while saveSettings() loops ALLOWANCE_KEYS
               // to read the checkboxes back -- so a key present in ALLOWANCE_KEYS but missing a row
               // here silently saves as [] (nobody eligible) on the next Settings save. Any future
@@ -5087,12 +5091,12 @@ function renderSettingsPage(_skipRefresh) {
               ['phone',        L('Phone Allowance','เบี้ยเลี้ยงค่าโทรศัพท์'), L('rate set above; enabled per employee','ใช้อัตรากลางด้านบน + ต้องติ๊กสิทธิ์รายคน')],
             ].map(([key, label, hint]) => `
               <tr style="border-bottom:1px solid #f1f5f9">
-                <td style="padding:8px 10px">
+                <td style="padding:8px 10px${key === 'holidayWorkPaid' ? ';padding-left:26px' : ''}">
                   <div style="font-weight:600;color:#1e293b">${label}</div>
                   <div style="font-size:10.5px;color:#94a3b8">${hint}</div>
                 </td>
                 ${ROLE_KEYS.map(role => `<td style="text-align:center;padding:8px 6px">
-                  <input type="checkbox" id="set-elig-${key}-${role}" ${isAllowanceEligible(s.allowanceEligibility, role, key) ? 'checked' : ''} style="width:16px;height:16px;cursor:pointer">
+                  <input type="checkbox" id="set-elig-${key}-${role}" ${isAllowanceEligible(s.allowanceEligibility, role, key) ? 'checked' : ''} ${key === 'holidayWorkPaid' ? `onchange="onHolidayWorkPaidToggle('${role}')"` : key === 'holidayWork' ? `onchange="onHolidayWorkParentToggle('${role}')"` : ''} style="width:16px;height:16px;cursor:pointer">
                 </td>`).join('')}
               </tr>`).join('')}
           </tbody>
@@ -5737,6 +5741,32 @@ async function saveMyNotifyPrefs(patch) {
   }
 }
 
+// 2026-10-05 (owner): "เลือกรับเป็นเงิน" is a sub-permission of "ทำงานวันหยุด" and means nothing
+// without it. Ticking the child ticks the parent, because that is plainly the intent and a disabled
+// checkbox just makes people hunt for the reason (the first draft disabled it; the owner rejected
+// that). The auto-tick is announced: the click asked for the narrower permission and granted the
+// broader one with it, so the person must see that more changed than they pressed.
+// mayChoosePaidHolidayWork() requires both regardless, so this is convenience, not the control.
+function onHolidayWorkPaidToggle(role) {
+  const child = document.getElementById(`set-elig-holidayWorkPaid-${role}`);
+  const parent = document.getElementById(`set-elig-holidayWork-${role}`);
+  if (!child || !parent || !child.checked || parent.checked) return;
+  parent.checked = true;
+  parent.style.outline = '2px solid #f59e0b';
+  setTimeout(() => { parent.style.outline = ''; }, 1600);
+  showToast(currentLang === 'ja'
+    ? '休日出勤の申請権限も有効にしました'
+    : L('Permission to file Holiday Work was switched on too',
+        'เปิดสิทธิ์ยื่นทำงานวันหยุดให้ด้วยแล้ว'), 'info');
+}
+// The other direction only ever narrows, so it needs no announcement.
+function onHolidayWorkParentToggle(role) {
+  const parent = document.getElementById(`set-elig-holidayWork-${role}`);
+  const child = document.getElementById(`set-elig-holidayWorkPaid-${role}`);
+  if (!parent || !child || parent.checked) return;
+  child.checked = false;
+}
+
 async function saveSettingsPage() {
   // 2026-10-02 (review finding 3): read and judge the Early Morning times BEFORE anything is
   // written. The check used to sit halfway down this function, after APP_SETTINGS had already
@@ -5879,6 +5909,16 @@ async function saveSettingsPage() {
         affected = DATA_USERS.filter(u => u.role === role && u.active !== false && u[flagField] === true);
       } else if (key === 'diligence' || key === 'earlyLate') {
         affected = DATA_USERS.filter(u => u.role === role && u.active !== false);
+      } else if (key === 'holidayWorkPaid') {
+        // 2026-10-05: taking this away turns approved PAID holiday work into nothing payable, so
+        // only the paid-mode records of this period count -- the generic branch below matches on
+        // type alone and would also warn about annual-leave-mode records, which are unaffected.
+        const roleUserIds = new Set(DATA_USERS.filter(u => u.role === role && u.active !== false).map(u => u.id));
+        const affectedIds = new Set(DATA_LEAVES.filter(l =>
+          roleUserIds.has(l.userId) && l.type === 'holiday-work' && l.status === 'approved' &&
+          l.compensationMode === 'paid' && l.dateFrom >= curStartStr && l.dateFrom <= curEndStr
+        ).map(l => l.userId));
+        affected = DATA_USERS.filter(u => affectedIds.has(u.id));
       } else {
         // upcountry / ot / longDistance: warn only if someone of this role actually has an
         // approved record of the matching type this period -- otherwise removing the role
