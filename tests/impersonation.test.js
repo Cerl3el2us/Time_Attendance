@@ -158,15 +158,14 @@ test('isImpersonatingPerson is true only when the screen really is that person',
     catch (e) { process.exitCode = 1; console.log(`  FAIL  ${name}\n        ${e.message}`); }
   };
 
-  await atest('a write while impersonating is refused without even asking', async () => {
+  await atest('a write while impersonating becomes a dry run, without even asking', async () => {
     const c = gateWorld(SYS, STAFF, STAFF.id);
-    const res = await c.writeGateRefusal('/api/leaves', 'POST');
-    assert.ok(res, 'the write must be refused');
-    assert.strictEqual(res.status, 403);
+    const verdict = await c.writeGateRefusal('/api/leaves', 'POST');
+    assert.strictEqual(verdict, 'dry-run',
+      'the request goes out for real so the SERVER can judge it — most of the rules that refuse a ' +
+      'request live there, and that is where the bugs worth finding are');
     assert.strictEqual(c.prompts, 0,
       'no CONFIRM may be offered — typing it cannot fix the record being stamped with the wrong name');
-    const body = await res.json();
-    assert.ok(/read-only|exit/i.test(body.message), 'the message must say why and how to proceed');
   });
   await atest('the same write at Full access only asks', async () => {
     const c = gateWorld(SYS, SYS, 0);

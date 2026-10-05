@@ -241,12 +241,7 @@ async function writeGateRefusal(path, method) {
   // employee's name, and with no activity log there is nothing to show it was really the system
   // account. They would be answerable for something they did not do. Typing CONFIRM cannot fix
   // that, so it is not offered. Take the impersonation off and act as yourself.
-  if (isImpersonatingPerson()) {
-    return gateRefusal(currentLang === 'ja'
-      ? '閲覧専用です：他の従業員として表示中は保存できません。解除してから操作してください。'
-      : L('Read-only while viewing as an employee — nothing was saved. Exit the preview to make changes.',
-          'กำลังดูเป็นพนักงานคนอื่น ระบบไม่บันทึกข้อมูลให้ — ออกจากโหมดนี้ก่อนจึงจะแก้ไขได้'));
-  }
+  if (isImpersonatingPerson()) return 'dry-run';
   if (gestureAlreadyConfirmed()) return null;
   if (await requireSuperAdminConfirm(writeGateLabel(path, method))) {
     _confirmedGesture = _gestureSeq;
@@ -1565,12 +1560,21 @@ async function apiFetch(path, opts = {}) {
   // and not at the 62 call sites.
   // systemSync buys past the CONFIRM prompt, never past the impersonation block: while the screen
   // is somebody else, nothing this tab does may write, housekeeping included.
+  let dryRun = false;
+  // systemSync buys past the CONFIRM prompt, never past the impersonation rule: while the screen
+  // is somebody else, nothing this tab does may persist.
   if (isWriteMethod(opts.method) && (!isSystemSyncWrite(opts) || isImpersonatingPerson())) {
     const refused = await writeGateRefusal(path, opts.method);
-    if (refused) return refused;
+    // 2026-10-05: 'dry-run' means send it for real and let the server judge it, then throw the
+    // result away. Refusing here instead would only ever tell the person what the BROWSER thinks,
+    // and most of the rules that refuse a request live on the server — which is exactly where the
+    // bugs worth finding are. See the dry-run block in server.js.
+    if (refused === 'dry-run') dryRun = true;
+    else if (refused) return refused;
   }
   const headers = { ...(opts.headers || {}) };
   if (AUTH_TOKEN) headers['Authorization'] = `Bearer ${AUTH_TOKEN}`;
+  if (dryRun) headers['X-Dry-Run'] = '1';
   let res;
   try {
     res = await fetch(`${NAS_BACKEND}${path}`, { ...opts, headers });
@@ -1597,7 +1601,28 @@ async function apiFetch(path, opts = {}) {
     clearTimeout(_pendingLogoutTimer);
     _pendingLogoutTimer = setTimeout(logout, 800);
   }
+  if (dryRun) reportDryRun(path, res);
   return res;
+}
+// 2026-10-05 (owner): say what WOULD have happened. The verdict is the server's — it ran every
+// rule — so a pass here means the button genuinely works, and a refusal is the real reason, which
+// is the thing worth finding. The caller still gets the response and renders its own success or
+// error on top; this toast is what tells the person nothing was actually saved.
+function reportDryRun(path, res) {
+  const ok = res.ok;
+  res.clone().json().then(d => {
+    const why = d && d.message ? ` — ${d.message}` : '';
+    if (ok) {
+      showToast(currentLang === 'ja'
+        ? '✅ 検証はすべて通過しました：この操作は実際に保存できます。ただし閲覧用アカウントのため保存していません。'
+        : L('✅ Passed every check — this would really have saved. Nothing was written: inspector account.',
+            '✅ ตรวจผ่านทุกเงื่อนไข — ของจริงบันทึกได้ แต่บัญชีนี้เป็นผู้ตรวจสอบ ระบบจึงไม่บันทึกให้'), 'success');
+    } else {
+      showToast(currentLang === 'ja'
+        ? `❌ この操作は実際には拒否されます${why}`
+        : L(`❌ This would have been refused${why}`, `❌ ของจริงจะถูกปฏิเสธ${why}`), 'danger');
+    }
+  }).catch(() => { /* a non-JSON body tells us nothing worth showing */ });
 }
 
 // Dual-sync with server.js DEFAULT_ANNUAL_LEAVE_TIERS — company annual-leave ladder

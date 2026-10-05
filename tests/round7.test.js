@@ -154,6 +154,8 @@ test('sendPushToUser records the inbox item even with no push subscription', () 
   const recorded = [];
   const X = sandbox(SERVER_SRC, ['sendPushToUser', 'sendPushToRole'], {
     readPushSubs: () => [], writePushSubs: () => {}, webpush: { sendNotification: () => { throw new Error('no'); } },
+    // 2026-10-05: sendPushToUser now bails out during a dry run; this sandbox is a normal request.
+    isDryRun: () => false,
     recordNotifications: e => recorded.push(...e), readUsers: () => [{ id: 1, role: 'md' }, { id: 2, role: 'md', active: false }, { id: 3, role: 'md' }],
     console,
   });

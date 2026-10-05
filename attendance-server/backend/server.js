@@ -84,7 +84,30 @@ function isHashed(p) { const s = String(p||''); return s.startsWith('$2b$') || s
 // F-18: Atomic write — write to a temp file then rename so a crash mid-write never leaves a
 // partially-written (broken) JSON file. fs.renameSync is POSIX-atomic when source and
 // destination are on the same filesystem, which they always are (same DATA_DIR).
+// ===== DRY RUN =====
+// 2026-10-05 (owner): the system account inspects the app by pressing the real buttons. The answer
+// it needs is "would this have worked" — and only the server can answer that honestly, because most
+// of the rules that refuse a request live here, not in the browser. So the request runs for real:
+// every validation, every gate, in order. What it must not do is leave anything behind.
+//
+// Three kinds of trace, each suppressed at the single place it happens:
+//   persistence  — atomicWrite(), which every save in this file goes through
+//   notification — sendPushToUser(), so nobody is told about a request that does not exist
+//   live update  — broadcast(), so a colleague's open screen does not show a phantom row
+//
+// Request-scoped via AsyncLocalStorage rather than a module flag: handlers are async and interleave,
+// and a flag set by one request would silently disarm the writes of another.
+//
+// Safe here because nothing is cached in memory — readLeaves()/readSettings() re-read the file on
+// every call, so a dry run mutating its own copy throws that copy away when the request ends.
+// If anything in this file ever starts holding state between requests, this stops being safe.
+const { AsyncLocalStorage } = require('async_hooks');
+const dryRunStore = new AsyncLocalStorage();
+function isDryRun() { return dryRunStore.getStore() === true; }
+function runAsDryRun(fn) { return dryRunStore.run(true, fn); }
+
 function atomicWrite(filePath, str, sensitive) {
+  if (isDryRun()) return;   // the whole point: validate everything, persist nothing
   const tmp = filePath + '.tmp' + process.pid;
   fs.writeFileSync(tmp, str, 'utf8');
   fs.renameSync(tmp, filePath);
@@ -323,6 +346,9 @@ const PUSH_STATUS_TO_ROLE = { pending: 'manager', 'pending-accounting': 'account
 // has a push subscription. Omitted (test push) = push only, nothing stored.
 async function sendPushToUser(userId, payload, inbox) {
   if (userId == null) return;
+  // A dry run must not tell anyone about a request that does not exist. This covers the inbox row
+  // AND the push itself, which is why it sits above both rather than inside atomicWrite().
+  if (isDryRun()) return;
   if (inbox && inbox.kind) {
     try { recordNotifications([{ userId, kind: inbox.kind, params: inbox.params, link: inbox.link }]); }
     catch (e) { console.error('[NOTIFY] inbox record failed:', e && e.message); }
@@ -1023,11 +1049,34 @@ app.use((req, res, next) => {
         }
       }
     }
+    // 2026-10-05 (owner): dry run. Decided HERE, from the verified token, never from the header
+    // alone — otherwise anyone could send x-dry-run and have their writes quietly discarded, or
+    // worse, probe which requests would be accepted. The header only expresses intent; the identity
+    // is what grants it, and only the system account has it.
+    //
+    // No new access: this account can already write. All the header does is ask for the write to be
+    // thrown away afterwards, which is what makes "would this have worked?" answerable without
+    // leaving a request, a notification, or a row on a colleague's screen behind.
+    const wantsDryRun = String(req.headers['x-dry-run'] || '') === '1';
+    if (wantsDryRun && isWriteRequest(req) && isSystemAccountUser(liveUserForDryRun(req))) {
+      res.setHeader('X-Dry-Run', '1');
+      return runAsDryRun(() => next());
+    }
     next();
   } catch (e) {
     return res.status(401).json({ success:false, message:'Invalid or expired token' });
   }
 });
+function isWriteRequest(req) {
+  return ['POST', 'PUT', 'PATCH', 'DELETE'].includes(String(req.method || '').toUpperCase());
+}
+// The live record, not the token payload — same "trust live state, not the token" reasoning as the
+// Observer and tokenVersion checks above.
+function liveUserForDryRun(req) {
+  const users = readUsers();
+  if (!users || !req.user) return null;
+  return users.find(u => u.id === req.user.sub) || null;
+}
 
 // SECURITY FIX 2026-07-19 (F-01): nothing below this point checked req.user.role at all -- any
 // logged-in account (including plain "user") could hit any mutating endpoint directly (devtools
@@ -1215,6 +1264,8 @@ function refreshWsViewers() {
 }
 
 function broadcast(d) {
+  // A colleague with the page open must not see a row appear and then vanish on their next reload.
+  if (isDryRun()) return;
   refreshWsViewers();
   const m = JSON.stringify(d);
   clients.forEach(ws => { if (ws.readyState === 1) ws.send(m); });
