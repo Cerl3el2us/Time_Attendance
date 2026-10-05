@@ -131,6 +131,8 @@ console.log('\nWrite gate: what it does to a write');
       console, Response, Date,
       L: (en) => en,
       isSuperAdmin: () => isSuper,
+      previewUserId: 0,
+      realUser: null,
       prompts: 0,
       t: k => k,
       currentLang: 'en',
@@ -144,7 +146,7 @@ console.log('\nWrite gate: what it does to a write');
       'const CONFIRMED_GESTURE_TTL_MS = 120000;' +
       'function press() { _gestureSeq++; }' +
       'function ageConfirmation(ms) { _confirmedGestureAt -= ms; }', c);
-    ['gestureAlreadyConfirmed', 'requireSuperAdminConfirm', 'writeGateLabel', 'writeGateRefusal']
+    ['isImpersonatingPerson', 'gateRefusal', 'gestureAlreadyConfirmed', 'requireSuperAdminConfirm', 'writeGateLabel', 'writeGateRefusal']
       .forEach(n => vm.runInContext(extractFunction(APP_SRC, n), c));
     return c;
   };

@@ -119,8 +119,18 @@ function isEmployeeRecord(u) { return !!(u && !u.isSystemAccount); }
 // impersonated employee must never make them disappear.
 function isSuperAdmin() { const u = loggedInUser(); return !!(u && u.role === 'superadmin' && u.isSystemAccount); }
 let previewRole = localStorage.getItem('ta_preview_role') || '';
+// 2026-10-05 (owner, step 2): impersonating a PERSON. `previewUserId` is who, and while it is set
+// `currentUser` IS that employee's record, so every entitlement the app reads off the person —
+// start date, probation, phone/car allowance, salary — is theirs without 324 call sites having to
+// learn about impersonation. `realUser` (above) is still the account that logged in.
+let previewUserId = Number(localStorage.getItem('ta_preview_user') || '') || 0;
+function isImpersonatingPerson() {
+  return isSuperAdmin() && !!previewUserId && !!currentUser && Number(currentUser.id) === previewUserId;
+}
 function effectiveRole() {
   if (!isSuperAdmin()) return currentUser?.role || 'user';
+  // A person outranks a role: when one is being impersonated, their own rank is the honest answer.
+  if (isImpersonatingPerson()) return currentUser.role || 'user';
   return previewRole || 'superadmin';
 }
 function isPayrollLockDisabled() { return isSuperAdmin(); }
@@ -217,19 +227,33 @@ function gestureAlreadyConfirmed() {
   return _confirmedGesture === _gestureSeq &&
          Date.now() - _confirmedGestureAt < CONFIRMED_GESTURE_TTL_MS;
 }
+// A refusal body in the shape every caller in this app already understands.
+function gateRefusal(message, status) {
+  return new Response(JSON.stringify({ success: false, message }), {
+    status: status || 403, headers: { 'Content-Type': 'application/json' },
+  });
+}
 // Returns null to let the request through, or a Response the caller handles like any refusal.
 async function writeGateRefusal(path, method) {
   if (!isSuperAdmin()) return null;
+  // 2026-10-05 (owner): while impersonating a PERSON nothing is written, and no CONFIRM can unlock
+  // it. The reason is not caution, it is attribution: the record would be stamped with that
+  // employee's name, and with no activity log there is nothing to show it was really the system
+  // account. They would be answerable for something they did not do. Typing CONFIRM cannot fix
+  // that, so it is not offered. Take the impersonation off and act as yourself.
+  if (isImpersonatingPerson()) {
+    return gateRefusal(currentLang === 'ja'
+      ? '閲覧専用です：他の従業員として表示中は保存できません。解除してから操作してください。'
+      : L('Read-only while viewing as an employee — nothing was saved. Exit the preview to make changes.',
+          'กำลังดูเป็นพนักงานคนอื่น ระบบไม่บันทึกข้อมูลให้ — ออกจากโหมดนี้ก่อนจึงจะแก้ไขได้'));
+  }
   if (gestureAlreadyConfirmed()) return null;
   if (await requireSuperAdminConfirm(writeGateLabel(path, method))) {
     _confirmedGesture = _gestureSeq;
     _confirmedGestureAt = Date.now();
     return null;
   }
-  const message = L('Cancelled — nothing was saved', 'ยกเลิกแล้ว ไม่มีการบันทึก');
-  return new Response(JSON.stringify({ success: false, message }), {
-    status: 403, headers: { 'Content-Type': 'application/json' },
-  });
+  return gateRefusal(L('Cancelled — nothing was saved', 'ยกเลิกแล้ว ไม่มีการบันทึก'));
 }
 function isWriteMethod(method) {
   const m = String(method || 'GET').toUpperCase();
@@ -262,6 +286,11 @@ function roleLabel(role) {
 function exitRolePreview() {
   const sel = document.getElementById('role-preview-select');
   if (sel) sel.value = '';
+  const userSel = document.getElementById('preview-user-select');
+  if (userSel) userSel.value = '';
+  // Drop the person first: the banner and every gate read it, so leaving it set while the role
+  // clears would show Full access over a screen still rendering as somebody else.
+  applyPreviewUser(0);
   onRolePreviewChange('');
 }
 function updateSystemAccountUI() {
@@ -275,16 +304,26 @@ function updateSystemAccountUI() {
   // in one click. The risk this guards is not a wrong click -- it is reading the whole system from
   // somebody else's seat for ten minutes and concluding it is broken. The banner also turns red, so
   // "am I impersonating?" is answerable from the corner of the eye.
+  renderPreviewUserOptions();
   const live = document.getElementById('system-account-live-state');
   if (banner && live) {
-    const on = isSuperAdmin() && !!previewRole;
+    const asPerson = isImpersonatingPerson();
+    const on = isSuperAdmin() && (asPerson || !!previewRole);
     banner.style.background = on ? '#fef2f2' : '#fff7ed';
     banner.style.borderBottomColor = on ? '#fecaca' : '#fed7aa';
     banner.style.color = on ? '#991b1b' : '#9a3412';
+    // Naming the person, not just "an employee": the risk is spending ten minutes reading the
+    // system from somebody else's seat, and a name is what interrupts that.
+    const who = asPerson
+      ? `${currentUser.name || ('#' + currentUser.id)} · ${roleLabel(currentUser.role)}`
+      : roleLabel(previewRole);
+    const label = asPerson
+      ? (currentLang === 'ja' ? `${who} として表示中 — 閲覧専用` :
+         L(`Viewing as ${who} — read-only`, `กำลังดูเป็น ${who} — ดูได้อย่างเดียว`))
+      : (currentLang === 'ja' ? `${who} として表示中` :
+         L(`Viewing as ${who}`, `กำลังดูเป็น ${who}`));
     live.innerHTML = on
-      ? `<span style="padding:2px 10px;border-radius:999px;background:#991b1b;color:#fff;font-weight:800">${escapeHtml(
-          currentLang === 'ja' ? `${roleLabel(previewRole)} として表示中` :
-          L(`Viewing as ${roleLabel(previewRole)}`, `กำลังดูเป็น ${roleLabel(previewRole)}`))}</span>
+      ? `<span style="padding:2px 10px;border-radius:999px;background:#991b1b;color:#fff;font-weight:800">${escapeHtml(label)}</span>
          <button onclick="exitRolePreview()" style="padding:3px 12px;border-radius:999px;border:1px solid #991b1b;background:#fff;color:#991b1b;font-size:12px;font-weight:800;cursor:pointer">${escapeHtml(
           currentLang === 'ja' ? '解除' : L('Exit', 'ออกจากโหมดนี้'))}</button>`
       : '';
@@ -293,10 +332,72 @@ function updateSystemAccountUI() {
   if (userBtn) userBtn.onclick = () => navigateTo(isSuperAdmin() ? 'dashboard' : 'checkin');
 }
 // 2026-10-05 (owner): back to Full access, used on every login. Kept next to the only other writer
-// of ta_preview_role so the two can never drift.
+// of ta_preview_role so the two can never drift. Clears the person as well — "every login starts at
+// Full access" has to mean both kinds of preview, or the more powerful one survives the rule.
 function resetRolePreview() {
   previewRole = '';
-  try { localStorage.removeItem('ta_preview_role'); } catch (e) { /* private mode */ }
+  previewUserId = 0;
+  if (realUser) currentUser = realUser;
+  try {
+    localStorage.removeItem('ta_preview_role');
+    localStorage.removeItem('ta_preview_user');
+  } catch (e) { /* private mode */ }
+}
+// Swap the rendered identity to an employee, or back to the real account with 0/''.
+// Everything the app reads off `currentUser` then describes that person, which is the whole point:
+// their start date decides whether the annual-leave button exists, their per-employee allowance
+// flags decide which request buttons appear, their records are what the pages render.
+function applyPreviewUser(id) {
+  const wanted = Number(id) || 0;
+  if (!isSuperAdmin() || !wanted) {
+    previewUserId = 0;
+    if (realUser) currentUser = realUser;
+    try { localStorage.removeItem('ta_preview_user'); } catch (e) { /* private mode */ }
+    return true;
+  }
+  const target = DATA_USERS.find(u => Number(u.id) === wanted && isEmployeeRecord(u));
+  if (!target) {
+    // The employee list may not have loaded yet, or the person may be gone. Either way, do not
+    // leave a half-applied impersonation behind: fall back to the real account.
+    previewUserId = 0;
+    if (realUser) currentUser = realUser;
+    try { localStorage.removeItem('ta_preview_user'); } catch (e) { /* private mode */ }
+    return false;
+  }
+  previewUserId = wanted;
+  currentUser = target;
+  try { localStorage.setItem('ta_preview_user', String(wanted)); } catch (e) { /* private mode */ }
+  return true;
+}
+// Re-apply a stored impersonation once the employee list exists. Called after users load on the
+// session-restore path, so refreshing the page mid-inspection does not drop the person being
+// inspected — the same reasoning as the role preview surviving a reload.
+function restorePreviewUser() {
+  if (!isSuperAdmin() || !previewUserId) return;
+  const ok = applyPreviewUser(previewUserId);
+  if (ok) { updateUserUI(); applyRolePermissions(); if (currentPage) navigateTo(currentPage); }
+}
+function onPreviewUserChange(val) {
+  if (!applyPreviewUser(val)) {
+    showToast(L('That employee is no longer available', 'ไม่พบพนักงานคนนี้แล้ว'), 'warning');
+  }
+  const sel = document.getElementById('preview-user-select');
+  if (sel) sel.value = previewUserId ? String(previewUserId) : '';
+  applyRolePermissions();
+  updateUserUI();
+  updateMyRequestsBadge();
+  updateApprovalBadge();
+  if (currentPage) navigateTo(currentPage);
+}
+// The picker lists employees only — the system account is never an employee and must not appear.
+function renderPreviewUserOptions() {
+  const sel = document.getElementById('preview-user-select');
+  if (!sel || !isSuperAdmin()) return;
+  const people = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active !== false)
+    .slice().sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+  sel.innerHTML = `<option value="">${escapeHtml(L('— whole role —', '— ทั้งตำแหน่ง —'))}</option>` +
+    people.map(u => `<option value="${Number(u.id)}">${escapeHtml(u.name || ('#' + u.id))} · ${escapeHtml(roleLabel(u.role))}</option>`).join('');
+  sel.value = previewUserId ? String(previewUserId) : '';
 }
 function onRolePreviewChange(val) {
   previewRole = val || '';
@@ -1462,7 +1563,9 @@ window.addEventListener('online', () => {
 async function apiFetch(path, opts = {}) {
   // 2026-10-05: the write gate. See the block above requireSuperAdminConfirm() for why it is here
   // and not at the 62 call sites.
-  if (isWriteMethod(opts.method) && !isSystemSyncWrite(opts)) {
+  // systemSync buys past the CONFIRM prompt, never past the impersonation block: while the screen
+  // is somebody else, nothing this tab does may write, housekeeping included.
+  if (isWriteMethod(opts.method) && (!isSystemSyncWrite(opts) || isImpersonatingPerson())) {
     const refused = await writeGateRefusal(path, opts.method);
     if (refused) return refused;
   }
@@ -21008,8 +21111,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         maybeShowForcePasswordGate(); // F-09: block until a first-login default password is changed
         // Refresh user list then attendance from backend
         loadUsersFromBackend().then(() => {
-          const fresh = DATA_USERS.find(u => u.id === currentUser.id);
+          // loggedInUser(), not currentUser: an impersonation restored below would otherwise make
+          // this look up the inspected employee and overwrite realUser with them.
+          const me = loggedInUser();
+          const fresh = me && DATA_USERS.find(u => u.id === me.id);
           if (fresh) { realUser = fresh; currentUser = fresh; updateUserUI(); applyRolePermissions(); }
+          // The employee list exists now, so a stored impersonation can be put back. Refreshing the
+          // page mid-inspection must not drop the person being inspected.
+          restorePreviewUser();
           maybeShowForcePasswordGate(); // re-check against server-fresh data (idempotent if already shown)
           if (currentPage === 'employees') renderEmployeesTable();
           if (currentPage === 'payslip') { renderPayslipEmployeeList(); renderPayslip(); }

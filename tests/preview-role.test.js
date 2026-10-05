@@ -41,9 +41,9 @@ function test(name, fn) {
 function world(who, preview) {
   // realUser is the account that logged in; currentUser is who the screen renders as. Nothing here
   // impersonates, so they are the same — these tests are about the role preview, not impersonation.
-  const ctx = { console, realUser: who, currentUser: who, previewRole: preview || '' };
+  const ctx = { console, realUser: who, currentUser: who, previewRole: preview || '', previewUserId: 0 };
   vm.createContext(ctx);
-  ['loggedInUser', 'isSuperAdmin', 'effectiveRole', 'gateRoleFor'].forEach(n =>
+  ['loggedInUser', 'isSuperAdmin', 'isImpersonatingPerson', 'effectiveRole', 'gateRoleFor'].forEach(n =>
     vm.runInContext(extractFunction(APP_SRC, n), ctx));
   return ctx;
 }

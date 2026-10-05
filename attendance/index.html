@@ -207,6 +207,13 @@
             <option value="driver">Driver</option>
             <option value="marketing">Marketing</option>
           </select>
+          <!-- 2026-10-05 (owner): impersonate a PERSON, not just a rank. Entitlements that follow
+               the individual — start date, phone and car allowance, salary, probation — cannot be
+               reproduced by a role, so "what does this person see" needs the person. Filled by
+               renderPreviewUserOptions(); writes are blocked outright while one is selected. -->
+          <select id="preview-user-select" onchange="onPreviewUserChange(this.value)" title="View as a specific employee" style="font-size:12px;padding:4px 8px;border:1.5px solid #e2e8f0;border-radius:8px;background:var(--bg-card);color:inherit;max-width:180px">
+            <option value="">— ทั้งตำแหน่ง —</option>
+          </select>
         </div>
         <button id="lang-toggle-btn" onclick="toggleLang()" style="padding:4px 10px;border:1.5px solid #e2e8f0;border-radius:8px;background:#f8fafc;font-size:12px;font-weight:700;color:#1e3a5f;cursor:pointer;letter-spacing:0.03em">EN</button>
         <!-- 2026-09-24 (round 7): 🔔 in-app notification inbox (toggleNotificationPanel). The
@@ -2792,6 +2799,6 @@
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ja.js" integrity="sha384-mKor8U8jwukUkfxaFPCsxKF9S62PXq4gG7zcZ5yQ2x3KL1msprJZeFlKFEDeeb5V" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/th.js" integrity="sha384-E6OVFg1zUc/pckGxry0YZ6VeZ1E17l7Jl8ZQx58jbEfxxkz9LqknQhiIrA9zg/8b" crossorigin="anonymous"></script>
 
-<script src="js/app.js?v=20261005u"></script>
+<script src="js/app.js?v=20261005v"></script>
 </body>
 </html>

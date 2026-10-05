@@ -90,17 +90,123 @@ test('the session stores the real account', () => {
   assert.ok(/ta_user[\s\S]{0,80}loggedInUser\(\)/.test(fn),
     'saveSession must persist the real account — otherwise a reload returns logged in as the person being inspected');
 });
-test('every place that sets currentUser also sets realUser', () => {
+test('currentUser only diverges from realUser where impersonation says it may', () => {
   // Drift between the two is the failure mode this whole design has to avoid, and it happens by
-  // somebody adding a sixth assignment and not noticing the first five came in pairs.
-  const assigns = [...APP_SRC.matchAll(/^\s*(?:let\s+)?currentUser = (.+);/gm)];
-  const lines = assigns.map(m => APP_SRC.slice(0, m.index).split('\n').length);
-  const unpaired = lines.filter(line => {
-    const near = APP_SRC.split('\n').slice(Math.max(0, line - 4), line + 2).join('\n');
-    return !/realUser = /.test(near) && !/let currentUser = null/.test(near);
+  // somebody adding an assignment and not noticing the others came in pairs. Three right-hand sides
+  // are legitimate on their own; everything else must move realUser with it.
+  //   null      — the declaration and logout
+  //   realUser  — putting the screen back to the real account
+  //   target    — applyPreviewUser(), the one place impersonation is MEANT to diverge
+  const lines = APP_SRC.split('\n');
+  const offenders = [];
+  lines.forEach((line, i) => {
+    const m = /^\s*(?:let\s+)?currentUser = (.+);\s*$/.exec(line);
+    if (!m) return;
+    const rhs = m[1].trim();
+    if (rhs === 'null' || rhs === 'realUser' || rhs === 'target') return;
+    const near = lines.slice(Math.max(0, i - 3), i + 3).join('\n');
+    if (!/realUser = /.test(near)) offenders.push(i + 1);
   });
-  assert.deepStrictEqual(unpaired, [],
-    `currentUser is assigned without realUser at line(s) ${unpaired.join(', ')} — the two must move together`);
+  assert.deepStrictEqual(offenders, [],
+    `currentUser is assigned without realUser at line(s) ${offenders.join(', ')} — the two must move together`);
+});
+test('the one deliberate divergence is inside applyPreviewUser and nowhere else', () => {
+  const fn = extractFunction(APP_SRC, 'applyPreviewUser');
+  assert.ok(/currentUser = target/.test(fn), 'applyPreviewUser is where the screen becomes somebody else');
+  assert.ok(!/realUser = /.test(fn),
+    'applyPreviewUser must never touch realUser — that is what keeps authority with the real account');
+  const elsewhere = APP_SRC.replace(fn, '');
+  assert.ok(!/currentUser = target/.test(elsewhere),
+    'only applyPreviewUser may point currentUser at another employee');
 });
 
-console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ', 0 failed'}`);
+console.log('\nImpersonation: a person on screen means nothing is written');
+
+function gateWorld(real, rendered, previewId) {
+  const ctx = {
+    console, Response, Date,
+    realUser: real, currentUser: rendered,
+    previewUserId: previewId || 0,
+    previewRole: '',
+    currentLang: 'en',
+    L: (en) => en,
+    prompts: 0,
+  };
+  ctx.prompt = () => { ctx.prompts++; return 'CONFIRM'; };
+  vm.createContext(ctx);
+  vm.runInContext('let _gestureSeq = 0; let _confirmedGesture = -1; let _confirmedGestureAt = 0;' +
+    'const CONFIRMED_GESTURE_TTL_MS = 120000;', ctx);
+  ['loggedInUser', 'isSuperAdmin', 'isImpersonatingPerson', 'gestureAlreadyConfirmed',
+   'requireSuperAdminConfirm', 'writeGateLabel', 'gateRefusal', 'writeGateRefusal']
+    .forEach(n => vm.runInContext(extractFunction(APP_SRC, n), ctx));
+  return ctx;
+}
+
+test('isImpersonatingPerson is true only when the screen really is that person', async () => {
+  assert.strictEqual(gateWorld(SYS, STAFF, STAFF.id).isImpersonatingPerson(), true);
+  assert.strictEqual(gateWorld(SYS, SYS, 0).isImpersonatingPerson(), false);
+  // A stale id that does not match who is actually rendered must not count — half-applied
+  // impersonation is the state where the screen and the rules disagree.
+  assert.strictEqual(gateWorld(SYS, SYS, STAFF.id).isImpersonatingPerson(), false);
+  // An ordinary account can never be impersonating, whatever is in localStorage.
+  assert.strictEqual(gateWorld(STAFF, STAFF, STAFF.id).isImpersonatingPerson(), false);
+});
+
+(async () => {
+  const atest = async (name, fn) => {
+    try { await fn(); passed++; console.log(`  ok  ${name}`); }
+    catch (e) { process.exitCode = 1; console.log(`  FAIL  ${name}\n        ${e.message}`); }
+  };
+
+  await atest('a write while impersonating is refused without even asking', async () => {
+    const c = gateWorld(SYS, STAFF, STAFF.id);
+    const res = await c.writeGateRefusal('/api/leaves', 'POST');
+    assert.ok(res, 'the write must be refused');
+    assert.strictEqual(res.status, 403);
+    assert.strictEqual(c.prompts, 0,
+      'no CONFIRM may be offered — typing it cannot fix the record being stamped with the wrong name');
+    const body = await res.json();
+    assert.ok(/read-only|exit/i.test(body.message), 'the message must say why and how to proceed');
+  });
+  await atest('the same write at Full access only asks', async () => {
+    const c = gateWorld(SYS, SYS, 0);
+    assert.strictEqual(await c.writeGateRefusal('/api/leaves', 'POST'), null);
+    assert.strictEqual(c.prompts, 1);
+  });
+  await atest('machine housekeeping is exempt from CONFIRM but never from the person block', async () => {
+    // systemSync skips the prompt; it must not skip this. Checked at the apiFetch call site.
+    const fn = extractFunction(APP_SRC, 'apiFetch');
+    assert.ok(/!isSystemSyncWrite\(opts\)\s*\|\|\s*isImpersonatingPerson\(\)/.test(fn),
+      'while the screen is somebody else, nothing this tab does may write — housekeeping included');
+  });
+
+  console.log('\nImpersonation: leaving, and coming back');
+
+  test('exiting drops the person before the role', () => {
+    const fn = extractFunction(APP_SRC, 'exitRolePreview');
+    const personIdx = fn.indexOf('applyPreviewUser(0)');
+    const roleIdx = fn.indexOf('onRolePreviewChange');
+    assert.ok(personIdx > -1 && roleIdx > personIdx,
+      'clearing the role first would show Full access over a screen still rendering as somebody else');
+  });
+  test('login clears the person as well as the role', () => {
+    const fn = extractFunction(APP_SRC, 'resetRolePreview');
+    assert.ok(/previewUserId = 0/.test(fn), 'resetRolePreview must clear the impersonated person');
+    assert.ok(/ta_preview_user/.test(fn), 'and must not leave it in localStorage to come back');
+    assert.ok(/currentUser = realUser/.test(fn), 'and must put the screen back to the real account');
+  });
+  test('the picker never offers the system account', () => {
+    const fn = extractFunction(APP_SRC, 'renderPreviewUserOptions');
+    assert.ok(/isEmployeeRecord\(u\)/.test(fn),
+      'the system account is not an employee and must never appear in a staff list');
+  });
+  test('a missing employee falls back to the real account rather than half-applying', () => {
+    const fn = extractFunction(APP_SRC, 'applyPreviewUser');
+    assert.ok(/return false/.test(fn), 'it must report the failure');
+    const notFound = fn.slice(fn.indexOf('if (!target)'));
+    assert.ok(/previewUserId = 0/.test(notFound) && /currentUser = realUser/.test(notFound),
+      'a half-applied impersonation is the state where the screen and the rules disagree');
+  });
+
+  console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ', 0 failed'}`);
+})();
