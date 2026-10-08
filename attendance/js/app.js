@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 89;
+const APP_BUILD = 90;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -447,8 +447,17 @@ const i18n = {
     pt_calendar:'ปฏิทินวันหยุด', ps_calendar:'วันหยุดประจำปีและวันหยุดสาธารณะ',
     pt_holidays:'จัดการวันหยุดประจำปี', ps_holidays:'กำหนดวันหยุดราชการและวันหยุดบริษัท',
     // roles
-    role_md:'Managing Director', role_manager:'Manager', role_accounting:'Accounting',
-    role_user:'Staff', role_driver:'Driver', role_marketing:'Marketing', role_superadmin:'System Admin',
+    // 2026-10-08 (owner): these seven sat in the Thai block as the English strings, byte for byte
+    // identical to the `en` block below, so a Thai reader saw "Staff" and "Managing Director" in
+    // the sidebar, in every employee table and on every employee card. Japanese was translated;
+    // Thai never was. It went unnoticed because the sidebar pill used to print the job title
+    // instead of the role, and the job titles are typed in English anyway.
+    // The words are not new: they are the ones this app already uses elsewhere for the same roles
+    // (the role dropdown in index.html, and the short table header map in renderAllowanceMatrix),
+    // so nothing here invents a second vocabulary. `superadmin` had none and takes the Thai of its
+    // Japanese label, システム管理者.
+    role_md:'กรรมการผู้จัดการ', role_manager:'ผู้จัดการ', role_accounting:'บัญชี',
+    role_user:'พนักงาน', role_driver:'คนขับ', role_marketing:'การตลาด', role_superadmin:'ผู้ดูแลระบบ',
     // checkin page
     checkin_title:'บันทึกเวลาเข้างาน', checkin_sub:'กดปุ่มเพื่อบันทึกเวลาเข้า-ออกงาน',
     btn_checkin:'เข้างาน', btn_checkout:'ออกงาน', btn_scanning:'กำลังสแกน...',
