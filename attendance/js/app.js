@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 90;
+const APP_BUILD = 91;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -11319,9 +11319,14 @@ function renderUserTodayPanel(panel) {
         <h3>🙋 ${L('My Status Today', 'สถานะวันนี้ของฉัน')}</h3>
         <span style="font-size:12px;color:#718096">${todayLabel}</span>
       </div>
-      <div class="card-body" style="text-align:center;padding:24px 16px">
-        <div style="margin-bottom:14px">${statusHtml}</div>
-        <div style="display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:8px">${timeHtml}</div>
+      <!-- 2026-10-08 (owner): the padding and the 14px margin used to be inline here, which meant
+           no stylesheet could make this card shorter without !important. They are now in
+           .dash-today-body (style.css) so the layout lives in one place. The card holds a status
+           pill and two times; it used to stand 189px tall for that, with the two sitting on
+           separate lines. They sit on one line now and the card is the height of its contents. -->
+      <div class="card-body dash-today-body">
+        <div>${statusHtml}</div>
+        <div class="dash-today-times">${timeHtml}</div>
       </div>
     </div>`;
 }

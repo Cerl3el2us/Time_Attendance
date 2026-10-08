@@ -4123,6 +4123,35 @@ tr.finalize-row-confirmed:hover td {
    tiles to hide one gap trades one empty area for eight.
    The inline style="display:none" on the card still wins while it is hidden; renderDashboard()
    clears it to '' to show the card, which is what lets this rule apply. */
+/* ===== 2026-10-08 (owner): "My Status Today" was a tall card holding very little =====
+   It carries a status pill and the two scan times, and it stood 189px tall for them: a header
+   with a divider, then the pill on its own line, then the times on another, inside 24px of
+   vertical padding. The owner's words were that it takes up space while having nothing in it.
+   Side by side, the two fit easily — 123px and 212px inside a 523px card — so they go on one
+   line and the card comes down to 118px. Nothing moves and nothing gets narrower; the box just
+   stops being bigger than what is in it.
+   (Moving it to a full-width strip above the columns was tried first and rejected by the owner:
+   it balanced the two columns but gave two short facts the whole 1590px width.) */
+#dash-left-panel .card-header {
+  border-bottom: 0;
+  padding: 14px 20px 0;
+}
+.dash-today-body {
+  display: flex;
+  flex-wrap: wrap;          /* a long status label on a narrow column drops to its own line */
+  align-items: center;
+  justify-content: center;
+  gap: 10px 16px;
+  padding: 12px 18px 16px;
+}
+.dash-today-times {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 #dash-lower-b { align-self: stretch; }
 #dash-lower-b > #dash-period-stats-wrap { display: flex; flex-direction: column; flex: 1 1 auto; }
 #dash-period-stats-wrap .card-body { flex: 1 1 auto; }
