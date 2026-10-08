@@ -63,17 +63,33 @@ Time Attendance — an attendance / leave / payroll web app for Tozai Boeki Kais
 **The frontend has no build step.** `attendance/index.html` and `attendance/js/app.js` are served to
 browsers exactly as they sit on disk. There is no bundler, no transpiler, no dist folder.
 
-### The git remote is stale — do not work from it
+### The git remote — a private GitHub repository
 
-`origin` points at `https://origin.cursor.com/teerawat-rungraung/Time_Attendance.git`, but `main` is
-**far ahead of `origin/main`** and nothing has been pushed in a long time. Ask git for the number
-rather than trusting one written here: `git -C Z:/Time_Attendance rev-list --count origin/main..main`.
-If you clone or pull from `origin` you will get very old code.
+`origin` points at `https://github.com/Cerl3el2us/Time_Attendance.git`.
 
-**The authoritative source is `Z:\Time_Attendance`, branch `main`.** Branch from there.
+**It must stay private.** `attendance-server/backend/server.js` carries bcrypt hashes for ten real
+employees as seed data. Those are hashes, not passwords, but they are real people's accounts.
+Live data (`attendance-server/backend/data/`) is gitignored and has never been committed — the whole
+history was scanned on 2026-10-08 for that, for the NAS password, and for `.env` / `.pem` / `.key`
+files, and came back clean. Keep it that way: anything you add under `data/` stays out of git.
 
-Do not `git push` without asking the owner first — pushing that whole backlog to that remote is a
-decision, not a chore.
+**The authoritative source is still `Z:\Time_Attendance`, branch `main`.** Branch from there, not
+from a GitHub clone — merging into that `main` is what deploys the frontend (section 6), so it is
+the tree the live site actually serves. GitHub is for inheritance and off-site history, not for
+deploying.
+
+Pushing to this remote is now a chore, not a decision: `git -C Z:/Time_Attendance push` after you
+merge. Ask git for the gap rather than trusting a number written here:
+`git -C Z:/Time_Attendance rev-list --count origin/main..main`.
+
+Making the repository public, adding collaborators, or pointing `origin` somewhere else are still
+the owner's decisions, not yours.
+
+2026-10-08 (owner): `origin` used to be `https://origin.cursor.com/teerawat-rungraung/Time_Attendance.git`,
+which had been stuck on the first commit since 2026-08-31 — 205 commits behind. The owner created the
+GitHub repository and pushed the whole history himself; the old remote was removed on his instruction.
+The reason was the one his own `STATUS.md` had recorded: history reachable only by someone with access
+to this NAS is a succession risk.
 
 ---
 
