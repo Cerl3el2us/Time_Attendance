@@ -114,6 +114,16 @@ document.documentElement.lang = currentLang === 'en' ? 'en' : currentLang === 'j
 // tables/pickers. Always filter with isEmployeeRecord (do not drop that filter).
 // Secret: no other user may learn that this login exists (login page, role
 // dropdowns, toasts, API errors). Banner/preview UI is for this session only.
+// 2026-10-08 (owner): "do not edit" is not "leave it broken". If THIS account is what is
+// broken -- cannot log in, banner or role preview missing, dry run no longer reporting, or a
+// bug sitting in the page it is inspecting -- repair it without being asked, towards the
+// documented behaviour and never narrowing it. The rule guards against deletion, not repair.
+// 2026-10-08 (owner): a NEW feature must stay inspectable through this account, as a role and
+// as a person. A "can I do this?" gate asks effectiveRole() / gateRoleFor(), never the raw
+// currentUser.role; every write goes through apiFetch() so the dry run can intercept it; and a
+// new page or menu lists 'superadmin' among the roles allowed to see it (applyRolePermissions
+// walks role by role -- it is not a wildcard). Full detail: AGENTS.md section 7a.
+// tests/superadmin-reach.test.js fails on the first two; the third needs a human.
 function isEmployeeRecord(u) { return !!(u && !u.isSystemAccount); }
 // Always the REAL account: the write gate, the banner and the preview UI hang off this, and an
 // impersonated employee must never make them disappear.
@@ -13155,7 +13165,6 @@ function renderReportsMonthly() {
   if (!tbody) return;
   applyReportsViewStyle();
   tbody.innerHTML = '';
-  const role = currentUser.role;
   const showPayslipBtn = isAccountingView();
   // เงินเดือนสุทธิ: ไม่แสดงในหน้านี้ทุก role (ดูได้ในหน้าใบเงินเดือนโดยตรง)
   const thSal = document.getElementById('th-report-salary');
@@ -13234,7 +13243,6 @@ function renderReportsYearly() {
   if (!tbody) return;
   applyReportsViewStyle();
   tbody.innerHTML = '';
-  const role = currentUser.role;
   const showPayslipBtn = isAccountingView();
   const thSal = document.getElementById('th-report-salary');
   const thBtn = document.getElementById('th-report-payslip-btn');

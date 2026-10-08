@@ -292,6 +292,31 @@ add it to รายชื่อพนักงาน or other staff lists (keep 
 `employeeRecords` filters). See `.cursor/rules/superadmin-do-not-touch.mdc`
 and the header in `backend/systemAccount.js`.
 
+**But “do not touch” is not “leave it broken” (2026-10-08, owner).** If the account
+itself is what is broken — it cannot log in, the banner or role preview will not
+appear, the dry run stops reporting, or there is a bug in the page it is inspecting
+— repair it without waiting to be asked. The rule above guards against an agent
+*removing* developer access, not against fixing it. Repair towards the documented
+behaviour only: never narrow what the account can do, never drop the `apiFetch`
+write gate or an `isEmployeeRecord` filter, never let it become visible to staff.
+The test suite must be green afterwards, and say what you changed.
+
+**New features must stay inspectable (2026-10-08, owner).** This account is only
+useful for finding bugs if features written *after* it can also be viewed through
+it, as a role and as a specific person. Three habits when you add one:
+
+1. A “can I do this?” gate asks `effectiveRole()`, or `gateRoleFor(user, uid)` when
+   the subject may be someone else — never the raw `currentUser.role`, which judges
+   the superadmin account rather than the role being previewed.
+2. Every write goes through `apiFetch()`. A bare `fetch()` while impersonating a
+   person really writes, and the row carries that employee’s name.
+3. A new page or menu lists `superadmin` among the roles allowed to see it.
+   `applyRolePermissions()` walks role by role; `superadmin` is one of them, not a
+   wildcard, so forgetting it hides the page from the one account meant to inspect it.
+
+`tests/superadmin-reach.test.js` fails on 1 and 2. It cannot know about a menu that
+has not been written yet, so 3 is on the reviewer. Full detail: `AGENTS.md` § 7a.
+
 **Do not delete `systemAccount.js` or remove its hooks in `server.js`.** If an AI
 or another developer removes the account from `users.json`, restart the backend
 (with `SUPERADMIN_PASSWORD` still set) to restore it.

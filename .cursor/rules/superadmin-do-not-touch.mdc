@@ -29,7 +29,18 @@ This login is **developer-only and secret**. Staff, MD, Accounting, and every ot
 
 - Leave every `isSuperAdmin()` / `isSuperAdminUser()` branch as-is.
 - Do not drop `superadmin` from role checks or remove restore-on-boot.
-- If the bug is next to this code, stop and ask the human.
+- If the bug is merely *next to* this code, stop and ask the human.
+- **But if the bug is IN this account** — it cannot log in, the banner or role preview will not appear, the dry run stops reporting, or there is a bug in the page it is inspecting — **fix it without asking** (2026-10-08, owner). "Do not touch" has never meant "leave it broken"; the rule is here to stop an AI *removing* this account, not to stop it being repaired. Repair towards the documented behaviour only: never narrow what the account can do, never drop the `apiFetch` write gate or an `isEmployeeRecord` filter, never let it become visible to employees. The suite must be green afterwards, and say what you changed.
+
+## New features must stay inspectable (2026-10-08, owner)
+
+A feature written *after* this account must still be viewable through it — as a role, and as a specific person — or the account stops being able to find bugs in it.
+
+- A "can I do this?" gate asks `effectiveRole()`, or `gateRoleFor(user, uid)` when the subject may be someone else. **Never `currentUser.role`** — the raw read judges the superadmin account, not the previewed role, so the button shows and every date is refused.
+- Every write goes through `apiFetch()`. A bare `fetch()` while impersonating a PERSON really writes, stamped with that employee’s name, with no activity log to show it was not them.
+- A new page or menu lists `superadmin` among the roles allowed to see it. `applyRolePermissions()` walks role by role and `superadmin` is one of them, not a wildcard — forget it and Full access falls into the `else` and cannot open the page at all. Copy `canAddEmp`: `(role === 'md' || role === 'accounting' || role === 'superadmin')`.
+
+`tests/superadmin-reach.test.js` goes red on the first two. It cannot know about a menu nobody has written yet, so the third is on you.
 
 ## Allowed
 

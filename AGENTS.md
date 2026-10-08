@@ -283,6 +283,47 @@ Three properties that look like bugs but are deliberate, so do not "fix" them:
   typed CONFIRM. Do not add a `POST`/`PUT`/`DELETE` that bypasses it — a test asserts this by
   reading the source, and that test exists so the rule fails loudly instead of eroding.
 
+### If superadmin itself is broken, fix it — that is not the "touching" this rule forbids
+
+2026-10-08 (owner): the paragraph above was read back and it only ever said "do not change". Taken
+literally, an agent that found superadmin unable to log in would stop and ask rather than repair it.
+That is not the intent. This rule exists to stop an agent REMOVING or weakening the account while
+busy with something else. It has never meant leave it broken.
+
+So: a superadmin that cannot log in, a banner or role preview that will not appear, a dry run that
+no longer reports, or a bug sitting in the page it is inspecting — repair it without waiting to be
+asked. In one direction only:
+
+- Repair towards the behaviour the spec describes. Do not take the opportunity to narrow what the
+  account can do, to drop the write gate in `apiFetch`, to remove an `isEmployeeRecord` filter, or
+  to let the account become visible to employees.
+- The whole suite must be green afterwards. A red test means the repair went the wrong way, not
+  that the test is wrong.
+- Say what you changed in this path, every time.
+
+### A new feature must be inspectable through superadmin
+
+2026-10-08 (owner): this account earns its keep only if features written AFTER it can be looked at
+through it too — as a role, and as a specific person. Three habits, all easy to miss while thinking
+about something else:
+
+1. **A "can I do this?" gate asks `effectiveRole()`, or `gateRoleFor(user, uid)` when the subject
+   may be someone else — never `currentUser.role`.** The raw read judges the superadmin account
+   instead of the role being previewed, so "view as Staff" shows the button and then refuses every
+   date: visible buttons, dead pickers.
+2. **Every write goes through `apiFetch()`.** The dry run hangs off it. A bare `fetch()` while a
+   PERSON is being impersonated really writes, and the record carries that employee's name with no
+   activity log to show it was not them. This is the worst outcome anything on this page prevents.
+3. **A new page or menu lists `superadmin` among the roles allowed to see it.**
+   `applyRolePermissions()` walks role by role, and `superadmin` is one of them — not a wildcard
+   that sees everything. A menu written as `role === 'md' || role === 'accounting'` drops Full
+   access into the `else` and hides itself from the one account meant to inspect it. Copy
+   `canAddEmp` in that same function, which gets it right:
+   `(role === 'md' || role === 'accounting' || role === 'superadmin')`.
+
+`tests/superadmin-reach.test.js` goes red on 1 and 2, and on deleting the superadmin branch in
+`applyRolePermissions()`. It cannot know about a menu nobody has written yet, so 3 is on you.
+
 Authoritative copies, in order of detail: the header comment in `attendance/js/app.js` (search
 `AI POLICY`), `attendance-server/backend/systemAccount.js`, `.cursor/rules/superadmin-do-not-touch.mdc`,
 and the account's own section in `attendance-server/DEVELOPER_HANDOFF.md`. The design and the
