@@ -205,7 +205,7 @@ const ROLE_PINS = [
     why: 'saveEmployee(): WRITES the role back after a failed save; not a read that decides anything' },
   { code: 'badge.className = `role-badge role-${isSuperAdmin() && previewRole ? previewRole : currentUser.role}`;',
     why: 'updateUserUI(): picks the pill\'s COLOUR class. Previewing already wins here, and nothing is gated on it' },
-  { code: "const roleText = roleLabels[currentUser.role] || currentUser.role || '';",
+  { code: "const roleText = roleLabels[currentUser.role] || currentUser.role || '';", times: 2,
     why: "updateUserUI(): the pill's TEXT. A label; the account's own role is the honest thing to name " +
          'there, and when a role is being previewed the suffix beside it says so separately' },
 ];
@@ -224,11 +224,26 @@ const FETCH_PINS = [
 
 const squash = s => s.replace(/\s+/g, ' ').trim();
 
+// 2026-10-08 (review): this compared SETS, so a verbatim copy of a pinned line was a free pass.
+// A review pasted `if (!isSuperAdmin()) return currentUser?.role || 'user';` into a brand-new
+// gate and `res = await fetch(...)` into a brand-new POST helper, and the suite stayed green at
+// 9 passed while the hit count quietly rose. Counts are compared now: each pinned text must
+// appear exactly as many times as it is pinned, so the second copy is reported as new.
 function comparePins(hits, pins, label) {
-  const wanted = pins.map(p => squash(p.code));
-  const got = hits.map(h => squash(h.code));
-  const unexpected = hits.filter(h => !wanted.includes(squash(h.code)));
-  const missing = pins.filter(p => !got.includes(squash(p.code)));
+  const tally = arr => arr.reduce((m, t) => m.set(t, (m.get(t) || 0) + 1), new Map());
+  // `times` is how many matches that one line legitimately contains — roleText's line reads
+  // currentUser.role twice (`roleLabels[currentUser.role] || currentUser.role`). Default 1.
+  const wanted = pins.reduce((m, p) => m.set(squash(p.code), (m.get(squash(p.code)) || 0) + (p.times || 1)), new Map());
+  const got = tally(hits.map(h => squash(h.code)));
+  const seen = new Map();
+  const unexpected = hits.filter(h => {
+    const k = squash(h.code);
+    const n = (seen.get(k) || 0) + 1;
+    seen.set(k, n);
+    return n > (wanted.get(k) || 0);   // the 1st copy is the pin; the 2nd onwards is new code
+  });
+  const missing = pins.filter(p => (got.get(squash(p.code)) || 0) < (wanted.get(squash(p.code)) || 0)
+    || !got.has(squash(p.code)));
   return { unexpected, missing, label };
 }
 
@@ -262,6 +277,20 @@ test('the scrubber keeps code and loses only comments and string bodies', () => 
   assert.ok(out.includes('currentUser.role'), 'code inside ${} was eaten');
   assert.ok(out.includes('doIt(a / b, c / d)'), 'division was mistaken for a regex');
   assert.ok(/currentUser\s*\[/.test(out), 'the bracket lookup was eaten');
+});
+
+test('the scrubber did not quietly eat the file', () => {
+  // 2026-10-08 (review): the pins only reach app.js line ~12800 of 24000+, so a desync starting
+  // after that would blank arbitrary code with every pin still present and every check green.
+  // A ratio is crude but it covers the whole file: a tokenizer that loses its place blanks to the
+  // next matching delimiter or to EOF, which craters this number. It sits near 47% today.
+  const nonSpace = s => (s.match(/\S/g) || []).length;
+  const ratio = nonSpace(APP_CODE) / nonSpace(APP_SRC);
+  assert.ok(ratio > 0.35 && ratio < 0.65,
+    `blankNonCode() kept ${(ratio * 100).toFixed(1)}% of app.js's non-space characters, outside the\n` +
+    '       35-65% band this file has always sat in. Either a lot of prose was added at once, or the\n' +
+    '       scrubber lost its place and is blanking real code — in which case every scan below is\n' +
+    '       reading a file that is mostly spaces, and passing for that reason.');
 });
 
 test('the scanner catches every spelling of a raw role read', () => {
@@ -374,7 +403,11 @@ test('the service worker is still out of scope for a reason', () => {
   // sw.js makes its own fetch calls; it is a cache layer, and nothing there writes to the API.
   // If that ever changes, a background replay would be a write outside apiFetch and outside every
   // rule in this file, so the day sw.js gains a write method this must fail and be dealt with.
-  const sw = blankNonCode(fs.readFileSync(path.join(ROOT, 'attendance/sw.js'), 'utf8'));
+  // 2026-10-08 (review): this read blankNonCode(sw.js) and then looked for a STRING LITERAL in it
+  // — which the scrubber has already erased by construction, so the check could never fire. The
+  // comment above promised the opposite. Read the raw file; a mention inside a comment here is a
+  // false alarm worth having, given what it guards.
+  const sw = fs.readFileSync(path.join(ROOT, 'attendance/sw.js'), 'utf8');
   const writes = sw.match(/method\s*:\s*['"](?:POST|PUT|PATCH|DELETE)['"]/gi) || [];
   assert.strictEqual(writes.length, 0,
     `attendance/sw.js now issues ${writes.length} write request(s) of its own. Those bypass apiFetch\n` +

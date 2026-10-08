@@ -32,7 +32,17 @@ function extractFunction(src, name) {
   const re = new RegExp(`^(?:async\\s+)?function ${name}\\(`, 'm');
   const m = re.exec(src);
   if (!m) throw new Error(`function ${name} not found in app.js`);
-  const i = src.indexOf('{', m.index);
+  // 2026-10-08 (review): start the body AFTER the parameter list closes. buildAttendancePrintView
+  // takes a destructured object, so "the first { after the name" is the parameter pattern — brace
+  // matching from there returned the signature alone. Every assertion about its BODY then passed
+  // or failed on text that was never searched.
+  let p = src.indexOf('(', m.index), parens = 0, afterParams = -1;
+  for (let j = p; j < src.length; j++) {
+    if (src[j] === '(') parens++;
+    else if (src[j] === ')') { parens--; if (parens === 0) { afterParams = j; break; } }
+  }
+  if (afterParams < 0) throw new Error(`unbalanced parameter list for ${name}`);
+  const i = src.indexOf('{', afterParams);
   let depth = 0;
   for (let j = i; j < src.length; j++) {
     if (src[j] === '{') depth++;
@@ -117,6 +127,19 @@ test('a Company Trip day is excluded, the same as in the reports', () => {
   assert.strictEqual(w.attendanceDayOtRecord(UID, DATE, true, true), null);
 });
 
+test('a record from a NEARBY DAY is not borrowed onto this row', () => {
+  // 2026-10-08 (review): every fixture record sat on one date, so deleting the `l.dateFrom ===
+  // dateStr` filter outright left all 11 tests green — and every row of the timesheet would then
+  // have shown the same OT record. The date is half the question this function answers.
+  const w = world([{ ...hwPaid, dateFrom: '2026-09-25' }]);
+  assert.strictEqual(w.attendanceDayOtRecord(UID, DATE, true, true), null, 'yesterday leaked in');
+  const w2 = world([{ ...plainOT, dateFrom: '2026-09-27' }]);
+  assert.strictEqual(w2.attendanceDayOtRecord(UID, DATE, true, true), null, 'tomorrow leaked in');
+  // and it still finds the right day when both are present
+  const w3 = world([{ ...hwPaid, id: 9, dateFrom: '2026-09-25' }, hwPaid]);
+  assert.strictEqual(w3.attendanceDayOtRecord(UID, DATE, true, true).id, hwPaid.id, 'wrong day won');
+});
+
 test('another person\'s record on the same day is not borrowed', () => {
   const w = world([{ ...hwPaid, userId: 99 }]);
   assert.strictEqual(w.attendanceDayOtRecord(UID, DATE, true, true), null);
@@ -136,9 +159,9 @@ test('the rule matches reportOtRecords() — same record, same verdict', () => {
     vm.runInContext(extractFunction(APP_SRC, n), ctx));
   const fromReports = ctx.reportOtRecords({ id: UID, role: 'user' }, DATE, DATE)
     .map(r => r.id).sort();
-  const fromTable = [hwPaid, plainOT, hwLeaveMode, hwPending, hwPaidNoHours]
-    .filter(l => ctx.attendanceDayOtRecord(UID, l.dateFrom, true, true))
-    .map(() => null); // the table returns ONE record per day; compare the set it would accept
+  // 2026-10-08 (review): a `fromTable` built here, computed nothing (.map(() => null)) and was
+  // then thrown away with `void` — six lines of decoy that made the real comparison below hard to
+  // find. Deleted. The comparison that matters is tableAccepts vs fromReports.
   const tableAccepts = [hwPaid, plainOT, hwLeaveMode, hwPending, hwPaidNoHours]
     .filter(l => {
       const only = { console, DATA_LEAVES: [l], isCompanyTripDay: () => false };
@@ -147,7 +170,6 @@ test('the rule matches reportOtRecords() — same record, same verdict', () => {
         vm.runInContext(extractFunction(APP_SRC, n), only));
       return !!only.attendanceDayOtRecord(UID, l.dateFrom, true, true);
     }).map(l => l.id).sort();
-  void fromTable;
   assert.deepStrictEqual(tableAccepts, fromReports,
     `the table accepts ${JSON.stringify(tableAccepts)} but the reports accept ${JSON.stringify(fromReports)}`);
 });
@@ -159,17 +181,43 @@ test('the row shows a Holiday Work icon of its own, not only the OT one', () => 
   const fn = extractFunction(APP_SRC, 'renderAttendanceTable');
   assert.ok(/holidayWorkBadge/.test(fn),
     'renderAttendanceTable() builds no holidayWorkBadge — an approved Holiday Work day still says nothing');
-  const listed = /const allowIcons = \[([^\]]*)\]/.exec(fn);
+  const listed = /const allowIcons\s*=\s*\[([^\]]*)\]/.exec(fn);
   assert.ok(listed, 'could not find the allowIcons list');
   assert.ok(/holidayWorkBadge/.test(listed[1]),
     `holidayWorkBadge is built but not in the icon list: ${listed[1].trim()}`);
+});
+
+// 2026-10-08 (review): the first version of this change reached the desktop table and stopped
+// there. The phone card and the printed sheet are the same timesheet and both still carried the
+// old rule — the phone showed ⏱️ with no 🔄 to explain it, and the printout showed neither, so the
+// paper that gets filed contradicted the screen. One surface fixed is not the screen fixed.
+test('all three renderings of the timesheet show Holiday Work, not just the desktop table', () => {
+  const table = extractFunction(APP_SRC, 'renderAttendanceTable');
+  const print = extractFunction(APP_SRC, 'buildAttendancePrintView');
+
+  const mobile = /const badgesArr\s*=\s*\[([^\]]*)\]/.exec(table);
+  assert.ok(mobile, 'could not find the mobile card badge list in renderAttendanceTable()');
+  assert.ok(/holidayWorkBadge/.test(mobile[1]),
+    `the phone card omits holidayWorkBadge: ${mobile[1].trim()}`);
+
+  assert.ok(/canHolidayWorkTarget/.test(print),
+    'buildAttendancePrintView() never receives canHolidayWorkTarget, so it cannot decide whether\n' +
+    '       to print the Holiday Work mark');
+  assert.ok(/badges\.push\('🔄'\)/.test(print),
+    'the printed sheet has no 🔄 — an approved Holiday Work day prints as an ordinary day');
+  assert.ok(/attendanceDayOtRecord\(/.test(print),
+    'the printed sheet still decides OT with its own filter instead of the shared rule, so it can\n' +
+    '       disagree with the screen it was printed from');
 });
 
 test('the Holiday Work icon is gated by holidayWork eligibility', () => {
   const fn = extractFunction(APP_SRC, 'renderAttendanceTable');
   assert.ok(/canHolidayWorkTarget\s*=\s*isAllowanceEligible\([^)]*'holidayWork'\)/.test(fn),
     'no canHolidayWorkTarget gate — the icon would show for roles with no such entitlement');
-  assert.ok(/hasAnyAllowanceTarget[^;]*canHolidayWorkTarget/.test(fn),
+  // 2026-10-08 (review): this used to be /hasAnyAllowanceTarget[^;]*canHolidayWorkTarget/, and
+  // [^;]* crosses newlines — so the COMMENT sitting above the declaration satisfied it. Deleting
+  // `|| canHolidayWorkTarget` from the assignment left the suite green. Anchor on the assignment.
+  assert.ok(/const hasAnyAllowanceTarget\s*=[^;]*canHolidayWorkTarget/.test(fn),
     'canHolidayWorkTarget is missing from hasAnyAllowanceTarget, so the whole column can stay\n' +
     '       hidden for someone whose only entitlement is Holiday Work');
 });

@@ -4049,12 +4049,18 @@ tr.finalize-row-confirmed:hover td {
      that wants width. */
   /* 2026-10-08 (owner): "ช่องฝั่งคำขอมันเล็ก" — 360px was a fixed width at every size, so the
      wider the screen the narrower it looked: 23% of the row at 1920, with the request rows
-     wrapping their date and approver onto separate lines inside it.
-     1fr / 2fr keeps the 1366 measurement above intact — at that width it computes to 351/703
-     against the old 360/694, a 9px difference — and lets the column grow with the window
-     instead of standing still. The 340px floor is what the request card needs before its rows
-     start wrapping again; below that the layout has already stacked. */
-  grid-template-columns: minmax(340px, 1fr) minmax(0, 2fr);
+     wrapping their date and approver onto separate lines inside it. 1fr / 2fr lets it grow with
+     the window instead of standing still: 526px at 1920.
+     The floor is 360px, the width this column used to have, and that is the whole point of the
+     number — below the crossover the ratio would hand it LESS than before, and this change exists
+     to make it wider. Measured: the crossover is a 1420px window. At 1366 the ratio alone gives
+     340px, so the floor holds it at 360 and nothing is lost on the common office laptop.
+     The first version of this rule had a 340px floor and a comment claiming 1366 computed to
+     351/703 against an old 360/694. Both numbers were wrong: they assumed --sidebar-w was 296px
+     when it is 268px (296 is where content starts, sidebar + the 28px page padding). The real
+     figures are 340/680 against 360/666 — the column came out 20px NARROWER than before on a
+     1366 laptop, the opposite of the complaint. Found in review, measured in the browser. */
+  grid-template-columns: minmax(360px, 1fr) minmax(0, 2fr);
   gap: 16px;
   align-items: start;
   margin-top: 16px;
@@ -4098,11 +4104,21 @@ tr.finalize-row-confirmed:hover td {
   gap: 20px;
   align-content: start;
 }
-/* Between 1280 and 1599 the summary column is near 750px; four tiles there squeeze the labels
+/* Between 1280 and 1599 the summary column is near 680px; four tiles there squeeze the labels
    again, so step down to three. Below 1280 the two columns have already stacked (see above) and
    the card has the full width back, which fits four. */
 @media (max-width: 1599px) {
   #dash-period-stats-wrap .card-body { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+/* 2026-10-08 (review): and down to two once the sidebar starts eating the width without giving
+   any back. The rule above assumed that below 1280 the page has its full width — it has not. The
+   sidebar undocks at 768, not at 1280 (.main-content keeps its margin until then), and between
+   769 and 1024 it is still 220px wide while the page padding is still 28px. Four tiles there
+   measured 112x176 on an 834px iPad in portrait, against roughly 157px wide before this change:
+   narrower than what it replaced, which is the one thing this work was not allowed to be.
+   Two columns put that back to ~246px at 834 and ~341px at 1024. */
+@media (max-width: 1024px) {
+  #dash-period-stats-wrap .card-body { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 1279px) {
   #dash-period-stats-wrap .card-body { grid-template-columns: repeat(4, minmax(0, 1fr)); }

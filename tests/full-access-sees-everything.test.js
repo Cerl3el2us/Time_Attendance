@@ -74,10 +74,17 @@ function extractFunction(src, name) {
 //
 // Two entries share data-page="payslip" (My Payslip for an employee, the admin payslip browser
 // for everyone else), which is why elements are kept as a list.
-function navItemsFromSource(src) {
+// 2026-10-08 (review): this matched `<div …>` only and read the raw text, so a menu written as
+// `<a class="nav-item …" data-page="…">` was invisible to the fixture — a review added exactly
+// that, carrying `.nav-no-md`, the shape of the original bug, and the suite still reported
+// "22 nav items" and passed. The mirror case was as bad: a menu parked inside an HTML comment
+// still counted, so the suite certified Full access could reach a menu that no longer rendered.
+// Any tag now, and comments are stripped first.
+function navItemsFromSource(rawSrc) {
+  const src = rawSrc.replace(/<!--[\s\S]*?-->/g, '');
   const out = [];
   const computed = [];
-  const tags = src.match(/<div\b[^>]*>/g) || [];
+  const tags = src.match(/<[a-zA-Z][a-zA-Z0-9]*\b[^>]*>/g) || [];
   tags.forEach(tag => {
     const cls = /class\s*=\s*(['"])([\s\S]*?)\1/.exec(tag);
     const page = /data-page\s*=\s*(['"])([\s\S]*?)\1/.exec(tag);
@@ -134,18 +141,38 @@ function makeElement(className, page) {
       'model, so the effect would be invisible here and the suite would pass blind. Teach ' +
       'makeElement() and the visibility rule about it.');
   };
-  const style = { display: '' };
-  Object.defineProperty(style, 'visibility', { get: () => '', set: boom('style.visibility') });
-  const el = {
+  // 2026-10-08 (review): the first hostile version named the mechanisms it knew about, and a
+  // review walked straight past it. `el.style.cssText = 'display:none'` hid Finalize Payroll and
+  // Payroll History from Full access and this suite reported 10 passed — including the test
+  // called "the payroll pages the inspector needs are reachable at Full access". So did
+  // textContent='', innerHTML='', inert, className+=' is-hidden', and opacity/height/position
+  // tricks. A list of known-bad properties can only ever be as long as the last review.
+  // It is a deny-by-default Proxy now: `display` is the one property this model understands, and
+  // every other write to style or to the element throws by name.
+  const style = new Proxy({ display: '' }, {
+    get: (t, k) => (k === 'display' ? t.display : (typeof k === 'string' ? boom(`style.${k}`)() : t[k])),
+    set: (t, k, v) => { if (k === 'display') { t.display = v; return true; } return boom(`style.${k}`)(); },
+  });
+  const el = new Proxy({
     className, page, style,
     classList: {
       contains: c => classes.includes(c),
       add: boom('classList.add'), remove: boom('classList.remove'), toggle: boom('classList.toggle'),
     },
     setAttribute: boom('setAttribute'), removeAttribute: boom('removeAttribute'), remove: boom('remove'),
+    replaceChildren: boom('replaceChildren'), append: boom('append'), appendChild: boom('appendChild'),
     getAttribute: a => (a === 'data-page' ? page : null),
-  };
-  Object.defineProperty(el, 'hidden', { get: () => false, set: boom('the hidden property') });
+    get hidden() { return false; },
+    set hidden(v) { boom('the hidden property')(); },
+  }, {
+    // Reading an unknown property is fine (feature detection does it); WRITING one is a hiding
+    // mechanism this model cannot see, so it fails by name instead of being swallowed.
+    set: (t, k, v) => {
+      if (k === 'className') return boom('className (assigning it also leaves classList stale)')();
+      if (!(k in t)) return boom(`the "${String(k)}" property`)();
+      t[k] = v; return true;
+    },
+  });
   return el;
 }
 

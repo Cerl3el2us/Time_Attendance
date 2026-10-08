@@ -7995,11 +7995,18 @@ function updateUserUI() {
   // Four of the six roles in use have a position that is simply the role's own name (Driver,
   // Accounting, Marketing, Managing Director), so showing the role there would still repeat the
   // line above. One rule covers every case: never print the same words twice.
-  // Both sides must be in the SAME language or the rule quietly stops working: comparing a raw
-  // English "Driver" against a translated "ドライバー" never matches, so before the L() above the
-  // pill never once hid for a Japanese reader — the duplicate this whole block exists to remove
-  // was still on their screen. positionText is localised now, roleText comes from t(), so they
-  // meet in whatever language is on.
+  // Both sides have to be in the same language or the rule quietly stops working. Before the L()
+  // above, a raw English "Driver" was compared against a translated "ドライバー" and never matched,
+  // so the pill never once hid for a Japanese reader.
+  // 2026-10-08 (review) — the honest version, because the first wording of this comment claimed
+  // more than the code does: L(en, th) returns `th` for Thai and only consults LANG_JA for
+  // Japanese, and here it is called as L(positionRaw, positionRaw). So in ENGLISH and JAPANESE
+  // both sides are localised and the rule works. In THAI the position line stays the raw English
+  // job title while roleText is now Thai, so they can never be equal and the pill always shows.
+  // That was reported to the owner as a visible consequence of translating the role names and
+  // left as it is: a Thai reader seeing "Driver" above "คนขับ" is getting the Thai name for a
+  // title that was typed in English, which is worth a line. It is NOT the duplicate this block
+  // removes. If job titles are ever stored per language, revisit this and the comparison.
   badge.style.display = (!badgeSuffix && positionText && positionText.toLowerCase() === roleText.trim().toLowerCase())
     ? 'none' : '';
   const avatar = document.getElementById('user-avatar');
@@ -10371,7 +10378,7 @@ function renderAttendanceTable() {
     // shared rule, so approved Holiday Work in paid mode brings its OT hours to this row the same
     // way it already does on the Dashboard, the reports and the payslip OT tile. Display only --
     // payroll was already paying these hours and nothing here changes that.
-    const approvedOT = attendanceDayOtRecord(targetUserId || currentUser.id, row.date, canOTTarget, canHolidayWorkTarget);
+    const approvedOT = attendanceDayOtRecord(targetUserId, row.date, canOTTarget, canHolidayWorkTarget);
     if (approvedOT) {
       const totHrs = otRecordTotalHours(approvedOT);
       const h = Math.floor(totHrs);
@@ -10399,9 +10406,15 @@ function renderAttendanceTable() {
     // is the day itself. Unlike the OT icon beside it, it shows for BOTH compensation modes: the
     // annual-leave mode earns no OT but the person still worked a holiday, and the row should say
     // so. 🔄 is the icon this app already uses for Holiday Work on the request button.
+    // 2026-10-08 (review): the Company Trip guard matches the icons beside it (upcountry at the
+    // line below, early morning above) and attendanceDayOtRecord(), which refuses one outright.
+    // Unreachable today — the server will not accept a Company Trip date that an approved Holiday
+    // Work record covers, and blocks the approval from the other side too — but without it, if
+    // that net were ever loosened, the row would claim Holiday Work on a day paying nothing while
+    // the ⏱️ next to it correctly vanished. Agreeing with its neighbours costs nothing.
     let holidayWorkBadge = '';
-    const hwRow = canHolidayWorkTarget ? DATA_LEAVES.find(l =>
-      l.userId === (targetUserId || currentUser.id) &&
+    const hwRow = (canHolidayWorkTarget && row.status !== 'company-trip') ? DATA_LEAVES.find(l =>
+      l.userId === targetUserId &&
       l.type === 'holiday-work' && l.dateFrom === row.date && l.status === 'approved'
     ) : null;
     if (hwRow) {
@@ -10477,7 +10490,10 @@ function renderAttendanceTable() {
       const card = document.createElement('div');
       card.className = cardCls;
       if (row.isFuture) card.style.opacity = '0.45';
-      const badgesArr = [earlyBadge, lateBadge, otBadge, upcountryBadge, ldBadge, personalCarBadge].filter(Boolean);
+      // 2026-10-08 (review): holidayWorkBadge was added to the desktop row and missed here, so the
+      // phone card showed ⏱️ "OT 3h30m" on a Sunday with nothing to say where holiday OT came from
+      // — the one icon that answers that was the one left out, on the screen most staff read.
+      const badgesArr = [holidayWorkBadge, earlyBadge, lateBadge, otBadge, upcountryBadge, ldBadge, personalCarBadge].filter(Boolean);
       card.innerHTML = `
         <div class="att-card-header">
           <div class="att-card-date">
@@ -10517,6 +10533,7 @@ function renderAttendanceTable() {
     targetUser, days, start, end,
     workDays, lateDays, annualDays, sickDays,
     canEarlyLateTarget, canOTTarget, canUpcountryTarget, canPersonalCarTarget, canLongDistTarget,
+    canHolidayWorkTarget,
   });
   syncAttendanceStickyHead();
 }
@@ -10527,7 +10544,7 @@ function renderAttendanceTable() {
 // 2026-08-02: rebuilt on feedback — plain "28 July 2026" date (fmtDateLong, no Thai
 // วัน...ที่ grammar prefix) + a separate explicit Status column (Present/Late/Not clocked
 // in/Holiday/...) instead of a stacked note under the date; cleaner font/spacing throughout.
-function buildAttendancePrintView({ targetUser, days, start, end, workDays, lateDays, annualDays, sickDays, canEarlyLateTarget, canOTTarget, canUpcountryTarget, canPersonalCarTarget, canLongDistTarget }) {
+function buildAttendancePrintView({ targetUser, days, start, end, workDays, lateDays, annualDays, sickDays, canEarlyLateTarget, canOTTarget, canUpcountryTarget, canPersonalCarTarget, canLongDistTarget, canHolidayWorkTarget }) {
   const el = document.getElementById('att-print-view');
   if (!el || !targetUser) return;
 
@@ -10578,10 +10595,14 @@ function buildAttendancePrintView({ targetUser, days, start, end, workDays, late
     if (canEarlyLateTarget && deviceScanQualifiesForLateNight(row, new Set(DATA_LEAVES.filter(l =>
       l.userId === targetUser.id && l.type === 'holiday-work' && l.status === 'approved'
     ).map(l => l.dateFrom)))) badges.push('🌙');
-    if (canOTTarget) {
-      const otLv = DATA_LEAVES.find(l => l.userId === targetUser.id && l.type === 'ot' && l.dateFrom === row.date && l.status === 'approved');
-      if (otLv) badges.push('⏱️');
+    // 2026-10-08 (review): this carried the old `type === 'ot'` filter verbatim and had no 🔄 at
+    // all, so the printout contradicted the screen beside it on an approved Holiday Work day. The
+    // paper is what gets filed and signed, and a payroll dispute is settled from the paper.
+    if (canHolidayWorkTarget && DATA_LEAVES.some(l =>
+      l.userId === targetUser.id && l.type === 'holiday-work' && l.dateFrom === row.date && l.status === 'approved')) {
+      badges.push('🔄');
     }
+    if (attendanceDayOtRecord(targetUser.id, row.date, canOTTarget, canHolidayWorkTarget)) badges.push('⏱️');
     if (canUpcountryTarget && row.upcountry) badges.push('🗺️');
     if (canLongDistTarget && row.longDistance) badges.push('🚗');
     if (canPersonalCarTarget) {
@@ -12192,6 +12213,11 @@ function renderEmployeesTable() {
   const roleLabels = { md:t('role_md'), manager:t('role_manager'), accounting:t('role_accounting'), user:t('role_user'), driver:t('role_driver'), marketing:t('role_marketing'), superadmin:t('role_superadmin') };
   [...DATA_USERS].filter(isEmployeeRecord).sort((a, b) => parseInt(a.employeeNo) - parseInt(b.employeeNo)).forEach(u => {
     const tr = document.createElement('tr');
+    // 2026-10-08 (review): the search below matches the row's rendered text, and the role badge is
+    // Thai now — so on the Thai UI, typing "driver" or "staff" stopped finding anyone. Carry the
+    // role key alongside, plus "staff" by hand because it is the one label whose English name is
+    // not its key. The Thai words keep working through textContent as before.
+    tr.dataset.search = u.role === 'user' ? 'user staff' : String(u.role || '');
     const startDate = u.startDate ? fmtDate(new Date(u.startDate + 'T12:00:00')) : '—';
     const { years: workYears, months: workMonths } = computeTenure(u.startDate);
     tr.innerHTML = `
@@ -12224,7 +12250,8 @@ function renderEmployeesTable() {
 function filterEmployees() {
   const search = (document.getElementById('emp-search')?.value || '').toLowerCase();
   document.querySelectorAll('#employees-tbody tr').forEach(tr => {
-    tr.style.display = (!search || tr.textContent.toLowerCase().includes(search)) ? '' : 'none';
+    const hay = (tr.textContent + ' ' + (tr.dataset.search || '')).toLowerCase();
+    tr.style.display = (!search || hay.includes(search)) ? '' : 'none';
   });
 }
 
