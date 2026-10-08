@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 87;
+const APP_BUILD = 88;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -7932,11 +7932,30 @@ function restoreTodayLog() {
 
 function updateUserUI() {
   document.getElementById('sidebar-name').textContent = currentUser.name;
-  document.getElementById('sidebar-position').textContent = currentUser.position;
+  const positionText = (currentUser.position || '').trim();
+  document.getElementById('sidebar-position').textContent = positionText;
   document.getElementById('topbar-name').textContent = currentUser.name;
   const roleLabels = { md:t('role_md'), manager:t('role_manager'), accounting:t('role_accounting'), user:t('role_user'), driver:t('role_driver'), marketing:t('role_marketing'), superadmin:t('role_superadmin') };
-  document.getElementById('sidebar-role-badge').textContent = (currentUser.position ? L(currentUser.position, currentUser.position) : roleLabels[currentUser.role] || currentUser.role) + (currentUser.isObserver ? ` — ${L('view only','ดูอย่างเดียว')} 👁️` : '') + (isSuperAdmin() && previewRole ? ` — ${L('preview','ดูเป็น')} ${roleLabels[previewRole] || previewRole}` : '');
-  document.getElementById('sidebar-role-badge').className = `role-badge role-${isSuperAdmin() && previewRole ? previewRole : currentUser.role}`;
+  // 2026-10-08 (owner): the badge used to print `position` when there was one, and the line
+  // directly above it already prints `position` — so everyone read their own job title twice,
+  // once as text and once as a coloured pill. All 9 active employees have a position set, so
+  // this was every user, every page. The badge's job is the ROLE (what the app lets you do);
+  // the line above is the job title (what you are called). Showing the role makes the pill say
+  // something the line above does not: "Sales Engineer" with a Staff pill, rather than
+  // "Sales Engineer" twice.
+  const roleText = roleLabels[currentUser.role] || currentUser.role;
+  // These two suffixes are the badge's real work — "view only" and which role is being previewed
+  // — so the badge must survive whenever either is present, duplicate text or not.
+  const badgeSuffix = (currentUser.isObserver ? ` — ${L('view only','ดูอย่างเดียว')} 👁️` : '')
+    + (isSuperAdmin() && previewRole ? ` — ${L('preview','ดูเป็น')} ${roleLabels[previewRole] || previewRole}` : '');
+  const badge = document.getElementById('sidebar-role-badge');
+  badge.textContent = roleText + badgeSuffix;
+  badge.className = `role-badge role-${isSuperAdmin() && previewRole ? previewRole : currentUser.role}`;
+  // Four of the six roles in use have a position that is simply the role's own name (Driver,
+  // Accounting, Marketing, Managing Director), so showing the role there would still repeat the
+  // line above. One rule covers every case: never print the same words twice.
+  badge.style.display = (!badgeSuffix && positionText && positionText.toLowerCase() === roleText.trim().toLowerCase())
+    ? 'none' : '';
   const avatar = document.getElementById('user-avatar');
   if (currentUser.facePhoto) {
     avatar.style.backgroundImage = `url(${currentUser.facePhoto})`;
