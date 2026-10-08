@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 91;
+const APP_BUILD = 92;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -2612,6 +2612,20 @@ function reportOtRecords(u, startStr, endStr) {
   return DATA_LEAVES.filter(l =>
     l.userId === u.id && l.dateFrom >= startStr && l.dateFrom <= endStr && !isCompanyTripDay(l.dateFrom) &&
     ((canOT && l.type === 'ot' && l.status === 'approved') || (canHW && isHolidayWorkOtRecord(l))));
+}
+// 2026-10-08 (owner): the same rule as reportOtRecords() above, for ONE day instead of a period.
+// The attendance table asks per row, so it cannot use the period version -- and before this it
+// carried its own copy that accepted `l.type === 'ot'` and nothing else. The result: an approved
+// Holiday Work day showed no OT icon on the timesheet while the five screens listed in the
+// 2026-09-24 note counted those hours and the payslip paid them. Found by the owner against a real
+// record: approved, paid mode, 3.5 hours at x2.0, which reportOtRecords() returns and the table
+// did not. The two bodies have to keep saying the same thing, so
+// tests/holiday-work-attendance-row.test.js feeds the same records to both and compares.
+function attendanceDayOtRecord(userId, dateStr, canOT, canHW) {
+  if (isCompanyTripDay(dateStr)) return null;
+  return DATA_LEAVES.find(l =>
+    l.userId === userId && l.dateFrom === dateStr &&
+    ((canOT && l.type === 'ot' && l.status === 'approved') || (canHW && isHolidayWorkOtRecord(l)))) || null;
 }
 // 2026-09-24 (review): Reports show the OT rows/counts for a role eligible for OT OR for Holiday
 // Work -- reportOtRecords() already filters each record type by its own eligibility, and the
@@ -10148,7 +10162,11 @@ function renderAttendanceTable() {
   const canUpcountryTarget   = isAllowanceEligible(eligAtt, targetUser.role, 'upcountry');
   const canLongDistTarget    = isAllowanceEligible(eligAtt, targetUser.role, 'longDistance');
   const canPersonalCarTarget = isAllowanceEligible(eligAtt, targetUser.role, 'personalCar') && targetUser.personalCarEligible === true;
-  const hasAnyAllowanceTarget = canEarlyLateTarget || canOTTarget || canUpcountryTarget || canLongDistTarget || canPersonalCarTarget;
+  // 2026-10-08 (owner): Holiday Work had no gate here at all, because the column had no icon for
+  // it. Without this flag the column can also stay hidden for someone whose only entitlement is
+  // Holiday Work -- hasAnyAllowanceTarget decides whether the whole column renders.
+  const canHolidayWorkTarget = isAllowanceEligible(eligAtt, targetUser.role, 'holidayWork');
+  const hasAnyAllowanceTarget = canEarlyLateTarget || canOTTarget || canUpcountryTarget || canLongDistTarget || canPersonalCarTarget || canHolidayWorkTarget;
   const thAllowances = tbody.closest('table')?.querySelector('thead th#att-th-allowances');
   if (thAllowances) { thAllowances.style.display = hasAnyAllowanceTarget ? '' : 'none'; }
 
@@ -10341,10 +10359,11 @@ function renderAttendanceTable() {
     }
 
     let otBadge = '';
-    const approvedOT = !canOTTarget ? null : DATA_LEAVES.find(l =>
-      l.userId === (targetUserId || currentUser.id) &&
-      l.type === 'ot' && l.dateFrom === row.date && l.status === 'approved'
-    );
+    // 2026-10-08 (owner): was a local filter that only matched `type === 'ot'`. It now asks the
+    // shared rule, so approved Holiday Work in paid mode brings its OT hours to this row the same
+    // way it already does on the Dashboard, the reports and the payslip OT tile. Display only --
+    // payroll was already paying these hours and nothing here changes that.
+    const approvedOT = attendanceDayOtRecord(targetUserId || currentUser.id, row.date, canOTTarget, canHolidayWorkTarget);
     if (approvedOT) {
       const totHrs = otRecordTotalHours(approvedOT);
       const h = Math.floor(totHrs);
@@ -10367,12 +10386,28 @@ function renderAttendanceTable() {
       const pcRate = pcLeave.personalCarRate != null ? pcLeave.personalCarRate : (APP_SETTINGS.allowances.personalCar != null ? APP_SETTINGS.allowances.personalCar : 1000);
       personalCarBadge = attAllowIcon('🚙', `${L('Personal Car', 'รถส่วนตัว')} (+฿${pcRate.toLocaleString()})`);
     }
+    // 2026-10-08 (owner): an approved Holiday Work day said nothing on this row — not the day
+    // itself, and (before the OT lookup above was widened) not the hours it carries either. This
+    // is the day itself. Unlike the OT icon beside it, it shows for BOTH compensation modes: the
+    // annual-leave mode earns no OT but the person still worked a holiday, and the row should say
+    // so. 🔄 is the icon this app already uses for Holiday Work on the request button.
+    let holidayWorkBadge = '';
+    const hwRow = canHolidayWorkTarget ? DATA_LEAVES.find(l =>
+      l.userId === (targetUserId || currentUser.id) &&
+      l.type === 'holiday-work' && l.dateFrom === row.date && l.status === 'approved'
+    ) : null;
+    if (hwRow) {
+      const hwMode = hwRow.compensationMode === 'paid'
+        ? L('Paid compensation', 'ชดเชยเป็นเงิน')
+        : L('Annual leave +1 day', 'ลาพักร้อน +1 วัน');
+      holidayWorkBadge = attAllowIcon('🔄', `${L('Holiday Work', 'ทำงานวันหยุด')} (${hwMode})`);
+    }
     const upcountryBadge = (canUpcountryTarget && row.upcountry && row.status !== 'company-trip')
       ? attAllowIcon('🗺️', L('Upcountry', 'Upcountry')) : '';
     const ldBadge = (canLongDistTarget && row.longDistance)
       ? attAllowIcon('🚗', `${L('Long Distance', 'Long Distance')} ${Number(row.longDistanceKm) || 0} ${L('km', 'กม.')}${row.longDistanceAllowance > 0 ? ` (+฿${row.longDistanceAllowance})` : ''}`)
       : '';
-    const allowIcons = [earlyBadge, lateBadge, otBadge, upcountryBadge, ldBadge, personalCarBadge].filter(Boolean).join('');
+    const allowIcons = [holidayWorkBadge, earlyBadge, lateBadge, otBadge, upcountryBadge, ldBadge, personalCarBadge].filter(Boolean).join('');
     const allowIconsHtml = allowIcons
       ? `<span class="att-allow-icons">${allowIcons}</span>`
       : '<span style="color:#cbd5e1">—</span>';

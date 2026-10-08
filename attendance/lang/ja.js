@@ -1301,6 +1301,7 @@ window.LANG_JA = {
   "Compensation Mode": "補償方法",
   "Annual leave +1 day": "年次休暇+1日",
   "Paid (OT + transport)": "金銭補償（OT＋交通費）",
+  "Paid compensation": "金銭補償",
   "Pays holiday transport and OT ×2/×3 from start–end times. Early Morning (Hikvision) and Upcountry (if you entered a location) still pay.": "休日交通費と開始〜終了からのOT×2/×3を支給します。顔認証の早朝手当と、場所を入れた出張手当は引き続き出ます。",
   "Adds 1 annual-leave day. No holiday transport and no OT ×2/×3. Early Morning (Hikvision) and Upcountry (if you entered a location) still pay.": "年次休暇が1日増えます。休日交通費とOT×2/×3は出ません。顔認証の早朝手当と、場所を入れた出張手当は引き続き出ます。",
   "Specify the work you did on the holiday...": "休日に行った業務を入力...",
