@@ -93,15 +93,31 @@ function navItemsFromSource(src) {
 const SCRAPE = navItemsFromSource(APP_SRC);
 const NAV_ITEMS = SCRAPE.items;
 
+// How a menu is named in the sets below.
+//
+// `data-page` alone is not an identity: two different menus carry data-page="payslip" — My
+// Payslip for an employee, and the admin payslip browser for everyone else. Collapsing both to
+// "payslip" made them one entry, so the suite could not tell "Full access can reach the payslip
+// pages" from "Full access can reach ONE of the two and the other role can reach the other".
+// Where a page name is shared, the class list disambiguates; where it is unique — twenty of the
+// twenty-two — the plain name is kept, so the lists here stay readable.
+function keyMaker(items) {
+  const count = {};
+  items.forEach(i => { count[i.page] = (count[i.page] || 0) + 1; });
+  return el => (count[el.page] > 1 ? `${el.page} [${el.className}]` : el.page);
+}
+
 // The fixture, pinned. If a nav item stops being scraped — renamed attribute, computed class,
 // moved to a different markup shape — coverage for it silently drops to nothing, and the only
 // symptom is a number in this file's own log line that nobody is watching. So the number is
 // watched here. Adding or removing a menu is expected to update this list, deliberately.
-const EXPECTED_NAV_PAGES = [
+const EXPECTED_NAV_KEYS = [
   'approval', 'archive', 'attendance', 'audit-log', 'calendar', 'checkin', 'dashboard',
   'employees', 'faq', 'finalize', 'holidays', 'leave', 'leave-summary', 'my-requests',
-  'myattendance', 'payroll-history', 'payslip', 'payslip', 'profile', 'reports', 'settings',
-  'tawi50',
+  'myattendance', 'payroll-history',
+  'payslip [nav-item nav-admin nav-payslip]',
+  'payslip [nav-item nav-emp-only]',
+  'profile', 'reports', 'settings', 'tawi50',
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -191,8 +207,9 @@ function visiblePagesFor(preview, opts) {
   ['loggedInUser', 'isSuperAdmin', 'isImpersonatingPerson', 'effectiveRole', 'applyRolePermissions']
     .forEach(n => vm.runInContext(extractFunction(APP_SRC, n), ctx));
   vm.runInContext('applyRolePermissions()', ctx);
+  const key = keyMaker(o.items || NAV_ITEMS);
   return {
-    pages: new Set(doc._elements.filter(e => e.style.display !== 'none').map(e => e.page)),
+    pages: new Set(doc._elements.filter(e => e.style.display !== 'none').map(key)),
     effectiveRole: vm.runInContext('effectiveRole()', ctx),
     unknownSelectors: [...doc._unknownSelectors],
   };
@@ -212,6 +229,12 @@ const PERSONAL_TO_THE_VIEWER = new Map([
   ['checkin',     'clocking in is an act by an employee; this account has no timesheet to clock into (navigateTo refuses it outright too)'],
   ['leave',       "shows and spends the viewer's own leave balance, which this account does not have"],
   ['my-requests', "literally the viewer's own requests; this account cannot file one"],
+  // Surfaced by keying on class as well as page name: this one was previously indistinguishable
+  // from the admin payslip browser, so the pair cancelled out and neither was ever examined.
+  ['payslip [nav-item nav-emp-only]',
+    "My Payslip — the viewer's own pay record, which this account does not have. The admin " +
+    'payslip browser is a separate menu (payslip [nav-item nav-admin nav-payslip]) and Full ' +
+    'access keeps that one; if it ever disappears, the rule below will say so.'],
 ]);
 
 // The one comparison, used by the real check AND by the self-test that is supposed to vouch for
@@ -232,14 +255,14 @@ let full, perRole;
 test('the sidebar fixture is the one this suite was written against', () => {
   assert.strictEqual(SCRAPE.computed.length, 0,
     `these nav items build their class list by interpolation, so the stand-in cannot model them: ${SCRAPE.computed.join(', ')}`);
-  const got = NAV_ITEMS.map(i => i.page).sort();
-  assert.deepStrictEqual(got, EXPECTED_NAV_PAGES.slice().sort(),
+  const got = NAV_ITEMS.map(keyMaker(NAV_ITEMS)).sort();
+  assert.deepStrictEqual(got, EXPECTED_NAV_KEYS.slice().sort(),
     '\n       The set of nav items scraped out of app.js changed.' +
-    '\n       If you added or removed a menu, update EXPECTED_NAV_PAGES.' +
+    '\n       If you added or removed a menu, update EXPECTED_NAV_KEYS.' +
     '\n       If you did not, an item is no longer being scraped — it has silently left every' +
     '\n       check in this file, which is exactly the failure this pin exists to catch.' +
     `\n       got:      ${JSON.stringify(got)}` +
-    `\n       expected: ${JSON.stringify(EXPECTED_NAV_PAGES.slice().sort())}`);
+    `\n       expected: ${JSON.stringify(EXPECTED_NAV_KEYS.slice().sort())}`);
 });
 
 test('the harness runs the real function and reproduces the real roles', () => {

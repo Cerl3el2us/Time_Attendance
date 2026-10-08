@@ -104,66 +104,15 @@
       </div>
     </div>
 
-    <nav class="sidebar-nav">
-      <div class="nav-section">หน้าหลัก</div>
-      <div class="nav-item nav-no-md active" data-page="checkin" onclick="navigateTo('checkin')">
-        <span class="icon">⏰</span> ลงเวลาทำงาน
-      </div>
-      <div class="nav-item" data-page="dashboard" onclick="navigateTo('dashboard')">
-        <span class="icon">📊</span> แดชบอร์ด
-      </div>
-
-      <div class="nav-section">ข้อมูลส่วนตัว</div>
-      <div class="nav-item" data-page="profile" onclick="navigateTo('profile')">
-        <span class="icon">🙍</span> โปรไฟล์ของฉัน
-      </div>
-      <div class="nav-item" data-page="attendance" onclick="navigateTo('attendance')">
-        <span class="icon">📅</span> ตารางเวลาทำงาน
-      </div>
-      <div class="nav-item" data-page="leave" onclick="navigateTo('leave')">
-        <span class="icon">🏖️</span> วันลาของฉัน
-        <span id="leave-requests-badge" style="display:none;background:#ef4444;color:#fff;font-size:10px;font-weight:800;min-width:18px;height:18px;padding:0 5px;border-radius:9px;margin-left:auto;align-items:center;justify-content:center;line-height:1"></span>
-      </div>
-      <div class="nav-item nav-staff-only" data-page="my-requests" onclick="navigateTo('my-requests')">
-        <span class="icon">📋</span> ตรวจสอบสถานะคำขอ
-        <span id="my-requests-badge" style="display:none;background:#ef4444;color:#fff;font-size:10px;font-weight:800;min-width:18px;height:18px;padding:0 5px;border-radius:9px;margin-left:auto;align-items:center;justify-content:center;line-height:1"></span>
-      </div>
-
-      <div class="nav-section nav-manager">จัดการพนักงาน</div>
-      <div class="nav-item nav-manager" data-page="employees" onclick="navigateTo('employees')">
-        <span class="icon">👥</span> ข้อมูลพนักงาน
-      </div>
-      <div class="nav-item nav-approval" data-page="approval" onclick="navigateTo('approval')">
-        <span class="icon">📋</span> รายการคำขอ
-        <span id="approval-badge" class="nav-badge" style="display:none"></span>
-      </div>
-
-      <div class="nav-section nav-admin">รายงาน & การเงิน</div>
-      <div class="nav-item nav-admin nav-payslip" data-page="payslip" onclick="navigateTo('payslip')">
-        <span class="icon">💵</span> ใบเงินเดือน
-      </div>
-      <div class="nav-item nav-accounting-only" data-page="finalize" onclick="navigateTo('finalize')">
-        <span class="icon">✅</span> Finalize Payroll
-      </div>
-      <div class="nav-item nav-admin" data-page="reports" onclick="navigateTo('reports')">
-        <span class="icon">📈</span> รายงานสรุปวันทำงาน
-      </div>
-      <div class="nav-item nav-admin" data-page="leave-summary" onclick="navigateTo('leave-summary')">
-        <span class="icon">🗓️</span> <span data-en="Employee Leave Summary">สรุปวันลาพนักงาน</span>
-      </div>
-
-      <div class="nav-item nav-accounting-only" data-page="tawi50" onclick="navigateTo('tawi50')">
-        <span class="icon">📄</span> <span data-en="Withholding Tax">50 ทวิ</span>
-      </div>
-      <div class="nav-item nav-accounting-only" data-page="archive" onclick="navigateTo('archive')">
-        <span class="icon">🗂️</span> <span data-en="Former Employees">อดีตพนักงาน</span>
-      </div>
-
-      <div class="nav-section" data-en="System">ระบบ</div>
-      <div class="nav-item" data-page="settings" onclick="navigateTo('settings')">
-        <span class="icon">⚙️</span> การตั้งค่าระบบ
-      </div>
-    </nav>
+    <!-- The real menu is built by fixStaticText() in app.js and REPLACES this element's contents
+         outright on DOMContentLoaded: 22 items, three languages. Anything written here is erased
+         before anyone sees it, with no error and nothing in the console — so a menu added here
+         simply never appears, and the cause is very hard to find. Add menus in fixStaticText().
+         Keep the element itself: app.js finds it by this class.
+         2026-10-08 (owner): emptied. It had drifted to 15 Thai-only items against the 22 real
+         ones, and since the app layout paints before a 1.6MB app.js has finished parsing, that
+         stale menu could flash on screen on a slow first load. -->
+    <nav class="sidebar-nav"></nav>
 
     <div class="sidebar-footer">
       <button id="dark-mode-toggle" onclick="toggleDarkMode()" style="display:flex;align-items:center;gap:10px;width:100%;padding:10px 14px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.12);border-radius:var(--radius-sm);color:rgba(255,255,255,0.75);cursor:pointer;font-size:13px;font-family:inherit;margin-bottom:8px;transition:all 180ms">
