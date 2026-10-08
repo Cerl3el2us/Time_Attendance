@@ -190,6 +190,41 @@ test('split: start-day rate, x3 after 17:30 through midnight, lunch only on the 
     assert.deepStrictEqual([s('20:00', '05:30').otHours20, s('20:00', '05:30').otHours30], [0, 0], side);
   }
 });
+// 2026-10-08 (owner): a shift that ENDS inside the lunch hour never took that lunch -- the person
+// was working and then went home. Deducting it paid them nothing for the hour they worked through:
+// ending at 12:00, 12:30 and 13:00 all came out at 3.5 hours, so the hour between 12:00 and 13:00
+// was worked for free. The deduction now applies only when the shift runs past 13:00.
+//
+// The step at 13:00 is deliberate, not an oversight to be smoothed away later: someone who leaves
+// at 13:00 worked 4.5 hours straight, while someone who stays to 13:30 and took the hour off
+// worked 4.0. Longer at work is not more hours worked, and the pay follows the hours.
+test('split: a shift that ends by 13:00 worked through lunch, so nothing is deducted', () => {
+  for (const [side, X] of both(world())) {
+    const h20 = (a, b) => X.splitHolidayWorkOtMinutes(a, b, SETTINGS).otHours20;
+    // ends before lunch even starts -- nothing to deduct, unchanged
+    assert.strictEqual(h20('08:30', '12:00'), 3.5, `${side} 08:30-12:00`);
+    // ends INSIDE the lunch hour: was 3.5 (30 min taken away), now the full 4
+    assert.strictEqual(h20('08:30', '12:30'), 4, `${side} 08:30-12:30`);
+    // ends exactly at 13:00: was 3.5 (a whole hour taken away), now 4.5
+    assert.strictEqual(h20('08:30', '13:00'), 4.5, `${side} 08:30-13:00`);
+    // a short shift wholly inside the lunch hour still counts
+    assert.strictEqual(h20('12:30', '13:00'), 0.5, `${side} 12:30-13:00`);
+    assert.strictEqual(h20('11:00', '12:45'), 1.75, `${side} 11:00-12:45`);
+    // past 13:00 the old behaviour stands -- the break is assumed taken
+    assert.strictEqual(h20('08:30', '13:30'), 4, `${side} 08:30-13:30`);
+    assert.strictEqual(h20('08:30', '17:30'), 8, `${side} 08:30-17:30`);
+    assert.strictEqual(h20('08:30', '14:00'), 4.5, `${side} 08:30-14:00`);
+  }
+});
+test('split: the drop after 13:00 is the rule working, not a bug to round away', () => {
+  for (const [side, X] of both(world())) {
+    const h20 = (a, b) => X.splitHolidayWorkOtMinutes(a, b, SETTINGS).otHours20;
+    // 13:00 pays MORE than 13:30 on purpose: 4.5 hours worked straight through against 4.0 with
+    // an hour off in the middle. If someone "fixes" this into a smooth curve, they are paying for
+    // time spent on the premises rather than time worked.
+    assert.ok(h20('08:30', '13:00') > h20('08:30', '13:30'), `${side} the step at 13:00 is gone`);
+  }
+});
 test('scan window: an after-midnight Holiday Work end is checked against the real check-out', () => {
   const SAT = '2026-09-26';
   const cases = [[{ checkIn: '08:00', checkOut: '01:30' }, '01:00', true], [{ checkIn: '08:00', checkOut: '23:00' }, '01:00', false]];

@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 92;
+const APP_BUILD = 93;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -2322,8 +2322,16 @@ function splitHolidayWorkOtMinutes(workStartTime, workEndTime, S) {
   // 2026-09-23 (owner decision): the ×2 window excludes the 12:00-13:00 lunch hour -- the hourly
   // rate assumes an 8-hour day (salary / 30 / 8), so 08:30-17:30 is 8 paid hours, not 9. Only the
   // part of lunch the employee actually worked through is removed (13:00-17:00 loses nothing).
+  // 2026-10-08 (owner): and nothing is removed at all from a shift that ENDS by 13:00. That
+  // person was still working when lunch came and then went home -- they never took it. Deducting
+  // it meant ending at 12:00, 12:30 or 13:00 all paid the same 3.5 hours, so the hour worked
+  // through lunch was worked for free.
+  // The step at 13:00 is deliberate and must not be smoothed away: leaving at 13:00 is 4.5 hours
+  // worked straight, staying until 13:30 with the hour off is 4.0. Pay follows hours worked, not
+  // time spent on the premises.
   const x2Start = Math.max(startMin, stdStart), x2End = Math.min(endMin, stdEnd);
-  const lunchMins = Math.max(0, Math.min(x2End, 13 * 60) - Math.max(x2Start, 12 * 60));
+  const lunchMins = endMin <= 13 * 60 ? 0
+    : Math.max(0, Math.min(x2End, 13 * 60) - Math.max(x2Start, 12 * 60));
   const otMins20 = Math.max(0, x2End - x2Start - lunchMins);
   const round2 = n => Math.round(n / 60 * 100) / 100;
   return { otMins20, otMins30, otHours20: round2(otMins20), otHours30: round2(otMins30) };
