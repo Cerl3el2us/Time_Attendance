@@ -4080,14 +4080,35 @@ tr.finalize-row-confirmed:hover td {
    397x137 and the bottom 230x161 — 73% wider and 15% shorter, for the same kind of value —
    and no vertical edge met. That mismatch is what read as "ขาดๆ เกินๆ".
    display:contents lifts both wrappers out of the way so every tile is a cell of ONE grid and
-   they are all the same size. auto-fit, not a fixed column count, because the second group is
-   0-6 tiles depending on what the person is eligible for (see the tile list in renderDashboard) —
-   a hardcoded 4 would leave a ragged last row for most of those counts. */
+   they are all the same size.
+
+   A fixed column count per breakpoint, NOT repeat(auto-fit, minmax(150px, 1fr)): auto-fit was
+   tried first and packed six tiles into the 1049px column, leaving two stranded on a row of
+   their own and squeezing each tile to 151px — narrow enough that "allowance units (higher
+   tier = 2)" wrapped to two lines and made those tiles 15px taller than the rest. It solved the
+   alignment and broke the balance, which was the complaint.
+   Four is the number that matters: the common case is three fixed tiles plus five eligibility
+   tiles, and eight across four columns is two full rows. The count is 3-9 depending on what the
+   person is eligible for (see the tile list in renderDashboard), so some totals will still leave
+   a short last row — unavoidable with any fixed count, and a left-aligned short row reads
+   normally. Two grids of different-sized tiles did not. */
 #dash-period-stats-wrap .card-body {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 20px;
   align-content: start;
+}
+/* Between 1280 and 1599 the summary column is near 750px; four tiles there squeeze the labels
+   again, so step down to three. Below 1280 the two columns have already stacked (see above) and
+   the card has the full width back, which fits four. */
+@media (max-width: 1599px) {
+  #dash-period-stats-wrap .card-body { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 1279px) {
+  #dash-period-stats-wrap .card-body { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+@media (max-width: 767px) {
+  #dash-period-stats-wrap .card-body { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 }
 #dash-period-stats-wrap .card-body > .grid-3,
 #dash-period-stats-wrap .card-body > #dash-role-stats-row,
