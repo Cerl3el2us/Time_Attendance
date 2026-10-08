@@ -9,6 +9,28 @@ this file.
 
 ---
 
+## Before you answer anything — two steps
+
+Added 2026-10-08 at the owner's request, after the second machine kept reporting that it did not
+know what this one had left open. Sections are deliberately left unnumbered here so the existing
+cross-references ("Section 3", "checklist item 9") keep pointing at the same places.
+
+**1. Check your plugins/skills, and state in Thai which skill you are invoking and why.**
+Write that line *at the moment you invoke it*, not in the closing summary. The owner's words:
+*"คอมเครื่องนี้ก่อนทำอะไรจะเรียกใช้ skill ต่างๆ และบอกให้ผมรู้ อีกเครื่องเงียบ ไม่บอกอะไรเลย ไม่รู้ว่าใช้รึเปล่า"*
+— silence means he cannot tell disciplined work from guessing, and silence is what he sees from
+the other machine. The marketplaces and the seven plugins to install are listed in the memory file
+`feedback_attendance_announce_skills_and_tooling.md`, pulled from `Z:\claude_memory` by the
+SessionStart hook. `superpowers` and `playwright` are the two that actually matter here.
+
+**2. Read `STATUS.md` in this folder before saying anything about what is or is not pending.**
+It is the answer to "what is the other machine in the middle of?" — open work travels with the
+code, not in Claude's memory, and not in `MEMORY.md`. Never answer that you do not know. Its first
+section repeats these two steps, and every entry records when it was last checked against real
+code, because an entry you do not re-verify is how a finished job gets reopened.
+
+---
+
 ## 0. Where to point your editor — read this first
 
 **Open your editor / agent on a worktree folder, not on `Z:\Time_Attendance`.**
