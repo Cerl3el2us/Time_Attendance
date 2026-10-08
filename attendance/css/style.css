@@ -4047,7 +4047,14 @@ tr.finalize-row-confirmed:hover td {
      rest gives ~848px. (Heights, not "screens" -- how many screens that is depends on the
      window height.) The panels are short and narrow by nature; the summary is a row of tiles
      that wants width. */
-  grid-template-columns: 360px minmax(0, 1fr);
+  /* 2026-10-08 (owner): "ช่องฝั่งคำขอมันเล็ก" — 360px was a fixed width at every size, so the
+     wider the screen the narrower it looked: 23% of the row at 1920, with the request rows
+     wrapping their date and approver onto separate lines inside it.
+     1fr / 2fr keeps the 1366 measurement above intact — at that width it computes to 351/703
+     against the old 360/694, a 9px difference — and lets the column grow with the window
+     instead of standing still. The 340px floor is what the request card needs before its rows
+     start wrapping again; below that the layout has already stacked. */
+  grid-template-columns: minmax(340px, 1fr) minmax(0, 2fr);
   gap: 16px;
   align-items: start;
   margin-top: 16px;
@@ -4065,6 +4072,39 @@ tr.finalize-row-confirmed:hover td {
 @media (max-width: 1279px) {
   .dash-lower { grid-template-columns: 1fr; }
 }
+
+/* ===== 2026-10-08 (owner): the period summary was two grids pretending to be one =====
+   The three fixed tiles (Work Days / Late / Leave) sat in .grid-3 and the eligibility tiles
+   (Early Morning, Late Night, Upcountry, OT, Long Distance, Personal Car) in a separate
+   .grid-auto-stats underneath. Two grids cannot line up: measured at 1920 the top row was
+   397x137 and the bottom 230x161 — 73% wider and 15% shorter, for the same kind of value —
+   and no vertical edge met. That mismatch is what read as "ขาดๆ เกินๆ".
+   display:contents lifts both wrappers out of the way so every tile is a cell of ONE grid and
+   they are all the same size. auto-fit, not a fixed column count, because the second group is
+   0-6 tiles depending on what the person is eligible for (see the tile list in renderDashboard) —
+   a hardcoded 4 would leave a ragged last row for most of those counts. */
+#dash-period-stats-wrap .card-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 20px;
+  align-content: start;
+}
+#dash-period-stats-wrap .card-body > .grid-3,
+#dash-period-stats-wrap .card-body > #dash-role-stats-row,
+#dash-period-stats-wrap .card-body > #dash-role-stats-row > .grid {
+  display: contents;
+}
+/* And let the card fill its column, so the page background does not show through beside it.
+   Measured before this: a 1214x317 block of bare grey under the summary while the left column
+   ran on — the "สีเทาพื้นหลังที่ดูโล่งๆ" in the report. Only this column stretches: it is the
+   one whose body can absorb height. The tiles keep their natural height (align-content:start
+   above) rather than growing to fill, because this is a data-dense card and inflating eight
+   tiles to hide one gap trades one empty area for eight.
+   The inline style="display:none" on the card still wins while it is hidden; renderDashboard()
+   clears it to '' to show the card, which is what lets this rule apply. */
+#dash-lower-b { align-self: stretch; }
+#dash-lower-b > #dash-period-stats-wrap { display: flex; flex-direction: column; flex: 1 1 auto; }
+#dash-period-stats-wrap .card-body { flex: 1 1 auto; }
 
 /* An empty announcements board is one line, not a card holding a sentence that says it is
    empty. It grows back into the full card as soon as something is posted or the composer opens. */
