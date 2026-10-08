@@ -10,7 +10,11 @@ const files = readdirSync(dir).filter(f => f.endsWith('.test.js')).sort();
 const failed = [];
 
 for (const f of files) {
-  const r = spawnSync(process.execPath, [join(dir, f)], { stdio: 'inherit' });
+  // Forward our own arguments so `npm test -- --slow` reaches the files that honour a flag.
+  // Without this, tests/backup-bundle.test.js could only run its slow cases through a second,
+  // separate command nobody is told to run -- the same "remember an extra step" failure the
+  // cache-buster guard exists to remove.
+  const r = spawnSync(process.execPath, [join(dir, f), ...process.argv.slice(2)], { stdio: 'inherit' });
   if (r.status !== 0) failed.push(f);
 }
 

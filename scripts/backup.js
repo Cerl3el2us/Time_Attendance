@@ -30,68 +30,102 @@ const { spawnSync } = require('child_process');
 const ROOT = path.join(__dirname, '..');
 
 function git(cwd, args) {
-  return spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8' });
+  return spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
 }
-function fail(msg) { console.error(msg); process.exit(1); }
+// Throw, do not process.exit(): `process.exit` skips `finally`, so every failure used to leave the
+// temp folder behind holding a full bundle of this repo AND a full clone of it. A backup tool that
+// fills up the disk it is protecting, a little more on each failed run, is its own outage.
+class Refused extends Error {}
+function fail(msg) { throw new Refused(msg); }
 
 const fromArgs = process.argv.slice(2).filter(Boolean);
 const fromEnv = (process.env.TA_BACKUP_DIRS || '').split(path.delimiter).filter(Boolean);
-const dests = fromArgs.length ? fromArgs : fromEnv;
+// Everything below runs inside one guard so a refusal prints its written explanation instead of a
+// raw stack trace, no matter which check rejected first. The inner try/finally still owns the temp
+// folder; this outer one owns how a refusal reaches the user.
+function main() {
+  const dests = fromArgs.length ? fromArgs : fromEnv;
 
-if (dests.length === 0) {
-  fail([
-    'No backup destination given, so nothing was written.',
-    '',
-    'Where bundles go is the owner\'s decision (spec 9.2: not the NAS, not one machine alone), so there',
-    'is no default. Pass folders:',
-    '    npm run backup -- D:/backups E:/other-disk',
-    'or set TA_BACKUP_DIRS and run `npm run backup`.',
-  ].join('\n'));
-}
-
-for (const d of dests) {
-  if (!fs.existsSync(d) || !fs.statSync(d).isDirectory()) {
-    fail(`Destination does not exist: ${d}\nNothing was written. Create it first, or check the path for a typo.`);
+  if (dests.length === 0) {
+    fail([
+      'No backup destination given, so nothing was written.',
+      '',
+      'Where bundles go is the owner\'s decision (spec 9.2: not the NAS, not one machine alone), so there',
+      'is no default. Pass folders:',
+      '    npm run backup -- D:/backups E:/other-disk',
+      'or set TA_BACKUP_DIRS and run `npm run backup`.',
+    ].join('\n'));
   }
-}
 
-const head = git(ROOT, ['rev-parse', 'HEAD']);
-if (head.status !== 0) fail('Not a git checkout, nothing to bundle: ' + (head.stderr || '').trim());
-const headSha = head.stdout.trim();
-
-const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '').replace(/^(\d{8})/, '$1-');
-const name = `time-attendance-${stamp}-${headSha.slice(0, 7)}.bundle`;
-
-// Build once in a temp folder, verify THAT, then copy it to each destination and compare sizes --
-// so a destination that fills up halfway is caught instead of leaving a truncated file behind.
-const work = fs.mkdtempSync(path.join(os.tmpdir(), 'ta-backup-'));
-try {
-  const bundle = path.join(work, name);
-  const made = git(ROOT, ['bundle', 'create', bundle, '--all']);
-  if (made.status !== 0) fail('git bundle create failed:\n' + (made.stderr || made.stdout));
-
-  const ver = git(ROOT, ['bundle', 'verify', bundle]);
-  if (ver.status !== 0) fail('git bundle verify failed -- the file is not a usable backup:\n' + (ver.stderr || ver.stdout));
-
-  const restore = path.join(work, 'restore');
-  const clone = spawnSync('git', ['clone', '-q', bundle, restore], { encoding: 'utf8' });
-  if (clone.status !== 0) fail('Could not clone from the bundle -- it does not restore:\n' + (clone.stderr || ''));
-  const restored = git(restore, ['rev-parse', 'HEAD']).stdout.trim();
-  if (restored !== headSha) fail(`The restored copy is at ${restored.slice(0, 7)}, not ${headSha.slice(0, 7)}. Not a usable backup.`);
-
-  const size = fs.statSync(bundle).size;
-  const written = [];
   for (const d of dests) {
-    const target = path.join(d, name);
-    fs.copyFileSync(bundle, target);
-    if (fs.statSync(target).size !== size) {
-      fail(`${target} is ${fs.statSync(target).size} bytes, expected ${size}: the destination may be full. Remove it and retry.`);
+    if (!fs.existsSync(d) || !fs.statSync(d).isDirectory()) {
+      fail(`Destination does not exist: ${d}\nNothing was written. Create it first, or check the path for a typo.`);
     }
-    written.push(target);
   }
 
-  console.log(`Backed up ${headSha.slice(0, 7)} (${(size / 1024 / 1024).toFixed(2)} MiB), verified by restoring it:`);
-  for (const w of written) console.log('  ' + w);
-} finally {
-  fs.rmSync(work, { recursive: true, force: true });
+  const head = git(ROOT, ['rev-parse', 'HEAD']);
+  if (head.status !== 0) fail('Not a git checkout, nothing to bundle: ' + (head.stderr || '').trim());
+  const headSha = head.stdout.trim();
+
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '').replace(/^(\d{8})/, '$1-');
+  const name = `time-attendance-${stamp}-${headSha.slice(0, 7)}.bundle`;
+
+  // Build once in a temp folder, verify THAT, then copy it to each destination and compare sizes --
+  // so a destination that fills up halfway is caught instead of leaving a truncated file behind.
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'ta-backup-'));
+  try {
+    const bundle = path.join(work, name);
+    const made = git(ROOT, ['bundle', 'create', bundle, '--all']);
+    if (made.status !== 0) fail('git bundle create failed:\n' + (made.stderr || made.stdout));
+
+    const ver = git(ROOT, ['bundle', 'verify', bundle]);
+    if (ver.status !== 0) fail('git bundle verify failed -- the file is not a usable backup:\n' + (ver.stderr || ver.stdout));
+
+    const restore = path.join(work, 'restore');
+    const clone = spawnSync('git', ['clone', '-q', bundle, restore], { encoding: 'utf8' });
+    if (clone.status !== 0) fail('Could not clone from the bundle -- it does not restore:\n' + (clone.stderr || ''));
+    const restored = git(restore, ['rev-parse', 'HEAD']).stdout.trim();
+    if (restored !== headSha) fail(`The restored copy is at ${restored.slice(0, 7)}, not ${headSha.slice(0, 7)}. Not a usable backup.`);
+
+    const size = fs.statSync(bundle).size;
+    const written = [];
+    for (const d of dests) {
+      const target = path.resolve(d, name);
+      try {
+        // copyFileSync THROWS on a full disk or a dropped share; it does not quietly return a short
+        // file. But on Windows it can leave a partial or zero-byte file behind, which would then sit
+        // in the backup folder named like a good backup and fail only when someone needs it. So the
+        // partial is removed before reporting, and the destinations that did succeed are named --
+        // otherwise a failure on the second disk hides that the first one is fine.
+        fs.copyFileSync(bundle, target);
+        if (fs.statSync(target).size !== size) throw new Error(`copied ${fs.statSync(target).size} of ${size} bytes`);
+        written.push(target);
+      } catch (e) {
+        try { fs.rmSync(target, { force: true }); } catch (_) { /* nothing usable to remove */ }
+        const ok = written.length ? `\nGood copies already written:\n  ${written.join('\n  ')}` : '\nNo destination was written.';
+        fail(`Could not write ${target}: ${e.message}\nThe partial file was removed.${ok}`);
+      }
+    }
+
+    console.log(`Backed up ${headSha.slice(0, 7)} (${(size / 1024 / 1024).toFixed(2)} MiB).`);
+    console.log('Verified by cloning the bundle and checking it restores to the same commit.');
+    console.log('Written to:');
+    for (const w of written) console.log('  ' + w);
+    console.log('Not included: uncommitted work, and commits of other worktrees that sit on no branch.');
+  } catch (e) {
+    if (!(e instanceof Refused)) throw e;
+    console.error(e.message);
+    process.exitCode = 1;
+  } finally {
+    fs.rmSync(work, { recursive: true, force: true });
+  }
+
+}
+
+try {
+  main();
+} catch (e) {
+  if (!(e instanceof Refused)) throw e;
+  console.error(e.message);
+  process.exitCode = 1;
 }

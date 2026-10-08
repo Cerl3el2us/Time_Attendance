@@ -24,13 +24,25 @@ const m = require('./lib/cache-markers');
 
 const { ROOT, git } = m;
 const out = (s = '') => console.log(s);
-const run = (args) => { const r = git(args); return r.status === 0 ? r.stdout.trim() : null; };
+// UNMEASURED is returned whenever git could not answer. It exists because the first version of this
+// file returned null/[] on failure, and every call site then printed a confident measurement that
+// had never been taken: a failing `git status` printed "Uncommitted: none", a failing `rev-list`
+// printed "0 ahead, 0 behind", a failing log printed "0 commit(s) since STATUS.md". Those are the
+// most dangerous sentences this tool can produce -- the owner reads them as "clean, nothing new,
+// safe to proceed". git itself distinguishes "exit 0 with empty output" from "exit 128", so the
+// distinction is free; it was simply being thrown away.
+const UNMEASURED = Symbol('unmeasured');
+const why = (r) => r.error ? `git could not run: ${r.error.code || r.error.message}`
+                           : `git exited ${r.status}: ${(r.stderr || '').trim().split('\n')[0]}`;
+
+const run = (args) => { const r = git(args); return r.status === 0 ? String(r.stdout).trim() : UNMEASURED; };
 // Line lists must NOT be trimmed as one block: `git status --short` starts a line with a space
 // (" M file"), and trimming the block eats the first line's leading column, so one file would read
 // differently from the rest. Strip only the trailing newline and indent each line ourselves.
 const lines = (args) => {
   const r = git(args);
-  return r.status === 0 ? r.stdout.replace(/\r?\n$/, '').split('\n').filter(Boolean) : [];
+  if (r.status !== 0) return { failed: why(r), list: [] };
+  return { failed: null, list: String(r.stdout).replace(/\r?\n$/, '').split('\n').filter(Boolean) };
 };
 
 const MAX_SINCE = 20;
@@ -45,31 +57,41 @@ if (!m.isGitCheckout()) {
 }
 
 // --- where this was measured from, and what it therefore cannot see -------------------------------
-const branch = run(['rev-parse', '--abbrev-ref', 'HEAD']) || '(unknown)';
-const head = run(['log', '-1', '--format=%h %s']) || '(no commits)';
+const branch = run(['rev-parse', '--abbrev-ref', 'HEAD']);
+const head = run(['log', '-1', '--format=%h %s']);
 out(`Measured from: ${ROOT}`);
-out(`  branch ${branch}, at ${head}`);
+out(`  branch ${branch === UNMEASURED ? '(NOT measured)' : branch}, at ${head === UNMEASURED ? '(NOT measured)' : (head || '(no commits yet)')}`);
 out();
 
 // --- uncommitted work ----------------------------------------------------------------------------
 const dirty = lines(['status', '--short']);
-out(`Uncommitted: ${dirty.length === 0 ? 'none' : dirty.length + ' file(s)'}`);
-for (const line of dirty.slice(0, 10)) out('  ' + line);
-if (dirty.length > 10) out(`  ...and ${dirty.length - 10} more`);
+if (dirty.failed) {
+  out(`Uncommitted: NOT measured -- ${dirty.failed}`);
+} else {
+  out(`Uncommitted: ${dirty.list.length === 0 ? 'none' : dirty.list.length + ' file(s)'}`);
+  for (const line of dirty.list.slice(0, 10)) out('  ' + line);
+  if (dirty.list.length > 10) out(`  ...and ${dirty.list.length - 10} more`);
+}
 
 // --- position against the remote -----------------------------------------------------------------
 const upstream = run(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
-if (!upstream) {
-  out(`Remote: this branch tracks nothing (${branch}); compare against origin/main by hand`);
+if (upstream === UNMEASURED || !upstream) {
+  out(`Remote: this branch tracks nothing (${branch === UNMEASURED ? '?' : branch}); compare against origin/main by hand`);
 } else {
   const counts = run(['rev-list', '--left-right', '--count', `HEAD...${upstream}`]);
-  const [ahead, behind] = (counts || '0 0').split(/\s+/);
-  out(`Remote: ${upstream} -- ${ahead} ahead, ${behind} behind`);
+  if (counts === UNMEASURED) out(`Remote: ${upstream} -- NOT measured (git could not count it)`);
+  else {
+    const [ahead, behind] = counts.split(/\s+/);
+    out(`Remote: ${upstream} -- ${ahead} ahead, ${behind} behind`);
+  }
 }
-// main matters more than the current branch: it is what the live site serves.
+// main matters more than the current branch: it is what the live site serves. Never drop this line
+// silently -- its absence reads as "nothing to report", which is the opposite of "could not check".
 const aheadMain = run(['rev-list', '--count', 'origin/main..main']);
 const behindMain = run(['rev-list', '--count', 'main..origin/main']);
-if (aheadMain !== null && behindMain !== null) {
+if (aheadMain === UNMEASURED || behindMain === UNMEASURED) {
+  out('  main vs origin/main: NOT measured (no local main, or origin/main not fetched here)');
+} else {
   out(`  main vs origin/main: ${aheadMain} ahead, ${behindMain} behind`);
 }
 out();
@@ -77,8 +99,9 @@ out();
 // --- what was done lately ------------------------------------------------------------------------
 out('Latest commits (what was last worked on):');
 const latest = lines(['log', '-10', '--format=%h %ad %s', '--date=short']);
-for (const l of latest) out('  ' + l);
-if (!latest.length) out('  (none)');
+if (latest.failed) out(`  NOT measured -- ${latest.failed}`);
+else if (!latest.list.length) out('  (none)');
+else for (const l of latest.list) out('  ' + l);
 out();
 
 // --- commits since STATUS.md was last touched ----------------------------------------------------
@@ -86,21 +109,39 @@ out();
 // work that came from another editor or another machine cannot be told apart by metadata. A count
 // would hide it; reading the titles is how you notice "I did not do that one".
 const statusSha = run(['log', '-1', '--format=%H', '--', 'STATUS.md']);
-if (!statusSha) {
+if (statusSha === UNMEASURED) {
+  out('Since STATUS.md was last updated: NOT measured (git could not read its history)');
+} else if (!statusSha) {
   out('Since STATUS.md was last updated: STATUS.md has no history here, nothing to compare against');
 } else {
   const stamp = run(['log', '-1', '--format=%h %ad', '--date=short', statusSha]);
   const since = lines(['log', `${statusSha}..HEAD`, '--format=%h %s']);
-  out(`Since STATUS.md was last updated (${stamp}): ${since.length} commit(s)`);
-  for (const line of since.slice(0, MAX_SINCE)) out('  ' + line);
-  if (since.length > MAX_SINCE) out(`  ...and ${since.length - MAX_SINCE} more`);
+  if (since.failed) {
+    out(`Since STATUS.md was last updated (${stamp === UNMEASURED ? '?' : stamp}): NOT measured -- ${since.failed}`);
+  } else {
+    out(`Since STATUS.md was last updated (${stamp === UNMEASURED ? '?' : stamp}): ${since.list.length} commit(s)`);
+    for (const line of since.list.slice(0, MAX_SINCE)) out('  ' + line);
+    if (since.list.length > MAX_SINCE) out(`  ...and ${since.list.length - MAX_SINCE} more`);
+  }
 
   // `Closes:` trailers: work that says it finished something STATUS.md may still list as open.
-  const closes = (run(['log', `${statusSha}..HEAD`, '--format=%h%n%B']) || '')
-    .split('\n').filter(l => /^Closes:/i.test(l.trim())).map(l => l.trim());
+  // Keep the commit id on each line -- the point of seeing one is to go and look at that commit.
+  const bodies = lines(['log', `${statusSha}..HEAD`, '--format=%h%x00%B%x00']);
+  const closes = [];
+  if (bodies.failed) {
+    out(`Closed since then: NOT measured -- ${bodies.failed}`);
+  } else {
+    let current = null;
+    for (const raw of String(bodies.list.join('\n')).split('\0')) {
+      const t = raw.trim();
+      if (/^[0-9a-f]{7,40}$/.test(t)) { current = t; continue; }
+      for (const l of t.split('\n')) if (/^Closes:/i.test(l.trim())) closes.push(`${current || '???'} ${l.trim()}`);
+    }
+  }
   if (closes.length) {
     out('Closed since then (STATUS.md may still list these as open):');
-    for (const c of closes) out('  ' + c);
+    for (const c of closes.slice(0, MAX_SINCE)) out('  ' + c);
+    if (closes.length > MAX_SINCE) out(`  ...and ${closes.length - MAX_SINCE} more`);
   }
 }
 out();
@@ -108,19 +149,26 @@ out();
 // --- cache-buster vs the assets ------------------------------------------------------------------
 // The bug this project hit again and again: an edit that is live but not visible because the browser
 // is still running the old file. The same rules as `npm run check`, read from one shared list.
-out('Cache-buster (has each asset changed since its marker last moved?):');
-let stale = 0;
-for (const g of m.GUARDED) {
-  const label = `${g.asset} vs ${g.markerPattern.replace(/\\/g, '')} in ${g.markerFile}`;
-  const sha = m.lastCommitTouchingMarker(g.markerPattern, g.markerFile);
-  if (!sha) { out(`  ?  ${label}: marker never committed, cannot compare`); continue; }
-  let changed;
-  try { changed = m.assetChangedSince(sha, g.asset); }
-  catch (e) { out(`  ?  ${label}: could not ask git (${e.message})`); continue; }
-  if (changed) { stale++; out(`  STALE  ${label} -- ${g.fix}`); }
-  else out(`  ok     ${label}`);
+out('Cache-buster (has each asset changed since its version value was last bumped?):');
+if (m.isShallowCheckout()) {
+  out('  NOT measured: this is a shallow clone, so every marker would look freshly bumped.');
+  out('  Run `git fetch --unshallow` before trusting this section.');
+} else {
+  let stale = 0;
+  for (const g of m.GUARDED) {
+    const label = `${g.asset} vs ${g.markerName} in ${g.markerFile}`;
+    try {
+      m.assertAssetIsReal(g.asset);
+      const s = m.markerState(g);
+      if (!s.ok) { stale++; out(`  STALE  ${label} = "${s.current}" -- ${g.fix}`); }
+      else out(`  ok     ${label} = "${s.current}"${s.reason ? ` (${s.reason})` : ''}`);
+    } catch (e) {
+      // Report the failure, do not swallow it into a clean-looking line.
+      out(`  ?      ${label}: ${e.message}`);
+    }
+  }
+  if (stale) out(`  ${stale} marker(s) behind the code: users will keep the old file until they move.`);
 }
-if (stale) out(`  ${stale} marker(s) behind the code: users will keep the old file until they move.`);
 out();
 
 // --- data files: only when the folder is actually here --------------------------------------------

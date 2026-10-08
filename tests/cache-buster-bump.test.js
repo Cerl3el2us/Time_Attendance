@@ -8,19 +8,19 @@
 // that a stale cache already cost a real debugging session on 2026-07-23: the fix was live, the
 // browser was running the old file, and the hunt went looking for a bug that was not there.
 //
-// So this suite asks git a question no human has to remember to ask: has the asset changed since the
-// last commit that moved its version marker? If it has, the marker is stale and this fails.
+// The question asked here is: has the asset changed since the version value users are being served
+// was chosen? That is answered by comparing the CAPTURED VALUE at each commit, not by asking whether
+// the marker's line was touched -- see the long comment on GUARDED in scripts/lib/cache-markers.js
+// for the two ways the line-touched version of this got it wrong on the day it was written.
 //
-// Why git rather than a checked-in hash: a recorded hash is one more thing to update by hand, which
-// is the same forgetting this test exists to stop. git already knows when each line last moved.
-//
-// Working-tree changes count. `git diff <sha> -- <file>` compares the commit to what is on disk, so
-// this goes red while the edit is still uncommitted -- which is when it is cheap to fix.
+// Working-tree changes count, and so does an uncommitted bump: an edit with its marker already
+// moved is green even before it is committed, so this gate is satisfiable at every moment of normal
+// work. A gate nobody can satisfy is a gate people learn to ignore.
 'use strict';
+const fs = require('fs');
+const path = require('path');
 const assert = require('assert');
-// One list of what-moves-what, shared with `npm run status` so the report cannot describe different
-// rules than this gate enforces. Edit scripts/lib/cache-markers.js to add an asset.
-const { GUARDED, lastCommitTouchingMarker, assetChangedSince, isGitCheckout } = require('../scripts/lib/cache-markers');
+const { GUARDED, markerState, assertAssetIsReal, isGitCheckout, isShallowCheckout } = require('../scripts/lib/cache-markers');
 
 let passed = 0;
 function test(name, fn) {
@@ -30,24 +30,46 @@ function test(name, fn) {
 
 console.log('Cache-buster guard: every frontend asset must move its marker when it changes');
 
-// A checkout with no git history cannot answer the question. Say so and fail, rather than printing a
-// green line that means nothing -- a guard that silently passes when it cannot check is worse than
-// no guard, because it is trusted.
+// A checkout that cannot answer the question must FAIL, not pass quietly. A guard that goes green
+// when it could not check is worse than no guard, because it is trusted. Three ways to be in that
+// state, each of which used to read as "all clean":
+//   - not a git checkout at all
+//   - a shallow clone, where the one grafted commit looks like it introduced every line
+//   - an empty GUARDED list, where the loop below simply runs zero times
 const inRepo = isGitCheckout();
 
 test('git history is available to check against', () => {
-  assert.ok(inRepo, 'not a git checkout -- this guard cannot run, and must not be read as passing');
+  assert.ok(inRepo, 'not a git checkout (or git is not on PATH) -- this guard cannot run, and must not be read as passing');
 });
 
-if (inRepo) {
+test('history is complete, not a shallow clone', () => {
+  if (!inRepo) return;
+  assert.ok(!isShallowCheckout(),
+    'shallow clone: every marker would look freshly introduced, so this guard would pass no matter how stale it is. Run `git fetch --unshallow`.');
+});
+
+// Mirrors the guard in tests/inline-handlers.test.js: if the list this suite iterates ever empties,
+// the loop checks nothing while still printing green.
+test('the guarded list is populated and covers every asset AGENTS.md section 5 names', () => {
+  const assets = new Set(GUARDED.map(g => g.asset));
+  for (const required of ['attendance/js/app.js', 'attendance/css/style.css', 'attendance/lang/ja.js']) {
+    assert.ok(assets.has(required), `${required} is not guarded -- AGENTS.md section 5 requires it`);
+  }
+  assert.ok(GUARDED.some(g => g.markerName === 'APP_BUILD'), 'APP_BUILD is not guarded');
+  assert.ok(GUARDED.length >= 4, `only ${GUARDED.length} guarded pair(s) -- someone emptied the list`);
+});
+
+if (inRepo && !isShallowCheckout()) {
   for (const g of GUARDED) {
-    const name = `${g.asset} is unchanged since its marker in ${g.markerFile} last moved`;
-    test(name, () => {
-      const sha = lastCommitTouchingMarker(g.markerPattern, g.markerFile);
-      assert.ok(sha, `no commit in history ever touched /${g.markerPattern}/ in ${g.markerFile}`);
+    test(`${g.asset} is unchanged since ${g.markerName} was last bumped`, () => {
+      // A wrong asset path makes `git diff` report "no differences" forever, so check it is real
+      // and tracked before trusting that answer.
+      assertAssetIsReal(g.asset);
+
+      const s = markerState(g);        // throws if the marker was renamed away
       assert.ok(
-        !assetChangedSince(sha, g.asset),
-        `${g.asset} has changed since ${sha.slice(0, 7)}, the last commit that moved its marker.\n` +
+        s.ok,
+        `${g.asset} has changed, but ${g.markerName} is still "${s.current}".\n` +
         `       The browser and the service worker will keep serving the old file.\n` +
         `       Fix: ${g.fix}`
       );
