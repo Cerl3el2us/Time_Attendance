@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "description": "Lint-only tooling for the Time Attendance app. The app itself ships no build step — attendance/ is served as static files and attendance-server/backend runs plain Node.",
   "scripts": {
+    "status": "node scripts/status.js",
     "lint": "eslint attendance/js attendance/lang attendance/sw.js attendance-server/backend/server.js attendance-server/backend/payslipXlsx.js attendance-server/backend/systemAccount.js attendance-server/backend/tawi50Xlsx.js attendance-server/backend/tawi50Template.js",
     "test": "node tests/run-all.js",
     "check": "npm run lint && npm test"
