@@ -333,9 +333,9 @@ employee records (their check-in, their leave, their requests). This account has
 to look at those is to impersonate a person.
 
 2026-10-08: the first thing that test caught was already in the tree. Finalize Payroll and Payroll
-History were hidden from Full access -- 16 menus against the 21 Accounting saw -- because this
-branch was copied from MD's and inherited `.nav-no-md`. navigateTo() had always named superadmin
-in its Finalize guard, so the page was reachable by URL while its own link was hidden.
+History were hidden from Full access -- fewer menus than previewing Accounting showed -- because
+this branch was copied from MD's and inherited `.nav-no-md`. navigateTo() had always named
+superadmin in its Finalize guard, so the page was reachable by URL while its own link was hidden.
 
 Authoritative copies, in order of detail: the header comment in `attendance/js/app.js` (search
 `AI POLICY`), `attendance-server/backend/systemAccount.js`, `.cursor/rules/superadmin-do-not-touch.mdc`,

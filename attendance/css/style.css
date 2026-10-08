@@ -322,6 +322,12 @@ body {
 .role-user { background: rgba(37,99,235,0.25); color: #93c5fd; }
 .role-driver { background: rgba(20,184,166,0.25); color: #2dd4bf; }
 .role-marketing { background: rgba(236,72,153,0.25); color: #f472b6; }
+/* 2026-10-08 (review): the system account had no rule here, so its pill rendered with no
+   background and inherited text colour -- unreadable on the dark sidebar. It only became worth
+   fixing once the pill started naming the ROLE, which made it the one place that says you are
+   in the developer account. Rose rather than another employee hue: it is not an employee role,
+   and the colour is the reminder that writes from here are real. */
+.role-superadmin { background: rgba(244,63,94,0.25); color: #fda4af; }
 
 .sidebar-nav {
   flex: 1;

@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 88;
+const APP_BUILD = 89;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -7932,7 +7932,14 @@ function restoreTodayLog() {
 
 function updateUserUI() {
   document.getElementById('sidebar-name').textContent = currentUser.name;
-  const positionText = (currentUser.position || '').trim();
+  // 2026-10-08 (review): the job title is free text an admin typed in English, and this line used
+  // to print it raw in every language. LANG_JA knows four of the ones in use (Driver, Accounting,
+  // Marketing, Managing Director), and before today the role pill below was the only place a
+  // Japanese reader ever saw any of them translated — moving the pill to role names would have
+  // taken that away. Sending the line itself through L() gives it back, and gives it to the line
+  // that should have had it. L() is a no-op for Thai and English, which take the text as typed.
+  const positionRaw = (currentUser.position || '').trim();
+  const positionText = positionRaw ? L(positionRaw, positionRaw) : '';
   document.getElementById('sidebar-position').textContent = positionText;
   document.getElementById('topbar-name').textContent = currentUser.name;
   const roleLabels = { md:t('role_md'), manager:t('role_manager'), accounting:t('role_accounting'), user:t('role_user'), driver:t('role_driver'), marketing:t('role_marketing'), superadmin:t('role_superadmin') };
@@ -7943,7 +7950,10 @@ function updateUserUI() {
   // the line above is the job title (what you are called). Showing the role makes the pill say
   // something the line above does not: "Sales Engineer" with a Staff pill, rather than
   // "Sales Engineer" twice.
-  const roleText = roleLabels[currentUser.role] || currentUser.role;
+  // The trailing '' matters: a record with no role at all yields undefined from both halves, and
+  // the comparison below calls .trim() on this. updateUserUI() runs inside initApp()'s try, so a
+  // throw here would skip applyRolePermissions() and leave every menu on screen.
+  const roleText = roleLabels[currentUser.role] || currentUser.role || '';
   // These two suffixes are the badge's real work — "view only" and which role is being previewed
   // — so the badge must survive whenever either is present, duplicate text or not.
   const badgeSuffix = (currentUser.isObserver ? ` — ${L('view only','ดูอย่างเดียว')} 👁️` : '')
@@ -7954,6 +7964,11 @@ function updateUserUI() {
   // Four of the six roles in use have a position that is simply the role's own name (Driver,
   // Accounting, Marketing, Managing Director), so showing the role there would still repeat the
   // line above. One rule covers every case: never print the same words twice.
+  // Both sides must be in the SAME language or the rule quietly stops working: comparing a raw
+  // English "Driver" against a translated "ドライバー" never matches, so before the L() above the
+  // pill never once hid for a Japanese reader — the duplicate this whole block exists to remove
+  // was still on their screen. positionText is localised now, roleText comes from t(), so they
+  // meet in whatever language is on.
   badge.style.display = (!badgeSuffix && positionText && positionText.toLowerCase() === roleText.trim().toLowerCase())
     ? 'none' : '';
   const avatar = document.getElementById('user-avatar');
@@ -8036,16 +8051,8 @@ function applyRolePermissions() {
     document.querySelectorAll('.nav-staff-only').forEach(el => el.style.display = 'none');
     document.querySelectorAll('.nav-no-md').forEach(el => el.style.display = 'none');
     document.querySelectorAll('.nav-emp-only').forEach(el => el.style.display = 'none');
-    // 2026-10-08 (owner): put the accounting pages back. This branch was copied from the MD branch
-    // above, `.nav-no-md` with it -- and Finalize Payroll and Payroll History carry that class
-    // because the *MD* should not see them, which says nothing about this account. The result was
-    // that Full access showed 16 menus where previewing Accounting showed 21, and the two it was
-    // missing were the payroll pages: the inspector could not reach the screens where a bug costs
-    // the most. navigateTo() has always let superadmin into Finalize on purpose (it is named in
-    // that guard), so the page was reachable by URL while the link to it was hidden -- the nav and
-    // the page gate disagreed. Nothing personal hides here: check-in and Leave keep their
-    // .nav-no-md and stay hidden, because they are not .nav-accounting-only.
-    document.querySelectorAll('.nav-accounting-only').forEach(el => el.style.display = '');
+    // The accounting pages this branch wrongly hid are put back at the END of this function, after
+    // the Observer pass, so that nothing can hide them again afterwards. See the comment there.
   } else {
     document.querySelectorAll('.nav-accounting-only').forEach(el => el.style.display = 'none');
     document.querySelectorAll('.nav-emp-only').forEach(el => el.style.display = 'none');
@@ -8062,6 +8069,28 @@ function applyRolePermissions() {
   // check-in with, applied last so it wins regardless of which role branch ran above.
   if (currentUser.isObserver) {
     document.querySelectorAll('.nav-no-md').forEach(el => el.style.display = 'none');
+  }
+  // 2026-10-08 (owner): give the inspector back the accounting pages, LAST, so nothing below or
+  // above can take them away again.
+  //
+  // What went wrong: the superadmin branch was copied from the MD branch, `.nav-no-md` with it,
+  // and Finalize Payroll and Payroll History carry that class because the *MD* should not see
+  // them — which says nothing about this account. Full access ended up showing fewer menus than
+  // previewing Accounting did, and the two it was missing were the payroll screens: the inspector
+  // could not reach the pages where a bug costs the most. navigateTo() has named superadmin in
+  // its Finalize guard all along, so the page answered a direct call while its own link was
+  // hidden; the nav and the page gate disagreed and the nav won.
+  //
+  // Why here and not inside the branch (2026-10-08, review): the Observer pass immediately above
+  // re-hides every `.nav-no-md`, and these two carry both classes — so an Observer superadmin
+  // would have lost them again. No such account can exist today (the server refuses every write
+  // that could set the flag on a system account), but "correct because of data" is a worse
+  // guarantee than "correct because of order", and the order costs nothing.
+  //
+  // Nothing personal is exposed: Check-in and Leave keep their `.nav-no-md` and stay hidden,
+  // because they are not `.nav-accounting-only`.
+  if (role === 'superadmin') {
+    document.querySelectorAll('.nav-accounting-only').forEach(el => el.style.display = '');
   }
   updateAnnualLeaveEntryVisibility();
 }
