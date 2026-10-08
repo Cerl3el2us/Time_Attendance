@@ -207,6 +207,18 @@ current value and move it forward.
 query already busts individual assets; bump `SHELL_CACHE` when you change which files the service
 worker precaches, or its caching behaviour.
 
+**`npm run check` now fails when you forget.** `tests/cache-buster-bump.test.js` asks git whether
+each asset has changed since the last commit that moved its marker — `APP_BUILD`, and the three
+`?v=` strings above. Uncommitted work counts, so it goes red while you are still editing. If you see
+
+```
+attendance/js/app.js has changed since <sha>, the last commit that moved its marker.
+```
+
+the fix is in the failure message: move that marker. Do not "fix" it by editing the test. The rule
+is bump on **every** edit, including one that only touches a comment — judging for yourself that
+users are unaffected is exactly the call that cost a debugging session on 2026-07-23.
+
 ---
 
 ## 6. Deploying
