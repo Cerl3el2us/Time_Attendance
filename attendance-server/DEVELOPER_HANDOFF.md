@@ -314,8 +314,11 @@ it, as a role and as a specific person. Three habits when you add one:
    `applyRolePermissions()` walks role by role; `superadmin` is one of them, not a
    wildcard, so forgetting it hides the page from the one account meant to inspect it.
 
-`tests/superadmin-reach.test.js` fails on 1 and 2. It cannot know about a menu that
-has not been written yet, so 3 is on the reviewer. Full detail: `AGENTS.md` § 7a.
+`tests/superadmin-reach.test.js` fails on 1 and 2, and
+`tests/full-access-sees-everything.test.js` fails on 3 — it runs `applyRolePermissions()`
+for every role and complains when Full access cannot reach a page some other role
+can. Exempting a page means listing it as personal to the viewer, with a reason.
+Full detail: `AGENTS.md` § 7a.
 
 **Do not delete `systemAccount.js` or remove its hooks in `server.js`.** If an AI
 or another developer removes the account from `users.json`, restart the backend

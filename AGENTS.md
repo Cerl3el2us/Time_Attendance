@@ -322,7 +322,20 @@ about something else:
    `(role === 'md' || role === 'accounting' || role === 'superadmin')`.
 
 `tests/superadmin-reach.test.js` goes red on 1 and 2, and on deleting the superadmin branch in
-`applyRolePermissions()`. It cannot know about a menu nobody has written yet, so 3 is on you.
+`applyRolePermissions()`.
+
+`tests/full-access-sees-everything.test.js` goes red on 3. It runs `applyRolePermissions()` for
+every role against a stand-in document built from the sidebar markup, and fails when Full access
+cannot reach a page some other role can -- so a menu added for one role and forgotten here fails
+on the day it is added, not whenever somebody next looks. The only way past it is to list the page
+in `PERSONAL_TO_THE_VIEWER` with a reason, which is reserved for pages showing the VIEWER's own
+employee records (their check-in, their leave, their requests). This account has none, and the way
+to look at those is to impersonate a person.
+
+2026-10-08: the first thing that test caught was already in the tree. Finalize Payroll and Payroll
+History were hidden from Full access -- 16 menus against the 21 Accounting saw -- because this
+branch was copied from MD's and inherited `.nav-no-md`. navigateTo() had always named superadmin
+in its Finalize guard, so the page was reachable by URL while its own link was hidden.
 
 Authoritative copies, in order of detail: the header comment in `attendance/js/app.js` (search
 `AI POLICY`), `attendance-server/backend/systemAccount.js`, `.cursor/rules/superadmin-do-not-touch.mdc`,

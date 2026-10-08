@@ -40,7 +40,7 @@ A feature written *after* this account must still be viewable through it — as 
 - Every write goes through `apiFetch()`. A bare `fetch()` while impersonating a PERSON really writes, stamped with that employee’s name, with no activity log to show it was not them.
 - A new page or menu lists `superadmin` among the roles allowed to see it. `applyRolePermissions()` walks role by role and `superadmin` is one of them, not a wildcard — forget it and Full access falls into the `else` and cannot open the page at all. Copy `canAddEmp`: `(role === 'md' || role === 'accounting' || role === 'superadmin')`.
 
-`tests/superadmin-reach.test.js` goes red on the first two. It cannot know about a menu nobody has written yet, so the third is on you.
+`tests/superadmin-reach.test.js` goes red on the first two, and `tests/full-access-sees-everything.test.js` goes red on the third: it runs `applyRolePermissions()` for every role and fails when Full access cannot reach a page another role can. To exempt a page you must list it as personal to the viewer, with a reason. (That test's first catch, 2026-10-08, was Finalize Payroll and Payroll History already hidden from Full access.)
 
 ## Allowed
 

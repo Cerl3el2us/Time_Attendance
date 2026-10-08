@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 86;
+const APP_BUILD = 87;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -8011,9 +8011,22 @@ function applyRolePermissions() {
     // nav-approval stays visible for accounting — scoped to Driver OT only (see renderApprovals)
     document.querySelectorAll('.nav-emp-only').forEach(el => el.style.display = 'none');
   } else if (role === 'superadmin') {
+    // The three lines below hide what belongs to the VIEWER as an employee -- their own check-in,
+    // leave, My Requests and My Payslip. This account has no employee record, so those pages have
+    // nothing to show; to look at them, impersonate a person.
     document.querySelectorAll('.nav-staff-only').forEach(el => el.style.display = 'none');
     document.querySelectorAll('.nav-no-md').forEach(el => el.style.display = 'none');
     document.querySelectorAll('.nav-emp-only').forEach(el => el.style.display = 'none');
+    // 2026-10-08 (owner): put the accounting pages back. This branch was copied from the MD branch
+    // above, `.nav-no-md` with it -- and Finalize Payroll and Payroll History carry that class
+    // because the *MD* should not see them, which says nothing about this account. The result was
+    // that Full access showed 16 menus where previewing Accounting showed 21, and the two it was
+    // missing were the payroll pages: the inspector could not reach the screens where a bug costs
+    // the most. navigateTo() has always let superadmin into Finalize on purpose (it is named in
+    // that guard), so the page was reachable by URL while the link to it was hidden -- the nav and
+    // the page gate disagreed. Nothing personal hides here: check-in and Leave keep their
+    // .nav-no-md and stay hidden, because they are not .nav-accounting-only.
+    document.querySelectorAll('.nav-accounting-only').forEach(el => el.style.display = '');
   } else {
     document.querySelectorAll('.nav-accounting-only').forEach(el => el.style.display = 'none');
     document.querySelectorAll('.nav-emp-only').forEach(el => el.style.display = 'none');
