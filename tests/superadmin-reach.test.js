@@ -185,9 +185,36 @@ test('every write goes through apiFetch, so the dry run can intercept it', () =>
 
 // ---------------------------------------------------------------------------------------------
 // 3. Full access still reaches the menus
-test('applyRolePermissions() still has a superadmin branch', () => {
-  const body = extractFunction(APP_SRC, 'applyRolePermissions');
-  assert.ok(/role === 'superadmin'/.test(body),
+//
+// Match the BRANCH, not merely the word. The first version of this check looked for
+// /role === 'superadmin'/ anywhere in the function and passed happily with the branch deleted,
+// because canAddEmp further down names superadmin too. Caught on 2026-10-08 by deleting the branch
+// and watching the test stay green -- which is the whole reason this suite breaks its own guards
+// on purpose instead of trusting them.
+const SUPERADMIN_NAV_BRANCH = /else if \(role === 'superadmin'\)/;
+
+function hasSuperadminNavBranch(src) {
+  return SUPERADMIN_NAV_BRANCH.test(extractFunction(src, 'applyRolePermissions'));
+}
+
+test('the checker itself actually catches the superadmin branch being removed', () => {
+  const withBranch = [
+    "function applyRolePermissions() {",
+    "  const role = effectiveRole();",
+    "  if (role === 'md') { hideStaffNav(); }",
+    "  else if (role === 'superadmin') { hideStaffNav(); }",
+    "  const canAddEmp = (role === 'md' || role === 'superadmin');",
+    "}",
+  ].join('\n');
+  // The same source with only the BRANCH gone. canAddEmp still names superadmin, which is exactly
+  // what fooled the first version of this check.
+  const without = withBranch.replace("  else if (role === 'superadmin') { hideStaffNav(); }\n", '');
+  assert.ok(hasSuperadminNavBranch(withBranch), 'should see the branch when it is there');
+  assert.ok(!hasSuperadminNavBranch(without), 'canAddEmp alone must not count as the branch');
+});
+
+test('applyRolePermissions() still has its own superadmin branch', () => {
+  assert.ok(hasSuperadminNavBranch(APP_SRC),
     '\n       Without its own branch, Full-access superadmin falls through to the else and loses' +
     '\n       menus it is supposed to inspect. See AGENTS.md section 7a (R2.3).');
 });
