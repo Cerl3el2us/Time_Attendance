@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 96;
+const APP_BUILD = 97;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -9146,7 +9146,7 @@ function getTodayPersonalLeaves() {
 // tests/checkin-status-leave.test.js feeds the same world to both callers and compares.
 // Takes the leave list rather than calling getTodayPersonalLeaves() itself, so a caller that
 // already has it does not read the file twice. Pure.
-function fullDayLeaveIdsToday(todayLeaves, dateStr, stdStartMin) {
+function offTheFloorAllDayIdsToday(todayLeaves, dateStr, stdStartMin) {
   return new Set(todayLeaves.filter(l =>
     !['annual', 'sick', 'business'].includes(l.type) || leaveDayCoverage(l, dateStr, stdStartMin) === 'full'
   ).map(l => l.userId));
@@ -10894,11 +10894,11 @@ function renderDashboard() {
   // AM/PM (or partial) annual/sick/business leave still leaves them expected for the other half
   // of the day (leaveDayCoverage() handles the am/pm/partial classification). Other leave types
   // (upcountry, ot, etc.) keep the prior "any overlap excludes" behavior, out of scope here.
-  // 2026-10-09: this rule now lives in fullDayLeaveIdsToday() because the Check-in Status list
+  // 2026-10-09: this rule now lives in offTheFloorAllDayIdsToday() because the Check-in Status list
   // needs the same answer -- see the note there. The behaviour is unchanged from the 2026-08-06
   // copy that used to sit inline here.
   const _stdStartMinDash = (APP_SETTINGS.workSchedule?.standardStartHour ?? 8) * 60 + (APP_SETTINGS.workSchedule?.standardStartMinute ?? 30);
-  const onLeaveIds = fullDayLeaveIdsToday(todayLeaves, bizStr, _stdStartMinDash);
+  const onLeaveIds = offTheFloorAllDayIdsToday(todayLeaves, bizStr, _stdStartMinDash);
   const expectedToday = activeUsers.filter(u => !onLeaveIds.has(u.id));
   const checkedInToday = expectedToday.filter(u => {
     const rec = attendanceLog[attKey(u.id, bizStr)];
@@ -16733,7 +16733,13 @@ function loadPdfJs() {
         // main thread instead, freezing the page while a list of PDF attachments renders.
         // js/vendor/pdf.worker.min.js is pinned to PDFJS_VER and must be re-downloaded from
         // jsDelivr whenever that constant moves -- a worker/API version mismatch makes pdf.js throw.
-        window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'js/vendor/pdf.worker.min.js';
+        // 2026-10-09 (review): this was requested with NO version at all. It is same-origin,
+        // not a document and not /api/, so sw.js serves it cache-first (stale-while-revalidate)
+        // -- bump PDFJS_VER, replace the worker, and an installed app loads the NEW pdf.min.js
+        // from the CDN against the OLD cached worker, which makes pdf.js throw (see the note
+        // just above). Pinning the URL to PDFJS_VER makes it a different cache key, so the
+        // worker can never lag the library it must match.
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc = `js/vendor/pdf.worker.min.js?v=${PDFJS_VER}`;
         resolve(window.pdfjsLib);
       };
       sc.onerror = () => { _pdfjsPromise = null; reject(new Error('pdf.js failed to load')); };
@@ -20752,15 +20758,22 @@ function closeAttDetail() {
 // which is the question the screen is opened to answer. Third list now, carrying the leave TYPE.
 //
 // getTodayPersonalLeaves() is reused deliberately rather than filtering DATA_LEAVES here: it
-// already means "approved annual/sick/business covering today" for exactly this population
-// (isEmployeeRecord, active, not MD), so this list and the dashboard's "On Leave Today" count
-// cannot drift apart. tests/checkin-status-leave.test.js pins the bucketing.
+// already means "approved annual/sick/business covering today" for nearly this population, so this
+// list and the dashboard's "On Leave Today" count cannot drift apart on the leave RULE.
+// tests/checkin-status-leave.test.js pins the bucketing.
+//
+// 2026-10-09 (review): "nearly", not "exactly" -- the two population filters differ by one case.
+// Here and on the dashboard card it is `u.active`; getTodayPersonalLeaves() uses `u.active !== false`.
+// A record with `active` missing would be counted by the "วันลาวันนี้" card and land in NO bucket
+// here. Pre-existing, and theoretical today: all 11 records in users.json carry an explicit
+// true/false (checked 2026-10-09). Left alone rather than quietly changed, because picking one
+// predicate changes who appears on a screen and that is the owner's call, not a tidy-up.
 function getCheckinStatusLists() {
   const todayStr = businessDateStr();
   const activeUsers = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active && u.role !== 'md').sort((a, b) => a.name.localeCompare(b.name, 'th'));
   const stdStartMin = (APP_SETTINGS.workSchedule?.standardStartHour ?? 8) * 60 + (APP_SETTINGS.workSchedule?.standardStartMinute ?? 30);
   const todayLeaves = getTodayPersonalLeaves();
-  const fullDayIds = fullDayLeaveIdsToday(todayLeaves, todayStr, stdStartMin);
+  const fullDayIds = offTheFloorAllDayIdsToday(todayLeaves, todayStr, stdStartMin);
   const leaveByUser = new Map();
   todayLeaves.forEach(l => { if (!leaveByUser.has(l.userId)) leaveByUser.set(l.userId, l); });
   const checkedIn  = [];
@@ -20773,15 +20786,25 @@ function getCheckinStatusLists() {
       checkedIn.push({ user: u, time: rec.checkIn, checkOut: rec.checkOut || null, checkInSource: rec.checkInSource || null, checkOutSource: rec.checkOutSource || null, isLate: rec.status === 'late' && !isApprovedAbroadDate(todayStr, u.id) });
       return;
     }
-    const leave = leaveByUser.get(u.id);
     // Full day off -> its own group. A half-day leave does NOT move anyone here: the owner
     // confirmed on 2026-10-09 that they are still expected for the other half, which is what the
-    // dashboard card counts too (fullDayLeaveIdsToday). They stay under "has not checked in" and
-    // carry their leave so the row can say which half, instead of reading as an unexplained absence.
-    if (leave && fullDayIds.has(u.id)) {
-      onLeave.push({ user: u, leave, coverage: leaveDayCoverage(leave, todayStr, stdStartMin) });
+    // dashboard card counts too (offTheFloorAllDayIdsToday). They stay under "has not checked in"
+    // and carry their leave so the row says which half, instead of reading as an unexplained absence.
+    //
+    // 2026-10-09 (review): pick the leave that DECIDED the group, not the first one on file. With
+    // two approved leaves in one day (half-day AM + full-day sick) the group came from "any of them
+    // is full-day" while the chip came from "the first one", so the row rendered under ลางาน
+    // wearing a "ครึ่งวันเช้า" label -- and flipping the order in leaves.json changed the output.
+    // The server blocks overlapping leaves (findOverlappingLeave), so this needs legacy or
+    // hand-edited data to happen at all; it is still not a row anyone should have to explain.
+    const fullDayLeave = fullDayIds.has(u.id)
+      ? todayLeaves.find(l => l.userId === u.id && leaveDayCoverage(l, todayStr, stdStartMin) === 'full')
+      : null;
+    if (fullDayLeave) {
+      onLeave.push({ user: u, leave: fullDayLeave, coverage: 'full' });
       return;
     }
+    const leave = leaveByUser.get(u.id);
     notChecked.push({
       user: u,
       partialLeave: leave ? { leave, coverage: leaveDayCoverage(leave, todayStr, stdStartMin) } : null,
@@ -20834,7 +20857,7 @@ function showCheckinStatusModal() {
         <div style="font-size:11px;color:#64748b">${escapeHtml(item.user.position || '')}</div>
       </div>
       <div style="text-align:right">
-        <div style="font-weight:700;font-size:13px;color:#7c3aed">${cfg.icon} ${cfg.label}</div>
+        <div style="font-weight:700;font-size:13px;color:#7c3aed">${cfg.icon} ${escapeHtml(cfg.label)}</div>
         ${suffix ? `<div style="font-size:11px;color:#94a3b8">${suffix}</div>` : ''}
       </div>
     </div>`;
@@ -20857,7 +20880,7 @@ function showCheckinStatusModal() {
       </div>
       <div style="text-align:right">
         <div style="font-size:13px;color:#ef4444;font-weight:700">⏳ ${L('Not in', 'ยังไม่เข้า')}</div>
-        ${cfg ? `<div style="font-size:11px;color:#7c3aed;font-weight:600">${cfg.icon} ${cfg.label}${suffix ? ` · ${suffix}` : ''}</div>` : ''}
+        ${cfg ? `<div style="font-size:11px;color:#7c3aed;font-weight:600">${cfg.icon} ${escapeHtml(cfg.label)}${suffix ? ` · ${suffix}` : ''}</div>` : ''}
       </div>
     </div>`;
   }).join('');

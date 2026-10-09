@@ -82,7 +82,7 @@ function world(users, leaves, log) {
   vm.createContext(ctx);
   ['LUNCH_START_MIN', 'LUNCH_END_MIN', 'STD_END_MIN', 'HALFDAY_TOL_MIN', 'PERSONAL_LEAVE_TYPES']
     .forEach(n => vm.runInContext(extractConst(APP_SRC, n), ctx));
-  ['leaveCoversDate', 'leaveDayCoverage', 'getTodayPersonalLeaves', 'fullDayLeaveIdsToday',
+  ['leaveCoversDate', 'leaveDayCoverage', 'getTodayPersonalLeaves', 'offTheFloorAllDayIdsToday',
    'getCheckinStatusLists'].forEach(n => vm.runInContext(extractFunction(APP_SRC, n), ctx));
   return ctx;
 }
@@ -166,7 +166,7 @@ test('the dashboard card and this list use one rule for "off for the whole day"'
   const w = world([ALICE, BOB], [annualAm, { id: 20, userId: 2, type: 'sick', dateFrom: TODAY,
                                               dateTo: TODAY, status: 'approved', days: 1 }]);
   const stdStartMin = 8 * 60 + 30;
-  const cardSet = w.fullDayLeaveIdsToday(w.getTodayPersonalLeaves(), TODAY, stdStartMin);
+  const cardSet = w.offTheFloorAllDayIdsToday(w.getTodayPersonalLeaves(), TODAY, stdStartMin);
   const listSet = new Set(ids(w.getCheckinStatusLists().onLeave));
   assert.deepStrictEqual(Array.from(cardSet).sort(), Array.from(listSet).sort(),
     'the card and the Check-in list disagree about who is off for the whole day');
@@ -198,6 +198,49 @@ test('the half-day chip is rendered on the "not checked in" row', () => {
   const body = extractFunction(APP_SRC, 'showCheckinStatusModal');
   assert.ok(/partialLeave/.test(body),
     'the "not checked in" rows ignore partialLeave, so a half-day leave reads as an unexplained absence');
+});
+
+// 2026-10-09 (review): with two approved leaves in one day the group came from "any of them is
+// full-day" while the chip came from "the first one on file", so a full-day row could render
+// wearing a half-day label -- and reversing the order in leaves.json changed the answer. The
+// server blocks overlapping leaves, so this needs legacy data, but the row must still be coherent.
+test('two leaves in one day: the row shows the leave that decided the group', () => {
+  const half = { id: 30, userId: 1, type: 'annual', dateFrom: TODAY, dateTo: TODAY,
+                 status: 'approved', days: 0, hourlyStart: '08:30', hourlyEnd: '12:00' };
+  const full = { id: 31, userId: 1, type: 'sick', dateFrom: TODAY, dateTo: TODAY,
+                 status: 'approved', days: 1 };
+  for (const order of [[half, full], [full, half]]) {
+    const r = world([ALICE], order).getCheckinStatusLists();
+    assert.deepStrictEqual(ids(r.onLeave), [1], 'a full-day leave must put them in the on-leave group');
+    assert.strictEqual(r.onLeave[0].leave.type, 'sick',
+      'the row shows the half-day leave while sitting in the full-day group');
+    assert.strictEqual(r.onLeave[0].coverage, 'full',
+      'a row in the on-leave group must never carry a half-day coverage');
+  }
+});
+
+// The rendering that the bug above produced: a half-day suffix under a full-day heading. Nothing
+// asserted that a full-day row renders bare.
+test('a full-day row carries no half-day suffix', () => {
+  const r = world([ALICE], [sickFullDay]).getCheckinStatusLists();
+  assert.strictEqual(r.onLeave[0].coverage, 'full');
+  const body = extractFunction(APP_SRC, 'showCheckinStatusModal');
+  const map = /leaveCoverageSuffix\s*=\s*\{([\s\S]*?)\}/.exec(body);
+  assert.ok(map, 'leaveCoverageSuffix not found -- this test went blind');
+  assert.ok(!/full\s*:/.test(map[1]),
+    'the suffix map has a `full` entry, so a full-day row would print one');
+});
+
+// 2026-10-09 (review): the three-language test below greps the hard-coded Japanese in the function
+// body, which cannot catch a MISSING ja.js key -- L() silently falls back to English. Check the
+// dictionary itself for every English string the new rows pass through L().
+test('every new string the rows pass to L() has a Japanese entry in ja.js', () => {
+  const ja = fs.readFileSync(path.join(__dirname, '..', 'attendance', 'lang', 'ja.js'), 'utf8');
+  for (const key of ['morning half-day', 'afternoon half-day', 'partial day',
+                     'Annual Leave', 'Sick Leave', 'Business Leave', 'Not in']) {
+    assert.ok(ja.includes(`"${key}"`),
+      `ja.js has no entry for "${key}" -- Japanese users silently get the English string`);
+  }
 });
 
 // The owner asked for the type, not the reason. openTodayLeaveModal() is where reasons live.
