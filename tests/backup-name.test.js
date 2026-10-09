@@ -89,7 +89,23 @@ test('backup.js uses the helper and no longer builds its own minute-only name', 
   const path = require('path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'backup.js'), 'utf8');
   assert.ok(/pickFreeName/.test(src), 'backup.js does not call pickFreeName()');
-  assert.ok(!/slice\(0, 16\)/.test(src), 'backup.js still truncates the timestamp to the minute');
+  // 2026-10-09 (review): `slice(0, 16)` needed that exact space -- a formatter collapsing it to
+  // slice(0,16) would have let the minute truncation back in with this test still green. backup.js
+  // builds no timestamp of its own any more, so assert that instead of a formatting detail.
+  // Strip line comments first. 2026-10-09: the first version of the COPYFILE_EXCL assertion below
+  // searched the raw source, so removing the flag from the actual call left the comment ABOVE it
+  // still saying the word, and this test stayed green while the overwrite was back. The same trap
+  // the reviewer had just demonstrated on the status.js grep, reproduced here within the hour.
+  const code = src.replace(/^[ 	]*\/\/.*$/gm, '');
+  assert.ok(!/toISOString/.test(code), 'backup.js builds its own timestamp again instead of using the helper');
+  assert.ok(/copyFileSync\([^)]*COPYFILE_EXCL/.test(code),
+    'the copy can overwrite again: pickFreeName checks the name tens of seconds before the write, ' +
+    'so a concurrent run can take it in between -- COPYFILE_EXCL is what makes the refusal real');
+});
+
+test('with no destinations it refuses instead of approving a name it checked nowhere', () => {
+  assert.throws(() => pickFreeName(bundleBaseName(AT, SHA), [], () => true), /no destinations/,
+    'an empty destination list made every candidate look free');
 });
 
 console.log(`  ${passed} passed`);

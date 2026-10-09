@@ -20,7 +20,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { GUARDED, markerState, assertAssetIsReal, isGitCheckout, isShallowCheckout } = require('../scripts/lib/cache-markers');
+const { GUARDED, assetPaths, guardLabel, markerState, assertAssetIsReal, isGitCheckout, isShallowCheckout } = require('../scripts/lib/cache-markers');
 
 let passed = 0;
 function test(name, fn) {
@@ -74,29 +74,70 @@ test('the service worker shell and the FAQ images are guarded too', () => {
   assert.ok(GUARDED.length >= 6, `only ${GUARDED.length} guarded pair(s) -- someone removed one`);
 });
 
-// A marker that guards several files must actually watch all of them. Checking only the first
-// would leave the rest silently unguarded while the pair reads as covered.
-test('every guarded pair lists at least one path, and multi-file pairs list them all', () => {
+// A marker that guards several files must actually watch all of them.
+//
+// 2026-10-09 (review): the first version of this test read `g.assets || [g.asset]` -- the raw DATA,
+// never assetPaths(), the function that actually feeds git. The reviewer proved the hole by making
+// assetPaths() return only the FIRST path of each group: four of the five precached shell files
+// stopped being guarded and this suite still printed 11/11 green. Assert on the function.
+test('assetPaths() hands git every path of a group, not just the first', () => {
   for (const g of GUARDED) {
-    const paths = g.assets || [g.asset];
+    const paths = assetPaths(g);
     assert.ok(Array.isArray(paths) && paths.length >= 1, `${g.markerName} guards no path at all`);
+    if (g.assets) {
+      assert.deepStrictEqual(paths, g.assets,
+        `${g.markerName} declares ${g.assets.length} path(s) but assetPaths() passes ${paths.length} to git -- ` +
+        'the rest are silently unguarded while this pair still reads as covered');
+    }
   }
   const shell = GUARDED.find(g => g.markerName === 'SHELL_CACHE');
-  assert.ok(shell && (shell.assets || []).length >= 2,
+  assert.ok(shell && assetPaths(shell).length >= 2,
     'SHELL_CACHE must watch every file the service worker precaches, not just one');
+});
+
+// 2026-10-09 (review): the SHELL_CACHE path list was hand-copied out of sw.js. Add a sixth icon to
+// SHELL_URLS and the guard keeps reporting the old five as "ok" forever, with nothing to notice --
+// the same drift this whole module exists to prevent, one level up. So derive the expected set from
+// sw.js itself and compare.
+//
+// Excluded on purpose, and the exclusions are the point: './' and './index.html' are documents, and
+// sw.js serves documents network-first (see its isDoc branch), so they cannot be served stale while
+// online. Everything else in SHELL_URLS carries no version in its URL and IS served cache-first.
+test('the SHELL_CACHE list still matches what the service worker actually precaches', () => {
+  const sw = fs.readFileSync(path.join(__dirname, '..', 'attendance', 'sw.js'), 'utf8');
+  const block = /const\s+SHELL_URLS\s*=\s*\[([\s\S]*?)\]/.exec(sw);
+  assert.ok(block, 'SHELL_URLS not found in attendance/sw.js -- it was renamed, and this test went blind');
+  const urls = Array.from(block[1].matchAll(/'([^']+)'/g)).map(m => m[1]);
+  assert.ok(urls.length >= 3, `only parsed ${urls.length} entries from SHELL_URLS -- the parse broke`);
+  const expected = urls
+    .filter(u => u !== './' && !/\.html?$/.test(u))
+    .map(u => 'attendance/' + u.replace(/^\.\//, ''))
+    .sort();
+  const shell = GUARDED.find(g => g.markerName === 'SHELL_CACHE');
+  assert.ok(shell, 'SHELL_CACHE is not guarded');
+  assert.deepStrictEqual(assetPaths(shell).slice().sort(), expected,
+    'the SHELL_CACHE guard and sw.js SHELL_URLS have drifted apart:\n' +
+    `       guard:  ${assetPaths(shell).slice().sort().join(', ')}\n` +
+    `       sw.js:  ${expected.join(', ')}`);
 });
 
 if (inRepo && !isShallowCheckout()) {
   for (const g of GUARDED) {
-    test(`${g.asset} is unchanged since ${g.markerName} was last bumped`, () => {
+    const label = guardLabel(g);
+    test(`${label} is unchanged since ${g.markerName} was last bumped`, () => {
       // A wrong asset path makes `git diff` report "no differences" forever, so check it is real
       // and tracked before trusting that answer.
       assertAssetIsReal(g);
 
       const s = markerState(g);        // throws if the marker was renamed away
+      // 2026-10-09 (review): say WHY a row is green. markerState() returns ok:true for states it
+      // could not actually measure -- an asset whose last change was the root commit, or a marker
+      // that did not exist in the earlier version. Those are honest answers, but "ok" on its own
+      // reads as "measured and clean", which is the misreading this whole module exists to stop.
+      if (s.ok && s.reason) console.log(`       (${s.reason})`);
       assert.ok(
         s.ok,
-        `${g.asset} has changed, but ${g.markerName} is still "${s.current}".\n` +
+        `${label} has changed, but ${g.markerName} is still "${s.current}".\n` +
         `       The browser and the service worker will keep serving the old file.\n` +
         `       Fix: ${g.fix}`
       );

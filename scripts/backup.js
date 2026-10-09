@@ -71,7 +71,14 @@ function main() {
   // 2026-10-09: the name used to stop at the minute, so two runs in the same minute at the same
   // commit produced the same path and copyFileSync() overwrote the first backup without a word.
   // pickFreeName() refuses any name already present in ANY destination. See scripts/lib/backup-name.js.
-  const name = pickFreeName(bundleBaseName(new Date(), headSha), dests);
+  // pickFreeName throws a plain Error; everything in this file reports through Refused so the
+  // written explanation reaches the user instead of a Node stack trace (see the Refused comment).
+  let name;
+  try {
+    name = pickFreeName(bundleBaseName(new Date(), headSha), dests);
+  } catch (e) {
+    fail(e.message);
+  }
 
   // Build once in a temp folder, verify THAT, then copy it to each destination and compare sizes --
   // so a destination that fills up halfway is caught instead of leaving a truncated file behind.
@@ -100,12 +107,25 @@ function main() {
         // in the backup folder named like a good backup and fail only when someone needs it. So the
         // partial is removed before reporting, and the destinations that did succeed are named --
         // otherwise a failure on the second disk hides that the first one is fine.
-        fs.copyFileSync(bundle, target);
+        // 2026-10-09 (review): COPYFILE_EXCL makes "never replace an older backup" unconditional
+        // instead of probabilistic. pickFreeName() checks the name up at the top, but the bundle
+        // build + verify + clone between there and here take tens of seconds over SMB, and a
+        // concurrent run -- the very case this guard exists for, someone starting a second run
+        // because they are unsure of the first -- can take the name in that window. The OS refuses
+        // the write; nobody has to win a race.
+        fs.copyFileSync(bundle, target, fs.constants.COPYFILE_EXCL);
         if (fs.statSync(target).size !== size) throw new Error(`copied ${fs.statSync(target).size} of ${size} bytes`);
         written.push(target);
       } catch (e) {
-        try { fs.rmSync(target, { force: true }); } catch (_) { /* nothing usable to remove */ }
         const ok = written.length ? `\nGood copies already written:\n  ${written.join('\n  ')}` : '\nNo destination was written.';
+        // EEXIST is NOT a partial write -- that file is somebody's backup, and the cleanup below
+        // would delete it. Refusing to overwrite must never turn into deleting instead.
+        if (e && e.code === 'EEXIST') {
+          fail(`${target} already exists and was NOT touched.\n` +
+               'Another run took this name while this one was building. Nothing was overwritten; ' +
+               'run the backup again to get a fresh name.' + ok);
+        }
+        try { fs.rmSync(target, { force: true }); } catch (_) { /* nothing usable to remove */ }
         fail(`Could not write ${target}: ${e.message}\nThe partial file was removed.${ok}`);
       }
     }

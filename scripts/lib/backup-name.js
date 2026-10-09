@@ -17,6 +17,8 @@ const MAX_ATTEMPTS = 100;
 
 // 2026-10-09T14:05:07Z -> "20261009-140507". Seconds are included so an ordinary repeat already
 // differs by name; pickFreeName() is what actually guarantees it.
+// The stamp is UTC, like the name it replaced. A 02:00 Bangkok run is therefore named 1900
+// the previous day -- consistent and sortable, but do not read it as local time.
 function bundleBaseName(date, headSha) {
   const iso = date.toISOString();
   const stamp = iso.slice(0, 19).replace(/[-:]/g, '').replace('T', '-');
@@ -27,6 +29,12 @@ function bundleBaseName(date, headSha) {
 // destination would write the same bundle under two names and leave nobody able to tell they are
 // the same backup. `exists` is injectable so the test does not need real files.
 function pickFreeName(baseName, dests, exists) {
+  // 2026-10-09 (review): with no destinations, [].some() is false, so every candidate looked
+  // free and the function returned a name it had checked nowhere -- the exact opposite of its
+  // contract. backup.js guards this earlier, but a helper has to be safe on its own.
+  if (!Array.isArray(dests) || dests.length === 0) {
+    throw new Error('pickFreeName was given no destinations, so it cannot promise the name is free');
+  }
   const taken = exists || (p => fs.existsSync(p));
   const free = n => !dests.some(d => taken(path.resolve(d, n)));
   if (free(baseName)) return baseName;

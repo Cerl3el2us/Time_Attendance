@@ -25,7 +25,11 @@ function describeDataFiles(dir, names) {
       return [`  the directory could not be listed: ${e.message}`];
     }
   }
-  const jsonNames = list.filter(n => n.endsWith('.json')).sort();
+  // 2026-10-09 (review): the header promises this never throws. A caller passing a non-array
+  // `names` would still have broken it, so make the promise unconditional rather than
+  // true-for-today.
+  if (!Array.isArray(list)) return ['  the file list could not be read'];
+  const jsonNames = list.filter(n => typeof n === 'string' && n.endsWith('.json')).sort();
   if (jsonNames.length === 0) return ['  no .json files here'];
   return jsonNames.map(f => describeOne(dir, f));
 }

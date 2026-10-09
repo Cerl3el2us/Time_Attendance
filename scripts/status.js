@@ -157,7 +157,7 @@ if (m.isShallowCheckout()) {
 } else {
   let stale = 0;
   for (const g of m.GUARDED) {
-    const label = `${g.asset} vs ${g.markerName} in ${g.markerFile}`;
+    const label = `${m.guardLabel(g)} vs ${g.markerName} in ${g.markerFile}`;
     try {
       m.assertAssetIsReal(g);
       const s = m.markerState(g);

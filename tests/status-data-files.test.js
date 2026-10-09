@@ -86,8 +86,13 @@ test('only .json files are listed', () => {
 test('status.js actually uses the shared helper instead of its own loop', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'status.js'), 'utf8');
   assert.ok(/describeDataFiles/.test(src), 'status.js does not call describeDataFiles()');
-  assert.ok(!/fs\.statSync\(full\)/.test(src),
-    'status.js still has the unguarded statSync loop this fix removed');
+  // 2026-10-09 (review): this used to grep for `fs.statSync(full)` -- a VARIABLE NAME. The
+  // reviewer put the identical unguarded loop back using `fp` instead of `full` and this test
+  // stayed green. status.js now calls neither syscall at all, so assert exactly that -- but strip
+  // the line comments first, or the comment that EXPLAINS the removal trips the check.
+  const code = src.replace(/^[ 	]*\/\/.*$/gm, '');
+  assert.ok(!/statSync|readdirSync/.test(code),
+    'status.js reads the data directory itself again -- that loop is what killed the report');
 });
 
 console.log(`  ${passed} passed`);

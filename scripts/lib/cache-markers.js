@@ -83,7 +83,10 @@ const GUARDED = [
     // or manifest reaches an installed app only on the visit AFTER the background refresh, unless
     // the cache name moves. Adding index.html here would force a bump on every HTML edit for no
     // reason, and a guard that cries wolf is one people switch off.
-    asset: 'attendance/ (precached unversioned shell files)',
+    // `label` is the human name for reports and test titles; `assets` holds paths and only
+    // paths. 2026-10-09 (review): this used to put the prose in `asset`, which other code reads
+    // as a path (status.js, and a Set of paths in the guard test). Keep the two kinds apart.
+    label: 'attendance/ (precached unversioned shell files)',
     assets: [
       'attendance/manifest.json',
       'attendance/images/logo-short.jpg',
@@ -93,7 +96,10 @@ const GUARDED = [
     ],
     markerFile: 'attendance/sw.js',
     markerName: 'SHELL_CACHE',
-    markerValue: /SHELL_CACHE\s*=\s*'([^']+)'/,
+    // Anchored to the declaration (2026-10-09 review): .exec takes the FIRST match in the file,
+    // and this codebase narrates history in comments -- a comment quoting an old value above
+    // the declaration would be read as the marker and frozen there forever.
+    markerValue: /^\s*const\s+SHELL_CACHE\s*=\s*'([^']+)'/m,
     fix: "bump the version in `const SHELL_CACHE = 'ta-shell-vN';` (attendance/sw.js)",
   },
   {
@@ -104,7 +110,7 @@ const GUARDED = [
     assets: ['attendance/images/faq'],
     markerFile: 'attendance/js/app.js',
     markerName: 'FAQ_IMG_V',
-    markerValue: /FAQ_IMG_V\s*=\s*'([^']+)'/,
+    markerValue: /^\s*const\s+FAQ_IMG_V\s*=\s*'([^']+)'/m,
     fix: "bump `const FAQ_IMG_V = '...'` in attendance/js/app.js",
   },
 ];
@@ -116,8 +122,15 @@ function assetPaths(g) {
   if (typeof g === 'string') return [g];
   return (g && g.assets) ? g.assets : [g.asset];
 }
-// Stable key for the memo caches, and for messages.
-const assetKey = g => assetPaths(g).join(' ');
+// What to call this pair in a report or a test title. A grouped entry has no single path to name.
+function guardLabel(g) {
+  if (typeof g === 'string') return g;
+  return (g && g.label) ? g.label : assetPaths(g).join(', ');
+}
+// Stable key for the memo caches. 2026-10-09 (review): this joined on a space, so ['a b'] and
+// ['a','b'] produced the same key and one entry could be handed the other's cached answer. No
+// tracked path in this repo contains a space today, which is exactly why it would surface late.
+const assetKey = g => assetPaths(g).join('\0');
 
 function markerValueIn(text, g) {
   const m = g.markerValue.exec(text);
@@ -219,16 +232,25 @@ function assetChangedSince(sha, file) {
 // An asset path that is wrong — a typo, or a file that moved and was not updated here — makes
 // `git diff` answer "no differences" for a path that does not exist, so that pair would read as
 // permanently clean. Checked explicitly so a broken entry is loud instead of invisible.
+// git reports paths with forward slashes and no trailing slash. An entry written with
+// backslashes or a trailing slash is the SAME path to both Node and git -- git on Windows accepts
+// either pathspec -- but a raw string compare would miss it and throw "not tracked": a false red
+// that costs someone an afternoon. 2026-10-09 (review).
+const gitPath = p => String(p).replace(/\\/g, '/').replace(/\/+$/, '');
+
 function assertAssetIsReal(g) {
   const paths = assetPaths(g);
   // One `ls-files` for every guarded path at once, not one call per pair. A folder pathspec
   // expands to the files inside it, so membership is "this exact file, or something under it".
+  // -z and a NUL split because ls-files otherwise quotes and C-escapes any non-ASCII path
+  // (core.quotePath), which would make a Thai- or Japanese-named screenshot read as untracked.
   const tracked = memo('tracked', () => new Set(
-    gitOrThrow(['ls-files', '--', ...GUARDED.flatMap(assetPaths)], 'listing tracked files')
-      .split('\n').map(s => s.trim()).filter(Boolean)));
+    gitOrThrow(['ls-files', '-z', '--', ...GUARDED.flatMap(assetPaths)], 'listing tracked files')
+      .split('\0').map(s => s.trim()).filter(Boolean)));
   for (const p of paths) {
     if (!fs.existsSync(path.join(ROOT, p))) throw new Error(`${p} does not exist — the path in cache-markers.js is wrong or the file moved`);
-    const isTracked = tracked.has(p) || [...tracked].some(t => t.startsWith(p + '/'));
+    const q = gitPath(p);
+    const isTracked = tracked.has(q) || [...tracked].some(t => t.startsWith(q + '/'));
     if (!isTracked) throw new Error(`${p} is not tracked by git — git cannot answer whether it changed`);
   }
 }
@@ -249,7 +271,7 @@ function isShallowCheckout() {
 }
 
 module.exports = {
-  assetPaths,
+  assetPaths, guardLabel,
   ROOT, GUARDED, git, gitOrThrow,
   currentMarkerValue, markerState,
   assetChangedSince, assertAssetIsReal, isGitCheckout, isShallowCheckout,

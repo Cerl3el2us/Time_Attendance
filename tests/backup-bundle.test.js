@@ -77,6 +77,26 @@ test('refuses a destination folder that does not exist (no mkdir on a typo)', ()
   assert.ok(!fs.existsSync(nowhere), 'created the missing folder instead of refusing');
 });
 
+// 2026-10-09 (review): the unit tests prove pickFreeName() picks a free name; nothing proved the
+// COPY step honours it. Running the script twice into one folder is the only assertion that covers
+// the whole chain -- and twice in a row is exactly what someone does when they are not sure the
+// first run worked, which is the case the original bug destroyed.
+slowTest('running it twice into one folder leaves TWO backups, not one overwritten', () => {
+  const dest = tmp();
+  try {
+    const first = runBackup([dest]);
+    assert.strictEqual(first.status, 0, `first run exit ${first.status}: ${first.stdout}${first.stderr}`);
+    const second = runBackup([dest]);
+    assert.strictEqual(second.status, 0, `second run exit ${second.status}: ${second.stdout}${second.stderr}`);
+    const bundles = fs.readdirSync(dest).filter(f => f.endsWith('.bundle'));
+    assert.strictEqual(bundles.length, 2,
+      `expected both backups to survive, found ${bundles.length}: ${bundles.join(', ')}\n` +
+      '       one of them overwrote the other, which is the bug this is here for');
+  } finally {
+    fs.rmSync(dest, { recursive: true, force: true });
+  }
+});
+
 slowTest('writes a bundle that restores to the same commit', () => {
   const dest = tmp();
   try {
