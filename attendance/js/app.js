@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 95;
+const APP_BUILD = 96;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -9135,6 +9135,23 @@ function getTodayPersonalLeaves() {
   });
 }
 
+// 2026-10-09: ONE definition of "today's leave takes this person off the floor for the whole day".
+// The dashboard "Check-in วันนี้" card and the Check-in Status list both need it, and they had
+// started answering it differently: the card excluded only full-day leave from "expected today"
+// (its own rule since 2026-08-06), while the list moved half-day people into "on leave" as well.
+// The card then said "ยังไม่ check-in 1 คน" and the list it opens showed "ยังไม่เข้างาน (0)".
+//
+// Owner, asked directly on 2026-10-09 -- "คนลาครึ่งเช้าที่ยังไม่มา ควรนับเป็นคนที่คาดว่ามาวันนี้ไหม"
+// -- answered yes: a half-day leave still leaves you expected for the other half. So full-day only.
+// tests/checkin-status-leave.test.js feeds the same world to both callers and compares.
+// Takes the leave list rather than calling getTodayPersonalLeaves() itself, so a caller that
+// already has it does not read the file twice. Pure.
+function fullDayLeaveIdsToday(todayLeaves, dateStr, stdStartMin) {
+  return new Set(todayLeaves.filter(l =>
+    !['annual', 'sick', 'business'].includes(l.type) || leaveDayCoverage(l, dateStr, stdStartMin) === 'full'
+  ).map(l => l.userId));
+}
+
 function getDashPendingLeaves() {
   if (!currentUser) return [];
   const isStaff = ['user', 'driver', 'marketing'].includes(effectiveRole());
@@ -10877,10 +10894,11 @@ function renderDashboard() {
   // AM/PM (or partial) annual/sick/business leave still leaves them expected for the other half
   // of the day (leaveDayCoverage() handles the am/pm/partial classification). Other leave types
   // (upcountry, ot, etc.) keep the prior "any overlap excludes" behavior, out of scope here.
+  // 2026-10-09: this rule now lives in fullDayLeaveIdsToday() because the Check-in Status list
+  // needs the same answer -- see the note there. The behaviour is unchanged from the 2026-08-06
+  // copy that used to sit inline here.
   const _stdStartMinDash = (APP_SETTINGS.workSchedule?.standardStartHour ?? 8) * 60 + (APP_SETTINGS.workSchedule?.standardStartMinute ?? 30);
-  const onLeaveIds = new Set(todayLeaves.filter(l =>
-    !['annual', 'sick', 'business'].includes(l.type) || leaveDayCoverage(l, bizStr, _stdStartMinDash) === 'full'
-  ).map(l => l.userId));
+  const onLeaveIds = fullDayLeaveIdsToday(todayLeaves, bizStr, _stdStartMinDash);
   const expectedToday = activeUsers.filter(u => !onLeaveIds.has(u.id));
   const checkedInToday = expectedToday.filter(u => {
     const rec = attendanceLog[attKey(u.id, bizStr)];
@@ -20741,8 +20759,10 @@ function getCheckinStatusLists() {
   const todayStr = businessDateStr();
   const activeUsers = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active && u.role !== 'md').sort((a, b) => a.name.localeCompare(b.name, 'th'));
   const stdStartMin = (APP_SETTINGS.workSchedule?.standardStartHour ?? 8) * 60 + (APP_SETTINGS.workSchedule?.standardStartMinute ?? 30);
+  const todayLeaves = getTodayPersonalLeaves();
+  const fullDayIds = fullDayLeaveIdsToday(todayLeaves, todayStr, stdStartMin);
   const leaveByUser = new Map();
-  getTodayPersonalLeaves().forEach(l => { if (!leaveByUser.has(l.userId)) leaveByUser.set(l.userId, l); });
+  todayLeaves.forEach(l => { if (!leaveByUser.has(l.userId)) leaveByUser.set(l.userId, l); });
   const checkedIn  = [];
   const onLeave    = [];
   const notChecked = [];
@@ -20753,15 +20773,19 @@ function getCheckinStatusLists() {
       checkedIn.push({ user: u, time: rec.checkIn, checkOut: rec.checkOut || null, checkInSource: rec.checkInSource || null, checkOutSource: rec.checkOutSource || null, isLate: rec.status === 'late' && !isApprovedAbroadDate(todayStr, u.id) });
       return;
     }
-    // A half-day leave only excuses its own half, and anyone who scanned in is already handled
-    // above -- so whoever is still here with leave today has genuinely not arrived. The coverage
-    // rides along so the row can say "morning half-day" instead of implying a whole day off.
     const leave = leaveByUser.get(u.id);
-    if (leave) {
+    // Full day off -> its own group. A half-day leave does NOT move anyone here: the owner
+    // confirmed on 2026-10-09 that they are still expected for the other half, which is what the
+    // dashboard card counts too (fullDayLeaveIdsToday). They stay under "has not checked in" and
+    // carry their leave so the row can say which half, instead of reading as an unexplained absence.
+    if (leave && fullDayIds.has(u.id)) {
       onLeave.push({ user: u, leave, coverage: leaveDayCoverage(leave, todayStr, stdStartMin) });
       return;
     }
-    notChecked.push(u);
+    notChecked.push({
+      user: u,
+      partialLeave: leave ? { leave, coverage: leaveDayCoverage(leave, todayStr, stdStartMin) } : null,
+    });
   });
   checkedIn.sort((a, b) => a.time.localeCompare(b.time));
   return { checkedIn, onLeave, notChecked };
@@ -20816,15 +20840,27 @@ function showCheckinStatusModal() {
     </div>`;
   }).join('');
 
-  const outRows = notChecked.map(u => `
+  // Someone on a HALF-day leave is still expected for the other half, so they stay here rather
+  // than in the group above (owner, 2026-10-09) -- but the row says which half, otherwise it
+  // reads as an unexplained absence, which is the whole complaint this screen was fixed for.
+  const outRows = notChecked.map(item => {
+    const u = item.user;
+    const pl = item.partialLeave;
+    const cfg = pl ? (getLEAVE_TYPE_CFG()[pl.leave.type] || { icon: '📋', label: pl.leave.type }) : null;
+    const suffix = pl ? (leaveCoverageSuffix[pl.coverage] || '') : '';
+    return `
     <div style="display:flex;align-items:center;gap:12px;padding:11px 20px;border-bottom:1px solid #f1f5f9">
       ${avatar(u)}
-      <div style="flex:1">
+      <div style="flex:1;min-width:0">
         <div style="font-weight:600;color:#1e293b;font-size:13.5px">${escapeHtml(u.name)}</div>
         <div style="font-size:11px;color:#64748b">${escapeHtml(u.position || '')}</div>
       </div>
-      <div style="font-size:13px;color:#ef4444;font-weight:700">⏳ ${L('Not in', 'ยังไม่เข้า')}</div>
-    </div>`).join('');
+      <div style="text-align:right">
+        <div style="font-size:13px;color:#ef4444;font-weight:700">⏳ ${L('Not in', 'ยังไม่เข้า')}</div>
+        ${cfg ? `<div style="font-size:11px;color:#7c3aed;font-weight:600">${cfg.icon} ${cfg.label}${suffix ? ` · ${suffix}` : ''}</div>` : ''}
+      </div>
+    </div>`;
+  }).join('');
 
   const titleEl = document.getElementById('checkin-status-title');
   const bodyEl  = document.getElementById('checkin-status-body');

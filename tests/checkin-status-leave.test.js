@@ -82,8 +82,8 @@ function world(users, leaves, log) {
   vm.createContext(ctx);
   ['LUNCH_START_MIN', 'LUNCH_END_MIN', 'STD_END_MIN', 'HALFDAY_TOL_MIN', 'PERSONAL_LEAVE_TYPES']
     .forEach(n => vm.runInContext(extractConst(APP_SRC, n), ctx));
-  ['leaveCoversDate', 'leaveDayCoverage', 'getTodayPersonalLeaves', 'getCheckinStatusLists']
-    .forEach(n => vm.runInContext(extractFunction(APP_SRC, n), ctx));
+  ['leaveCoversDate', 'leaveDayCoverage', 'getTodayPersonalLeaves', 'fullDayLeaveIdsToday',
+   'getCheckinStatusLists'].forEach(n => vm.runInContext(extractFunction(APP_SRC, n), ctx));
   return ctx;
 }
 
@@ -139,12 +139,38 @@ test('half-day PM leave for someone who already checked in stays under "checked 
   assert.deepStrictEqual(ids(r.onLeave), [], 'a PM leave must not erase the morning check-in');
 });
 
-test('half-day AM leave for someone who has not arrived yet shows as leave, and says which half', () => {
+// 2026-10-09 (owner, asked directly): "คนลาครึ่งเช้าที่ยังไม่มา ควรนับเป็นคนที่คาดว่ามาวันนี้ไหม
+// — ใช่ ถูกต้อง". So a half-day leave does NOT take someone off the floor: they are still expected
+// for the other half. That is also exactly what the dashboard card has done since 2026-08-06.
+// The first version of this screen moved them to "on leave" anyway, which made the card say
+// "ยังไม่ check-in 1 คน" while the list it opens showed "ยังไม่เข้างาน (0)".
+test('half-day AM leave stays under "has not checked in" — they are still expected today', () => {
   const w = world([ALICE], [annualAm]);
   const r = w.getCheckinStatusLists();
-  assert.deepStrictEqual(ids(r.onLeave), [1]);
-  assert.strictEqual(r.onLeave[0].coverage, 'am',
-    'the row does not record that this is a morning-only leave');
+  assert.deepStrictEqual(ids(r.onLeave), [],
+    'a half-day leave must not move anyone into the on-leave group');
+  assert.deepStrictEqual(ids(r.notChecked), [1]);
+});
+
+test('...but the row still says which half, so it does not read as an unexplained absence', () => {
+  const w = world([ALICE], [annualAm]);
+  const row = w.getCheckinStatusLists().notChecked[0];
+  assert.ok(row.partialLeave, 'the row carries no leave at all, so the screen cannot explain it');
+  assert.strictEqual(row.partialLeave.leave.type, 'annual');
+  assert.strictEqual(row.partialLeave.coverage, 'am');
+});
+
+// The two screens must not be able to disagree again. Feed the same world to both rules and
+// compare who each one considers off for the whole day.
+test('the dashboard card and this list use one rule for "off for the whole day"', () => {
+  const w = world([ALICE, BOB], [annualAm, { id: 20, userId: 2, type: 'sick', dateFrom: TODAY,
+                                              dateTo: TODAY, status: 'approved', days: 1 }]);
+  const stdStartMin = 8 * 60 + 30;
+  const cardSet = w.fullDayLeaveIdsToday(w.getTodayPersonalLeaves(), TODAY, stdStartMin);
+  const listSet = new Set(ids(w.getCheckinStatusLists().onLeave));
+  assert.deepStrictEqual(Array.from(cardSet).sort(), Array.from(listSet).sort(),
+    'the card and the Check-in list disagree about who is off for the whole day');
+  assert.deepStrictEqual(Array.from(listSet), [2], 'only the full-day sick leave counts');
 });
 
 test('a leave request that is not approved yet does not excuse anyone', () => {
@@ -166,6 +192,12 @@ test('the three buckets together still account for every employee, with no one c
   const r = w.getCheckinStatusLists();
   const all = [...ids(r.checkedIn), ...ids(r.onLeave), ...ids(r.notChecked)];
   assert.deepStrictEqual(all.slice().sort(), [1, 2], 'someone was lost or double-counted');
+});
+
+test('the half-day chip is rendered on the "not checked in" row', () => {
+  const body = extractFunction(APP_SRC, 'showCheckinStatusModal');
+  assert.ok(/partialLeave/.test(body),
+    'the "not checked in" rows ignore partialLeave, so a half-day leave reads as an unexplained absence');
 });
 
 // The owner asked for the type, not the reason. openTodayLeaveModal() is where reasons live.
