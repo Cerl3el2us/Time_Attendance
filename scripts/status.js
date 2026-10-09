@@ -21,6 +21,7 @@
 const fs = require('fs');
 const path = require('path');
 const m = require('./lib/cache-markers');
+const { describeDataFiles } = require('./lib/data-files');
 
 const { ROOT, git } = m;
 const out = (s = '') => console.log(s);
@@ -158,7 +159,7 @@ if (m.isShallowCheckout()) {
   for (const g of m.GUARDED) {
     const label = `${g.asset} vs ${g.markerName} in ${g.markerFile}`;
     try {
-      m.assertAssetIsReal(g.asset);
+      m.assertAssetIsReal(g);
       const s = m.markerState(g);
       if (!s.ok) { stale++; out(`  STALE  ${label} = "${s.current}" -- ${g.fix}`); }
       else out(`  ok     ${label} = "${s.current}"${s.reason ? ` (${s.reason})` : ''}`);
@@ -178,16 +179,12 @@ if (!fs.existsSync(dataDir)) {
   out('  attendance-server/backend/data/ is gitignored and exists only on the NAS, so a worktree');
   out('  has no records to count. Read it on Z:\\Time_Attendance if you need the numbers.');
 } else {
+  // 2026-10-09: this used to be an inline loop whose statSync() sat outside the try. On Z: the
+  // live backend rewrites these files through atomicWrite() while the report runs, so a file
+  // could be listed and then gone a moment later -- which threw, and killed every section below
+  // this one. describeDataFiles() gives up at most one line per file. See scripts/lib/data-files.js.
   out('Data files (attendance-server/backend/data):');
-  for (const f of fs.readdirSync(dataDir).filter(n => n.endsWith('.json')).sort()) {
-    const full = path.join(dataDir, f);
-    let n = '?';
-    try {
-      const j = JSON.parse(fs.readFileSync(full, 'utf8'));
-      n = Array.isArray(j) ? j.length + ' records' : Object.keys(j).length + ' top-level keys';
-    } catch (e) { n = 'unreadable'; }
-    out(`  ${f}: ${n}, modified ${fs.statSync(full).mtime.toISOString().slice(0, 16).replace('T', ' ')}`);
-  }
+  describeDataFiles(dataDir).forEach(out);
 }
 out();
 

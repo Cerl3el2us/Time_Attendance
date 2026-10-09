@@ -73,7 +73,51 @@ const GUARDED = [
     markerValue: /lang\/ja\.js\?v=([^"'\s>]+)/,
     fix: 'bump `<script src="lang/ja.js?v=...">` in attendance/index.html',
   },
+  // 2026-10-09: the two markers that were NOT in `?v=` form, and so could not be expressed by the
+  // original one-marker-one-file list. Found outside the guard by review on 2026-10-08.
+  {
+    // Deliberately NOT index.html, and NOT the js/css: sw.js serves documents network-first (so
+    // index.html can never be stale) and the versioned js/css miss the cache on a `?v=` bump
+    // anyway, and are guarded above. What SHELL_CACHE actually protects is the precached files
+    // with no version in their URL, which the fetch handler serves cache-first -- a changed icon
+    // or manifest reaches an installed app only on the visit AFTER the background refresh, unless
+    // the cache name moves. Adding index.html here would force a bump on every HTML edit for no
+    // reason, and a guard that cries wolf is one people switch off.
+    asset: 'attendance/ (precached unversioned shell files)',
+    assets: [
+      'attendance/manifest.json',
+      'attendance/images/logo-short.jpg',
+      'attendance/images/logo-long.png',
+      'attendance/images/icon-192.png',
+      'attendance/images/icon-512.png',
+    ],
+    markerFile: 'attendance/sw.js',
+    markerName: 'SHELL_CACHE',
+    markerValue: /SHELL_CACHE\s*=\s*'([^']+)'/,
+    fix: "bump the version in `const SHELL_CACHE = 'ta-shell-vN';` (attendance/sw.js)",
+  },
+  {
+    // The FAQ screenshots are requested as `images/faq/<name>?v=FAQ_IMG_V` and served cache-first,
+    // so replacing a screenshot without moving the version leaves every browser showing the old
+    // picture of a screen that no longer looks like that.
+    asset: 'attendance/images/faq',
+    assets: ['attendance/images/faq'],
+    markerFile: 'attendance/js/app.js',
+    markerName: 'FAQ_IMG_V',
+    markerValue: /FAQ_IMG_V\s*=\s*'([^']+)'/,
+    fix: "bump `const FAQ_IMG_V = '...'` in attendance/js/app.js",
+  },
 ];
+
+// A marker can guard one file or a whole set (the precached shell, a folder of screenshots).
+// Everything below works in pathspecs, which git accepts several of at once, so asking about a
+// group costs the same number of git calls as asking about one file.
+function assetPaths(g) {
+  if (typeof g === 'string') return [g];
+  return (g && g.assets) ? g.assets : [g.asset];
+}
+// Stable key for the memo caches, and for messages.
+const assetKey = g => assetPaths(g).join(' ');
 
 function markerValueIn(text, g) {
   const m = g.markerValue.exec(text);
@@ -123,11 +167,13 @@ function blobAt(sha, file) {
 const _memo = new Map();
 const memo = (key, fn) => { if (!_memo.has(key)) _memo.set(key, fn()); return _memo.get(key); };
 
-function assetIsDirty(asset) {
-  return memo(`dirty:${asset}`, () => {
-    const wt = git(['diff', '--quiet', 'HEAD', '--', asset]);
-    if (wt.error) throw new Error(`could not run git diff for ${asset}: ${wt.error.code || wt.error.message}`);
-    if (wt.status !== 0 && wt.status !== 1) throw new Error(`git diff failed for ${asset}: ${(wt.stderr || '').trim()}`);
+function assetIsDirty(g) {
+  const paths = assetPaths(g);
+  const key = assetKey(g);
+  return memo(`dirty:${key}`, () => {
+    const wt = git(['diff', '--quiet', 'HEAD', '--', ...paths]);
+    if (wt.error) throw new Error(`could not run git diff for ${key}: ${wt.error.code || wt.error.message}`);
+    if (wt.status !== 0 && wt.status !== 1) throw new Error(`git diff failed for ${key}: ${(wt.stderr || '').trim()}`);
     return wt.status === 1;
   });
 }
@@ -138,15 +184,17 @@ function markerState(g) {
   const headOk = memo('head', () => { const r = git(['rev-parse', 'HEAD']); return !(r.error || r.status !== 0); });
   if (!headOk) return { ok: false, current, reason: 'no commits to compare against' };
 
-  if (assetIsDirty(g.asset)) {
+  if (assetIsDirty(g)) {
     const atHead = blobAt('HEAD', g.markerFile);
     if (atHead === null) return { ok: true, current, reason: 'marker file is new in this working tree' };
     const bumped = markerValueIn(atHead, g) !== current;
     return { ok: bumped, current, baseline: 'HEAD', reason: bumped ? 'bumped, not committed yet' : null };
   }
 
-  const lastChange = memo(`last:${g.asset}`,
-    () => gitOrThrow(['log', '-1', '--format=%H', '--', g.asset], `finding the last change to ${g.asset}`).trim());
+  // For a group, "the last change" is the newest commit touching ANY of its files -- git -1 over
+  // several pathspecs already answers exactly that.
+  const lastChange = memo(`last:${assetKey(g)}`,
+    () => gitOrThrow(['log', '-1', '--format=%H', '--', ...assetPaths(g)], `finding the last change to ${assetKey(g)}`).trim());
   if (!lastChange) return { ok: true, current, reason: `${g.asset} has no commit history` };
 
   const before = blobAt(`${lastChange}^`, g.markerFile);
@@ -171,13 +219,18 @@ function assetChangedSince(sha, file) {
 // An asset path that is wrong — a typo, or a file that moved and was not updated here — makes
 // `git diff` answer "no differences" for a path that does not exist, so that pair would read as
 // permanently clean. Checked explicitly so a broken entry is loud instead of invisible.
-function assertAssetIsReal(asset) {
-  if (!fs.existsSync(path.join(ROOT, asset))) throw new Error(`${asset} does not exist — the path in cache-markers.js is wrong or the file moved`);
-  // One `ls-files` for every guarded asset at once, not one call per pair.
+function assertAssetIsReal(g) {
+  const paths = assetPaths(g);
+  // One `ls-files` for every guarded path at once, not one call per pair. A folder pathspec
+  // expands to the files inside it, so membership is "this exact file, or something under it".
   const tracked = memo('tracked', () => new Set(
-    gitOrThrow(['ls-files', '--', ...GUARDED.map(g => g.asset)], 'listing tracked files')
+    gitOrThrow(['ls-files', '--', ...GUARDED.flatMap(assetPaths)], 'listing tracked files')
       .split('\n').map(s => s.trim()).filter(Boolean)));
-  if (!tracked.has(asset)) throw new Error(`${asset} is not tracked by git — git cannot answer whether it changed`);
+  for (const p of paths) {
+    if (!fs.existsSync(path.join(ROOT, p))) throw new Error(`${p} does not exist — the path in cache-markers.js is wrong or the file moved`);
+    const isTracked = tracked.has(p) || [...tracked].some(t => t.startsWith(p + '/'));
+    if (!isTracked) throw new Error(`${p} is not tracked by git — git cannot answer whether it changed`);
+  }
 }
 
 function isGitCheckout() {
@@ -196,6 +249,7 @@ function isShallowCheckout() {
 }
 
 module.exports = {
+  assetPaths,
   ROOT, GUARDED, git, gitOrThrow,
   currentMarkerValue, markerState,
   assetChangedSince, assertAssetIsReal, isGitCheckout, isShallowCheckout,

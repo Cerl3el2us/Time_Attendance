@@ -59,12 +59,39 @@ test('the guarded list is populated and covers every asset AGENTS.md section 5 n
   assert.ok(GUARDED.length >= 4, `only ${GUARDED.length} guarded pair(s) -- someone emptied the list`);
 });
 
+// 2026-10-09: these two were the ones left outside the guard, found by review on 2026-10-08. They
+// are not in `?v=` form -- the service worker version names a whole cache, and the FAQ version is
+// appended to 45 image files -- so the original list, which assumed one marker to one file, could
+// not express them. cache-markers.js now takes a list of paths per marker, and these are in it.
+// Without this, a changed app shell or a replaced FAQ screenshot ships while every browser that
+// already installed the app keeps serving the old one, and nothing anywhere goes red.
+test('the service worker shell and the FAQ images are guarded too', () => {
+  const names = new Set(GUARDED.map(g => g.markerName));
+  assert.ok(names.has('SHELL_CACHE'),
+    'SHELL_CACHE is not guarded -- the installed app shell can go stale with nothing to catch it');
+  assert.ok(names.has('FAQ_IMG_V'),
+    'FAQ_IMG_V is not guarded -- a replaced FAQ screenshot stays cached in every browser');
+  assert.ok(GUARDED.length >= 6, `only ${GUARDED.length} guarded pair(s) -- someone removed one`);
+});
+
+// A marker that guards several files must actually watch all of them. Checking only the first
+// would leave the rest silently unguarded while the pair reads as covered.
+test('every guarded pair lists at least one path, and multi-file pairs list them all', () => {
+  for (const g of GUARDED) {
+    const paths = g.assets || [g.asset];
+    assert.ok(Array.isArray(paths) && paths.length >= 1, `${g.markerName} guards no path at all`);
+  }
+  const shell = GUARDED.find(g => g.markerName === 'SHELL_CACHE');
+  assert.ok(shell && (shell.assets || []).length >= 2,
+    'SHELL_CACHE must watch every file the service worker precaches, not just one');
+});
+
 if (inRepo && !isShallowCheckout()) {
   for (const g of GUARDED) {
     test(`${g.asset} is unchanged since ${g.markerName} was last bumped`, () => {
       // A wrong asset path makes `git diff` report "no differences" forever, so check it is real
       // and tracked before trusting that answer.
-      assertAssetIsReal(g.asset);
+      assertAssetIsReal(g);
 
       const s = markerState(g);        // throws if the marker was renamed away
       assert.ok(

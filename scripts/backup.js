@@ -26,6 +26,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { bundleBaseName, pickFreeName } = require('./lib/backup-name');
 
 const ROOT = path.join(__dirname, '..');
 
@@ -67,8 +68,10 @@ function main() {
   if (head.status !== 0) fail('Not a git checkout, nothing to bundle: ' + (head.stderr || '').trim());
   const headSha = head.stdout.trim();
 
-  const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '').replace(/^(\d{8})/, '$1-');
-  const name = `time-attendance-${stamp}-${headSha.slice(0, 7)}.bundle`;
+  // 2026-10-09: the name used to stop at the minute, so two runs in the same minute at the same
+  // commit produced the same path and copyFileSync() overwrote the first backup without a word.
+  // pickFreeName() refuses any name already present in ANY destination. See scripts/lib/backup-name.js.
+  const name = pickFreeName(bundleBaseName(new Date(), headSha), dests);
 
   // Build once in a temp folder, verify THAT, then copy it to each destination and compare sizes --
   // so a destination that fills up halfway is caught instead of leaving a truncated file behind.
