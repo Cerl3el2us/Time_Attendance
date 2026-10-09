@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 94;
+const APP_BUILD = 95;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -20728,27 +20728,48 @@ function closeAttDetail() {
 }
 
 // ===== CHECK-IN STATUS (shared by dashboard live widget + modal) =====
+// 2026-10-09 (owner): this used to return two lists, split on rec.checkIn alone, so somebody on
+// approved leave appeared under "ยังไม่เข้างาน" in the same red "⏳ ยังไม่เข้า" row an absent
+// person gets. Colleagues looking at the screen could not tell an approved leave from a no-show,
+// which is the question the screen is opened to answer. Third list now, carrying the leave TYPE.
+//
+// getTodayPersonalLeaves() is reused deliberately rather than filtering DATA_LEAVES here: it
+// already means "approved annual/sick/business covering today" for exactly this population
+// (isEmployeeRecord, active, not MD), so this list and the dashboard's "On Leave Today" count
+// cannot drift apart. tests/checkin-status-leave.test.js pins the bucketing.
 function getCheckinStatusLists() {
   const todayStr = businessDateStr();
   const activeUsers = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active && u.role !== 'md').sort((a, b) => a.name.localeCompare(b.name, 'th'));
+  const stdStartMin = (APP_SETTINGS.workSchedule?.standardStartHour ?? 8) * 60 + (APP_SETTINGS.workSchedule?.standardStartMinute ?? 30);
+  const leaveByUser = new Map();
+  getTodayPersonalLeaves().forEach(l => { if (!leaveByUser.has(l.userId)) leaveByUser.set(l.userId, l); });
   const checkedIn  = [];
+  const onLeave    = [];
   const notChecked = [];
   activeUsers.forEach(u => {
     const rec = attendanceLog[attKey(u.id, todayStr)];
     if (rec && rec.checkIn) {
       // 2026-09-24 (owner): an approved Abroad day is never shown as late.
       checkedIn.push({ user: u, time: rec.checkIn, checkOut: rec.checkOut || null, checkInSource: rec.checkInSource || null, checkOutSource: rec.checkOutSource || null, isLate: rec.status === 'late' && !isApprovedAbroadDate(todayStr, u.id) });
-    } else {
-      notChecked.push(u);
+      return;
     }
+    // A half-day leave only excuses its own half, and anyone who scanned in is already handled
+    // above -- so whoever is still here with leave today has genuinely not arrived. The coverage
+    // rides along so the row can say "morning half-day" instead of implying a whole day off.
+    const leave = leaveByUser.get(u.id);
+    if (leave) {
+      onLeave.push({ user: u, leave, coverage: leaveDayCoverage(leave, todayStr, stdStartMin) });
+      return;
+    }
+    notChecked.push(u);
   });
   checkedIn.sort((a, b) => a.time.localeCompare(b.time));
-  return { checkedIn, notChecked };
+  return { checkedIn, onLeave, notChecked };
 }
 
 function showCheckinStatusModal() {
   const todayLabel = fmtDateLong(new Date());
-  const { checkedIn, notChecked } = getCheckinStatusLists();
+  const { checkedIn, onLeave, notChecked } = getCheckinStatusLists();
 
   const avatar = u => u.facePhoto
     ? `<img src="${escapeHtml(u.facePhoto)}" style="width:36px;height:36px;border-radius:50%;object-fit:cover;flex-shrink:0">`
@@ -20768,6 +20789,33 @@ function showCheckinStatusModal() {
       </div>
     </div>`).join('');
 
+  // The leave TYPE is what the owner asked for -- "on leave" alone leaves the same question open.
+  // Labels and icons come from getLEAVE_TYPE_CFG() so this screen cannot invent its own wording,
+  // and the half-day suffix reuses the strings the attendance table already ships (ja.js has
+  // "morning half-day"/"afternoon half-day" translated). The leave REASON stays out: it belongs
+  // to openTodayLeaveModal(), and this screen was scoped to the type.
+  const leaveCoverageSuffix = {
+    am: L('morning half-day', 'ลาครึ่งวันเช้า'),
+    pm: L('afternoon half-day', 'ลาครึ่งวันบ่าย'),
+    partial: L('partial day', 'ลาบางส่วนของวัน'),
+  };
+  const leaveRows = onLeave.map(item => {
+    const cfg = getLEAVE_TYPE_CFG()[item.leave.type] || { icon: '📋', label: item.leave.type };
+    const suffix = leaveCoverageSuffix[item.coverage] || '';
+    return `
+    <div style="display:flex;align-items:center;gap:12px;padding:11px 20px;border-bottom:1px solid #f1f5f9">
+      ${avatar(item.user)}
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:600;color:#1e293b;font-size:13.5px">${escapeHtml(item.user.name)}</div>
+        <div style="font-size:11px;color:#64748b">${escapeHtml(item.user.position || '')}</div>
+      </div>
+      <div style="text-align:right">
+        <div style="font-weight:700;font-size:13px;color:#7c3aed">${cfg.icon} ${cfg.label}</div>
+        ${suffix ? `<div style="font-size:11px;color:#94a3b8">${suffix}</div>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+
   const outRows = notChecked.map(u => `
     <div style="display:flex;align-items:center;gap:12px;padding:11px 20px;border-bottom:1px solid #f1f5f9">
       ${avatar(u)}
@@ -20786,6 +20834,11 @@ function showCheckinStatusModal() {
       <div style="font-size:12px;font-weight:700;color:#059669;letter-spacing:.5px">✅ ${currentLang === 'ja' ? `出勤済み（${checkedIn.length}名）` : L(`Checked In (${checkedIn.length})`, `เข้างานแล้ว (${checkedIn.length} คน)`)}</div>
     </div>
     ${inRows || `<div style="padding:20px;text-align:center;color:#94a3b8;font-size:13px">${L('No one has checked in yet', 'ยังไม่มีใครเข้างาน')}</div>`}
+    ${onLeave.length > 0 ? `
+    <div style="padding:12px 20px 8px;background:#faf5ff;border-bottom:2px solid #e9d5ff;border-top:1px solid #e2e8f0">
+      <div style="font-size:12px;font-weight:700;color:#7c3aed;letter-spacing:.5px">🌴 ${currentLang === 'ja' ? `休暇（${onLeave.length}名）` : L(`On Leave (${onLeave.length})`, `ลางาน (${onLeave.length} คน)`)}</div>
+    </div>
+    ${leaveRows}` : ''}
     ${notChecked.length > 0 ? `
     <div style="padding:12px 20px 8px;background:#fff7ed;border-bottom:2px solid #fed7aa;border-top:1px solid #e2e8f0">
       <div style="font-size:12px;font-weight:700;color:#ea580c;letter-spacing:.5px">⏳ ${currentLang === 'ja' ? `未出勤（${notChecked.length}名）` : L(`Not Checked In (${notChecked.length})`, `ยังไม่เข้างาน (${notChecked.length} คน)`)}</div>
