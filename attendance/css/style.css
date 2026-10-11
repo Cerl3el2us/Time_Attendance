@@ -4117,15 +4117,30 @@ tr.finalize-row-confirmed:hover td {
    measured 112x176 on an 834px iPad in portrait, against roughly 157px wide before this change:
    narrower than what it replaced, which is the one thing this work was not allowed to be.
    Two columns put that back to ~246px at 834 and ~341px at 1024. */
-@media (max-width: 1024px) {
-  #dash-period-stats-wrap .card-body { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
+/* 2026-10-12 (review): the two blocks below used to be the other way round, and that made the
+   tablet rule dead code from the day it was written. Both of these carry the same specificity, so
+   between 769 and 1024 -- where BOTH conditions are true -- the later one wins, and the later one
+   asked for four. Measured on the live site at 834px: 112x176 tiles, the exact number the comment
+   above calls the one thing this work was not allowed to be, sitting there unnoticed because
+   every rule reads correctly on its own. Widest condition first, narrowest last, so each band is
+   decided by the rule written for it. tests/dashboard-grid.test.js resolves this cascade the way
+   a browser does and fails on any declaration that can never win. */
 @media (max-width: 1279px) {
   #dash-period-stats-wrap .card-body { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+@media (max-width: 1024px) {
+  #dash-period-stats-wrap .card-body { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 767px) {
   #dash-period-stats-wrap .card-body { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 }
+/* 2026-10-12 (owner): the three fixed tiles (Work Days / Late / Leave) carry no sub-label and came
+   out 24px shorter than the eligibility tiles beside them. With three columns those three land on
+   the top row together, so the row above sat visibly higher than the two below it -- the "ขาดๆ
+   เกินๆ" the 2026-10-08 work was chasing, and it was never about the column count. A floor, not a
+   fixed height: a tile whose content needs more room still grows, and at 1920/2560 every tile is
+   already 160 so nothing there moves. */
+#dash-period-stats-wrap .card-body .stat-card { min-height: 160px; }
 #dash-period-stats-wrap .card-body > .grid-3,
 #dash-period-stats-wrap .card-body > #dash-role-stats-row,
 #dash-period-stats-wrap .card-body > #dash-role-stats-row > .grid {
