@@ -83,7 +83,7 @@ function world(users, leaves, log) {
   ['LUNCH_START_MIN', 'LUNCH_END_MIN', 'STD_END_MIN', 'HALFDAY_TOL_MIN', 'PERSONAL_LEAVE_TYPES']
     .forEach(n => vm.runInContext(extractConst(APP_SRC, n), ctx));
   ['leaveCoversDate', 'leaveDayCoverage', 'getTodayPersonalLeaves', 'offTheFloorAllDayIdsToday',
-   'getCheckinStatusLists'].forEach(n => vm.runInContext(extractFunction(APP_SRC, n), ctx));
+   'isActiveEmployee', 'isFormerEmployee', 'getCheckinStatusLists'].forEach(n => vm.runInContext(extractFunction(APP_SRC, n), ctx));
   return ctx;
 }
 
@@ -257,6 +257,45 @@ test('the new section heading exists in all three languages', () => {
   assert.ok(/ลางาน/.test(body), 'no Thai heading for the on-leave section');
   assert.ok(/On Leave/.test(body), 'no English heading for the on-leave section');
   assert.ok(/休暇/.test(body), 'no Japanese heading for the on-leave section');
+});
+
+// 2026-10-11 (owner): the two screens ask "is this person still staff?" differently.
+// getTodayPersonalLeaves() asks `u.active !== false`; getCheckinStatusLists() asks `u.active`.
+// They agree on every record carrying an explicit true/false, and differ on one carrying no
+// `active` key at all: the "วันลาวันนี้" card counts that person, the list drops them from all
+// three buckets, and the two numbers disagree with nothing on screen to explain it.
+// The lenient reading is the right one. `active` is the payroll roster flag -- see the comment on
+// canOpenDoor() in server.js, which says forcing active:true to keep someone's door badge would
+// silently put a resigned person back into payroll -- so a record that never said anyone resigned
+// has not resigned. Both callers must read it the same way.
+test('a record with no `active` field is counted by the card and then lost by the list', () => {
+  const noFlag = { id: 3, name: 'Carol', position: 'Staff', role: 'user' }; // no `active` key
+  const leave = { id: 21, userId: 3, type: 'annual', dateFrom: TODAY, dateTo: TODAY,
+                  status: 'approved', days: 1 };
+  const w = world([ALICE, noFlag], [leave]);
+  const counted = new Set(w.getTodayPersonalLeaves().map(l => l.userId));
+  const r = w.getCheckinStatusLists();
+  const shown = new Set([...ids(r.checkedIn), ...ids(r.onLeave), ...ids(r.notChecked)]);
+  assert.ok(counted.has(3), 'the dashboard card should count a record that never said they left');
+  for (const uid of counted) {
+    assert.ok(shown.has(uid),
+      `user ${uid} is counted by the "วันลาวันนี้" card but appears in none of the three Check-in Status buckets`);
+  }
+});
+
+// The archive page ("อดีตพนักงาน") listed anyone the truthy test rejected, so a record with no
+// `active` key would have been shown as a former employee -- the same ambiguity read the other
+// way round, and this one puts a name on a page that says the person has left. "Still here" and
+// "has left" are not each other's complement when the field can be absent: absent means nobody
+// ever recorded a departure, which is not a departure.
+test('a record with no `active` field is neither counted as gone nor dropped from the roster', () => {
+  const noFlag = { id: 3, name: 'Carol', position: 'Staff', role: 'user' }; // no `active` key
+  const resigned = { id: 4, name: 'Dave', position: 'Staff', role: 'user', active: false };
+  const w = world([ALICE, noFlag, resigned], []);
+  assert.strictEqual(w.isActiveEmployee(noFlag), true, 'nobody ever said Carol left');
+  assert.strictEqual(w.isFormerEmployee(noFlag), false, 'so she must not appear on the archive page');
+  assert.strictEqual(w.isActiveEmployee(resigned), false, 'Dave was taken off the roster');
+  assert.strictEqual(w.isFormerEmployee(resigned), true, 'and belongs on the archive page');
 });
 
 console.log(`  ${passed} passed`);

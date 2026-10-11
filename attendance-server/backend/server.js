@@ -7743,14 +7743,19 @@ function carryForwardRunRefusal(todayStr, fromYear, firstSourceYear, runs) {
 function carryForwardFirstSourceYear() {
   return APP_FIRST_PERIOD_START.getFullYear();
 }
-// The carry-forward entries a run writes for fromYear -> fromYear + 1. Same user filter as the old
-// client function (isEmployeeRecord(u) && u.active). `??` not `||`: a configured 0 means "no
-// carry-forward" (dual-sync with refreshSnapshottedCarryForward).
+// The carry-forward entries a run writes for fromYear -> fromYear + 1. Same user filter as the
+// client's isActiveEmployee(): `!isSystemAccount && active !== false`. `??` not `||`: a configured
+// 0 means "no carry-forward" (dual-sync with refreshSnapshottedCarryForward).
+// 2026-10-11 (owner): this used to read `u.active` as a truthy test, which skipped a record that
+// carries no `active` key at all -- and skipping it here does not hide a row, it loses leave the
+// employee is owed. The predicate is written out rather than calling employeeActiveRecords(): the
+// dual-sync tests lift this function body into a sandbox on its own, so a helper call would only
+// be undefined in there.
 function computeYearEndCarryForward(leaves, users, fromYear, cf, carryForwardMax) {
   const rawMax = Number(carryForwardMax ?? 5);
   const maxCF = Math.max(0, Math.min(60, Number.isFinite(rawMax) ? rawMax : 5));
   const out = {};
-  (users || []).filter(u => u && !u.isSystemAccount && u.active).forEach(u => {
+  (users || []).filter(u => u && !u.isSystemAccount && u.active !== false).forEach(u => {
     const leftoverDays = Math.max(0, annualLeaveRemainingMinutes(leaves, u, fromYear, cf) / 480);
     out[`${fromYear + 1}_${u.id}`] = Math.min(leftoverDays, maxCF);
     out[`comp_${fromYear + 1}_${u.id}`] = 0;

@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 97;
+const APP_BUILD = 98;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -125,6 +125,21 @@ document.documentElement.lang = currentLang === 'en' ? 'en' : currentLang === 'j
 // walks role by role -- it is not a wildcard). Full detail: AGENTS.md section 7a.
 // tests/superadmin-reach.test.js fails on the first two; the third needs a human.
 function isEmployeeRecord(u) { return !!(u && !u.isSystemAccount); }
+// 2026-10-11 (owner): one answer to "is this person still on the roster?", because the screens
+// were giving two. Some callers asked `u.active` and some asked `u.active !== false`; the two
+// agree on every record carrying an explicit true/false and differ on one carrying no `active`
+// key at all, which the "วันลาวันนี้" card counted and the Check-in Status list dropped from all
+// three buckets. `!== false` is the right reading: `active` is the payroll roster flag (see the
+// comment on canOpenDoor() in server.js -- forcing active:true to keep someone's door badge would
+// silently put a resigned person back into payroll), so a record that never said anyone resigned
+// has not resigned. The server's own employeeActiveRecords() has always read it this way.
+// `isObserver` is deliberately NOT part of this: a resigned person is taken off the roster by
+// `active:false`, and Observer only decides whether they keep a badge and a read-only login.
+function isActiveEmployee(u) { return isEmployeeRecord(u) && u.active !== false; }
+// NOT `!isActiveEmployee(u)`. "Still here" and "has left" stop being each other's complement the
+// moment the field can be absent: absent means nobody ever recorded a departure, and the archive
+// page puts a name under a heading that says the person has left.
+function isFormerEmployee(u) { return isEmployeeRecord(u) && u.active === false; }
 // Always the REAL account: the write gate, the banner and the preview UI hang off this, and an
 // impersonated employee must never make them disappear.
 function isSuperAdmin() { const u = loggedInUser(); return !!(u && u.role === 'superadmin' && u.isSystemAccount); }
@@ -4941,7 +4956,7 @@ function exportBankCSV() {
   // everyone is approved (see renderFinalize()'s allApproved banner), but this function is a
   // global one stale render away from writing a bank-transfer row for someone only confirmed,
   // not approved. pit/bonus/manualAllowances read from calc.fin (frozen once approved).
-  DATA_USERS.filter(u => isEmployeeRecord(u) && u.active).forEach(u => {
+  DATA_USERS.filter(u => isActiveEmployee(u)).forEach(u => {
     const mdApproved = !!(finalizeData[getMdApprovalKey(start, u.id)]?.approved);
     if (!mdApproved) return;
     const calc = calcFinalizeEmployee(u, start, end, finalizeSelectedPeriodIndex);
@@ -4964,7 +4979,7 @@ function exportSSOCSV() {
   const maxSal = APP_SETTINGS.sso.maxSalary || 17500;
   const rows = [['ลำดับ','เลขประกันสังคม','ชื่อ-นามสกุล','ฐานเงินเดือน (บาท)','ประกันฯ ฝ่ายลูกจ้าง (บาท)','ประกันฯ ฝ่ายนายจ้าง (บาท)','รวม (บาท)']];
   let seq = 1;
-  DATA_USERS.filter(u => isEmployeeRecord(u) && u.active && u.role !== 'md').forEach(u => {
+  DATA_USERS.filter(u => isActiveEmployee(u) && u.role !== 'md').forEach(u => {
     const calc = calcFinalizeEmployee(u, start, end, finalizeSelectedPeriodIndex);
     const emp = calc.ssf;         // ใช้ค่าที่หักจริงจาก computePayroll ไม่คำนวณซ้ำ
     const er = calc.ssf;         // employer contribution = employee share (5% ทั้งคู่) — logic เดิม er=emp
@@ -4986,7 +5001,7 @@ function exportPayrollSummaryCSV() {
     'สถานะ'
   ];
   const rows = [header];
-  DATA_USERS.filter(u => isEmployeeRecord(u) && u.active).forEach(u => {
+  DATA_USERS.filter(u => isActiveEmployee(u)).forEach(u => {
     const fKey = getFinalizeKey(start, u.id);
     const saved = finalizeData[fKey] || {};
     // 2026-08-01: `c` is now the FULL calc object (was a 5-field pick before) -- transport/
@@ -5035,7 +5050,7 @@ function printFinalizePayslip(userId) {
 function renderArchivePage() {
   const tbody = document.getElementById('archive-tbody');
   if (!tbody) return;
-  const former = DATA_USERS.filter(u => !u.active);
+  const former = DATA_USERS.filter(u => isFormerEmployee(u));
   if (former.length === 0) {
     tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:32px;color:#94a3b8">${L('No former employees found', 'ไม่พบอดีตพนักงาน')}</td></tr>`;
     return;
@@ -10888,7 +10903,7 @@ function renderDashboard() {
     const [yy, mm, dd] = bizStr.split('-').map(Number);
     el5.textContent = fmtDate(new Date(yy, mm - 1, dd));
   }
-  const activeUsers = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active && u.role !== 'md');
+  const activeUsers = DATA_USERS.filter(u => isActiveEmployee(u) && u.role !== 'md');
   const todayLeaves = getTodayPersonalLeaves();
   // 2026-08-06: only a FULL-day leave should pull someone out of "expected today" -- a half-day
   // AM/PM (or partial) annual/sick/business leave still leaves them expected for the other half
@@ -13122,7 +13137,7 @@ function leaveRecordMinutes(l) {
 
 function leaveSummaryEmployees() {
   return DATA_USERS
-    .filter(u => isEmployeeRecord(u) && u.active && u.role !== 'md')
+    .filter(u => isActiveEmployee(u) && u.role !== 'md')
     .sort((a, b) => (parseInt(a.employeeNo, 10) || 0) - (parseInt(b.employeeNo, 10) || 0));
 }
 
@@ -13335,7 +13350,7 @@ function renderReportsMonthly() {
   if (thSal) thSal.style.display = 'none';
   if (thBtn) thBtn.style.display = showPayslipBtn ? '' : 'none';
   const { start, end } = getPeriodBounds(selectedPeriodIndex);
-  DATA_USERS.filter(u => isEmployeeRecord(u) && u.active && u.role !== 'md').forEach(u => {
+  DATA_USERS.filter(u => isActiveEmployee(u) && u.role !== 'md').forEach(u => {
     const s = computeReportPeriodStats(u, start, end, selectedPeriodIndex);
 
     const lateCell       = s.lateCount > 0
@@ -13413,7 +13428,7 @@ function renderReportsYearly() {
   if (thBtn) thBtn.style.display = showPayslipBtn ? '' : 'none';
 
   const year = selectedReportYear || new Date().getFullYear();
-  DATA_USERS.filter(u => isEmployeeRecord(u) && u.active && u.role !== 'md').forEach(u => {
+  DATA_USERS.filter(u => isActiveEmployee(u) && u.role !== 'md').forEach(u => {
     const { totals: s } = computeReportYearlyStats(u, year);
 
     const lateCell = s.lateCount > 0
@@ -20770,7 +20785,7 @@ function closeAttDetail() {
 // predicate changes who appears on a screen and that is the owner's call, not a tidy-up.
 function getCheckinStatusLists() {
   const todayStr = businessDateStr();
-  const activeUsers = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active && u.role !== 'md').sort((a, b) => a.name.localeCompare(b.name, 'th'));
+  const activeUsers = DATA_USERS.filter(u => isActiveEmployee(u) && u.role !== 'md').sort((a, b) => a.name.localeCompare(b.name, 'th'));
   const stdStartMin = (APP_SETTINGS.workSchedule?.standardStartHour ?? 8) * 60 + (APP_SETTINGS.workSchedule?.standardStartMinute ?? 30);
   const todayLeaves = getTodayPersonalLeaves();
   const fullDayIds = offTheFloorAllDayIdsToday(todayLeaves, todayStr, stdStartMin);
@@ -22951,7 +22966,7 @@ async function renderPayslipApprovalCard() {
   if (isMdView()) {
     // Approval is per-employee now, not per-period — each row tracks Accounting's confirm
     // status (finalize key) and MD's own approval (md key) independently.
-    const employees = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active);
+    const employees = DATA_USERS.filter(u => isActiveEmployee(u));
     const rows = employees.map(u => ({
       u,
       confirmed: !!(finalizeData[getFinalizeKey(start, u.id)]?.confirmed),
@@ -23013,7 +23028,7 @@ async function renderPayslipApprovalCard() {
   } else {
     // Accounting: same per-employee overview MD sees, but read-only (no approve action) —
     // reuses the same label-badge + soft-pill visual language for consistency.
-    const employees = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active);
+    const employees = DATA_USERS.filter(u => isActiveEmployee(u));
     const rows = employees.map(u => ({ u, approved: !!(finalizeData[getMdApprovalKey(start, u.id)]?.approved) }));
     const approvedCount = rows.filter(r => r.approved).length;
     const totalCount = rows.length;
@@ -24111,7 +24126,7 @@ async function renderFinalize() {
 
   // MD approval banner — approval is per-employee now, so this is a summary count, not a
   // single period-level flag. Per-employee status shows in the table's MD Approval column below.
-  const employeesForCount = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active);
+  const employeesForCount = DATA_USERS.filter(u => isActiveEmployee(u));
   const approvedCount = employeesForCount.filter(u => !!(finalizeData[getMdApprovalKey(start, u.id)]?.approved)).length;
   const totalForCount = employeesForCount.length;
   const allApproved = totalForCount > 0 && approvedCount === totalForCount;
@@ -24152,7 +24167,7 @@ async function renderFinalize() {
 
   // MD still draws a salary and needs PIT entered like everyone else — only attendance-related
   // things (checkin, leave, PVD) are skipped for MD, not payroll itself.
-  const employees = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active);
+  const employees = DATA_USERS.filter(u => isActiveEmployee(u));
   const tbody = document.getElementById('finalize-tbody');
   if (!tbody) return;
   tbody.innerHTML = '';

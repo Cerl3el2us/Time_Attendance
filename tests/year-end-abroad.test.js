@@ -170,6 +170,18 @@ test('missing carryForwardMax -> default 5; absurd value clamped to 60', () => {
   assert.strictEqual(S.computeYearEndCarryForward(w.leaves, w.users, 2026, w.cf, 'x')['2027_1'], 5);
   assert.ok(S.computeYearEndCarryForward(w.leaves, w.users, 2026, w.cf, 999)['2027_1'] <= 60);
 });
+// 2026-10-11 (owner): this function filtered on `u.active`, with a comment naming the old client
+// function it mirrored. The client now asks `u.active !== false` -- a record that never said
+// anyone resigned has not resigned -- and the two must not drift, because what this computes is
+// leave the employee is owed. Under the truthy test a record with no `active` key was skipped by
+// the run and simply lost its carry-forward, with nothing to show it had happened.
+test('a user with no `active` key still carries leave forward', () => {
+  const noFlag = { id: 6, startDate: '2020-01-01' }; // no `active` key at all
+  const w = worldCF({ users: [...USERS, noFlag] });
+  const out = makeServer(w).computeYearEndCarryForward(w.leaves, w.users, 2026, w.cf, 20);
+  assert.ok(Object.prototype.hasOwnProperty.call(out, '2027_6'),
+    'the carry-forward run skipped a record that never said the person left');
+});
 
 console.log('T2 approved Abroad days are never late (leave-balance late deduction, both sides)');
 function lateWorld(leaves) {

@@ -22,6 +22,7 @@ const fs = require('fs');
 const path = require('path');
 const m = require('./lib/cache-markers');
 const { describeDataFiles } = require('./lib/data-files');
+const { describeRosterHealth } = require('./lib/roster-health');
 
 const { ROOT, git } = m;
 const out = (s = '') => console.log(s);
@@ -185,6 +186,20 @@ if (!fs.existsSync(dataDir)) {
   // this one. describeDataFiles() gives up at most one line per file. See scripts/lib/data-files.js.
   out('Data files (attendance-server/backend/data):');
   describeDataFiles(dataDir).forEach(out);
+  // 2026-10-11: the roster flag, checked where the data actually is. `npm run check` cannot see
+  // this -- users.json is gitignored and a worktree has no data directory -- so a test there could
+  // never go red. See scripts/lib/roster-health.js.
+  out();
+  out('Roster (users.json, the payroll `active` flag):');
+  let roster;
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(dataDir, 'users.json'), 'utf8'));
+    roster = Array.isArray(raw) ? raw : raw && raw.users;
+  } catch (e) {
+    roster = undefined;
+    out(`  NOT measured -- users.json could not be read (${e && e.message ? e.message : 'unknown error'})`);
+  }
+  if (roster !== undefined) describeRosterHealth(roster).forEach(out);
 }
 out();
 
