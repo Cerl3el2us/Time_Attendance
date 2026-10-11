@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 99;
+const APP_BUILD = 100;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -14217,6 +14217,14 @@ function renderPayslipEmployeeList() {
   // A record with no `active` key dropped out of the normal list -- so that employee could not
   // even pick themselves in their own payslip dropdown -- and then reappeared below under
   // "พนักงานเก่า / Former Employees", labelled as having left.
+  //
+  // 2026-10-11 (owner): the self-view filter below gained an isEmployeeRecord test it did not
+  // have, which it reached through isActiveEmployee(). The visible effect is that the system
+  // account no longer lists ITSELF here while previewing a staff role -- an option that opened an
+  // empty payslip, since that account has no pay. The owner confirmed this is the rule, not a
+  // regression: the system account must not appear anywhere in the running system where its
+  // existence could become known. The rule is unchanged; the code now follows it.
+  // Impersonating a PERSON is unaffected -- currentUser is that employee, so they list normally.
   const usersToList = isAdminView
     ? DATA_USERS.filter(u => isActiveEmployee(u))
     : DATA_USERS.filter(u => isActiveEmployee(u) && u.id === currentUser?.id);
