@@ -30,10 +30,20 @@ function describeRosterHealth(users) {
   // those disagree: the server pays it as an employee, the screens hide it. Excluding truthily
   // here would have left exactly that record unchecked by everything below -- and then printed
   // the clean line. Follow the reading that decides money, and report the mismatch separately.
+  // 2026-10-12 (review): String() throws on a value whose toString is not callable, and
+  // JSON.parse can produce one -- `{"id": {"toString": 1}}`. The header above promises this never
+  // throws, and status.js calls it outside any try, so a throw here takes the rest of the report
+  // with it. Reading `username` was added in the same commit as that promise, widening the
+  // surface. Only a primitive is ever worth printing anyway.
+  const str = v => {
+    if (v === null || v === undefined) return '';
+    if (typeof v === 'object') return '(not a value)';
+    try { return String(v); } catch (e) { return '(unreadable)'; }
+  };
   const isSystemAccount = u =>
-    u.isSystemAccount === true || String(u.username || '').toLowerCase() === 'superadmin';
+    u.isSystemAccount === true || str(u.username).toLowerCase() === 'superadmin';
   const employees = rows.filter(u => !isSystemAccount(u));
-  const idOf = u => (u.id === undefined || u.id === null ? '(no id)' : String(u.id));
+  const idOf = u => (u.id === undefined || u.id === null ? '(no id)' : str(u.id));
 
   const noFlag = employees.filter(u => typeof u.active !== 'boolean').map(idOf);
   // The mirror of the check above. server.js reads isObserver strictly in some gates
@@ -67,7 +77,12 @@ function describeRosterHealth(users) {
     lines.push(`  ${badObserver.length} with a non-boolean \`isObserver\`, which different gates read differently: id ${badObserver.join(', ')}`);
   }
   if (badSystemFlag.length) {
-    lines.push(`  ${badSystemFlag.length} with a non-boolean \`isSystemAccount\`: the server pays this record as an employee while the screens hide it: id ${badSystemFlag.join(', ')}`);
+    // 2026-10-12 (review): the first wording said the server pays this record while the screens
+    // hide it. That is true for a TRUTHY non-boolean (1, "true", {}) -- the server's strict
+    // `=== true` says employee, app.js's `!u.isSystemAccount` says hide. For a falsy one (0, null,
+    // "") both sides agree it is an employee, so claiming a split would send the owner hunting for
+    // one that is not there. Say which case is which.
+    lines.push(`  ${badSystemFlag.length} with a non-boolean \`isSystemAccount\` (a truthy one is paid by the server while the screens hide it; a falsy one is just wrong): id ${badSystemFlag.join(', ')}`);
   }
   if (observerOnRoster.length) {
     lines.push(`  ${observerOnRoster.length} Observer still on the payroll roster (Observer means resigned, so \`active\` must be false): id ${observerOnRoster.join(', ')}`);

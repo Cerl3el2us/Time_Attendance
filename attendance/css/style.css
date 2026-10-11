@@ -4119,7 +4119,7 @@ tr.finalize-row-confirmed:hover td {
    Two columns put that back to ~246px at 834 and ~341px at 1024. */
 /* 2026-10-12 (review): the two blocks below used to be the other way round, and that made the
    tablet rule dead code from the day it was written. Both of these carry the same specificity, so
-   between 769 and 1024 -- where BOTH conditions are true -- the later one wins, and the later one
+   between 768 and 1024 -- where BOTH conditions are true -- the later one wins, and the later one
    asked for four. Measured on the live site at 834px: 112x176 tiles, the exact number the comment
    above calls the one thing this work was not allowed to be, sitting there unnoticed because
    every rule reads correctly on its own. Widest condition first, narrowest last, so each band is
@@ -4139,8 +4139,17 @@ tr.finalize-row-confirmed:hover td {
    the top row together, so the row above sat visibly higher than the two below it -- the "ขาดๆ
    เกินๆ" the 2026-10-08 work was chasing, and it was never about the column count. A floor, not a
    fixed height: a tile whose content needs more room still grows, and at 1920/2560 every tile is
-   already 160 so nothing there moves. */
-#dash-period-stats-wrap .card-body .stat-card { min-height: 160px; }
+   already 160 so nothing there moves.
+   2026-10-12 (review): min-width, because the first version of this had no condition at all. The
+   owner judged it at 1280 and 1536 on a laptop. Below 1025 the grid is two columns and the tiles
+   are deliberately smaller (.stat-card drops to 14px padding and a 28px value under max-width:480),
+   so a 160px floor there is a blank strip under the content -- on a phone, with up to nine tiles
+   over five rows, a few hundred pixels of scroll for every employee, to fix a raggedness that two
+   columns does not produce. Measuring the result at 390px showed every tile at 160 and I read that
+   as tidy; it was the floor doing it. */
+@media (min-width: 1025px) {
+  #dash-period-stats-wrap .card-body .stat-card { min-height: 160px; }
+}
 #dash-period-stats-wrap .card-body > .grid-3,
 #dash-period-stats-wrap .card-body > #dash-role-stats-row,
 #dash-period-stats-wrap .card-body > #dash-role-stats-row > .grid {

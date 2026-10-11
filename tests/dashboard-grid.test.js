@@ -33,7 +33,7 @@ function test(name, fn) {
 // Walk the stylesheet tracking brace depth and the @media condition in force, collecting every
 // declaration of `prop` on SELECTOR in source order. Deliberately not a regex over the whole file:
 // the thing under test IS the order, so the order has to come from the walk.
-function declarationsFor(prop) {
+function declarationsFor(prop, selector = SELECTOR) {
   const out = [];
   const mediaStack = [];
   let i = 0;
@@ -61,7 +61,7 @@ function declarationsFor(prop) {
       j++;
     }
     const selectors = head.split(',').map(s => s.replace(/\s+/g, ' ').trim());
-    if (selectors.includes(SELECTOR)) {
+    if (selectors.includes(selector)) {
       const body = CSS.slice(open + 1, j - 1);
       const m = new RegExp('(?:^|;)\\s*' + prop + '\\s*:([^;}]+)').exec(body);
       if (m) out.push({ media: mediaStack.length ? mediaStack[mediaStack.length - 1] : null, value: m[1].trim() });
@@ -73,15 +73,22 @@ function declarationsFor(prop) {
 
 const DECLS = declarationsFor('grid-template-columns');
 
+// 2026-10-12 (review): a condition this model does not understand used to be treated as "applies
+// at every width", so adding an ordinary `@media print` rule on this selector turned every
+// assertion below red at once -- a guard that cries wolf gets switched off. We model the SCREEN,
+// so a print-only rule is simply not ours to judge.
+function appliesAt(d, width) {
+  if (!d.media) return true;
+  if (/\bprint\b/.test(d.media)) return false;
+  const max = /max-width:\s*(\d+)/.exec(d.media);
+  const min = /min-width:\s*(\d+)/.exec(d.media);
+  if (max && width > Number(max[1])) return false;
+  if (min && width < Number(min[1])) return false;
+  return true;
+}
+
 function columnsAt(width) {
-  const matches = DECLS.filter(d => {
-    if (!d.media) return true;
-    const max = /max-width:\s*(\d+)/.exec(d.media);
-    const min = /min-width:\s*(\d+)/.exec(d.media);
-    if (max && width > Number(max[1])) return false;
-    if (min && width < Number(min[1])) return false;
-    return true;
-  });
+  const matches = DECLS.filter(d => appliesAt(d, width));
   const winner = matches[matches.length - 1];
   if (!winner) return null;
   const n = /repeat\(\s*(\d+)/.exec(winner.value);
@@ -118,6 +125,25 @@ for (const [width, cols, why] of EXPECTED) {
   });
 }
 
+// 2026-10-12 (review): everything below models ONE selector, matched as an exact string. A rule
+// written any other way -- `#dash-lower-b #dash-period-stats-wrap .card-body` (higher specificity,
+// and style.css already uses that compound form a few lines away) or `… > .card-body` -- is
+// invisible to this file, so it could force one column at every width while the suite stayed
+// green. Rather than teach this test specificity, refuse to be silent about rules it cannot model.
+test('nothing else in the stylesheet sets this grid behind the test\'s back', () => {
+  const others = [];
+  const re = /(?:^|[{}])\s*([^{}@]*#dash-period-stats-wrap[^{}]*)\{([^}]*)\}/g;
+  let m;
+  while ((m = re.exec(CSS))) {
+    const sel = m[1].replace(/\s+/g, ' ').trim();
+    if (!/grid-template-columns/.test(m[2])) continue;
+    if (sel.split(',').map(s => s.trim()).includes(SELECTOR)) continue;
+    others.push(sel);
+  }
+  assert.deepStrictEqual(others, [],
+    `these also set grid-template-columns on this card and are not modelled here: ${others.join(' | ')}`);
+});
+
 test('no rule in this cascade is dead -- every one wins at some width it covers', () => {
   // A declaration nothing can reach is a decision someone made that the page never honours, which
   // is how the tablet rule sat broken for days while reading perfectly in the file.
@@ -125,14 +151,10 @@ test('no rule in this cascade is dead -- every one wins at some width it covers'
   for (let w = 320; w <= 2600; w += 1) widths.push(w);
   const reachable = new Set();
   for (const w of widths) {
-    const matches = DECLS.filter(d => {
-      if (!d.media) return true;
-      const max = /max-width:\s*(\d+)/.exec(d.media);
-      const min = /min-width:\s*(\d+)/.exec(d.media);
-      if (max && w > Number(max[1])) return false;
-      if (min && w < Number(min[1])) return false;
-      return true;
-    });
+    // Same resolver as columnsAt(), not a second copy of it -- the first version of this test
+    // carried its own inline filter, which is how two slightly different ideas of "applies" end
+    // up in one file.
+    const matches = DECLS.filter(d => appliesAt(d, w));
     if (matches.length) reachable.add(DECLS.indexOf(matches[matches.length - 1]));
   }
   const dead = DECLS.map((d, i) => (reachable.has(i) ? null : (d.media || '(no media)'))).filter(Boolean);
@@ -142,10 +164,37 @@ test('no rule in this cascade is dead -- every one wins at some width it covers'
 // The tiles in the first row carry no sub-label and came out 24px shorter than the rest, so with
 // three columns the top row sat visibly higher than the two below it. Owner, 2026-10-12: even them
 // up. A floor, not a fixed height -- a tile whose content needs more room must still grow.
-test('the tiles have a height floor so rows line up', () => {
-  const decls = declarationsFor('min-height');
-  const onTiles = /#dash-period-stats-wrap[^{]*\.stat-card[^{]*\{[^}]*min-height/.test(CSS);
-  assert.ok(onTiles || decls.length > 0, 'no min-height on the period-summary tiles');
+// 2026-10-12 (review): the first version of this asserted only that the words "min-height" appear
+// somewhere on the selector. `min-height: 0` passed it, and so did wrapping the rule in
+// `@media print` where it never applies on screen. Assert the floor itself, and where it applies.
+// Reuse the walker rather than a second regex: the first attempt at this used its own pattern and
+// its own backwards hunt for the enclosing @media, and both were wrong in different ways.
+const TILE = '#dash-period-stats-wrap .card-body .stat-card';
+function minHeightRules() { return declarationsFor('min-height', TILE); }
+
+test('the tiles have a real height floor, not just the word', () => {
+  const rules = minHeightRules();
+  assert.ok(rules.length > 0, 'no min-height on the period-summary tiles');
+  const px = rules.map(r => parseFloat(r.value)).filter(n => Number.isFinite(n));
+  assert.ok(px.some(n => n >= 100), `the floor is not a floor: ${rules.map(r => r.value).join(', ')}`);
+});
+
+// 2026-10-12 (review): the floor was written unconditionally. The owner judged it at 1280 and
+// 1536, where three columns put the three label-less tiles on one row and left it sitting high.
+// Below 1025 the grid is two columns and the tiles are deliberately smaller -- `.stat-card` drops
+// to 14px padding and a 28px value under max-width:480 -- so a 160px floor there is pure blank
+// strip under the content, and with up to nine tiles over five rows on a phone that is a few
+// hundred pixels of scroll nobody asked for. Keep the floor where it was judged.
+test('the height floor does not reach the widths it was never judged at', () => {
+  const rules = minHeightRules();
+  assert.ok(rules.length > 0, 'no min-height rule found at all');
+  for (const r of rules) {
+    const cond = r.media;
+    assert.ok(cond && /min-width:\s*(\d+)/.test(cond),
+      `the floor applies at every width (condition: ${cond || 'none'}) -- phones get it too`);
+    const min = Number(/min-width:\s*(\d+)/.exec(cond)[1]);
+    assert.ok(min >= 1025, `the floor starts at ${min}px, below the band it was judged at`);
+  }
 });
 
 console.log(`  ${passed} passed`);

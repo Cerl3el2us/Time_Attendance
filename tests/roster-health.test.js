@@ -146,9 +146,18 @@ test('it never throws, whatever it is handed', () => {
   // 2026-10-11 (review round 2): the list used to stop short of the two paths added with the
   // skipped-entry and duplicate-id checks -- an array inside the array, and an `id` that is not a
   // primitive. Those are exactly the shapes JSON.parse can hand over and nothing else covered.
+  // 2026-10-12 (review): the previous list looked thorough and defended almost nothing. `[[]]`,
+  // `[{id:{}}]` and `[{id:[1,2]}]` all stringify fine, so removing the object guard or swapping
+  // String(u.id) for u.id.toString() left the suite green. The shape that actually throws is a
+  // value whose toString is not callable -- which JSON.parse can produce -- and the newly added
+  // username read widened that surface.
   const bad = [null, undefined, 'nope', 42, {}, [null], [undefined], [{}],
     [[]], [[1, 2]], [{ id: {} }], [{ id: [1, 2] }], [{ id: null }, { id: null }],
-    [{ id: 1 }, { id: '1' }], [{ active: 'x' }], [{ isObserver: {} }]];
+    [{ id: 1 }, { id: '1' }], [{ active: 'x' }], [{ isObserver: {} }],
+    JSON.parse('[{"id": {"toString": 1}}]'),
+    JSON.parse('[{"username": {"toString": 1}}]'),
+    JSON.parse('[{"id": {"toString": null, "valueOf": 2}}]'),
+    JSON.parse('[{"id": {"toString": 1}}, {"id": {"toString": 1}}]')];
   for (const input of bad) {
     assert.doesNotThrow(() => describeRosterHealth(input), `threw on ${JSON.stringify(input)}`);
   }
