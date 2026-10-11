@@ -7748,9 +7748,13 @@ function carryForwardFirstSourceYear() {
 // 0 means "no carry-forward" (dual-sync with refreshSnapshottedCarryForward).
 // 2026-10-11 (owner): this used to read `u.active` as a truthy test, which skipped a record that
 // carries no `active` key at all -- and skipping it here does not hide a row, it loses leave the
-// employee is owed. The predicate is written out rather than calling employeeActiveRecords(): the
-// dual-sync tests lift this function body into a sandbox on its own, so a helper call would only
-// be undefined in there.
+// employee is owed. The predicate is written out rather than calling employeeActiveRecords()
+// because the dual-sync tests lift this function body into a sandbox with an explicit helper list,
+// and a helper call would be undefined in there -- the same reason earnedDayUsedError and
+// runYearEndCarryForward below stay self-contained. 2026-10-11 (review): that is a choice, not a
+// wall. systemAccount.js has no side effects on require, so a test could inject it in one line.
+// The cost of keeping it spelled out is a third copy of the predicate with nothing forcing the
+// three to agree; `npm run check` pins the behaviour instead, in year-end-abroad.test.js.
 function computeYearEndCarryForward(leaves, users, fromYear, cf, carryForwardMax) {
   const rawMax = Number(carryForwardMax ?? 5);
   const maxCF = Math.max(0, Math.min(60, Number.isFinite(rawMax) ? rawMax : 5));

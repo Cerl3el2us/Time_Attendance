@@ -76,14 +76,18 @@ function world(users, leaves, log) {
     APP_SETTINGS: { workSchedule: { standardStartHour: 8, standardStartMinute: 30 } },
     businessDateStr: () => TODAY,
     attKey: (uid, d) => `${uid}_${d}`,
-    isEmployeeRecord: () => true,
     isApprovedAbroadDate: () => false,
   };
   vm.createContext(ctx);
   ['LUNCH_START_MIN', 'LUNCH_END_MIN', 'STD_END_MIN', 'HALFDAY_TOL_MIN', 'PERSONAL_LEAVE_TYPES']
     .forEach(n => vm.runInContext(extractConst(APP_SRC, n), ctx));
-  ['leaveCoversDate', 'leaveDayCoverage', 'getTodayPersonalLeaves', 'offTheFloorAllDayIdsToday',
-   'isActiveEmployee', 'isFormerEmployee', 'getCheckinStatusLists'].forEach(n => vm.runInContext(extractFunction(APP_SRC, n), ctx));
+  // 2026-10-11 (review): isEmployeeRecord used to be stubbed here as `() => true`. That hid the
+  // whole rule one level down -- putting the truthy test back INSIDE isEmployeeRecord restored the
+  // original bug at every call site while these tests stayed 18/18 green, because the stub meant
+  // they never ran the real one. Extract it like every other rule in this list.
+  ['isEmployeeRecord', 'leaveCoversDate', 'leaveDayCoverage', 'getTodayPersonalLeaves',
+   'offTheFloorAllDayIdsToday', 'isActiveEmployee', 'isFormerEmployee', 'employeeStatusValue',
+   'getCheckinStatusLists'].forEach(n => vm.runInContext(extractFunction(APP_SRC, n), ctx));
   return ctx;
 }
 
@@ -296,6 +300,23 @@ test('a record with no `active` field is neither counted as gone nor dropped fro
   assert.strictEqual(w.isFormerEmployee(noFlag), false, 'so she must not appear on the archive page');
   assert.strictEqual(w.isActiveEmployee(resigned), false, 'Dave was taken off the roster');
   assert.strictEqual(w.isFormerEmployee(resigned), true, 'and belongs on the archive page');
+});
+
+// 2026-10-11 (review): the status dropdown on the employee edit form read `u.active` as a truthy
+// test, so a record with no `active` key came up preselected on "Suspended" -- and the save path
+// writes `newActive = (value === 'true')` straight back. Opening that person's record to change a
+// phone number would have taken them off the payroll roster, silently, while every roster filter
+// on every other screen still counted them as here. The dropdown has to agree with the predicates.
+test('the status dropdown never preselects "suspended" for someone the roster counts as here', () => {
+  const w = world([], []);
+  assert.strictEqual(w.employeeStatusValue({ id: 3, name: 'Carol', role: 'user' }), 'true',
+    'a record that never said anyone left must not come up as suspended');
+  assert.strictEqual(w.employeeStatusValue({ id: 4, active: false }), 'false');
+  assert.strictEqual(w.employeeStatusValue({ id: 5, active: true }), 'true');
+  assert.strictEqual(w.employeeStatusValue({ id: 6, active: false, isObserver: true }), 'observer');
+  // An Observer who was never taken off the roster is a data error roster-health.js reports; the
+  // form still has to show what the record says, not guess.
+  assert.strictEqual(w.employeeStatusValue({ id: 7, active: true, isObserver: true }), 'observer');
 });
 
 console.log(`  ${passed} passed`);

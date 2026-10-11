@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 98;
+const APP_BUILD = 99;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -140,6 +140,17 @@ function isActiveEmployee(u) { return isEmployeeRecord(u) && u.active !== false;
 // moment the field can be absent: absent means nobody ever recorded a departure, and the archive
 // page puts a name under a heading that says the person has left.
 function isFormerEmployee(u) { return isEmployeeRecord(u) && u.active === false; }
+// 2026-10-11 (review): the value the status dropdown on the employee edit form shows. It used to
+// be spelled out there as `u.isObserver ? 'observer' : (u.active ? 'true' : 'false')`, a truthy
+// test -- so a record with no `active` key opened preselected on "Suspended", and the save path
+// writes `newActive = (value === 'true')` straight back. Opening that person's record to change a
+// phone number took them off the payroll roster, silently, while every other screen still counted
+// them as here. Observer is reported as-is: an Observer who was never taken off the roster is a
+// data error that `npm run status` names, and a form must show what the record says, not guess.
+function employeeStatusValue(u) {
+  if (u && u.isObserver) return 'observer';
+  return isFormerEmployee(u) ? 'false' : 'true';
+}
 // Always the REAL account: the write gate, the banner and the preview UI hang off this, and an
 // impersonated employee must never make them disappear.
 function isSuperAdmin() { const u = loggedInUser(); return !!(u && u.role === 'superadmin' && u.isSystemAccount); }
@@ -413,7 +424,7 @@ function onPreviewUserChange(val) {
 function renderPreviewUserOptions() {
   const sel = document.getElementById('preview-user-select');
   if (!sel || !isSuperAdmin()) return;
-  const people = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active !== false)
+  const people = DATA_USERS.filter(u => isActiveEmployee(u))
     .slice().sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
   sel.innerHTML = `<option value="">${escapeHtml(L('— whole role —', '— ทั้งตำแหน่ง —'))}</option>` +
     people.map(u => `<option value="${Number(u.id)}">${escapeHtml(u.name || ('#' + u.id))} · ${escapeHtml(roleLabel(u.role))}</option>`).join('');
@@ -4585,7 +4596,7 @@ async function processYearEndCarryForward(forYear) {
 // forfeit if the expiry date were today (pending leave dated on/before the expiry counts as used)
 // -- the same figure the server's reminders use (server.js carryForwardAtRiskList).
 function cfAtRiskRows(year) {
-  return DATA_USERS.filter(u => isEmployeeRecord(u) && u.active !== false)
+  return DATA_USERS.filter(u => isActiveEmployee(u))
     .map(u => ({ user: u, cfMin: (getCarryForwardDays(year, u.id) + getCarryForwardCompDays(year, u.id)) * 480,
       atRiskMin: carryForwardForfeitMinutes(u, year, `${year + 1}-01-01`, true) }))
     .filter(r => r.atRiskMin > 0)
@@ -4642,7 +4653,7 @@ function cfExpiryPolicyImpact(oldPolicy, newPolicy, year) {
   const lv = APP_SETTINGS.leave;
   const keys = ['carryForwardExpiryEnabled', 'carryForwardExpiryMonth', 'carryForwardExpiryDay'];
   const saved = keys.map(k => lv[k]);
-  const users = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active !== false);
+  const users = DATA_USERS.filter(u => isActiveEmployee(u));
   const run = pol => {
     keys.forEach(k => { lv[k] = pol[k]; });
     return users.map(u => carryForwardForfeitMinutes(u, year, `${year + 1}-01-01`, true));
@@ -9146,7 +9157,7 @@ function getTodayPersonalLeaves() {
     const u = DATA_USERS.find(x => x.id === l.userId);
     // Same population as the dashboard check-in card — inactive/archived/orphan/MD/system
     // accounts must not inflate "On Leave Today".
-    return u && isEmployeeRecord(u) && u.active !== false && u.role !== 'md';
+    return u && isActiveEmployee(u) && u.role !== 'md';
   });
 }
 
@@ -10090,7 +10101,7 @@ function renderAttEmployeeSelector() {
   if (!container) return;
   // MD, Accounting, Manager, and the developer system account can browse any employee's attendance.
   if (!canViewOtherEmployees()) { container.innerHTML = ''; return; }
-  const employees = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active !== false && u.role !== 'md')
+  const employees = DATA_USERS.filter(u => isActiveEmployee(u) && u.role !== 'md')
     .sort((a, b) => parseInt(a.employeeNo) - parseInt(b.employeeNo));
   if (!selectedAttUserId) {
     const role = effectiveRole();
@@ -12268,7 +12279,7 @@ function renderEmployeesTable() {
       <td><span class="role-badge role-${u.role}" style="display:inline-block">${roleLabels[u.role]}</span></td>
       <td class="col-hide-mobile">${startDate}<div style="font-size:11px;color:#94a3b8">${currentLang === 'ja' ? `${workYears}年${workMonths}ヶ月` : L(`${workYears}y ${workMonths}m`, `${workYears} ปี ${workMonths} เดือน`)}</div></td>
       <td class="col-hide-mobile" style="font-weight:700;display:${canSeeSalary ? '' : 'none'}">${u.salary != null ? '฿' + u.salary.toLocaleString() : '—'}</td>
-      <td><span class="badge ${u.isObserver ? 'badge-info' : (u.active ? 'badge-success' : 'badge-danger')}">${u.isObserver ? L('👁️ Observer', '👁️ ผู้สังเกตการณ์') : (u.active ? L('● Active', '● ปกติ') : L('● Suspended', '● ระงับ'))}</span></td>
+      <td><span class="badge ${u.isObserver ? 'badge-info' : (isFormerEmployee(u) ? 'badge-danger' : 'badge-success')}">${u.isObserver ? L('👁️ Observer', '👁️ ผู้สังเกตการณ์') : (isFormerEmployee(u) ? L('● Suspended', '● ระงับ') : L('● Active', '● ปกติ'))}</span></td>
       <td>
         <div style="display:flex;gap:6px">
           <button class="btn btn-ghost btn-sm" onclick="openEmployeeProfile(${u.id})">👤 ${L('Profile', 'โปรไฟล์')}</button>
@@ -12355,7 +12366,7 @@ function openEmployeeProfile(id) {
             : `${minToStr(profileLeaveBal.annual.remMin)}${!isAnnualLeaveUnlocked(u) ? (currentLang === 'ja' ? `（${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'}から）` : L(` (unlocks ${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'})`, ` (เปิดสิทธิ์ ${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'})`)) : (nextAnnualLeaveTier(u) ? (currentLang === 'ja' ? `（次は${nextAnnualLeaveTier(u).date}から${nextAnnualLeaveTier(u).days}日）` : L(` (next ${nextAnnualLeaveTier(u).days}d from ${nextAnnualLeaveTier(u).date})`, ` (ขั้นถัดไป ${nextAnnualLeaveTier(u).days} วัน ตั้งแต่ ${nextAnnualLeaveTier(u).date})`)) : '')}`}</p></div>
           <div class="profile-field"><label>${L('Sick Leave Balance', 'ลาป่วยคงเหลือ')}</label><p style="color:#ef4444;font-weight:700">${minToStr(profileLeaveBal.sick.remMin)}</p></div>
           <div class="profile-field"><label>${L('Business Leave Balance', 'ลากิจคงเหลือ')}</label><p style="color:#8b5cf6;font-weight:700">${minToStr(profileLeaveBal.business.remMin)}</p></div>
-          <div class="profile-field"><label>${L('Status', 'สถานะ')}</label><p><span class="badge ${u.active ? 'badge-success':'badge-danger'}">${u.active ? L('● Active', '● ปกติ') : L('● Suspended', '● ระงับ')}</span></p></div>
+          <div class="profile-field"><label>${L('Status', 'สถานะ')}</label><p><span class="badge ${isFormerEmployee(u) ? 'badge-danger' : 'badge-success'}">${isFormerEmployee(u) ? L('● Suspended', '● ระงับ') : L('● Active', '● ปกติ')}</span></p></div>
         </div>
       </div>
       <div id="ptab-finance" class="tab-content">
@@ -12537,7 +12548,7 @@ function openEditEmployee(id) {
   f('emp-annual-leave').value = annualLeaveEntitlementDays(u);
   f('emp-sick-leave').value = sickLeaveEntitlementDays();
   f('emp-business-leave').value = businessLeaveEntitlementDays();
-  f('emp-active').value = u.isObserver ? 'observer' : (u.active ? 'true' : 'false');
+  f('emp-active').value = employeeStatusValue(u);
   renderEmpDoorSyncStatus(u);
   document.getElementById('emp-modal').classList.add('show');
   updateEmpAnnualLeaveDisplay();
@@ -14202,9 +14213,13 @@ function renderPayslipEmployeeList() {
   const prev = sel.value;
   sel.innerHTML = '';
   const isAdminView = currentUser && isMdAccountingView();
+  // 2026-10-11 (review): these three filters were the archive bug over again, one page across.
+  // A record with no `active` key dropped out of the normal list -- so that employee could not
+  // even pick themselves in their own payslip dropdown -- and then reappeared below under
+  // "พนักงานเก่า / Former Employees", labelled as having left.
   const usersToList = isAdminView
-    ? DATA_USERS.filter(u => u.active && isEmployeeRecord(u))
-    : DATA_USERS.filter(u => u.active && u.id === currentUser?.id);
+    ? DATA_USERS.filter(u => isActiveEmployee(u))
+    : DATA_USERS.filter(u => isActiveEmployee(u) && u.id === currentUser?.id);
   usersToList.forEach(u => {
     const opt = document.createElement('option');
     opt.value = u.id;
@@ -14212,7 +14227,7 @@ function renderPayslipEmployeeList() {
     sel.appendChild(opt);
   });
   if (isAdminView) {
-    const inactive = DATA_USERS.filter(u => isEmployeeRecord(u) && !u.active);
+    const inactive = DATA_USERS.filter(u => isFormerEmployee(u));
     if (inactive.length > 0) {
       const sep = document.createElement('option');
       sep.disabled = true;
@@ -15063,7 +15078,7 @@ let _approvalSelected = new Set();
 function checkoutReviewBoxItems() {
   const out = { pending: [], reviewed: [] };
   if (!currentUser || currentUser.isObserver || !isMdAccountingView()) return out;
-  const users = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active !== false &&
+  const users = DATA_USERS.filter(u => isActiveEmployee(u) &&
     Number(u.id) !== Number(currentUser.id) &&
     isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'earlyLate'));
   [0, 1].forEach(idx => {
@@ -15256,7 +15271,7 @@ function morningReviewLaterScans(uid, day) {
 function morningReviewBoxItems() {
   const out = { pending: [], reviewed: [] };
   if (!currentUser || currentUser.isObserver || !isMdAccountingView()) return out;
-  const users = DATA_USERS.filter(u => isEmployeeRecord(u) && u.active !== false &&
+  const users = DATA_USERS.filter(u => isActiveEmployee(u) &&
     Number(u.id) !== Number(currentUser.id) &&
     isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'earlyLate'));
   const bounds = [0, 1].map(i => getPeriodBounds(i));
@@ -19354,7 +19369,7 @@ function closeExcusedModal() {
 // the Managing Director's lateness / absence is not tracked at all (owner, 2026-09-28), so there is
 // nothing an excused day could forgive for them.
 function excusedCandidateEmployees() {
-  return DATA_USERS.filter(u => isEmployeeRecord(u) && u.active !== false && u.role !== 'md')
+  return DATA_USERS.filter(u => isActiveEmployee(u) && u.role !== 'md')
     .sort((a, b) => parseInt(a.employeeNo) - parseInt(b.employeeNo));
 }
 function renderExcusedEmployeeList() {
@@ -20776,6 +20791,12 @@ function closeAttDetail() {
 // already means "approved annual/sick/business covering today" for nearly this population, so this
 // list and the dashboard's "On Leave Today" count cannot drift apart on the leave RULE.
 // tests/checkin-status-leave.test.js pins the bucketing.
+//
+// 2026-10-11 (owner): it is "exactly" again. The two filters used to differ by one case -- here
+// and on the dashboard card it was `u.active`, while getTodayPersonalLeaves() used
+// `u.active !== false` -- so a record with no `active` key was counted by the "วันลาวันนี้" card
+// and landed in no bucket here. Both now go through isActiveEmployee(); see its comment for why
+// the lenient reading is the right one. The paragraph below is kept as the record of the bug.
 //
 // 2026-10-09 (review): "nearly", not "exactly" -- the two population filters differ by one case.
 // Here and on the dashboard card it is `u.active`; getTodayPersonalLeaves() uses `u.active !== false`.
@@ -24054,7 +24075,12 @@ async function renderPayrollHistory() {
     // was paid). Previously this skipped any active employee with no finalizeData entry yet
     // (`if (!saved) return`) — so headcount undercounted the moment even one employee hadn't
     // been touched in Finalize Payroll, showing e.g. "0/4" while Finalize itself lists 9.
-    DATA_USERS.filter(u => isEmployeeRecord(u) && (u.active || finalizeData[getFinalizeKey(start, u.id)])).forEach(u => {
+    // 2026-10-11 (review): this read `u.active` as a truthy test while renderFinalize() moved to
+    // isActiveEmployee(), so the comment above ("Same roster renderFinalize() shows") had stopped
+    // being true -- a record with no `active` key and no saved entry would drop out of headcount
+    // and out of the totals here while Finalize listed it. That is the same two-screens-disagree
+    // bug this whole change exists to end, in the pair of screens where it is money.
+    DATA_USERS.filter(u => isActiveEmployee(u) || (isEmployeeRecord(u) && finalizeData[getFinalizeKey(start, u.id)])).forEach(u => {
       const fKey = getFinalizeKey(start, u.id);
       const saved = finalizeData[fKey] || {};
       headcount++;

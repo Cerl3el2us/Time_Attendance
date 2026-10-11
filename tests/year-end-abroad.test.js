@@ -150,7 +150,7 @@ for (const max of [5, 20, 0]) {
     const C = makeClient(w), S = makeServer(w);
     const out = S.computeYearEndCarryForward(w.leaves, w.users, 2026, w.cf, max);
     assert.deepStrictEqual(Object.keys(out).sort(), ['2027_1', '2027_2', '2027_5', 'comp_2027_1', 'comp_2027_2', 'comp_2027_5']);
-    for (const u of USERS.filter(x => x.active && !x.isSystemAccount)) {
+    for (const u of USERS.filter(x => x.active !== false && !x.isSystemAccount)) {
       assert.strictEqual(out[C.getCarryForwardKey(2027, u.id)], oldClientValue(C, u, 2026, max), `user ${u.id}`);
       assert.strictEqual(out[C.getCarryForwardCompKey(2027, u.id)], 0);
     }

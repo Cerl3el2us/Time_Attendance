@@ -196,8 +196,14 @@ test('isImpersonatingPerson is true only when the screen really is that person',
   });
   test('the picker never offers the system account', () => {
     const fn = extractFunction(APP_SRC, 'renderPreviewUserOptions');
-    assert.ok(/isEmployeeRecord\(u\)/.test(fn),
+    // 2026-10-11: this required the literal `isEmployeeRecord(u)` and went red when the filter
+    // moved to isActiveEmployee(), which calls it -- a text match reporting a regression that had
+    // not happened. Accept either name, then prove the helper really does exclude the system
+    // account instead of trusting that its name implies it.
+    assert.ok(/isEmployeeRecord\(u\)|isActiveEmployee\(u\)/.test(fn),
       'the system account is not an employee and must never appear in a staff list');
+    assert.ok(/isEmployeeRecord\(u\)/.test(extractFunction(APP_SRC, 'isActiveEmployee')),
+      'isActiveEmployee must go through isEmployeeRecord, or this picker would list the system account');
   });
   test('a missing employee falls back to the real account rather than half-applying', () => {
     const fn = extractFunction(APP_SRC, 'applyPreviewUser');

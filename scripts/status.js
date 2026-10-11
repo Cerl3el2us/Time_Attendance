@@ -191,15 +191,21 @@ if (!fs.existsSync(dataDir)) {
   // never go red. See scripts/lib/roster-health.js.
   out();
   out('Roster (users.json, the payroll `active` flag):');
-  let roster;
+  // 2026-10-11 (review): the first version of this held a `roster` sentinel and only printed when
+  // it was not undefined, with a `raw && raw.users` fallback for a shape this system never writes
+  // (users.json is always an array -- ensureSystemAccounts() requires it). A JSON object with no
+  // `users` key therefore printed the heading above and then nothing at all, which reads as
+  // "nothing to report" when the truth is "not measured" -- the exact failure the UNMEASURED
+  // comment at the top of this file exists to prevent. There is no silent branch now:
+  // describeRosterHealth() answers for every shape, and only an unreadable file short-circuits.
+  let roster = null, readFailed = null;
   try {
-    const raw = JSON.parse(fs.readFileSync(path.join(dataDir, 'users.json'), 'utf8'));
-    roster = Array.isArray(raw) ? raw : raw && raw.users;
+    roster = JSON.parse(fs.readFileSync(path.join(dataDir, 'users.json'), 'utf8'));
   } catch (e) {
-    roster = undefined;
-    out(`  NOT measured -- users.json could not be read (${e && e.message ? e.message : 'unknown error'})`);
+    readFailed = (e && e.message) ? e.message : 'unknown error';
   }
-  if (roster !== undefined) describeRosterHealth(roster).forEach(out);
+  if (readFailed) out(`  NOT measured -- users.json could not be read (${readFailed})`);
+  else describeRosterHealth(roster).forEach(out);
 }
 out();
 

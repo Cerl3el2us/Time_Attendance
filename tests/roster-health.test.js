@@ -30,19 +30,33 @@ const ok2 = { id: 2, active: false };
 const observerGone = { id: 3, active: false, isObserver: true };
 const sysAccount = { id: 900001, isSystemAccount: true, active: true };
 
+// 2026-10-11 (review): both assertions here were loose enough that a wrong implementation passed.
+// `/3 records/` is matched by "33 records", and the only complaint-check looked for words the
+// Observer line does not contain -- so flagging EVERY Observer, including a correctly resigned
+// one, stayed green and would have told the owner a correct record was a payroll error.
 test('a roster where every record carries true or false reports clean', () => {
   // Four entries go in, three come back counted: the system account is not an employee record,
-  // which the last test in this file pins separately.
+  // which a later test in this file pins separately.
   const lines = describeRosterHealth([ok1, ok2, observerGone, sysAccount]).join('\n');
-  assert.ok(/3 records/.test(lines), `expected the count, got: ${lines}`);
-  assert.ok(!/MISSING|never recorded/.test(lines), `expected no complaint, got: ${lines}`);
+  assert.ok(/\b3 records\b/.test(lines), `expected exactly the count 3, got: ${lines}`);
+  assert.ok(/every record says/.test(lines), `expected the clean line, got: ${lines}`);
+  assert.strictEqual(describeRosterHealth([ok1, ok2, observerGone, sysAccount]).length, 2,
+    `a clean roster is two lines, got: ${lines}`);
 });
 
-test('a record with no `active` key is named by id', () => {
+test('an Observer who WAS taken off the roster is correct and must not be flagged', () => {
+  const lines = describeRosterHealth([observerGone]).join('\n');
+  assert.ok(!/Observer still on the payroll roster/.test(lines),
+    `a resigned Observer is the correct shape, not an error: ${lines}`);
+});
+
+test('a record with no `active` key is named by id, under its own heading', () => {
   const noFlag = { id: 7 };
   const lines = describeRosterHealth([ok1, noFlag]).join('\n');
   assert.ok(/\b7\b/.test(lines), `expected id 7 in the report, got: ${lines}`);
-  assert.ok(/active/.test(lines), `expected the field named, got: ${lines}`);
+  // Not /active/: the Observer line contains the word too, so the missing-key case could be
+  // reported under the wrong heading and still pass.
+  assert.ok(/nobody ever recorded/.test(lines), `expected the missing-flag heading, got: ${lines}`);
 });
 
 test('`active` set to something that is not a boolean is caught too', () => {
@@ -63,6 +77,35 @@ test('an Observer still marked active is reported — that is a resigned person 
 test('the system account is not judged by the roster rules', () => {
   const lines = describeRosterHealth([{ id: 900001, isSystemAccount: true }]).join('\n');
   assert.ok(!/900001/.test(lines), `the system account is not an employee record, got: ${lines}`);
+});
+
+// 2026-10-11 (review): three data errors the first version did not look for.
+//
+// Duplicate ids matter most and nothing anywhere in this project guards them:
+// computeYearEndCarryForward() keys its output `${year}_${u.id}`, so two records sharing an id
+// overwrite each other's carry-forward without a word.
+test('two records sharing an id are reported — they overwrite each other everywhere id is a key', () => {
+  const lines = describeRosterHealth([{ id: 5, active: true }, { id: 5, active: true }]).join('\n');
+  assert.ok(/\b5\b/.test(lines), `expected the duplicated id, got: ${lines}`);
+  assert.ok(/more than one record|duplicate/i.test(lines), `expected it named as a duplicate, got: ${lines}`);
+});
+
+// The mirror of the `active` check. server.js reads isObserver both strictly (`!== true`) and as a
+// truthy value, so a non-boolean makes the person an Observer for one gate and not for another --
+// the same two-answers disease this whole change exists to end.
+test('`isObserver` set to something that is not a boolean is reported', () => {
+  const lines = describeRosterHealth([{ id: 11, active: true, isObserver: 'yes' }]).join('\n');
+  assert.ok(/\b11\b/.test(lines), `expected id 11, got: ${lines}`);
+  assert.ok(/isObserver/.test(lines), `expected the field named, got: ${lines}`);
+});
+
+// A row that is not an object was dropped silently, and the report then still said every record
+// was fine -- a confident sentence about records it never looked at.
+test('entries that are not records are counted, not quietly dropped', () => {
+  const lines = describeRosterHealth([{ id: 1, active: true }, null, 'nope']).join('\n');
+  assert.ok(/2 entr|not a record/i.test(lines), `expected the skipped entries named, got: ${lines}`);
+  assert.ok(!/every record says/.test(lines),
+    `must not claim the roster is clean when entries were skipped: ${lines}`);
 });
 
 // Same promise the sibling data-files module makes: on Z: this runs against files the live backend

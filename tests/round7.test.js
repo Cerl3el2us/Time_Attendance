@@ -250,9 +250,11 @@ function cfClient(w) {
   const ctx = {
     APP_SETTINGS: { leave: { ...(w.leave || LEAVE) } }, DATA_USERS: w.users, DATA_LEAVES: w.leaves,
     LEAVE_CARRY_FORWARD: w.cf, LEAVE_OPENING_USED: w.openingUsed || {}, currentLang: 'en',
-    isEmployeeRecord: u => !!(u && !u.isSystemAccount),
   };
-  return sandbox(APP_SRC, [...CF_SHARED, 'leaveRecordMinutes', 'getCarryForwardKey', 'getCarryForwardDays', 'getCarryForwardCompDays',
+  // 2026-10-11: isEmployeeRecord used to be stubbed in the ctx above. Extract the real pair
+  // instead -- a stub means the roster rule can change in app.js while this sandbox keeps testing
+  // the copy written here, which is how the same mistake hid in checkin-status-leave.test.js.
+  return sandbox(APP_SRC, ['isEmployeeRecord', 'isActiveEmployee', ...CF_SHARED, 'leaveRecordMinutes', 'getCarryForwardKey', 'getCarryForwardDays', 'getCarryForwardCompDays',
     'getOpeningUsedKey', 'getOpeningUsedDays', 'cfAtRiskRows', 'cfExpiryPolicyImpact'], ctx);
 }
 let lid = 1;

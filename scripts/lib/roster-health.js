@@ -15,23 +15,51 @@
 'use strict';
 
 function describeRosterHealth(users) {
-  if (!Array.isArray(users)) return ['  the roster could not be read'];
-  const rows = users.filter(u => u && typeof u === 'object' && !u.isSystemAccount);
+  // The wording matters: status.js's own rule is that a thing which was not measured says so.
+  if (!Array.isArray(users)) return ['  NOT measured -- users.json is not a list of records'];
+
+  const rows = [];
+  let skipped = 0;
+  for (const u of users) {
+    if (u && typeof u === 'object' && !Array.isArray(u)) rows.push(u);
+    else skipped++;
+  }
+  const employees = rows.filter(u => !u.isSystemAccount);
   const idOf = u => (u.id === undefined || u.id === null ? '(no id)' : String(u.id));
 
-  const noFlag = rows.filter(u => typeof u.active !== 'boolean').map(idOf);
+  const noFlag = employees.filter(u => typeof u.active !== 'boolean').map(idOf);
+  // The mirror of the check above. server.js reads isObserver strictly in some gates
+  // (`isObserver !== true`) and as a truthy value in others, so a non-boolean makes someone an
+  // Observer for one gate and not for another.
+  const badObserver = employees
+    .filter(u => u.isObserver !== undefined && typeof u.isObserver !== 'boolean').map(idOf);
   // Observer means the person resigned and kept a badge and a read-only login. Taking them off the
   // roster is `active:false`; Observer with active:true is a resigned person still being paid.
-  const observerOnRoster = rows.filter(u => u.isObserver === true && u.active !== false).map(idOf);
+  const observerOnRoster = employees
+    .filter(u => u.isObserver === true && u.active !== false).map(idOf);
+  // Nothing else in this project guards this, and computeYearEndCarryForward() keys its output
+  // `${year}_${u.id}` -- two records sharing an id overwrite each other's carry-forward silently.
+  const seen = new Map();
+  employees.forEach(u => { const k = idOf(u); seen.set(k, (seen.get(k) || 0) + 1); });
+  const duplicates = Array.from(seen.entries()).filter(([, n]) => n > 1).map(([k]) => k);
 
-  const lines = [`  ${rows.length} records (the system account is not one)`];
+  const lines = [`  ${employees.length} records (the system account is not one)`];
+  if (skipped) {
+    lines.push(`  ${skipped} entr${skipped === 1 ? 'y was' : 'ies were'} not a record at all and could not be checked`);
+  }
   if (noFlag.length) {
     lines.push(`  ${noFlag.length} with no boolean \`active\`, so nobody ever recorded whether they left: id ${noFlag.join(', ')}`);
+  }
+  if (badObserver.length) {
+    lines.push(`  ${badObserver.length} with a non-boolean \`isObserver\`, which different gates read differently: id ${badObserver.join(', ')}`);
   }
   if (observerOnRoster.length) {
     lines.push(`  ${observerOnRoster.length} Observer still on the payroll roster (Observer means resigned, so \`active\` must be false): id ${observerOnRoster.join(', ')}`);
   }
-  if (!noFlag.length && !observerOnRoster.length) lines.push('  every record says whether the person is still here');
+  if (duplicates.length) {
+    lines.push(`  ${duplicates.length} id used by more than one record, which overwrites itself wherever id is a key: id ${duplicates.join(', ')}`);
+  }
+  if (lines.length === 1) lines.push('  every record says whether the person is still here');
   return lines;
 }
 
