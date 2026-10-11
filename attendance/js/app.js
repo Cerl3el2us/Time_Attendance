@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 100;
+const APP_BUILD = 101;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -147,9 +147,14 @@ function isFormerEmployee(u) { return isEmployeeRecord(u) && u.active === false;
 // phone number took them off the payroll roster, silently, while every other screen still counted
 // them as here. Observer is reported as-is: an Observer who was never taken off the roster is a
 // data error that `npm run status` names, and a form must show what the record says, not guess.
+// 2026-10-11 (review round 2): reads `active` directly rather than through isFormerEmployee().
+// That helper also requires isEmployeeRecord(), so a record failing THAT test answered 'true'
+// even when it plainly said active:false -- and the save path writes the dropdown's value back,
+// which would have reactivated it. A form reports what the record says; deciding who belongs on
+// the roster is a different question, asked elsewhere.
 function employeeStatusValue(u) {
   if (u && u.isObserver) return 'observer';
-  return isFormerEmployee(u) ? 'false' : 'true';
+  return (u && u.active === false) ? 'false' : 'true';
 }
 // Always the REAL account: the write gate, the banner and the preview UI hang off this, and an
 // impersonated employee must never make them disappear.
@@ -12366,7 +12371,13 @@ function openEmployeeProfile(id) {
             : `${minToStr(profileLeaveBal.annual.remMin)}${!isAnnualLeaveUnlocked(u) ? (currentLang === 'ja' ? `（${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'}から）` : L(` (unlocks ${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'})`, ` (เปิดสิทธิ์ ${annualLeaveUnlockDateStr(u.startDate, getAnnualLeaveMinMonths()) || '—'})`)) : (nextAnnualLeaveTier(u) ? (currentLang === 'ja' ? `（次は${nextAnnualLeaveTier(u).date}から${nextAnnualLeaveTier(u).days}日）` : L(` (next ${nextAnnualLeaveTier(u).days}d from ${nextAnnualLeaveTier(u).date})`, ` (ขั้นถัดไป ${nextAnnualLeaveTier(u).days} วัน ตั้งแต่ ${nextAnnualLeaveTier(u).date})`)) : '')}`}</p></div>
           <div class="profile-field"><label>${L('Sick Leave Balance', 'ลาป่วยคงเหลือ')}</label><p style="color:#ef4444;font-weight:700">${minToStr(profileLeaveBal.sick.remMin)}</p></div>
           <div class="profile-field"><label>${L('Business Leave Balance', 'ลากิจคงเหลือ')}</label><p style="color:#8b5cf6;font-weight:700">${minToStr(profileLeaveBal.business.remMin)}</p></div>
-          <div class="profile-field"><label>${L('Status', 'สถานะ')}</label><p><span class="badge ${isFormerEmployee(u) ? 'badge-danger' : 'badge-success'}">${isFormerEmployee(u) ? L('● Suspended', '● ระงับ') : L('● Active', '● ปกติ')}</span></p></div>
+          <!-- 2026-10-11 (review round 2): this card had no Observer branch while the employees
+               table at renderEmployeesTable() did, so the same resigned Observer read
+               "👁️ ผู้สังเกตการณ์" in the list and "● ปกติ" on their own profile. Pre-existing;
+               fixed here because two screens disagreeing about one person is the thing this whole
+               change set is about. Same expression as the table, so no new string: L() already
+               resolves 👁️ Observer through LANG_JA. -->
+          <div class="profile-field"><label>${L('Status', 'สถานะ')}</label><p><span class="badge ${u.isObserver ? 'badge-info' : (isFormerEmployee(u) ? 'badge-danger' : 'badge-success')}">${u.isObserver ? L('👁️ Observer', '👁️ ผู้สังเกตการณ์') : (isFormerEmployee(u) ? L('● Suspended', '● ระงับ') : L('● Active', '● ปกติ'))}</span></p></div>
         </div>
       </div>
       <div id="ptab-finance" class="tab-content">
@@ -22005,7 +22016,10 @@ function renderCalendarPage() {
   // `birthdayMonthDay` ("MM-DD", no year) -- fall back to that so the badge still shows for
   // manager/user/driver viewers, without ever exposing a colleague's birth year/age.
   const birthdayMap = {}; // 'MM-DD' -> array of employee names
-  DATA_USERS.filter(u => isEmployeeRecord(u) && (u.dob || u.birthdayMonthDay) && u.active !== false).forEach(u => {
+  // 2026-10-11 (review round 2): the last place the roster test was written out by hand -- missed
+  // by the sweep because the two conjuncts are not adjacent, which made it the one remaining spot
+  // where the rule could drift away from isActiveEmployee() unnoticed.
+  DATA_USERS.filter(u => isActiveEmployee(u) && (u.dob || u.birthdayMonthDay)).forEach(u => {
     const key = u.dob ? `${String(new Date(u.dob + 'T12:00:00').getMonth() + 1).padStart(2, '0')}-${String(new Date(u.dob + 'T12:00:00').getDate()).padStart(2, '0')}` : u.birthdayMonthDay;
     (birthdayMap[key] = birthdayMap[key] || []).push(u.name);
   });

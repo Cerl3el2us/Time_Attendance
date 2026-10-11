@@ -108,12 +108,58 @@ test('entries that are not records are counted, not quietly dropped', () => {
     `must not claim the roster is clean when entries were skipped: ${lines}`);
 });
 
+// 2026-10-11 (review round 2): the hole left right next to the one just closed. This module read
+// `isSystemAccount` truthily while the server's isSystemAccountUser() reads it strictly
+// (`=== true || username === 'superadmin'`), so a record carrying `isSystemAccount: 1` was in no
+// total, checked by none of the checks, and the clean line printed anyway -- the exact failure the
+// "entries that are not records" check was added to end. The split is live, not theoretical:
+// systemAccount.js treats such a record as a payroll employee while app.js's isEmployeeRecord
+// hides it from every screen.
+test('a non-boolean `isSystemAccount` is reported, and the record is still counted', () => {
+  const lines = describeRosterHealth([{ id: 12, isSystemAccount: 1, active: true }]).join('\n');
+  assert.ok(/\b12\b/.test(lines), `expected id 12, got: ${lines}`);
+  assert.ok(/isSystemAccount/.test(lines), `expected the field named, got: ${lines}`);
+  assert.ok(/\b1 records\b/.test(lines), `it must be counted like the server counts it, got: ${lines}`);
+});
+
+test('the system account is excluded the way the server excludes it, by username too', () => {
+  // systemAccount.js:28 -- `isSystemAccount === true || username === 'superadmin'`.
+  const lines = describeRosterHealth([{ id: 900001, username: 'superadmin', active: true }]).join('\n');
+  assert.ok(!/900001/.test(lines), `the system account must not be listed, got: ${lines}`);
+  assert.ok(/\b0 records\b/.test(lines), `and must not be counted, got: ${lines}`);
+});
+
+// data-files.js says "no .json files here" rather than reporting health on nothing. A roster with
+// nobody in it has not been found clean; there was nothing to find.
+test('a roster with no employee records says so instead of calling itself clean', () => {
+  for (const input of [[], [{ id: 900001, isSystemAccount: true }]]) {
+    const lines = describeRosterHealth(input).join('\n');
+    assert.ok(!/every record says/.test(lines),
+      `an empty roster is not a clean verdict: ${JSON.stringify(input)} -> ${lines}`);
+    assert.ok(/no employee records/.test(lines), `expected it said so, got: ${lines}`);
+  }
+});
+
 // Same promise the sibling data-files module makes: on Z: this runs against files the live backend
 // is rewriting, and a status tool that throws mid-report hides every section after it.
 test('it never throws, whatever it is handed', () => {
-  for (const bad of [null, undefined, 'nope', 42, {}, [null], [undefined], [{}]]) {
-    assert.doesNotThrow(() => describeRosterHealth(bad), `threw on ${JSON.stringify(bad)}`);
+  // 2026-10-11 (review round 2): the list used to stop short of the two paths added with the
+  // skipped-entry and duplicate-id checks -- an array inside the array, and an `id` that is not a
+  // primitive. Those are exactly the shapes JSON.parse can hand over and nothing else covered.
+  const bad = [null, undefined, 'nope', 42, {}, [null], [undefined], [{}],
+    [[]], [[1, 2]], [{ id: {} }], [{ id: [1, 2] }], [{ id: null }, { id: null }],
+    [{ id: 1 }, { id: '1' }], [{ active: 'x' }], [{ isObserver: {} }]];
+  for (const input of bad) {
+    assert.doesNotThrow(() => describeRosterHealth(input), `threw on ${JSON.stringify(input)}`);
   }
+});
+
+// Two records with no id at all do not share an id -- they have none, which the missing-flag line
+// already names. Saying "1 id used by more than one record: id (no id)" sends someone looking for
+// a collision that is not there.
+test('records with no id are not reported as sharing one', () => {
+  const lines = describeRosterHealth([{ active: true }, { active: true }]).join('\n');
+  assert.ok(!/more than one record/.test(lines), `expected no duplicate claim, got: ${lines}`);
 });
 
 console.log(`  ${passed} passed`);

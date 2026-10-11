@@ -317,6 +317,12 @@ test('the status dropdown never preselects "suspended" for someone the roster co
   // An Observer who was never taken off the roster is a data error roster-health.js reports; the
   // form still has to show what the record says, not guess.
   assert.strictEqual(w.employeeStatusValue({ id: 7, active: true, isObserver: true }), 'observer');
+  // 2026-10-11 (review round 2): it routed through isFormerEmployee(), which requires
+  // isEmployeeRecord() -- so for a record that fails THAT test it answered 'true' even when the
+  // record plainly said active:false, and the save path would have written the reactivation back.
+  // Nothing reaches this form with such a record today; the form still must not misread one.
+  assert.strictEqual(w.employeeStatusValue({ id: 900001, isSystemAccount: true, active: false }), 'false',
+    'the form must report what the record says, not what the roster filter thinks of it');
 });
 
 console.log(`  ${passed} passed`);

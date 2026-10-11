@@ -24,7 +24,15 @@ function describeRosterHealth(users) {
     if (u && typeof u === 'object' && !Array.isArray(u)) rows.push(u);
     else skipped++;
   }
-  const employees = rows.filter(u => !u.isSystemAccount);
+  // 2026-10-11 (review round 2): exclude the way the SERVER excludes, not the way the screens do.
+  // systemAccount.js:28 reads `isSystemAccount === true || username === 'superadmin'`, while
+  // app.js's isEmployeeRecord reads the flag truthily. For a record carrying `isSystemAccount: 1`
+  // those disagree: the server pays it as an employee, the screens hide it. Excluding truthily
+  // here would have left exactly that record unchecked by everything below -- and then printed
+  // the clean line. Follow the reading that decides money, and report the mismatch separately.
+  const isSystemAccount = u =>
+    u.isSystemAccount === true || String(u.username || '').toLowerCase() === 'superadmin';
+  const employees = rows.filter(u => !isSystemAccount(u));
   const idOf = u => (u.id === undefined || u.id === null ? '(no id)' : String(u.id));
 
   const noFlag = employees.filter(u => typeof u.active !== 'boolean').map(idOf);
@@ -33,14 +41,19 @@ function describeRosterHealth(users) {
   // Observer for one gate and not for another.
   const badObserver = employees
     .filter(u => u.isObserver !== undefined && typeof u.isObserver !== 'boolean').map(idOf);
+  // The same disease on the flag that decides whether someone is an employee at all.
+  const badSystemFlag = employees
+    .filter(u => u.isSystemAccount !== undefined && typeof u.isSystemAccount !== 'boolean').map(idOf);
   // Observer means the person resigned and kept a badge and a read-only login. Taking them off the
   // roster is `active:false`; Observer with active:true is a resigned person still being paid.
   const observerOnRoster = employees
     .filter(u => u.isObserver === true && u.active !== false).map(idOf);
   // Nothing else in this project guards this, and computeYearEndCarryForward() keys its output
   // `${year}_${u.id}` -- two records sharing an id overwrite each other's carry-forward silently.
+  // Records with no id at all do not share one, and the missing-flag line already names them.
   const seen = new Map();
-  employees.forEach(u => { const k = idOf(u); seen.set(k, (seen.get(k) || 0) + 1); });
+  employees.filter(u => u.id !== undefined && u.id !== null)
+    .forEach(u => { const k = idOf(u); seen.set(k, (seen.get(k) || 0) + 1); });
   const duplicates = Array.from(seen.entries()).filter(([, n]) => n > 1).map(([k]) => k);
 
   const lines = [`  ${employees.length} records (the system account is not one)`];
@@ -53,13 +66,19 @@ function describeRosterHealth(users) {
   if (badObserver.length) {
     lines.push(`  ${badObserver.length} with a non-boolean \`isObserver\`, which different gates read differently: id ${badObserver.join(', ')}`);
   }
+  if (badSystemFlag.length) {
+    lines.push(`  ${badSystemFlag.length} with a non-boolean \`isSystemAccount\`: the server pays this record as an employee while the screens hide it: id ${badSystemFlag.join(', ')}`);
+  }
   if (observerOnRoster.length) {
     lines.push(`  ${observerOnRoster.length} Observer still on the payroll roster (Observer means resigned, so \`active\` must be false): id ${observerOnRoster.join(', ')}`);
   }
   if (duplicates.length) {
     lines.push(`  ${duplicates.length} id used by more than one record, which overwrites itself wherever id is a key: id ${duplicates.join(', ')}`);
   }
-  if (lines.length === 1) lines.push('  every record says whether the person is still here');
+  // Nobody to check is not a clean bill of health -- the sibling module says "no .json files here"
+  // rather than reporting on nothing.
+  if (!employees.length) lines.push('  no employee records to check');
+  else if (lines.length === 1) lines.push('  every record says whether the person is still here');
   return lines;
 }
 
