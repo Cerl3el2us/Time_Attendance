@@ -20,17 +20,21 @@
 //   2. fixture cases: small inline strings, one per bad shape, each of which MUST be rejected,
 //      plus a well-formed positive for every validator. A negative case that is never asserted
 //      to fail proves nothing, so these exist to show the validators can actually go red.
-//   3. assertions against the real STATUS.md and docs/STATUS_CLOSED.md. Most of these are EXPECTED
-//      to be red until STATUS.md is restructured (size, missing sections, no check ids, empty
-//      closed index); they must not be "fixed" by loosening the validators. Not all of them are red
-//      today: the section-shape test and the handoff test pass while the sections they inspect are
-//      absent or already well-formed, so a green there says nothing about the restructure.
+//   3. assertions against the real STATUS.md and docs/STATUS_CLOSED.md. STATUS.md has been
+//      restructured to fit them, so all of these are green today. If one goes red, STATUS.md has
+//      drifted: fix the file, do not loosen the validator. Two of them can be green with little
+//      inspected: the handoff test passes when the section has no items (an empty handoff is a
+//      legitimate state), and the section-shape test passes for any section that is absent.
 //
 // Item syntax the validators enforce inside the three managed sections:
 //   - an item starts with `- ` in column one (one or more spaces, then text);
 //   - every following non-blank line up to the next item is a continuation line and MUST be
 //     indented; an indented line that starts with a list marker (`-`, `*`, `+`, `•`, `–`, `・`,
-//     `1.`, `1)`) is a sub-list of the item above and is accepted as part of it;
+//     `1.`, `1)`) is a sub-list of the item above and is accepted as part of it -- EXCEPT when the
+//     marker is followed by bold text (`  - **b**`, `  1. **b**`). Every real item starts with a
+//     bold subject, a bold date or an emoji plus bold, so that shape is an item that lost its
+//     column-one indentation; accepting it would let it hide inside the item above and escape its
+//     own check id / handoff labels / index lookup, so it is rejected;
 //   - a list marker in column one that is not a `- ` item is rejected, and so is a table row;
 //   - a line whose first non-space character is `>` is a markdown blockquote: section explanation
 //     prose is allowed, but ONLY in that form. It is not part of any item, so it can never supply a
@@ -38,6 +42,11 @@
 //   - any other prose in column one is rejected (that is how a loose handoff note is kept from
 //     hiding), and nothing but a blockquote may come before the first item.
 // Anything else is rejected rather than silently ignored or swallowed into the previous item.
+//
+// KNOWN LIMIT: blockquote text is never validated as content. A handoff section written entirely as
+// `>` lines (`> รอบหน้าให้เตือนเรื่อง superadmin`) yields zero items, so the handoff assertion
+// passes with nothing inspected. That is the one shape that escapes; it cannot be forbidden without
+// also forbidding the explanation prose the carve-out exists for, and an empty section is legal.
 // A section starts at a column-one `## <title>` heading and ends at the next column-one `## `.
 'use strict';
 const fs = require('fs');
@@ -100,6 +109,8 @@ function sectionLines(text, title) {
 
 // ASCII markers plus the three bullet glyphs people paste in from other tools (U+2022, U+2013, U+30FB).
 const LIST_MARKER = /^\s*([-*+•–・]|\d+[.)])(\s|$)/;
+// An indented line whose list marker is followed by bold text: an item that lost its indentation.
+const INDENTED_BOLD_ITEM = /^\s+([-*+•–・]|\d+[.)])\s+\*\*/;
 
 // Split a section's lines into items. Returns { blocks, problems }: blocks are the items as
 // newline-joined strings; problems lists every line that is none of: a column-one `- ` item, a
@@ -119,6 +130,10 @@ function itemsOf(lines) {
       problems.push(`${at}: list marker in a shape that is not a column-one "- " item: ${snip(l)}`);
     } else if (/^\s*\|/.test(l)) {
       problems.push(`${at}: table row is not an item: ${snip(l)}`);
+    } else if (INDENTED_BOLD_ITEM.test(l)) {
+      // Every item starts with bold text, so an indented marker + bold is an item that lost its
+      // indentation. Attaching it to the item above would hide it from that item's own checks.
+      problems.push(`${at}: an item must start at column one, this one is indented: ${snip(l)}`);
     } else if (!blocks.length) {
       problems.push(`${at}: text before the first item: ${snip(l)}`);
     } else if (!/^\s/.test(l)) {
@@ -292,10 +307,54 @@ test('fixture: itemsOf accepts a ">" line but rejects the same sentence written 
   expectRejected(itemsOf([sentence, '- ok']).problems, /before the first item/);
   expectRejected(itemsOf(['- ok', sentence]).problems, /not indented/);
 });
-test('fixture: a blockquote line cannot stand in for a handoff label or a check id', () => {
+test('fixture: a blockquote line cannot stand in for a handoff label', () => {
+  // The label text is present with content; only dropping the `>` line from the block makes it fail.
   const noAction = GOOD_HANDOFF.replace('  · **ให้ทำอะไร:** อ่านสเปกแล้วทำข้อ 4–6', '  > **ให้ทำอะไร:** อ่านสเปกแล้วทำข้อ 4–6');
   expectRejected(validateHandoffItem(itemsOf(noAction.split('\n')).blocks[0]), /no content after \*\*ให้ทำอะไร:\*\*/);
-  expectRejected(validateOpenItem(itemsOf(['- **x**', '  > ตรวจ: some-id']).blocks[0]), /ตรวจ/);
+  // There is deliberately no open-item twin of this case: the check-id regex needs a line that
+  // STARTS with `·`, so a `>`-first line can never match whether or not it is kept in the block.
+  // Such an assertion would be red for a reason unrelated to the blockquote rule.
+});
+
+// An item that lost its indentation must not be swallowed by the item above it. Each section's
+// grammar is run: open (check id), handoff (three labels), closed index (date + title).
+const LOST_INDENT_CASES = [
+  ['open item', ['- **a**', '  · ตรวจ: id-a', '  - **b**']],
+  ['handoff item', [...GOOD_HANDOFF.split('\n'), '  - **b**', '    · **ให้ทำอะไร:** x']],
+  ['closed-index entry', ['- **2026-10-12** — A', '  - **2026-10-11** — B']],
+  ['numbered "1. **b**"', ['- **a**', '  1. **b**']],
+  ['"*" marker', ['- **a**', '  * **b**']],
+  ['"•" marker', ['- **a**', '  • **b**']],
+  ['deeper indent', ['- **a**', '      - **b**']],
+  ['dated item', ['- **a**', '  - **2026-10-12** — B']],
+];
+for (const [name, lines] of LOST_INDENT_CASES) {
+  test(`fixture: itemsOf rejects an indented ${name} and says it must start at column one`, () => {
+    expectRejected(itemsOf(lines).problems, /must start at column one/);
+  });
+}
+test('fixture: an indented "- **b**" is not left unvalidated inside the item above', () => {
+  // `b` has no check id. Before the rule it was merged into `a`'s block and `a`'s id satisfied the
+  // open-item check for both; now the section fails, so `b` can no longer hide.
+  const r = itemsOf(['- **a**', '  · ตรวจ: id-a', '  - **b**']);
+  if (!r.problems.length) throw new Error('mis-indented item was accepted');
+  // The sibling written correctly at column one is validated on its own and fails on its own.
+  const ok = itemsOf(['- **a**', '  · ตรวจ: id-a', '- **b**']);
+  expectClean(ok.problems);
+  expectClean(validateOpenItem(ok.blocks[0]));
+  expectRejected(validateOpenItem(ok.blocks[1]), /ตรวจ/);
+});
+test('fixture: itemsOf still accepts indented sub-steps whose content is not bold', () => {
+  const steps = itemsOf(['- **a**', '  1. ตรวจ log', '  2) ดูไฟล์ x', '  - ดูไฟล์ x', '  1. plain step', '  - plain sub-item']);
+  expectClean(steps.problems);
+  if (steps.blocks.length !== 1) throw new Error(`expected 1 item, got ${steps.blocks.length}`);
+  for (const frag of ['1. plain step', '- plain sub-item', '1. ตรวจ log']) {
+    if (!steps.blocks[0].includes(frag)) throw new Error(`sub-step not attached: ${frag}`);
+  }
+  // bold INSIDE a sub-step is fine; only a marker immediately followed by bold is an item
+  expectClean(itemsOf(['- **a**', '  1. ทำ **สำคัญ** ก่อน']).problems);
+  // the middle dot used for labels is not a list marker
+  expectClean(itemsOf(['- **a**', '  · **ที่มา:** x']).problems);
 });
 
 const BAD_SHAPES = [
@@ -404,7 +463,7 @@ test('fixture: validateIndexItem rejects a malformed line and a title with no he
 });
 
 // ---------------------------------------------------------------------------------------------
-// 3. The real files (expected red until STATUS.md is restructured)
+// 3. The real files (all green; a red here means STATUS.md drifted from the shape above)
 // ---------------------------------------------------------------------------------------------
 
 function realStatus() { return fs.readFileSync(STATUS_PATH, 'utf8'); }
