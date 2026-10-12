@@ -30,6 +30,15 @@
   · **หลักฐาน:** `docs/superpowers/plans/2026-10-12-status-md-restructure.md` คือแผนที่ 1 ที่ทำเสร็จแล้ว
     · `git log --oneline chore/faster-startup-and-sync`
 
+- **ดัชนี memory (`MEMORY.md`) ของเครื่อง `tairo` ใหม่กว่าสำเนาบน NAS — อีกเครื่องจึงยังไม่ได้ของ**
+  · **ให้ทำอะไร:** push โฟลเดอร์ memory ขึ้น NAS ด้วย
+    `Z:\claude_memory\sync_memory.ps1 push -ProjectDir "Z:\"` — **ต้องใส่ `-ProjectDir` ทุกครั้ง**
+    เพราะการพึ่งค่า default เคย push โฟลเดอร์ผิดไปแล้วแบบเงียบๆ · ผมไม่รันเอง รอเจ้าของสั่ง
+  · **ที่มา:** แผนที่ 1 ข้อ 3 (2026-10-12) เขียนบล็อก "เปิด session ใหม่" ใน `MEMORY.md` ใหม่
+    ให้จบในตัวเอง · hook ที่ push ให้เองคือข้อ 6 ของสเปก = เนื้อหาของแผนที่ 2 จึงยังไม่มีตัวช่วย
+  · **หลักฐาน:** `C:\Users\tairo\.claude\projects\Z--\memory\MEMORY.md` (บล็อก 6 ข้อแบบใหม่)
+    ต่างจาก `Z:\claude_memory\MEMORY.md` (ยังเป็นบล็อก "ทำ 2 ข้อนี้ก่อนตอบอะไร" แบบเก่า)
+
 ## เปิดอยู่
 
 - 🔴 **รหัสผ่าน NAS — ล้างออกจากไฟล์และประวัติแล้ว แต่ยังไม่ได้เปลี่ยนรหัส**
