@@ -13,10 +13,22 @@
 // Output is English on purpose: this runs in a plain Windows console, and Thai in a console without
 // UTF-8 prints as question marks. The tests in this repo are English for the same reason.
 //
-// Deliberately NOT here (spec 4.4): a per-item "recorded vs real" table -- it is a machine for
-// producing green lines nobody verifies -- and a per-commit warning for "no Closes: trailer", because
-// most commits (typo, cache-buster bump, lint) should not have one and the noise would teach people
-// to stop reading.
+// Deliberately NOT here (spec 4.4): a per-commit warning for "no Closes: trailer", because most
+// commits (typo, cache-buster bump, lint) should not have one and the noise would teach people to
+// stop reading.
+//
+// A per-item "recorded vs real" table used to be on that list too, because it is a machine for
+// producing green lines nobody verifies. 2026-10-13: the owner approved spec section 7, so that table
+// now exists -- in scripts/backlog.js (`npm run backlog`), NOT in this file, which stays a reporter
+// of facts about the checkout. The warning above still stands; what makes the table safe is four
+// guardrails, and removing any one of them brings the machine for green lines back:
+//   1. no PASS without evidence -- a PASS carries a real file:line or real command output, and a
+//      check that cannot find its evidence says NOT-VERIFIED;
+//   2. WAITING-OWNER instead of guessing -- what only the owner can decide is shown as awaiting him,
+//      never as passed;
+//   3. fewer lines than items -- a PASS prints ONE line, so what needs doing is not buried in green;
+//   4. a registry bound both ways -- tests/backlog-registry.test.js turns red when STATUS.md names a
+//      check that does not exist, or a check exists that no item uses.
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -212,6 +224,10 @@ out();
 // --- the commands, so only this one has to be remembered -----------------------------------------
 out('Commands (you only need to remember the first):');
 out('  npm run status   this report');
+out('  npm run backlog  what is still open: every STATUS.md item re-checked against the code, with evidence');
 out('  npm run check    lint + every test; must end "N/N test files passed"');
-out('Before you answer "what is still open": this report is facts, STATUS.md is claims -- verify each');
-out('open item against the code, and say what you could not measure.');
+// 2026-10-13: the closing sentence used to say "this report is facts, STATUS.md is claims -- verify
+// each open item against the code", which left the verifying to whoever read it, by hand, every time.
+// That is now `npm run backlog`'s job, so this points at it instead of asking for it.
+out('Before you answer "what is still open": run `npm run backlog`. This report is facts about the');
+out('checkout, STATUS.md is claims, and `npm run backlog` checks each claim and prints the evidence.');
