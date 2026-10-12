@@ -434,3 +434,12 @@ agent does not undo your work by accident. Example from `app.js`:
 8. tell the owner what changed, what you verified, and what you did **not** verify
 
 Step 8 matters. Say plainly when something is untested rather than implying it works.
+
+**A review finding you accept instead of fixing must be recorded before the task is done.** Write it
+into `STATUS.md` (under `## เปิดอยู่`, with its `· ตรวจ: <id>` line) or into a tracked file under
+`docs/superpowers/notes/`, and say in the item why it was left. The `.superpowers/` ledger is scratch:
+it is git-ignored, it exists on one machine only, and `git clean -fdx` deletes it — so a finding
+that lives only there has **not** been recorded, and the other machine will never see it. This rule
+exists because it happened on 2026-10-12: every finding that branch chose not to fix was written
+only to `.superpowers/sdd/progress.md`, and the owner's answer was that nothing may be forgotten,
+not only the one case a guard happened to cover.
