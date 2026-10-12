@@ -31,11 +31,15 @@
 //   - every following non-blank line up to the next item is a continuation line and MUST be
 //     indented; an indented line that starts with a list marker (`-`, `*`, `+`, `•`, `–`, `・`,
 //     `1.`, `1)`) is a sub-list of the item above and is accepted as part of it -- EXCEPT when the
-//     marker is followed by bold text, optionally after emoji/symbol decoration (`  - **b**`,
-//     `  1. **b**`, `  - 🔴 **b**`) but NOT after real words. Every real item starts with a
-//     bold subject, a bold date or an emoji plus bold, so that shape is an item that lost its
-//     column-one indentation; accepting it would let it hide inside the item above and escape its
-//     own check id / handoff labels / index lookup, so it is rejected;
+//     first real content on the line is bold (`**x**` or `__x__`), with or without a list marker
+//     before it: `  **b**`, `  __b__`, `  - **b**`, `  1. **b**`, `  - 🔴 **b**`, `  - A. **b**`,
+//     `  - (1) **b**`. Every real item starts with a bold subject, a bold date or an emoji plus
+//     bold, so all of those are an item that lost its column-one indentation; accepting one would
+//     let it hide inside the item above and escape its own check id / handoff labels / index
+//     lookup, so it is rejected. Emoji, symbols, punctuation and a short enumerator token (`A.`,
+//     `(1)`, `iv)`) are skipped while looking for that first real content, but real words are not:
+//     `  - ดูไฟล์ **app.js**` is a legitimate sub-step and stays accepted, and so does this repo's
+//     continuation shape `  · **ให้ทำอะไร:** <text>`, where `·` comes first;
 //   - a list marker in column one that is not a `- ` item is rejected, and so is a table row;
 //   - a line whose first non-space character is `>` is a markdown blockquote: section explanation
 //     prose is allowed, but ONLY in that form. It is not part of any item, so it can never supply a
@@ -44,11 +48,17 @@
 //     hiding), and nothing but a blockquote may come before the first item.
 // Anything else is rejected rather than silently ignored or swallowed into the previous item.
 //
-// KNOWN LIMIT: blockquote text is never validated as content. A handoff section written entirely as
-// `>` lines (`> รอบหน้าให้เตือนเรื่อง superadmin`) yields zero items, so the handoff assertion
-// passes with nothing inspected. That is the one shape that escapes; it cannot be forbidden without
-// also forbidding the explanation prose the carve-out exists for, and an empty section is legal.
+// 2026-10-12, final review of this branch: blockquote text is still never validated as content, so
+// a handoff section written entirely as `>` lines (`> รอบหน้าเตือนเรื่อง superadmin`) would have
+// zero items and the handoff assertion would pass with nothing inspected -- the exact failure this
+// file exists to stop. It is closed by pinning the rubric rather than by validating prose:
+// HANDOFF_RUBRIC holds the exact `>` lines that `## ส่งต่อรอบหน้า` is allowed to contain, and the
+// real-file assertion demands equality. Any NEW `>` prose under that heading is therefore red,
+// which leaves writing the note as an item with the four fields as the only way through.
 // A section starts at a column-one `## <title>` heading and ends at the next column-one `## `.
+// Each managed heading must appear exactly once and no fourth `## ` heading may exist: with two
+// `## เปิดอยู่` headings (what a bad merge of this file produces, and two machines edit it) the
+// items under the second were never parsed, so nothing under it was checked.
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -66,6 +76,20 @@ const SEC_OPEN = 'เปิดอยู่';
 const SEC_CLOSED = 'ปิดแล้ว (สารบัญ)';
 
 const HANDOFF_LABELS = ['**ให้ทำอะไร:**', '**ที่มา:**', '**หลักฐาน:**'];
+const MANAGED_SECTIONS = [SEC_HANDOFF, SEC_OPEN, SEC_CLOSED];
+
+// The standing explanation of the four required fields: the ONLY blockquote lines `## ส่งต่อรอบหน้า`
+// may contain. Pinned here byte for byte because blockquote lines are dropped from item blocks, so
+// a handoff written as `>` prose would be inspected by nothing. If the rubric in STATUS.md is
+// reworded on purpose, update this constant in the same commit -- that is the point: the rubric
+// changes only deliberately, and a new note cannot slip in beside it.
+const HANDOFF_RUBRIC = [
+  '> ข้อในหัวข้อนี้ต้องอ่านรู้เรื่องจากอีกเครื่องโดยไม่ต้องรู้บทสนทนาเดิม **ต้องมี 4 ช่อง**:',
+  '> หัวข้อตัวหนา · `**ให้ทำอะไร:**` · `**ที่มา:**` · `**หลักฐาน:**`',
+  '>',
+  '> ที่มาของกฎนี้: โน้ตที่เคยเขียนว่า "รอบหน้าเตือนเรื่อง superadmin" เดินทางไปถึงอีกเครื่องจริง',
+  '> แต่ความรู้ว่าเตือนเรื่องอะไรและให้ทำอะไร ไม่ได้ไปด้วย ⇒ อีกเครื่องรับโน้ตแล้วทำอะไรไม่ได้',
+];
 
 let passed = 0;
 let failed = 0;
@@ -108,24 +132,69 @@ function sectionLines(text, title) {
   return end === -1 ? rest : rest.slice(0, end);
 }
 
+// 1-based file line number of a section's FIRST line (the line after its heading), or null if the
+// section is absent. Only used to turn section-relative problem positions into real file lines.
+function sectionFirstLine(text, title) {
+  const i = splitLines(text).findIndex(l => l.trimEnd() === `## ${title}`);
+  return i === -1 ? null : i + 2;
+}
+
+// Every column-one `## ` heading, trailing whitespace trimmed.
+function topHeadings(text) { return splitLines(text).filter(l => /^## /.test(l)).map(l => l.trimEnd()); }
+
+// `sectionLines` takes the FIRST match, so a second `## เปิดอยู่` hides every item under it: the
+// parser never sees them, and no assertion ever runs on them. A duplicated heading is what a bad
+// git merge of this file produces, and two machines edit it. A fourth section is rejected too:
+// AGENTS.md states as a fact that this file holds exactly these three.
+function validateHeadings(text) {
+  const problems = [];
+  const headings = topHeadings(text);
+  for (const title of MANAGED_SECTIONS) {
+    const n = headings.filter(h => h === `## ${title}`).length;
+    if (n !== 1) problems.push(`"## ${title}" occurs ${n} times, it must occur exactly once`);
+  }
+  for (const h of headings) {
+    if (!MANAGED_SECTIONS.some(t => h === `## ${t}`)) {
+      problems.push(`unexpected "## " heading (this file has exactly three): ${snip(h)}`);
+    }
+  }
+  return problems;
+}
+
 // ASCII markers plus the three bullet glyphs people paste in from other tools (U+2022, U+2013, U+30FB).
 const LIST_MARKER = /^\s*([-*+•–・]|\d+[.)])(\s|$)/;
-// An indented line whose list marker is followed by bold text: an item that lost its indentation.
-// Decoration between the marker and the bold (emoji such as 🔴 or ⚠️, symbols, punctuation, extra
-// asterisks) is skipped: `[^\p{L}\p{N}]*` consumes everything that is not a letter or digit, so the
-// bold must be the first real content. `  - ดูไฟล์ **app.js**` has words first and stays accepted.
-const INDENTED_BOLD_ITEM = /^\s+([-*+•–・]|\d+[.)])\s+[^\p{L}\p{N}]*\*\*/u;
+// An indented line whose first real content is bold: an item that lost its column-one indentation.
+// Built from parts so each one can be read on its own:
+//   BOLD  -- markdown's two bold markers. `__b__` used to slip through while `**b**` was caught.
+//   DECOR -- what may sit between the start of the line and that bold: emoji (🔴, ⚠️ with its
+//            variation selector), symbols, punctuation, a list marker, extra asterisks. Anything
+//            that is not a letter or a digit, so the bold must be the FIRST REAL content.
+//            `·` is deliberately EXCLUDED: `  · **ให้ทำอะไร:** x` is this repo's legitimate
+//            continuation shape (the label comes after a middle dot) and must keep passing.
+//   ENUM  -- a short enumerator token (`A.`, `(1)`, `iv)`). Skipped as decoration, because
+//            `  - A. **b**` and `  - (1) **b**` are the same lost item; bounded to one letter or
+//            up to three digits so that real words never match and `  - ดูไฟล์ **app.js**`
+//            stays a sub-step.
+// No list marker is required: `  **เตือนเรื่อง superadmin**` was appended to the item above and so
+// inherited its labels / check id, which is the payload-free handoff shape all over again.
+const BOLD = String.raw`(?:\*\*|__)`;
+const DECOR = String.raw`[^\p{L}\p{N}·]*`;
+const ENUM = String.raw`\(?(?:\d{1,3}|[A-Za-z]|[ivxIVX]{1,4})[.)]`;
+const INDENTED_BOLD_ITEM = new RegExp(`^\\s+${DECOR}(?:${ENUM}${DECOR}){0,2}${BOLD}`, 'u');
 
 // Split a section's lines into items. Returns { blocks, problems }: blocks are the items as
 // newline-joined strings; problems lists every line that is none of: a column-one `- ` item, a
 // continuation line of one (indented, including an indented sub-list), or a `>` blockquote line.
 // Blockquote lines are explanation, not content: they are dropped from the blocks.
-function itemsOf(lines) {
+// `firstFileLine`, when given, is the real file line number of lines[0]; problem positions are then
+// reported as real file lines instead of section-relative ones (a red that says "section line 7"
+// with no section name sends the reader counting lines by hand).
+function itemsOf(lines, firstFileLine) {
   const blocks = [];
   const problems = [];
   lines.forEach((l, i) => {
     if (l.trim() === '') return;
-    const at = `section line ${i + 1}`;
+    const at = firstFileLine ? `line ${firstFileLine + i}` : `section line ${i + 1}`;
     if (/^- +\S/.test(l)) { blocks.push([l]); return; }
     if (/^\s*>/.test(l)) return;
     // A list marker is only a problem in column one; indented, it is a sub-list of the item above
@@ -135,8 +204,9 @@ function itemsOf(lines) {
     } else if (/^\s*\|/.test(l)) {
       problems.push(`${at}: table row is not an item: ${snip(l)}`);
     } else if (INDENTED_BOLD_ITEM.test(l)) {
-      // Every item starts with bold text, so an indented marker + bold is an item that lost its
-      // indentation. Attaching it to the item above would hide it from that item's own checks.
+      // Every item starts with bold text, so an indented line whose first real content is bold is
+      // an item that lost its indentation -- with or without a list marker in front of the bold.
+      // Attaching it to the item above would hide it from that item's own checks.
       problems.push(`${at}: an item must start at column one, this one is indented: ${snip(l)}`);
     } else if (!blocks.length) {
       problems.push(`${at}: text before the first item: ${snip(l)}`);
@@ -151,11 +221,44 @@ function itemsOf(lines) {
 
 function firstLine(block) { return block.split('\n')[0]; }
 
-// An item under ## เปิดอยู่ must say which check proves it is still open.
+// The blockquote lines of a section, in order and unchanged. `itemsOf` drops these, so they are the
+// part of a section that no item-level validator ever sees.
+function blockquotesOf(lines) { return lines.filter(l => /^\s*>/.test(l)); }
+
+// `## ส่งต่อรอบหน้า` may hold exactly the standing rubric and nothing else as blockquote prose.
+// Without this, `> รอบหน้าเตือนเรื่อง superadmin` alone gives the section zero items, and
+// "every handoff item carries an action, a source and evidence" passes having inspected nothing.
+function validateHandoffRubric(lines) {
+  const got = blockquotesOf(lines);
+  const same = got.length === HANDOFF_RUBRIC.length && got.every((l, i) => l === HANDOFF_RUBRIC[i]);
+  if (same) return [];
+  return [
+    'the "> " lines under ## ' + SEC_HANDOFF + ' are not exactly the standing rubric. A new handoff'
+    + ' note must be an ITEM with the four fields (bold subject, ' + HANDOFF_LABELS.join(' ')
+    + '), not "> " prose -- blockquote lines are inspected by nothing. If the rubric itself was'
+    + ' reworded on purpose, update HANDOFF_RUBRIC in this test in the same commit.'
+    + `\n       expected ${HANDOFF_RUBRIC.length} line(s):\n         ` + HANDOFF_RUBRIC.join('\n         ')
+    + `\n       got ${got.length} line(s):\n         ` + got.join('\n         '),
+  ];
+}
+
+// An item under ## เปิดอยู่ must say which check proves it is still open -- with exactly one id, so
+// that "which check owns this item" has one answer. Ids are `[a-z0-9]` words joined by single
+// dashes: `[a-z0-9-]+` used to accept a lone `-`.
+const CHECK_LINE = /^[ \t]*·[ \t]*ตรวจ:/;
+const CHECK_ID_LINE = /^[ \t]*·[ \t]*ตรวจ:[ \t]*[a-z0-9]+(?:-[a-z0-9]+)*[ \t]*$/;
 function validateOpenItem(block) {
-  // Horizontal whitespace only: with the `m` flag a plain `\s` would let the id sit on the NEXT line.
-  if (/^[ \t]*·[ \t]*ตรวจ:[ \t]*([a-z0-9-]+)[ \t]*$/m.test(block)) return [];
-  return [`no "· ตรวจ: <id>" line in: ${snip(firstLine(block))}`];
+  const problems = [];
+  // Per line, so the id can never be matched across a newline (a plain `\s` with the `m` flag used
+  // to let the id sit on the NEXT line).
+  const checkLines = block.split('\n').filter(l => CHECK_LINE.test(l));
+  if (!checkLines.some(l => CHECK_ID_LINE.test(l))) {
+    problems.push(`no "· ตรวจ: <id>" line in: ${snip(firstLine(block))}`);
+  }
+  if (checkLines.length > 1) {
+    problems.push(`${checkLines.length} "· ตรวจ:" lines, an item must carry exactly one: ${snip(firstLine(block))}`);
+  }
+  return problems;
 }
 
 // An item under ## ส่งต่อรอบหน้า must be readable from the other machine without the conversation.
@@ -167,7 +270,10 @@ function validateHandoffItem(block) {
     problems.push(`handoff item has no bold subject: ${snip(head)}`);
   } else {
     const bare = subject[1].trim().replace(/[:：]$/, '');
-    if (bare === '' || HANDOFF_LABELS.some(lab => lab === `**${bare}:**`)) {
+    if (bare === '') {
+      // Rejected for being empty, which is not the same defect as being one of the labels.
+      problems.push(`handoff item's bold subject is empty: ${snip(head)}`);
+    } else if (HANDOFF_LABELS.some(lab => lab === `**${bare}:**`)) {
       problems.push(`handoff item's bold subject is a label, not a subject: ${snip(head)}`);
     }
   }
@@ -193,17 +299,44 @@ function validateHandoffItem(block) {
   return problems;
 }
 
-// A closed-index item must be "- **YYYY-MM-DD** — <title>" and the title must be a heading that
-// exists in the closed-work file (headings = that file's `##`..`####` lines).
+// A closed-index item must be "- **YYYY-MM-DD** — <title>", the title must be a heading that
+// exists in the closed-work file (headings = that file's `##`..`####` lines), AND the date must
+// appear in that heading. The date used to be captured and thrown away, so
+// `- **1999-01-01** — ปิดไปแล้ว 2026-10-12 …` passed and the index could point at the wrong day.
+const INDEX_LINE = /^- \*\*(\d{4}-\d{2}-\d{2})\*\* — (.+)$/;
 function validateIndexItem(block, headings) {
-  const m = firstLine(block).match(/^- \*\*(\d{4}-\d{2}-\d{2})\*\* — (.+)$/);
+  const m = firstLine(block).match(INDEX_LINE);
   if (!m) return [`index line is not "- **YYYY-MM-DD** — <title>": ${snip(firstLine(block))}`];
-  const title = m[2].trim();
-  if (!headings.some(h => h.includes(title))) return [`no heading in docs/STATUS_CLOSED.md contains: ${title}`];
+  const [, date, rawTitle] = m;
+  const title = rawTitle.trim();
+  const matching = headings.filter(h => h.includes(title));
+  if (!matching.length) return [`no heading in docs/STATUS_CLOSED.md contains: ${title}`];
+  if (!matching.some(h => h.includes(date))) {
+    return [`the heading this index line points at does not carry its date ${date}: ${snip(matching[0])}`];
+  }
   return [];
 }
 
 function headingsOf(text) { return splitLines(text).filter(l => /^#{2,4} /.test(l)); }
+
+// The other direction, which nothing checked: every `## ` section of the closed-work file must be
+// named by some index line. Append a `## ปิดไปแล้ว 2026-10-13` section with no index line and the
+// work is invisible from STATUS.md -- so it can be proposed again, which is the one failure the
+// index exists to prevent. The file's own `# ` title is not a `## ` heading, so it is not required
+// to be indexed; the sub-headings (`###`) are details of a section and are not required either.
+function validateClosedCoverage(indexBlocks, closedText) {
+  const titles = indexBlocks
+    .map(b => firstLine(b).match(INDEX_LINE))
+    .filter(Boolean)
+    .map(m => m[2].trim());
+  const problems = [];
+  for (const h of topHeadings(closedText)) {
+    if (!titles.some(t => h.includes(t))) {
+      problems.push(`no line in the closed index points at docs/STATUS_CLOSED.md heading: ${snip(h)}`);
+    }
+  }
+  return problems;
+}
 
 // ---------------------------------------------------------------------------------------------
 // 2. Fixture cases (independent of the real files)
@@ -278,6 +411,27 @@ test('fixture: sectionLines needs the heading at column one to start AND to end 
   if (JSON.stringify(trailing) !== JSON.stringify(['- a1'])) throw new Error('trailing whitespace on the heading should be tolerated');
 });
 
+// --- validateHeadings -------------------------------------------------------------------------
+const THREE_HEADINGS = `## ${SEC_HANDOFF}\n## ${SEC_OPEN}\n## ${SEC_CLOSED}\n`;
+test('fixture: validateHeadings accepts the three managed headings, once each', () => {
+  expectClean(validateHeadings('# t\n\n' + THREE_HEADINGS));
+});
+test('fixture: validateHeadings rejects a duplicated heading (the shape a bad merge produces)', () => {
+  expectRejected(validateHeadings('# t\n' + THREE_HEADINGS + `## ${SEC_OPEN}\n`), /occurs 2 times/);
+  // Why it matters: sectionLines takes the FIRST match, so everything under the second heading is
+  // never parsed and never validated -- `- **b**` below has no check id and nothing notices.
+  const dup = `## ${SEC_OPEN}\n- **a**\n  · ตรวจ: id-a\n## ${SEC_CLOSED}\n- x\n## ${SEC_OPEN}\n- **b**\n`;
+  const seen = sectionLines(dup, SEC_OPEN);
+  if (JSON.stringify(seen) !== JSON.stringify(['- **a**', '  · ตรวจ: id-a'])) {
+    throw new Error(`expected only the first section's lines, got ${JSON.stringify(seen)}`);
+  }
+  if (seen.includes('- **b**')) throw new Error('the duplicate section was parsed after all');
+});
+test('fixture: validateHeadings rejects a missing managed heading and a fourth section', () => {
+  expectRejected(validateHeadings(`## ${SEC_HANDOFF}\n## ${SEC_OPEN}\n`), /occurs 0 times/);
+  expectRejected(validateHeadings('# t\n' + THREE_HEADINGS + '## บันทึกเพิ่มเติม\n'), /unexpected "## " heading/);
+});
+
 // --- itemsOf ----------------------------------------------------------------------------------
 test('fixture: itemsOf accepts column-one items with indented continuations and blank lines', () => {
   const r = itemsOf(['- one', '  · detail', '', '- two', '    deeper detail', '']);
@@ -334,6 +488,18 @@ const LOST_INDENT_CASES = [
   ['emoji + bold "- 🔴 **b**"', ['- **a**', '  - 🔴 **b**']],
   ['emoji with variation selector + bold "- ⚠️ **b**"', ['- **a**', '  - ⚠️ **b**']],
   ['numbered emoji + bold "1. 🔴 **b**"', ['- **a**', '  1. 🔴 **b**']],
+  // 2026-10-12: the shapes the earlier rounds still let through.
+  ['bold with NO list marker "  **b**"', ['- **a**', '  · ตรวจ: id-a', '  **เตือนเรื่อง superadmin**']],
+  ['bold with no marker, deeper indent', ['- **a**', '      **b**']],
+  ['bold with no marker under a handoff item', [...GOOD_HANDOFF.split('\n'), '  **b**', '    · **ให้ทำอะไร:** x']],
+  ['bold with no marker in the closed index', ['- **2026-10-12** — A', '  **2026-10-11** — B']],
+  ['emoji + bold with no marker "  🔴 **b**"', ['- **a**', '  🔴 **b**']],
+  ['"__b__" as the bold marker, with no list marker', ['- **a**', '  __b__']],
+  ['"__b__" as the bold marker, after a list marker', ['- **a**', '  - __b__']],
+  ['letter enumerator "- A. **b**"', ['- **a**', '  - A. **b**']],
+  ['parenthesised enumerator "- (1) **b**"', ['- **a**', '  - (1) **b**']],
+  ['roman enumerator "- iv) **b**"', ['- **a**', '  - iv) **b**']],
+  ['enumerator with no list marker "  A. **b**"', ['- **a**', '  A. **b**']],
 ];
 for (const [name, lines] of LOST_INDENT_CASES) {
   test(`fixture: itemsOf rejects an indented ${name} and says it must start at column one`, () => {
@@ -362,8 +528,19 @@ test('fixture: itemsOf still accepts indented sub-steps whose content is not bol
   expectClean(itemsOf(['- **a**', '  1. ทำ **สำคัญ** ก่อน']).problems);
   // bold after real words is a legitimate sub-step, with or without a leading emoji
   expectClean(itemsOf(['- **a**', '  - ดูไฟล์ **app.js**', '  - plain sub-item', '  - 🔴 ดูไฟล์ **app.js**']).problems);
-  // the middle dot used for labels is not a list marker
+  // bold after an enumerator AND real words is still a sub-step: the enumerator alone is decoration
+  expectClean(itemsOf(['- **a**', '  - A) ดูที่ **app.js**', '  1. (ก) ดู **x**', '  - 2. ตรวจ **log**']).problems);
+  // the middle dot used for labels is not a list marker, and it is what makes `· **label:**` legal
   expectClean(itemsOf(['- **a**', '  · **ที่มา:** x']).problems);
+  expectClean(itemsOf(GOOD_HANDOFF.split('\n')).problems);
+  expectClean(itemsOf(GOOD_OPEN.split('\n')).problems);
+  // an indented continuation that merely STARTS with punctuation or a backtick is not an item
+  expectClean(itemsOf(['- **a**', '  `app.js` ถูกแก้แล้ว', '  (ดูรายละเอียดในสเปก)', '  — ท้ายบรรทัด']).problems);
+});
+test('fixture: itemsOf reports real file line numbers when it is told where the section starts', () => {
+  // Finding 8: a red that says "section line 2" with no section name makes the reader count lines.
+  expectRejected(itemsOf(['- ok', 'prose that is not indented'], 41).problems, /^line 42:/);
+  expectRejected(itemsOf(['- ok', 'prose that is not indented']).problems, /^section line 2:/);
 });
 
 const BAD_SHAPES = [
@@ -408,6 +585,23 @@ test('fixture: validateOpenItem rejects an empty id, an upper-case id and a pros
   expectRejected(validateOpenItem('- **x**\n  · ตรวจ:'), /ตรวจ/);
   expectRejected(validateOpenItem('- **x**\n  · ตรวจ: Some_ID'), /ตรวจ/);
   expectRejected(validateOpenItem('- **x**\n  · ตรวจ 2026-10-12 / grep'), /ตรวจ/);
+});
+test('fixture: validateOpenItem rejects an id that is a lone dash or dashes in the wrong places', () => {
+  // `[a-z0-9-]+` admitted a bare `-`, which names no check at all.
+  for (const id of ['-', '--', '-a', 'a-', 'a--b', '-a-']) {
+    expectRejected(validateOpenItem(`- **x**\n  · ตรวจ: ${id}`), /ตรวจ/);
+  }
+  for (const id of ['a', 'id2', 'nas-password-scrubbed', 'superadmin-dryrun-pass-reasons', 'a1-b2-c3']) {
+    expectClean(validateOpenItem(`- **x**\n  · ตรวจ: ${id}`));
+  }
+});
+test('fixture: validateOpenItem rejects an item carrying two check ids', () => {
+  // Two ids and no rule for which one owns the item; the second used to be free.
+  expectRejected(validateOpenItem('- **x**\n  · ตรวจ: id-a\n  · ตรวจ: id-b'), /exactly one/);
+  // a well-formed id plus a malformed second line is still two
+  expectRejected(validateOpenItem('- **x**\n  · ตรวจ: id-a\n  · ตรวจ: -'), /exactly one/);
+  // "ตรวจ <date>" lines (no colon) are the last-checked note, not a check id, so they do not count
+  expectClean(validateOpenItem('- **x**\n  · ตรวจ 2026-10-12 / grep\n  · ตรวจ: id-a'));
 });
 
 // --- validateHandoffItem ----------------------------------------------------------------------
@@ -456,7 +650,33 @@ test('fixture: validateHandoffItem rejects a label-with-content as the subject a
 });
 test('fixture: validateHandoffItem rejects a missing or empty bold subject', () => {
   expectRejected(validateHandoffItem(GOOD_HANDOFF.replace('**ทำแผนที่ 2 ต่อ**', 'ทำแผนที่ 2 ต่อ')), /no bold subject/);
-  expectRejected(validateHandoffItem(GOOD_HANDOFF.replace('**ทำแผนที่ 2 ต่อ**', '** **')), /is a label, not a subject/);
+  // Rejected because it is EMPTY. It used to be reported as "is a label", which it is not.
+  expectRejected(validateHandoffItem(GOOD_HANDOFF.replace('**ทำแผนที่ 2 ต่อ**', '** **')), /bold subject is empty/);
+});
+
+// --- validateHandoffRubric --------------------------------------------------------------------
+test('fixture: validateHandoffRubric accepts exactly the standing rubric, items and blanks aside', () => {
+  expectClean(validateHandoffRubric([...HANDOFF_RUBRIC, '', ...GOOD_HANDOFF.split('\n')]));
+  expectClean(validateHandoffRubric(HANDOFF_RUBRIC));
+});
+test('fixture: validateHandoffRubric rejects a handoff written only as blockquote prose', () => {
+  const note = '> รอบหน้าเตือนเรื่อง superadmin';
+  // The hole: itemsOf accepts this line and produces NO item, so every item-level handoff
+  // assertion passes with nothing inspected. Only the rubric check can see it.
+  const r = itemsOf([note]);
+  expectClean(r.problems);
+  if (r.blocks.length !== 0) throw new Error('expected a blockquote-only section to have no items');
+  expectRejected(validateHandoffRubric([note]), /must be an ITEM/);
+  expectRejected(validateHandoffRubric([...HANDOFF_RUBRIC, '', note]), /must be an ITEM/);
+  expectRejected(validateHandoffRubric([note, '', ...HANDOFF_RUBRIC]), /must be an ITEM/);
+});
+test('fixture: validateHandoffRubric rejects a rubric that is edited, trimmed or reordered', () => {
+  expectRejected(validateHandoffRubric([]), /must be an ITEM/);
+  expectRejected(validateHandoffRubric(HANDOFF_RUBRIC.slice(1)), /must be an ITEM/);
+  expectRejected(validateHandoffRubric(HANDOFF_RUBRIC.map(l => `${l} `)), /must be an ITEM/);
+  expectRejected(validateHandoffRubric([...HANDOFF_RUBRIC].reverse()), /must be an ITEM/);
+  // the message has to tell the reader both ways out, or a red here gets "fixed" by deleting the rule
+  expectRejected(validateHandoffRubric([]), /update HANDOFF_RUBRIC/);
 });
 
 // --- validateIndexItem ------------------------------------------------------------------------
@@ -470,6 +690,32 @@ test('fixture: validateIndexItem rejects a malformed line and a title with no he
   expectRejected(validateIndexItem('- **2026-10-12** — งานที่ไม่มีหัวข้อ', headings), /no heading/);
   expectRejected(validateIndexItem('- **2026-10-12** — ไทล์สถิติ dashboard', []), /no heading/);
 });
+test('fixture: validateIndexItem rejects a date the heading it points at does not carry', () => {
+  // The date was captured and discarded, so an index line could date the work to any day at all.
+  const headings = ['## ปิดไปแล้ว 2026-10-12 — อย่าเสนอซ้ำ', '### 2026-10-12 — ไทล์สถิติ dashboard'];
+  expectRejected(validateIndexItem('- **1999-01-01** — ปิดไปแล้ว 2026-10-12 — อย่าเสนอซ้ำ', headings), /does not carry its date 1999-01-01/);
+  expectRejected(validateIndexItem('- **2026-10-11** — ไทล์สถิติ dashboard', headings), /does not carry its date 2026-10-11/);
+  expectClean(validateIndexItem('- **2026-10-12** — ไทล์สถิติ dashboard', headings));
+  // the date may sit anywhere in the heading, including in brackets at the end
+  expectClean(validateIndexItem('- **2026-10-11** — กฎพิกัด — ตรวจบางส่วน (2026-10-11)', ['## กฎพิกัด — ตรวจบางส่วน (2026-10-11)']));
+});
+
+// --- validateClosedCoverage -------------------------------------------------------------------
+test('fixture: validateClosedCoverage accepts a closed file whose every "## " section is indexed', () => {
+  const closed = '# title\n\n## ปิดไปแล้ว 2026-10-12 — อย่าเสนอซ้ำ\n### ✅ a detail heading\n- x\n';
+  expectClean(validateClosedCoverage(['- **2026-10-12** — ปิดไปแล้ว 2026-10-12 — อย่าเสนอซ้ำ'], closed));
+});
+test('fixture: validateClosedCoverage rejects a "## " section that no index line points at', () => {
+  // Appending a section with no index line leaves STATUS.md silent about it, so the work can be
+  // proposed again -- the one failure the index exists to prevent.
+  const closed = '# title\n## ปิดไปแล้ว 2026-10-12 — อย่าเสนอซ้ำ\n## ปิดไปแล้ว 2026-10-13 — อย่าเสนอซ้ำ\n';
+  const index = ['- **2026-10-12** — ปิดไปแล้ว 2026-10-12 — อย่าเสนอซ้ำ'];
+  expectRejected(validateClosedCoverage(index, closed), /2026-10-13/);
+  expectClean(validateClosedCoverage([...index, '- **2026-10-13** — ปิดไปแล้ว 2026-10-13 — อย่าเสนอซ้ำ'], closed));
+  // an empty index leaves every section uncovered; a malformed index line covers nothing
+  expectRejected(validateClosedCoverage([], closed), /no line in the closed index/);
+  expectRejected(validateClosedCoverage(['- 2026-10-12 ปิดไปแล้ว 2026-10-12 — อย่าเสนอซ้ำ'], closed), /no line in the closed index/);
+});
 
 // ---------------------------------------------------------------------------------------------
 // 3. The real files (all green; a red here means STATUS.md drifted from the shape above)
@@ -478,11 +724,13 @@ test('fixture: validateIndexItem rejects a malformed line and a title with no he
 function realStatus() { return fs.readFileSync(STATUS_PATH, 'utf8'); }
 
 // Managed-section items for the real file; throws if the section's lines have an unrecognised shape.
+// Problems name their section and their real file line, so a red can be acted on without counting.
 function realItems(title) {
-  const lines = sectionLines(realStatus(), title);
+  const text = realStatus();
+  const lines = sectionLines(text, title);
   if (lines === null) return [];
-  const r = itemsOf(lines);
-  expectClean(r.problems);
+  const r = itemsOf(lines, sectionFirstLine(text, title));
+  expectClean(r.problems.map(p => `## ${title}: ${p}`));
   return r.blocks;
 }
 
@@ -492,17 +740,23 @@ test('STATUS.md stays small enough to read in one pass', () => {
 
 test('the three required sections are present', () => {
   const text = realStatus();
-  for (const t of [SEC_HANDOFF, SEC_OPEN, SEC_CLOSED]) {
+  for (const t of MANAGED_SECTIONS) {
     if (sectionLines(text, t) === null) throw new Error(`missing section: ## ${t}`);
   }
+});
+
+test('each managed heading occurs exactly once and there is no fourth "## " section', () => {
+  expectClean(validateHeadings(realStatus()));
 });
 
 test('every line in the three sections is a valid item or a continuation of one', () => {
   const text = realStatus();
   const problems = [];
-  for (const t of [SEC_HANDOFF, SEC_OPEN, SEC_CLOSED]) {
+  for (const t of MANAGED_SECTIONS) {
     const lines = sectionLines(text, t);
-    if (lines !== null) problems.push(...itemsOf(lines).problems.map(p => `## ${t}: ${p}`));
+    if (lines !== null) {
+      problems.push(...itemsOf(lines, sectionFirstLine(text, t)).problems.map(p => `## ${t}: ${p}`));
+    }
   }
   expectClean(problems);
 });
@@ -517,11 +771,23 @@ test('every handoff item carries an action, a source and evidence', () => {
   for (const block of realItems(SEC_HANDOFF)) expectClean(validateHandoffItem(block));
 });
 
-test('every closed-index line points at a heading that exists', () => {
+test('the handoff section holds the standing rubric and no other "> " prose', () => {
+  const lines = sectionLines(realStatus(), SEC_HANDOFF);
+  if (lines === null) throw new Error(`missing section: ## ${SEC_HANDOFF}`);
+  expectClean(validateHandoffRubric(lines));
+});
+
+test('every closed-index line points at a heading that exists and carries its date', () => {
   const index = realItems(SEC_CLOSED);
   if (index.length === 0) throw new Error('the closed index is empty -- "do not propose this again" has no teeth');
   const headings = headingsOf(fs.readFileSync(CLOSED_PATH, 'utf8'));
   for (const block of index) expectClean(validateIndexItem(block, headings));
+});
+
+test('every "## " section of docs/STATUS_CLOSED.md is named by a closed-index line', () => {
+  const closed = fs.readFileSync(CLOSED_PATH, 'utf8');
+  if (topHeadings(closed).length === 0) throw new Error('docs/STATUS_CLOSED.md has no "## " section -- the parser or the file is wrong');
+  expectClean(validateClosedCoverage(realItems(SEC_CLOSED), closed));
 });
 
 console.log(`status-structure: ${passed} passed, ${failed} failed`);
