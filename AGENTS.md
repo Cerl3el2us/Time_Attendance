@@ -25,9 +25,11 @@ SessionStart hook. `superpowers` and `playwright` are the two that actually matt
 
 **2. Read `STATUS.md` in this folder before saying anything about what is or is not pending.**
 It is the answer to "what is the other machine in the middle of?" — open work travels with the
-code, not in Claude's memory, and not in `MEMORY.md`. Never answer that you do not know. Its first
-section repeats these two steps, and every entry records when it was last checked against real
-code, because an entry you do not re-verify is how a finished job gets reopened.
+code, not in Claude's memory, and not in `MEMORY.md`. Never answer that you do not know. It holds
+three sections: `## ส่งต่อรอบหน้า` (items handed to the next session), `## เปิดอยู่` and
+`## ปิดแล้ว (สารบัญ)`; details of closed work are in `docs/STATUS_CLOSED.md`. Every entry records
+when it was last checked against real code, because an entry you do not re-verify is how a
+finished job gets reopened.
 
 ---
 
