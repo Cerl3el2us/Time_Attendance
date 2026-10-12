@@ -20,7 +20,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const {
-  CHECKS, checkBacklogCommand, checkSyncPushFalseSuccess, applyOwnerGate, guarded, readSyncPatterns,
+  CHECKS, checkSyncPushFalseSuccess, applyOwnerGate, guarded, readSyncPatterns,
 } = require('../scripts/lib/backlog-checks');
 
 let passed = 0;
@@ -363,54 +363,6 @@ test('sync evidence: the DIRTY count is never compared with the sum of the four 
 test('readSyncPatterns: reads the quoted patterns, skips commented ones, null when absent', () => {
   assert.deepStrictEqual(readSyncPatterns(syncDir('patterns')), ['feedback_attendance*.md', 'MEMORY.md']);
   assert.strictEqual(readSyncPatterns(path.join(BASE, 'no-such-folder')), null);
-});
-
-// ---------------------------------------------------------------------------------------------
-// backlog-command
-// ---------------------------------------------------------------------------------------------
-const PKG = '{\n  "name": "x",\n  "scripts": {\n    "test": "t",\n    "backlog": "node scripts/backlog.js"\n  }\n}\n';
-function rootWith(name, { script = 'console.log(1);\n', pkg = PKG, cmd = '# backlog\n' } = {}) {
-  const d = dirFor(name);
-  // Files are overwritten, never removed, so a missing deliverable is a name nobody writes: each
-  // case below uses its own folder.
-  if (script !== null) put(d, 'scripts/backlog.js', script);
-  if (pkg !== null) put(d, 'package.json', pkg);
-  if (cmd !== null) put(d, '.claude/commands/backlog.md', cmd);
-  return d;
-}
-
-test('backlog-command: all three missing is FAIL naming each of them', () => {
-  const r = checkBacklogCommand(rootWith('bc-none', { script: null, pkg: '{"scripts":{}}', cmd: null }));
-  assert.strictEqual(r.verdict, 'FAIL');
-  for (const s of ['scripts/backlog.js does not exist', 'no "backlog" entry', '.claude/commands/backlog.md does not exist']) {
-    assert.ok(r.evidence.includes(s), `${s} missing from: ${r.evidence}`);
-  }
-});
-
-test('backlog-command: any one of the three missing is FAIL', () => {
-  assert.strictEqual(checkBacklogCommand(rootWith('bc-no-script', { script: null })).verdict, 'FAIL');
-  assert.strictEqual(checkBacklogCommand(rootWith('bc-no-entry', { pkg: '{"scripts":{"test":"t"}}' })).verdict, 'FAIL');
-  assert.strictEqual(checkBacklogCommand(rootWith('bc-no-cmd', { cmd: null })).verdict, 'FAIL');
-});
-
-test('backlog-command: an empty script, or an entry that does not run it, is FAIL', () => {
-  assert.strictEqual(checkBacklogCommand(rootWith('bc-empty', { script: '' })).verdict, 'FAIL');
-  const echo = checkBacklogCommand(rootWith('bc-echo', { pkg: PKG.replace('node scripts/backlog.js', 'echo hi') }));
-  assert.strictEqual(echo.verdict, 'FAIL');
-  assert.ok(echo.evidence.includes('does not run scripts/backlog.js'), echo.evidence);
-});
-
-test('backlog-command: PASS only with all three, citing the real package.json line of the key', () => {
-  const r = checkBacklogCommand(rootWith('bc-all'));
-  assert.strictEqual(r.verdict, 'PASS', r.evidence);
-  const want = PKG.split('\n').findIndex(l => l.includes('"backlog"')) + 1;
-  assert.ok(r.evidence.includes(`package.json:${want} `), `expected package.json:${want} in: ${r.evidence}`);
-  assert.ok(r.evidence.includes('scripts/backlog.js exists') && r.evidence.includes('.claude/commands/backlog.md exists'), r.evidence);
-});
-
-test('backlog-command: a package.json that is not JSON is NOT-VERIFIED, not a throw', () => {
-  const r = checkBacklogCommand(rootWith('bc-badjson', { pkg: '{ not json' }));
-  assert.strictEqual(r.verdict, 'NOT-VERIFIED');
 });
 
 console.log(`backlog-checks: ${passed} passed, ${failed} failed`);

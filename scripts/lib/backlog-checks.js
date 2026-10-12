@@ -47,70 +47,10 @@ const lines = (...parts) => parts.join('\n');
 const errText = e => (e && e.message ? e.message : String(e));
 // Console-safe: a quoted line of code may carry Thai in a trailing comment.
 const ascii = s => String(s).replace(/[^\x20-\x7e]/g, '?');
-const isFile = p => { try { return fs.statSync(p).isFile(); } catch (e) { return false; } };
-const sizeOf = p => { try { return fs.statSync(p).size; } catch (e) { return 0; } };
 // 2026-10-12 (review): sync.log on the NAS starts with a byte-order mark. `^(\S+)` does not match
 // U+FEFF, so a log whose only DIRTY run was line 1 read as "no DIRTY run". Strip it from every text
 // this file parses.
 const readText = p => fs.readFileSync(p, 'utf8').replace(/^\uFEFF/, '');
-
-// ---------------------------------------------------------------------------------------------
-// backlog-command: this feature's own deliverables
-// ---------------------------------------------------------------------------------------------
-// The item is the piece of work that builds this very command, so the check looks for what the
-// work is supposed to leave behind. It reports FAIL, honestly, until all three exist. The task that
-// closes the item deletes the STATUS.md entry and this check in the same commit.
-function checkBacklogCommand(root = ROOT) {
-  const scriptRel = 'scripts/backlog.js';
-  const cmdRel = '.claude/commands/backlog.md';
-  const pkgRel = 'package.json';
-  const scriptPath = path.join(root, 'scripts', 'backlog.js');
-  const cmdPath = path.join(root, '.claude', 'commands', 'backlog.md');
-  const pkgPath = path.join(root, 'package.json');
-
-  const hasScript = isFile(scriptPath);
-  const scriptBytes = sizeOf(scriptPath);
-  const hasCmd = isFile(cmdPath);
-
-  let entry = null;       // the value of scripts.backlog, or null when there is none
-  let entryLine = null;
-  try {
-    const text = readText(pkgPath);
-    const scripts = JSON.parse(text).scripts;
-    if (scripts && typeof scripts === 'object' && Object.prototype.hasOwnProperty.call(scripts, 'backlog')) {
-      entry = String(scripts.backlog);
-      // The line of the `"backlog"` key inside the scripts block (not any other mention of the word).
-      const all = text.split(/\r?\n/);
-      const from = all.findIndex(l => /^\s*"scripts"\s*:/.test(l));
-      const at = from === -1 ? -1 : all.findIndex((l, i) => i > from && /^\s*"backlog"\s*:/.test(l));
-      if (at !== -1) entryLine = at + 1;
-    }
-  } catch (e) {
-    return { verdict: 'NOT-VERIFIED', evidence: `${pkgRel} could not be read as JSON: ${errText(e)}` };
-  }
-
-  // 2026-10-12 (review): existence alone passed an empty scripts/backlog.js wired to
-  // `"backlog": "echo hi"`. The script must have content and the package.json entry must run it.
-  const missing = [];
-  if (!hasScript) missing.push(`${scriptRel} does not exist`);
-  else if (scriptBytes === 0) missing.push(`${scriptRel} is empty`);
-  if (entry === null) missing.push(`${pkgRel} has no "backlog" entry in its "scripts" block`);
-  else if (!entry.includes(scriptRel)) missing.push(`${pkgRel} "backlog" script is ${JSON.stringify(entry)}, which does not run ${scriptRel}`);
-  if (!hasCmd) missing.push(`${cmdRel} does not exist`);
-  if (missing.length) {
-    return { verdict: 'FAIL', evidence: `${missing.length} of 3 deliverables missing or unusable: ${missing.join('; ')}` };
-  }
-  if (entryLine === null) {
-    return { verdict: 'NOT-VERIFIED', evidence: `${pkgRel} has a "backlog" script but its line could not be located, so there is nothing to cite` };
-  }
-  return {
-    verdict: 'PASS',
-    evidence: lines(
-      `${pkgRel}:${entryLine} "backlog": ${JSON.stringify(entry)}`,
-      `${scriptRel} exists (${scriptBytes} bytes)`,
-      `${cmdRel} exists`),
-  };
-}
 
 // ---------------------------------------------------------------------------------------------
 // sync-push-false-success: the automatic memory push can report success while copying nothing
@@ -367,10 +307,6 @@ function checkSyncPushFalseSuccess(dir = NAS_MEMORY_DIR) {
 // The registry
 // ---------------------------------------------------------------------------------------------
 const RAW_CHECKS = {
-  'backlog-command': {
-    describe: 'The command that checks this backlog: scripts/backlog.js (non-empty), a "backlog" script in package.json that runs it, and .claude/commands/backlog.md must all exist.',
-    run: () => checkBacklogCommand(),
-  },
   'sync-push-false-success': {
     describe: 'Whether the automatic memory push (sync_if_dirty.ps1) can still write its clean marker after copying nothing: reads its success decision, the marker write and the latest sync.log run on the NAS; FAIL only while the known old shape of that code is still there, and it reads nothing but those three places, so a fix made elsewhere in the script, or nested inside the guard block, would not be seen.',
     run: () => checkSyncPushFalseSuccess(),
@@ -434,6 +370,6 @@ for (const id of Object.keys(RAW_CHECKS)) CHECKS[id] = guarded(id, RAW_CHECKS[id
 // fixtures; `npm run backlog` itself only reads CHECKS. readSyncPatterns and wildcardToRegExp are
 // exported for the sync-health block, which needs the same pattern list.
 module.exports = {
-  CHECKS, checkBacklogCommand, checkSyncPushFalseSuccess, applyOwnerGate, guarded,
+  CHECKS, checkSyncPushFalseSuccess, applyOwnerGate, guarded,
   readSyncPatterns, wildcardToRegExp,
 };

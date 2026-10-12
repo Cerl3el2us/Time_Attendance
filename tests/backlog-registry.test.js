@@ -242,20 +242,21 @@ function realStatus() {
   return parseStatus(text);
 }
 
-// The truncation case on the real file: the first handoff item's action starts "start with 3
-// commands" and the commands live on continuation lines. Each substring below sits on a LATER line
-// than the label, so this goes red the moment a field is cut back to its first line.
+// The truncation case on the real file: the first handoff item's action is a short first line and
+// the steps live on continuation lines. Each substring below sits on a LATER line than the label,
+// so this goes red the moment a field is cut back to its first line. (Reworded 2026-10-13 when the
+// handoff section was rewritten: these strings pin whatever the first item says, not the old plan.)
 test('parse (real STATUS.md): the first handoff item keeps the text on its continuation lines', () => {
   const { handoff } = realStatus();
   assert.ok(handoff.length >= 1, 'STATUS.md has no handoff item, so there is nothing to read');
   const f = handoff[0].fields;
   assert.ok(f.action.includes('`npm run check`'), `action lost its (2) command: ${f.action}`);
-  assert.ok(f.action.includes('36/36 test files passed'), `action lost the stop-and-report condition: ${f.action}`);
-  assert.ok(f.action.includes('(3) '), `action lost its third command: ${f.action}`);
-  assert.ok(f.source.includes('ให้ถามเฉพาะเรื่อง'), `source lost its second line: ${f.source}`);
-  assert.ok(f.evidence.includes('git log --oneline main'), `evidence lost its second line: ${f.evidence}`);
+  assert.ok(f.action.includes('หยุดและรายงาน'), `action lost the stop-and-report condition: ${f.action}`);
+  assert.ok(f.action.includes('`scripts/status.js`'), `action lost its last line: ${f.action}`);
+  assert.ok(f.source.includes('จึงเป็นการตัดสินใจของเจ้าของ'), `source lost its second line: ${f.source}`);
+  assert.ok(f.evidence.includes('ปลายสุดคือ commit'), `evidence lost its second line: ${f.evidence}`);
   // and it still stops where the next label begins
-  assert.ok(!f.action.includes('เจ้าของสั่ง 2026-10-12 ว่า'), `action swallowed the source field: ${f.action}`);
+  assert.ok(!f.action.includes('เจ้าของสั่ง 2026-10-12 ให้ทำแผนที่ 3'), `action swallowed the source field: ${f.action}`);
 });
 
 // Own properties only: an id such as `constructor` or `toString` is "in" every object, so `in` or a
