@@ -282,21 +282,67 @@ function realStatus() {
   return parseStatus(text);
 }
 
-// The truncation case on the real file: the first handoff item's action is a short first line and
-// the steps live on continuation lines. Each substring below sits on a LATER line than the label,
-// so this goes red the moment a field is cut back to its first line. (Reworded 2026-10-13 when the
-// handoff section was rewritten: these strings pin whatever the first item says, not the old plan.)
+// The truncation case on the real file. Earlier versions of this case pinned literal prose from the
+// first handoff item, and it went red twice (2026-10-13) when that item was rewritten -- a failure
+// that taught nothing about the parser and pushed whoever hit it to repoint the strings. So the
+// expectation is now DERIVED from the file: find the source lines of each field of the first item,
+// and require the parsed field to still carry a word from its LAST line. That is the rule that
+// matters ("a field is not cut back to its first line") and it survives any rewording.
+const FIELD_LABELS = [['action', 'ให้ทำอะไร'], ['source', 'ที่มา'], ['evidence', 'หลักฐาน']];
+
+// Source lines of the first handoff item, grouped by the field they belong to.
+function firstHandoffFieldLines(text) {
+  const lines = text.split(/\r?\n/);
+  const from = lines.findIndex(l => /^## ส่งต่อรอบหน้า\s*$/.test(l));
+  if (from < 0) throw new Error('STATUS.md has no "## ส่งต่อรอบหน้า" section');
+  const head = lines.findIndex((l, i) => i > from && /^- \*\*/.test(l));
+  if (head < 0) throw new Error('STATUS.md has no handoff item to read');
+  const out = {};
+  let cur = null;
+  for (let i = head; i < lines.length; i++) {
+    const l = lines[i];
+    if (i > head && (/^- \*\*/.test(l) || /^## /.test(l) || /^---/.test(l))) break;
+    const hit = FIELD_LABELS.find(([, th]) => l.includes(`**${th}:**`));
+    if (hit) { cur = hit[0]; out[cur] = [l.slice(l.indexOf(`**${hit[1]}:**`))]; continue; }
+    if (cur && l.trim() && !/^\s*>/.test(l)) out[cur].push(l);
+  }
+  return out;
+}
+
+// The longest bare word on a line, used as the needle. A single token cannot be broken by the
+// parser's whitespace collapsing, the way a multi-word slice could.
+const longestWord = (line) => (line.replace(/[*·]/g, ' ').match(/\S{6,}/g) || [])
+  .sort((a, b) => b.length - a.length)[0] || null;
+
 test('parse (real STATUS.md): the first handoff item keeps the text on its continuation lines', () => {
-  const { handoff } = realStatus();
+  const text = fs.readFileSync(STATUS_PATH, 'utf8');
+  const { handoff } = parseStatus(text);
   assert.ok(handoff.length >= 1, 'STATUS.md has no handoff item, so there is nothing to read');
   const f = handoff[0].fields;
-  assert.ok(f.action.includes('`npm run check`'), `action lost its (2) command: ${f.action}`);
-  assert.ok(f.action.includes('หยุดและรายงาน'), `action lost the stop-and-report condition: ${f.action}`);
-  assert.ok(f.action.includes('`scripts/status.js`'), `action lost its last line: ${f.action}`);
-  assert.ok(f.source.includes('จึงเป็นการตัดสินใจของเจ้าของ'), `source lost its second line: ${f.source}`);
-  assert.ok(f.evidence.includes('ปลายสุดคือ commit'), `evidence lost its second line: ${f.evidence}`);
-  // and it still stops where the next label begins
-  assert.ok(!f.action.includes('เจ้าของสั่ง 2026-10-12 ให้ทำแผนที่ 3'), `action swallowed the source field: ${f.action}`);
+  const src = firstHandoffFieldLines(text);
+
+  let checked = 0;
+  for (const [name] of FIELD_LABELS) {
+    const own = src[name] || [];
+    assert.ok(own.length >= 1, `STATUS.md's first handoff item has no **${name}** field`);
+    if (own.length < 2) continue;                       // single-line field proves nothing here
+    const needle = longestWord(own[own.length - 1]);
+    assert.ok(needle, `could not find a word to look for on the last line of ${name}: ${own[own.length - 1]}`);
+    assert.ok(f[name].includes(needle),
+      `${name} lost its last line: "${needle}" is in STATUS.md but not in the parsed field: ${f[name]}`);
+    checked++;
+  }
+  // If no field spans more than one line, this case is no longer exercising truncation at all, and a
+  // green result here would be false comfort.
+  assert.ok(checked >= 1,
+    'no field of the first handoff item spans more than one line, so this case proves nothing -- ' +
+    'give the item a multi-line field, or delete this case and say why');
+
+  // And a field still stops where the next label begins: swallowing one would drag the next label's
+  // own text in with it. (If a field ever legitimately contains the text "ที่มา:", rename the label
+  // rather than loosening this.)
+  assert.ok(!f.action.includes('ที่มา:'), `action swallowed the source field: ${f.action}`);
+  assert.ok(!f.source.includes('หลักฐาน:'), `source swallowed the evidence field: ${f.source}`);
 });
 
 // Own properties only: an id such as `constructor` or `toString` is "in" every object, so `in` or a
