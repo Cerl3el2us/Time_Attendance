@@ -199,11 +199,12 @@ const INDENTED_BOLD_ITEM = new RegExp(`^\\s+${DECOR}(?:${ENUM}${DECOR}){0,2}${BO
 // with no section name sends the reader counting lines by hand).
 function itemsOf(lines, firstFileLine) {
   const blocks = [];
+  const starts = []; // real file line of each block's first line; null when the caller gave no start
   const problems = [];
   lines.forEach((l, i) => {
     if (l.trim() === '') return;
     const at = firstFileLine ? `line ${firstFileLine + i}` : `section line ${i + 1}`;
-    if (/^- +\S/.test(l)) { blocks.push([l]); return; }
+    if (/^- +\S/.test(l)) { blocks.push([l]); starts.push(firstFileLine ? firstFileLine + i : null); return; }
     if (/^\s*>/.test(l)) return;
     // A list marker is only a problem in column one; indented, it is a sub-list of the item above
     // (and is caught below as "before the first item" if there is no item above).
@@ -224,7 +225,7 @@ function itemsOf(lines, firstFileLine) {
       blocks[blocks.length - 1].push(l);
     }
   });
-  return { blocks: blocks.map(b => b.join('\n')), problems };
+  return { blocks: blocks.map(b => b.join('\n')), starts, problems };
 }
 
 function firstLine(block) { return block.split('\n')[0]; }
@@ -303,8 +304,63 @@ function validateOpenItem(block) {
   return problems;
 }
 
+// One check id belongs to one open item. scripts/lib/backlog-status.js (parseStatus) throws on a
+// second item that reuses an id: the registry is keyed by id and the owner gate looks an item up by
+// id, so two items sharing one would each be answered with the first item's text. That throw costs
+// the whole `npm run backlog` report (HANDOFF and OPEN both print "NOT READ"), so the guard that
+// governs the document says it first. `starts` are the real file lines of the blocks (itemsOf), so
+// the message can name both lines; without them the position in the list is named instead.
+// Only a well-formed id counts (a malformed one is validateOpenItem's complaint), and an item with
+// two "· ตรวจ:" lines is validateOpenItem's complaint too, so only the first id of an item is read.
+function validateUniqueCheckIds(blocks, starts) {
+  const problems = [];
+  const seen = new Map(); // id -> where the first item using it starts
+  blocks.forEach((block, n) => {
+    const where = starts && starts[n] ? `line ${starts[n]}` : `open item ${n + 1}`;
+    const idLine = block.split('\n').find(l => CHECK_ID_LINE.test(l));
+    if (!idLine) return;
+    const id = idLine.match(/ตรวจ:[ \t]*(\S+)/)[1];
+    if (seen.has(id)) {
+      problems.push(`${where}: check id "${id}" is already used by the item at ${seen.get(id)}; one id may belong to only one item (npm run backlog refuses to read STATUS.md otherwise): ${snip(firstLine(block))}`);
+    } else {
+      seen.set(id, where);
+    }
+  });
+  return problems;
+}
+
+// Text that belongs to no field. parseStatus (scripts/lib/backlog-status.js, readFields) reads a
+// handoff field as the text after its label, so words that come BEFORE the item's first label are
+// attached to nothing; rather than drop them it throws, and that throw costs the whole `npm run
+// backlog` report. Two shapes, both found by the 2026-10-13 re-review of a9403d3 against fixtures
+// this test used to accept:
+//   - the head line carries text after its bold subject:  `- **หัวข้อ** (2026-10-13)`
+//   - a continuation line before the first label carries text:  `  · อธิบายก่อน`
+// Same split as readFields: every line is cut at the three labels and piece 0 is what precedes the
+// first label on that line. Once a label has been seen, later lines belong to that field.
+const LABEL_SPLIT = new RegExp('(' + HANDOFF_LABELS.map(l => l.replace(/[*]/g, '\\$&')).join('|') + ')');
+const HAS_CONTENT = /[\p{L}\p{N}]/u;
+function validateHandoffStray(block, firstFileLine) {
+  const problems = [];
+  const lines = block.split('\n');
+  if (!/^- \*\*(.+?)\*\*/.test(lines[0])) return problems; // "no bold subject" is reported on its own
+  let seenLabel = false;
+  for (let i = 0; i < lines.length && !seenLabel; i++) {
+    const before = lines[i].split(LABEL_SPLIT)[0];
+    if (lines[i].split(LABEL_SPLIT).length > 1) seenLabel = true;
+    const stray = i === 0 ? before.replace(/^- +\*\*.+?\*\*/, '') : before;
+    if (!HAS_CONTENT.test(stray)) continue;
+    const at = firstFileLine ? `line ${firstFileLine + i}` : `line ${i + 1} of the item`;
+    problems.push(i === 0
+      ? `${at}: text after the bold subject on the head line would be dropped by npm run backlog (it refuses to read STATUS.md): ${snip(stray)}`
+      : `${at}: text before the item's first field label would be dropped by npm run backlog (it refuses to read STATUS.md): ${snip(stray)}`);
+  }
+  return problems;
+}
+
 // An item under ## ส่งต่อรอบหน้า must be readable from the other machine without the conversation.
-function validateHandoffItem(block) {
+// `firstFileLine` (optional) is the real file line of the item's first line, for the stray-text messages.
+function validateHandoffItem(block, firstFileLine) {
   const problems = [];
   const head = firstLine(block);
   const subject = head.match(/^- \*\*(.+?)\*\*/);
@@ -338,6 +394,7 @@ function validateHandoffItem(block) {
       problems.push(`handoff item has no content after ${label}: ${snip(head)}`);
     }
   }
+  problems.push(...validateHandoffStray(block, firstFileLine));
   return problems;
 }
 
@@ -783,6 +840,87 @@ test('fixture: validateHandoffItem rejects a missing or empty bold subject', () 
   expectRejected(validateHandoffItem(GOOD_HANDOFF.replace('**ทำแผนที่ 2 ต่อ**', '** **')), /bold subject is empty/);
 });
 
+// --- the three rules parseStatus enforces (re-review of a9403d3) -----------------------------------
+// Each fixture below was ACCEPTED by this test before the rules existed and makes
+// scripts/lib/backlog-status.js throw, which turns `npm run backlog` into "HANDOFF -- NOT READ" /
+// "OPEN -- NOT READ" and `npm run check` red through backlog-registry. A guard that is looser than
+// the reader it governs lets someone edit STATUS.md, see this file green, and lose the report.
+test('fixture: validateHandoffItem rejects text after the bold subject on the head line', () => {
+  const dated = GOOD_HANDOFF.replace('**ทำแผนที่ 2 ต่อ**', '**ทำแผนที่ 2 ต่อ** (2026-10-13)');
+  expectRejected(validateHandoffItem(dated), /^line 1 of the item: text after the bold subject on the head line/);
+  expectRejected(validateHandoffItem(dated, 31), /^line 31: text after the bold subject/);
+  // the text may sit between the subject and the first label of the same line too
+  const sameLine = '- **หัวข้อ** ดูข้างล่าง **ให้ทำอะไร:** ทำข้อ 4\n  · **ที่มา:** เจ้าของสั่ง\n  · **หลักฐาน:** git log';
+  expectRejected(validateHandoffItem(sameLine), /text after the bold subject/);
+  // bare punctuation is not text (the same test the field contents use)
+  expectClean(validateHandoffItem(GOOD_HANDOFF.replace('**ทำแผนที่ 2 ต่อ**', '**ทำแผนที่ 2 ต่อ** ·')));
+});
+test('fixture: validateHandoffItem rejects text before the first field label on a continuation line', () => {
+  const lead = [
+    '- **หัวข้อ**',
+    '  · อธิบายก่อนว่าทำไม',
+    '  · **ให้ทำอะไร:** ทำข้อ 4',
+    '  · **ที่มา:** เจ้าของสั่ง',
+    '  · **หลักฐาน:** git log',
+  ].join('\n');
+  expectRejected(validateHandoffItem(lead), /^line 2 of the item: text before the item's first field label/);
+  expectRejected(validateHandoffItem(lead, 40), /^line 41: text before the item's first field label/);
+  // on the label's own line, before the label
+  const sameLine = GOOD_HANDOFF.replace('  · **ให้ทำอะไร:**', '  · อธิบายก่อน **ให้ทำอะไร:**');
+  expectRejected(validateHandoffItem(sameLine), /text before the item's first field label/);
+  // after the first label, free text belongs to that field and is fine
+  expectClean(validateHandoffItem(GOOD_HANDOFF.replace('git log --oneline', 'git log --oneline\n    ต่อบรรทัดที่สอง')));
+});
+test('fixture: validateUniqueCheckIds rejects a second open item that reuses an id, naming both lines', () => {
+  const a = '- **a**\n  · ตรวจ: id-one';
+  const b = '- **b**\n  · ตรวจ: id-two';
+  const c = '- **c**\n  · รอเจ้าของ: อะไรบางอย่าง\n  · ตรวจ: id-one';
+  expectClean(validateUniqueCheckIds([a, b], [10, 14]));
+  expectClean(validateUniqueCheckIds([a, '- **d**\n  · รอเจ้าของ: x', '- **e**\n  · รอเจ้าของ: x'], [10, 14, 16]));
+  expectRejected(validateUniqueCheckIds([a, b, c], [10, 14, 18]), /^line 18: check id "id-one" is already used by the item at line 10/);
+  expectRejected(validateUniqueCheckIds([a, b, c]), /^open item 3: check id "id-one" is already used by the item at open item 1/);
+});
+
+// The three fixtures as whole documents: parseStatus must refuse each AND this file's validators must
+// refuse it first. Fails if either side drifts (a validator loosened, or parseStatus gaining a rule
+// that nothing here knows about for these shapes).
+const { parseStatus } = require('../scripts/lib/backlog-status');
+function documentProblems(text) {
+  const problems = [];
+  for (const t of [SEC_HANDOFF, SEC_OPEN]) {
+    const lines = sectionLines(text, t);
+    const r = itemsOf(lines, sectionFirstLine(text, t));
+    problems.push(...r.problems);
+    if (t === SEC_HANDOFF) r.blocks.forEach((b, n) => problems.push(...validateHandoffItem(b, r.starts[n])));
+    else {
+      r.blocks.forEach(b => problems.push(...validateOpenItem(b)));
+      problems.push(...validateUniqueCheckIds(r.blocks, r.starts));
+    }
+  }
+  return problems;
+}
+const docOf = (handoff, open) => `## ${SEC_HANDOFF}\n\n${handoff}\n\n## ${SEC_OPEN}\n\n${open}\n\n## ${SEC_CLOSED}\n`;
+const REFUSED_BY_PARSER = [
+  ['text after the bold subject', docOf(GOOD_HANDOFF.replace('**ทำแผนที่ 2 ต่อ**', '**ทำแผนที่ 2 ต่อ** (2026-10-13)'), GOOD_OPEN), /after the bold subject/],
+  ['text before the first label', docOf(GOOD_HANDOFF.replace('  · **ให้ทำอะไร:**', '  · อธิบายก่อน\n  · **ให้ทำอะไร:**'), GOOD_OPEN), /before the item's first field label/],
+  ['a check id used by two open items', docOf(GOOD_HANDOFF, GOOD_OPEN + '\n' + GOOD_OPEN.replace('ข้อความโหมดซ้อม', 'ข้อความที่สอง')), /already used by the item at line/],
+];
+test('fixture: the well-formed document is accepted by the validators and by parseStatus', () => {
+  const ok = docOf(GOOD_HANDOFF, GOOD_OPEN);
+  expectClean(documentProblems(ok));
+  parseStatus(ok);
+});
+for (const [name, doc, reason] of REFUSED_BY_PARSER) {
+  test(`fixture: ${name} is refused by parseStatus and by the validators, with the line named`, () => {
+    let threw = null;
+    try { parseStatus(doc); } catch (e) { threw = e; }
+    if (!threw) throw new Error('parseStatus accepted it, so this fixture no longer shows a parse rule');
+    const problems = documentProblems(doc);
+    expectRejected(problems, reason);
+    if (!problems.some(p => /^line \d+:/.test(p))) throw new Error('no problem names a file line: ' + problems.join(' | '));
+  });
+}
+
 // --- validateHandoffRubric --------------------------------------------------------------------
 test('fixture: validateHandoffRubric accepts exactly the standing rubric, items and blanks aside', () => {
   expectClean(validateHandoffRubric([...HANDOFF_RUBRIC, '', ...GOOD_HANDOFF.split('\n')]));
@@ -921,14 +1059,15 @@ function realStatus() { return fs.readFileSync(STATUS_PATH, 'utf8'); }
 
 // Managed-section items for the real file; throws if the section's lines have an unrecognised shape.
 // Problems name their section and their real file line, so a red can be acted on without counting.
-function realItems(title) {
+function realItemsAt(title) {
   const text = realStatus();
   const lines = sectionLines(text, title);
-  if (lines === null) return [];
+  if (lines === null) return { blocks: [], starts: [] };
   const r = itemsOf(lines, sectionFirstLine(text, title));
   expectClean(r.problems.map(p => `## ${title}: ${p}`));
-  return r.blocks;
+  return r;
 }
+function realItems(title) { return realItemsAt(title).blocks; }
 
 test('STATUS.md stays small enough to read in one pass', () => {
   expectClean(checkSize(realStatus()));
@@ -963,8 +1102,14 @@ test('every open item names a check id, a "รอเจ้าของ" line, or
   for (const block of open) expectClean(validateOpenItem(block));
 });
 
-test('every handoff item carries an action, a source and evidence', () => {
-  for (const block of realItems(SEC_HANDOFF)) expectClean(validateHandoffItem(block));
+test('no two open items share a check id', () => {
+  const r = realItemsAt(SEC_OPEN);
+  expectClean(validateUniqueCheckIds(r.blocks, r.starts).map(p => `## ${SEC_OPEN}: ${p}`));
+});
+
+test('every handoff item carries an action, a source and evidence, and no text outside its fields', () => {
+  const r = realItemsAt(SEC_HANDOFF);
+  r.blocks.forEach((block, n) => expectClean(validateHandoffItem(block, r.starts[n])));
 });
 
 test('the handoff section holds the standing rubric and no other "> " prose', () => {

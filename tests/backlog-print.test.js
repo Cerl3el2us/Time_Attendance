@@ -536,11 +536,31 @@ test('an item whose check is unknown, throws or is unusable keeps the owner\'s w
   }
 });
 
-test('"no lines" in sync health points at NOT MEASURED only when something is listed there', () => {
+test('a sync health result without its LIMIT line says so, and points at NOT MEASURED only when something is listed there', () => {
+  // sync-health.js promises a LIMIT line always; the printer checks the promise instead of trusting it.
   const empty = B.formatSyncHealth(sync([], [])).join('\n');
+  assert.ok(/did not return its LIMIT line/.test(empty), empty);
   assert.ok(!/see NOT MEASURED|under NOT MEASURED/.test(empty), empty);
-  const reasons = B.formatSyncHealth(sync([], ['the NAS is unreachable'])).join('\n');
-  assert.ok(/under NOT MEASURED/.test(reasons), reasons);
+  const reasons = B.formatSyncHealth(sync(['memory: a line'], ['the NAS is unreachable'])).join('\n');
+  assert.ok(/did not return its LIMIT line/.test(reasons) && /under NOT MEASURED/.test(reasons), reasons);
+  // and a block that does carry LIMIT never prints the complaint
+  assert.ok(!/did not return its LIMIT line/.test(B.formatSyncHealth(sync()).join('\n')));
+});
+
+test('the SYNC HEALTH heading counts warnings only "among what was measured" when anything was not measured', () => {
+  // the re-reviewer's reproduction: every reader failed, only sync health's own unmeasured entries, LIMIT alone
+  const four = ['a reason 1', 'a reason 2', 'a reason 3', 'a reason 4'];
+  const head = B.formatSyncHealth(sync(['LIMIT: the limit'], four, 1))[0];
+  assert.ok(head.includes('0 warning(s) among what was measured; 4 thing(s) not measured'), head);
+  assert.ok(!/\(measured in 1 ms; 0 warning\(s\)\)/.test(head), 'the bare "0 warning(s)" reading is back: ' + head);
+  const mixed = B.formatSyncHealth(sync(['WARNING: x', 'LIMIT: the limit'], ['one'], 5))[0];
+  assert.ok(mixed.includes('1 warning(s) among what was measured; 1 thing(s) not measured'), mixed);
+  // nothing unmeasured: the plain count, no claim about "what was measured" to qualify
+  const clean = B.formatSyncHealth(sync(['LIMIT: the limit'], [], 5))[0];
+  assert.ok(clean.endsWith('(measured in 5 ms; 0 warning(s))') && !/not measured/.test(clean), clean);
+  // and it is the heading of the whole report, not just of the function
+  const text = report({ sync: sync(['LIMIT: the limit'], four, 1) });
+  assert.ok(text.includes('0 warning(s) among what was measured; 4 thing(s) not measured') && text.includes('NOT MEASURED -- 4 thing(s)'), text);
 });
 
 // -- the slash command: the five holes the review found --------------------------------------------

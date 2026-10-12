@@ -379,4 +379,4 @@ test('readSyncPatterns: a list with any pattern it cannot read is refused whole,
   assert.strictEqual(read('pat-all-double', ['  "a*.md",', '  "MEMORY.md"']), null);                // the old all-or-nothing case
 });
 
-console.log(`backlog-checks:${passed} passed, ${failed} failed`);
+console.log(`backlog-checks: ${passed} passed, ${failed} failed`);

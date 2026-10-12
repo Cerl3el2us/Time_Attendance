@@ -157,14 +157,22 @@ function formatHandoff(handoff) {
 // `lines` is already in display order (sync-health.js says so) and is printed as given. A line that
 // starts "WARNING: " is a finding for a human and is marked; they are counted in the heading so the
 // number is visible without reading every line.
+// 2026-10-13 (re-review): "0 warning(s)" beside a list of things that could not be measured read as
+// "measured, nothing wrong". When anything is unmeasured the heading says the count is of what WAS
+// measured and gives the number that was not, so the heading cannot out-claim the section under it.
 function formatSyncHealth(sync) {
   const warnings = sync.lines.filter(l => l.startsWith('WARNING: ')).length;
-  const out = [`SYNC HEALTH -- how far this answer can be trusted (measured in ${sync.elapsedMs} ms; ${warnings} warning(s))`];
-  if (!sync.lines.length) {
-    // 2026-10-13 (review): this used to point at NOT MEASURED even when that section said "none".
-    out.push(sync.unmeasured.length
-      ? '  (sync health produced no lines; its reasons are under NOT MEASURED)'
-      : '  (sync health produced no lines and reported nothing as not measured)');
+  const tally = sync.unmeasured.length
+    ? `${warnings} warning(s) among what was measured; ${sync.unmeasured.length} thing(s) not measured`
+    : `${warnings} warning(s)`;
+  const out = [`SYNC HEALTH -- how far this answer can be trusted (measured in ${sync.elapsedMs} ms; ${tally})`];
+  // sync-health.js promises its last line is LIMIT, success or failure. The old fallback here tested
+  // for "no lines at all", which that promise made unreachable. This tests the promise itself: if the
+  // LIMIT line is absent, the section is missing the one sentence about what it cannot know, and says
+  // so instead of printing what looks like a complete block.
+  if (!sync.lines.some(l => l.startsWith('LIMIT: '))) {
+    out.push('  (sync health did not return its LIMIT line, so what this answer cannot know is not stated here'
+      + (sync.unmeasured.length ? '; its reasons are under NOT MEASURED)' : ')'));
   }
   for (const l of sync.lines) out.push(l.startsWith('WARNING: ') ? `  !! ${l}` : `     ${l}`);
   return out;
