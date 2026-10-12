@@ -23,7 +23,6 @@ function test(name, fn) {
 // out of the source rather than re-typing them: if either line changes shape this test fails loudly.
 const flagRe = /const isFlagKey = (k => \/[^/]+\/\.test\(k\));/.exec(SERVER_SRC);
 assert.ok(flagRe, 'isFlagKey not found in server.js — the allowances validator changed shape');
-// eslint-disable-next-line no-eval
 const isFlagKey = eval('(' + flagRe[1] + ')');
 
 function validate(key, value) {

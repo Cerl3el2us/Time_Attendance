@@ -94,4 +94,31 @@ module.exports = [
       'no-unused-vars': 'off',
     },
   },
+  {
+    // 2026-10-12: tests/ — CommonJS Node scripts ('use strict', require, process.exitCode). Same
+    // rule set as the backend block, so "lint clean" means the same thing for the tests that guard
+    // the code as for the code. Added because `npm run check` linted everything except them.
+    files: ['tests/**/*.js'],
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: 'commonjs',
+      globals: { ...globals.node },
+    },
+    linterOptions: { reportUnusedDisableDirectives: true },
+    rules: {
+      'no-undef': 'error',
+      'no-dupe-keys': 'error',
+      'no-dupe-args': 'error',
+      'no-dupe-else-if': 'error',
+      'no-duplicate-case': 'error',
+      'no-unreachable': 'error',
+      'no-const-assign': 'error',
+      'no-self-assign': 'error',
+      'no-cond-assign': 'error',
+      'use-isnan': 'error',
+      'valid-typeof': 'error',
+      'no-unsafe-negation': 'error',
+      'no-unused-vars': 'off',
+    },
+  },
 ];
