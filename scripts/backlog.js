@@ -9,9 +9,12 @@
 //   scripts/lib/backlog-status.js   STATUS.md -> items
 //   scripts/lib/backlog-checks.js   one check per item -> { verdict, evidence }
 //   scripts/lib/sync-health.js      how far the answer can be trusted -> { lines, unmeasured, elapsedMs }
-// It does not decide a verdict, does not decide WAITING-OWNER (the registry already did, for every
-// check at once), and takes no measurement of its own except the one the header needs (branch and
-// head of this checkout, one git call) and its own elapsed time. Anything it cannot read becomes a "NOT MEASURED"
+// For an item that names a check it does not decide the verdict or WAITING-OWNER (the registry does,
+// for every check at once). The one verdict it puts on an item itself is WAITING-OWNER for an item
+// that names only an owner wait: the registry is keyed by check id and has no entry for it, so the
+// owner's own STATUS.md text is shown, labelled as unchecked. It takes no measurement of its own
+// except the one the header needs (branch and head of this checkout, one bounded git call) and its
+// own elapsed time. Anything it cannot read becomes a "NOT MEASURED"
 // entry; it is never skipped, because a backlog that silently shrinks is the one failure this command
 // exists to prevent.
 //
@@ -42,14 +45,21 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
 const BUDGET_MS = 5000;
+// The header's git call is bounded like sync-health's (scripts/lib/sync-health.js GIT_TIMEOUT_MS), for
+// the same reason: git killed by a timeout while it holds a lock leaves that lock behind, and on the
+// NAS a stale index.lock blocked every commit until the owner approved removing it (2026-10-12).
+// `--no-optional-locks` means this call never takes one, so being killed leaves nothing.
+const GIT_TIMEOUT_MS = 1500;
 
 // Worst first. An unknown verdict is never ranked: resolveItem() turns it into NOT-VERIFIED before
 // it can reach the sorter.
 const ORDER = ['FAIL', 'NOT-VERIFIED', 'WAITING-OWNER', 'PASS'];
 const KNOWN = new Set(ORDER);
 
+const NL = String.fromCharCode(10);
 const errText = e => (e && e.message ? e.message : String(e));
 const pad = (text, prefix) => String(text).split(/\r?\n/).map(l => prefix + l);
 
@@ -61,14 +71,20 @@ const pad = (text, prefix) => String(text).split(/\r?\n/).map(l => prefix + l);
 // unusable becomes a NOT-VERIFIED with the reason; an item is never dropped and never defaulted to PASS.
 function resolveItem(item, checks) {
   const base = { subject: item.subject, line: item.line, id: item.checkId };
-  const missing = (verdict, evidence) => ({ ...base, verdict, evidence });
+  // 2026-10-13 (review): an item whose check cannot run still carries the owner's wait text, and
+  // dropping it hid what the owner was being asked. It is appended to every NOT-VERIFIED below.
+  const ownerNote = item.waitingOwner ? `${NL}STATUS.md:${item.line}: awaiting the owner: ${item.waitingOwner}` : '';
+  const missing = (verdict, evidence) => ({ ...base, verdict, evidence: evidence + ownerNote });
 
   if (item.checkId === null || item.checkId === undefined) {
-    // No code check is named. STATUS.md's own owner-wait line is then the whole answer, and this is
-    // not a verdict being re-derived: it is the text the owner wrote, shown under the verdict the
-    // registry uses for it. The structure test guarantees an item has a check, an owner wait, or both.
+    // No check is named, so the registry (keyed by check id) has no entry that could own this item.
+    // This is the ONE verdict the printer itself puts on an item, and it is not derived from code: it
+    // is the owner's own owner-wait text from STATUS.md, shown under the verdict the registry uses
+    // for it, with a line saying nothing was run. (2026-10-13 review: kept on purpose; the header
+    // sentence says so instead of claiming every verdict comes from the registry.) The structure test
+    // guarantees an item has a check, an owner wait, or both.
     if (item.waitingOwner) {
-      return missing('WAITING-OWNER', `STATUS.md:${item.line}: awaiting the owner: ${item.waitingOwner}\nno code check is named for this item in STATUS.md`);
+      return { ...base, verdict: 'WAITING-OWNER', evidence: `STATUS.md:${item.line}: awaiting the owner: ${item.waitingOwner}${NL}this item names no check, so nothing was run for it; this line is STATUS.md's own text, not a result` };
     }
     return missing('NOT-VERIFIED', `STATUS.md:${item.line}: this item names no check and no owner wait, so nothing was checked`);
   }
@@ -144,7 +160,12 @@ function formatHandoff(handoff) {
 function formatSyncHealth(sync) {
   const warnings = sync.lines.filter(l => l.startsWith('WARNING: ')).length;
   const out = [`SYNC HEALTH -- how far this answer can be trusted (measured in ${sync.elapsedMs} ms; ${warnings} warning(s))`];
-  if (!sync.lines.length) out.push('  (sync health produced no lines; see NOT MEASURED)');
+  if (!sync.lines.length) {
+    // 2026-10-13 (review): this used to point at NOT MEASURED even when that section said "none".
+    out.push(sync.unmeasured.length
+      ? '  (sync health produced no lines; its reasons are under NOT MEASURED)'
+      : '  (sync health produced no lines and reported nothing as not measured)');
+  }
   for (const l of sync.lines) out.push(l.startsWith('WARNING: ') ? `  !! ${l}` : `     ${l}`);
   return out;
 }
@@ -171,12 +192,24 @@ function formatNotMeasured(entries) {
 // header, timing, commands
 // ---------------------------------------------------------------------------------------------
 
+// What an OPEN verdict is, said so that it is true for BOTH kinds of item (2026-10-13 review: the first
+// draft said every verdict came from the registry, which was false for an item that names only an
+// owner wait). tests/backlog-print.test.js pins this wording.
+const OPEN_BASIS = 'How to read OPEN: for an item that names a check, the verdict is what that registered check '
+  + '(scripts/lib/backlog-checks.js) returned when run just now; an item that names only an owner wait '
+  + 'is shown from its own STATUS.md text and was not checked.';
+
+// The one sentence about what this command does, used by the command list here and by the two
+// places in scripts/status.js that advertise it. It says what is done and nothing more: HANDOFF
+// items are not checked, an owner wait is not checked, and a PASS is only as strong as its evidence.
+const WHAT_IT_DOES = 're-runs the registered check for each open item that names one, and prints what it could not measure';
+
 function formatHeader(where, unmeasuredCount) {
   const out = [
     '=== Time Attendance backlog ===',
     `Measured from: ${where.root}`,
     `  branch ${where.branch === null ? '(NOT measured)' : where.branch}, at ${where.head === null ? '(NOT measured)' : where.head}`,
-    'OPEN verdicts come from the check registry (scripts/lib/backlog-checks.js), run just now; STATUS.md only says which check belongs to which item.',
+    OPEN_BASIS,
   ];
   if (unmeasuredCount) out.push(`WARNING: ${unmeasuredCount} thing(s) could not be measured -- read NOT MEASURED below before trusting any of this.`);
   return out;
@@ -186,13 +219,13 @@ function formatTiming(totalMs, syncMs) {
   const s = (totalMs / 1000).toFixed(2);
   const sync = syncMs === null ? 'sync health did not report a time' : `sync health took ${syncMs} ms of it`;
   const over = totalMs > BUDGET_MS ? ` -- OVER BUDGET by ${((totalMs - BUDGET_MS) / 1000).toFixed(2)} s` : '';
-  return [`Elapsed: ${s} s for this process (${sync}); budget ${BUDGET_MS / 1000} s${over}. \`npm run\` adds its own start-up on top.`];
+  return [`Elapsed: ${s} s for this process (${sync}); budget ${BUDGET_MS / 1000} s, judged on this process alone${over}. \`npm run\` adds roughly 1.0-1.4 s of start-up on top (measured 2026-10-13: 3.2-3.9 s at the terminal for 2.1-2.5 s here), so the margin at the terminal is that much smaller than this number shows.`];
 }
 
 function formatCommands() {
   return [
     'Commands (you only need to remember the first):',
-    '  npm run backlog   this report: what is still open, re-checked against the code, with evidence',
+    `  npm run backlog   what is still open: ${WHAT_IT_DOES}`,
     '  npm run status    facts about this checkout: branch, uncommitted work, latest commits, cache-buster',
     '  npm run check     lint + every test; must end "N/N test files passed"',
   ];
@@ -227,58 +260,99 @@ function buildReport(data) {
 // the only part that touches the machine
 // ---------------------------------------------------------------------------------------------
 
-function gather() {
-  const { parseStatus } = require('./lib/backlog-status');
-  const { CHECKS } = require('./lib/backlog-checks');
-  const { describeSyncHealth } = require('./lib/sync-health');
+// The things gather() touches, in one object so a test can hand it fakes (a lib that throws, a git
+// that times out) and drive every failure branch. realEnv() is the only place that names the real ones.
+function makeGit(root, spawn = spawnSync) {
+  return args => spawn('git', ['--no-optional-locks', '-C', root, ...args],
+    { encoding: 'utf8', timeout: GIT_TIMEOUT_MS, windowsHide: true });
+}
+
+function realEnv() {
   const m = require('./lib/cache-markers');
+  return {
+    root: m.ROOT,
+    git: makeGit(m.ROOT),
+    readStatus: () => fs.readFileSync(path.join(m.ROOT, 'STATUS.md'), 'utf8'),
+    parseStatus: require('./lib/backlog-status').parseStatus,
+    checks: require('./lib/backlog-checks').CHECKS,
+    describeSyncHealth: require('./lib/sync-health').describeSyncHealth,
+  };
+}
+
+// describeSyncHealth() is documented never to throw and to return { lines, unmeasured, elapsedMs }.
+// 2026-10-13 (review): a return of another shape used to throw inside the formatters, outside every
+// try, and the whole report was lost. Returns the problem as text, or null when the shape is usable.
+function syncProblem(sync) {
+  if (!sync || typeof sync !== 'object') return 'it returned no object';
+  if (!Array.isArray(sync.lines)) return 'its result has no "lines" array';
+  if (!Array.isArray(sync.unmeasured)) return 'its result has no "unmeasured" array';
+  if (typeof sync.elapsedMs !== 'number' || !Number.isFinite(sync.elapsedMs)) return 'its result has no numeric "elapsedMs"';
+  return null;
+}
+
+const why = r => (r.error ? `git could not run: ${r.error.code || r.error.message}` : `git exited ${r.status}`);
+
+function gather(env = realEnv()) {
   const failures = [];
 
   // Where this was measured from. Identification only; git's refusal is reported, not papered over.
   // ONE git call, not three: on the NAS-hosted worktree every git call costs about half a second, and
   // the first version (is-inside-work-tree, branch, log) spent 1.55 s of the 5 s budget on a header.
   // `rev-parse HEAD --abbrev-ref HEAD` answers both questions, one per line. A failure (not a
-  // checkout, git missing, no commits) leaves both null, which prints as "(NOT measured)".
-  const where = { root: m.ROOT, branch: null, head: null };
-  const r = m.git(['rev-parse', 'HEAD', '--abbrev-ref', 'HEAD']);
-  const answer = r.status === 0 ? String(r.stdout).trim().split(/\r?\n/) : [];
+  // checkout, git missing, no commits, timeout) leaves both null, which prints as "(NOT measured)".
+  const where = { root: env.root, branch: null, head: null };
+  let r;
+  try { r = env.git(['rev-parse', 'HEAD', '--abbrev-ref', 'HEAD']); }
+  catch (e) { r = { error: e }; }
+  const answer = r && r.status === 0 ? String(r.stdout).trim().split(/\r?\n/) : [];
   if (answer.length === 2 && /^[0-9a-f]{40}$/.test(answer[0]) && answer[1] !== '') {
     where.head = answer[0].slice(0, 7);
     where.branch = answer[1] === 'HEAD' ? '(detached HEAD)' : answer[1];
   } else {
-    failures.push(`which branch and commit this was measured from: ${m.ROOT} is not a git checkout, or git could not answer`);
+    failures.push(`which branch and commit this was measured from: ${env.root} is not a git checkout, or git could not answer (${r ? why(r) : 'no answer'})`);
   }
 
   let handoff = null;
   let items = null;
   try {
-    const raw = fs.readFileSync(path.join(m.ROOT, 'STATUS.md'), 'utf8');
+    const raw = env.readStatus();
     const text = raw.charCodeAt(0) === 0xFEFF ? raw.slice(1) : raw; // a byte-order mark would hide the first line's `## `
-    const parsed = parseStatus(text);
+    const parsed = env.parseStatus(text);
     handoff = parsed.handoff;
-    items = resolveOpen(parsed.open, CHECKS);
+    items = resolveOpen(parsed.open, env.checks);
   } catch (e) {
+    handoff = null;
+    items = null;
     failures.push(`STATUS.md could not be read, so neither HANDOFF nor OPEN was produced: ${errText(e)}`);
   }
 
   let sync = null;
-  try { sync = describeSyncHealth(); }
-  catch (e) { failures.push(`sync health could not run: ${errText(e)}`); }
+  try {
+    sync = env.describeSyncHealth();
+    const problem = syncProblem(sync);
+    if (problem) { failures.push(`sync health returned something the printer cannot use: ${problem}`); sync = null; }
+  } catch (e) {
+    sync = null;
+    failures.push(`sync health could not run: ${errText(e)}`);
+  }
 
   return { where, handoff, items, sync, failures };
 }
 
-function main() {
-  const data = gather();
+// deps exists for the tests: gather and the clock are injected there, so that the number printed as
+// the total time can be checked against a known clock instead of only against its own format.
+function main(deps = {}) {
+  const data = (deps.gather || gather)();
   // performance.now() counts from the start of this process, so it includes loading the libraries.
-  data.totalMs = Math.round(performance.now());
-  process.stdout.write(buildReport(data).join('\n') + '\n');
+  data.totalMs = Math.round((deps.now || (() => performance.now()))());
+  (deps.write || (text => process.stdout.write(text)))(buildReport(data).join(NL) + NL);
 }
 
 if (require.main === module) main();
 
 module.exports = {
-  BUDGET_MS, ORDER,
+  BUDGET_MS, GIT_TIMEOUT_MS, ORDER, OPEN_BASIS, WHAT_IT_DOES,
+  makeGit, gather, main, syncProblem,
   resolveItem, resolveOpen, sortItems,
   formatItem, formatOpen, formatHandoff, formatSyncHealth, formatNotMeasured,
   formatHeader, formatTiming, formatCommands, buildReport,

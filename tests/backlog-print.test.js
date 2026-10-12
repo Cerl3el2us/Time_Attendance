@@ -32,7 +32,7 @@ console.log('backlog printer: layout of `npm run backlog`');
 
 const item = (verdict, line, evidence, subject) =>
   ({ subject: subject || `item at ${line}`, line, id: `id-${line}`, verdict, evidence });
-const where = { root: 'C:\\fixture\\tree', branch: 'some-branch', head: 'abc1234 a subject' };
+const where = { root: 'C:\\fixture\\tree', branch: 'some-branch', head: 'abc1234' };
 const sync = (lines = ['memory: a line', 'LIMIT: the limit'], unmeasured = [], elapsedMs = 1234) => ({ lines, unmeasured, elapsedMs });
 const report = (over = {}) => B.buildReport({
   where, handoff: [], items: [], sync: sync(), failures: [], totalMs: 2000, ...over,
@@ -253,7 +253,7 @@ test('the report has its sections in the specified order and ends with the comma
 });
 
 test('the header says which tree and branch, and says so when git could not tell', () => {
-  assert.ok(report().includes('branch some-branch, at abc1234 a subject'));
+  assert.ok(report().includes('branch some-branch, at abc1234\n'), 'the header line is "branch <name>, at <short sha>" and nothing after it');
   const lost = B.formatHeader({ root: 'C:\\x', branch: null, head: null }, 0).join('\n');
   assert.ok(lost.includes('(NOT measured)'), lost);
 });
@@ -262,7 +262,9 @@ test('the header says which tree and branch, and says so when git could not tell
 // 2. the real script
 // ---------------------------------------------------------------------------------------------
 
+const wallStart = Date.now();
 const real = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'backlog.js')], { encoding: 'utf8', cwd: ROOT });
+const wallMs = Date.now() - wallStart;
 const realOut = real.stdout || '';
 
 test('the real run exits 0 and prints every section in order', () => {
@@ -320,6 +322,231 @@ test('the slash command exists and enforces its three rules', () => {
   assert.ok(md.includes('npm run backlog'), 'does not tell Claude to run npm run backlog');
   assert.ok(md.includes('NOT-VERIFIED') && md.includes('NOT MEASURED'), 'does not tell Claude to name NOT-VERIFIED and NOT MEASURED');
   assert.ok(md.includes('ขนาด | งาน'), 'does not require the ขนาด | งาน table');
+});
+
+// ---------------------------------------------------------------------------------------------
+// 4. fix round 1 (2026-10-13 review)
+// ---------------------------------------------------------------------------------------------
+
+const { CHECKS: REAL_CHECKS } = require('../scripts/lib/backlog-checks');
+
+// -- what an OPEN verdict is, and what the command says it does ---------------------------------
+
+test('the header says what an OPEN verdict is, true for both kinds of item', () => {
+  const h = B.formatHeader(where, 0).join('\n');
+  for (const part of ['for an item that names a check', 'registered check', 'names only an owner wait', 'was not checked']) {
+    assert.ok(h.includes(part), `the header does not say "${part}":\n${h}`);
+  }
+  assert.ok(!/verdicts come from the check registry/i.test(h), 'the header again claims every verdict comes from the registry');
+  assert.ok(realOut.includes(B.OPEN_BASIS), 'the real run does not print the OPEN_BASIS sentence');
+});
+
+test('an item that names only an owner wait says nothing was run for it and that the line is STATUS.md text', () => {
+  const r = B.resolveItem(open({ checkId: null, waitingOwner: 'owner text' }), {});
+  assert.strictEqual(r.verdict, 'WAITING-OWNER');
+  assert.ok(/nothing was run for it/.test(r.evidence) && /not a result/.test(r.evidence), r.evidence);
+});
+
+test('what the command claims to do is the same sentence everywhere and claims no more than it does', () => {
+  const w = B.WHAT_IT_DOES;
+  assert.ok(w.includes('re-runs the registered check for each open item that names one') && w.includes('prints what it could not measure'), w);
+  assert.ok(B.formatCommands().some(l => l.includes('npm run backlog') && l.includes(w)), 'the command list does not use the sentence');
+  const st = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'status.js')], { encoding: 'utf8', cwd: ROOT }).stdout;
+  assert.ok(st.split(w).length - 1 >= 2, 'npm run status uses the sentence in its command list and in its closing text');
+  assert.ok(/Say in your answer what it could not measure/.test(st), 'status.js lost the "say what you could not measure" half of the old closing sentence');
+  for (const text of [st, realOut]) {
+    for (const bad of ['re-checked against the code', 'checks each claim', 'every STATUS.md item']) {
+      assert.ok(!text.includes(bad), `an advert still says "${bad}"`);
+    }
+  }
+});
+
+// -- never clip: the printed evidence is the registry's evidence, line for line -------------------
+
+test('resolveItem keeps a long evidence line exactly (a clipping resolveItem is red)', () => {
+  const ev = ['y'.repeat(1200) + ' END1', 'short', 'z'.repeat(800) + ' END2'].join('\n');
+  const r = B.resolveItem(open(), checksOf({ verdict: 'FAIL', evidence: ev }));
+  assert.strictEqual(r.evidence, ev);
+  const lines = B.formatItem(r);
+  assert.strictEqual(lines[1], '        ' + ev.split('\n')[0]);
+  assert.ok(lines[3].endsWith(' END2'));
+});
+
+test('for every REAL registry check, the printed evidence equals what the check returns, line for line', () => {
+  const ids = Object.keys(REAL_CHECKS);
+  assert.ok(ids.length > 0, 'the registry is empty');
+  for (const id of ids) {
+    const want = REAL_CHECKS[id].run();
+    const got = B.resolveItem({ subject: 's', line: 9, checkId: id, waitingOwner: null }, REAL_CHECKS);
+    assert.strictEqual(got.verdict, want.verdict, id);
+    assert.strictEqual(got.evidence, want.evidence, `${id}: the evidence changed between the registry and the printer`);
+    const lines = B.formatItem(got);
+    const evLines = want.evidence.split(/\r?\n/);
+    if (want.verdict === 'PASS') {
+      assert.strictEqual(lines.length, 1, id);
+      for (const l of evLines.map(x => x.trim()).filter(Boolean)) assert.ok(lines[0].includes(l), `${id}: PASS line lost: ${l}`);
+    } else {
+      assert.deepStrictEqual(lines.slice(1), evLines.map(l => '        ' + l), `${id}: printed evidence differs from the check's`);
+    }
+  }
+});
+
+test('the real run prints every evidence line of every registered check on the real STATUS.md', () => {
+  const parsed = parseStatus(fs.readFileSync(path.join(ROOT, 'STATUS.md'), 'utf8'));
+  const printed = realOut.split('\n');
+  let checked = 0;
+  for (const it of parsed.open) {
+    if (!it.checkId || !Object.prototype.hasOwnProperty.call(REAL_CHECKS, it.checkId)) continue;
+    const r = REAL_CHECKS[it.checkId].run();
+    for (const l of r.evidence.split(/\r?\n/)) {
+      if (r.verdict === 'PASS') { if (l.trim()) assert.ok(realOut.includes(l.trim()), `PASS evidence line missing from the output: ${l}`); }
+      else assert.ok(printed.includes('        ' + l), `evidence line of ${it.checkId} missing or changed in the output: ${l.slice(0, 80)}`);
+      checked++;
+    }
+  }
+  assert.ok(checked > 0, 'no registered check ran, so nothing was compared');
+});
+
+// -- the printed total is the measured one -------------------------------------------------------
+
+test('main prints the total it measured: a known clock gives a known number', () => {
+  const base = { where, handoff: [], items: [], sync: sync(), failures: [] };
+  for (const [ms, text] of [[4321.4, 'Elapsed: 4.32 s'], [1234.4, 'Elapsed: 1.23 s'], [6400, 'OVER BUDGET by 1.40 s']]) {
+    const out = [];
+    B.main({ gather: () => ({ ...base }), now: () => ms, write: s => out.push(s) });
+    assert.ok(out.join('').includes(text), `clock ${ms}: expected "${text}" in\n${out.join('')}`);
+  }
+});
+
+test('the real run: its printed total lies between sync health\'s time and the wall clock of the whole child', () => {
+  const m = realOut.match(/Elapsed: (\d+\.\d\d) s/);
+  const s = realOut.match(/sync health took (\d+) ms of it/);
+  assert.ok(m && s, realOut);
+  const total = Number(m[1]) * 1000;
+  assert.ok(total + 10 >= Number(s[1]), `total ${total} ms is less than sync health's own ${s[1]} ms`);
+  assert.ok(total <= wallMs + 10, `total ${total} ms is more than the ${wallMs} ms the child really took`);
+});
+
+test('the Elapsed line is honest about npm run\'s start-up and what the budget is judged on', () => {
+  const t = B.formatTiming(2500, 1500).join('\n');
+  assert.ok(t.includes('judged on this process alone') && t.includes('1.0-1.4 s'), t);
+});
+
+// -- gather: every failure branch, driven by a lib that throws -------------------------------------
+
+const GOOD_SHA = '0123456789abcdef0123456789abcdef01234567';
+const goodEnv = (over = {}) => ({
+  root: 'C:\\fixture\\tree',
+  git: () => ({ status: 0, stdout: `${GOOD_SHA}\nsome-branch\n` }),
+  readStatus: () => 'status text',
+  parseStatus: () => ({ handoff: [{ subject: 'h', line: 1, fields: { action: 'a', source: 's', evidence: 'e' } }], open: [open({ line: 4 })] }),
+  checks: checksOf({ verdict: 'PASS', evidence: 'a:1' }),
+  describeSyncHealth: () => sync(),
+  ...over,
+});
+
+test('gather on a healthy fixture: sha shortened to 7, branch named, nothing in failures', () => {
+  const d = B.gather(goodEnv());
+  assert.deepStrictEqual(d.where, { root: 'C:\\fixture\\tree', branch: 'some-branch', head: '0123456' });
+  assert.strictEqual(d.failures.length, 0);
+  assert.strictEqual(d.items.length, 1);
+});
+
+test('gather: a STATUS.md that cannot be parsed is a NOT MEASURED entry, with no section invented', () => {
+  const d = B.gather(goodEnv({ parseStatus: () => { throw new Error('STATUS.md:12: bad line'); } }));
+  assert.strictEqual(d.handoff, null);
+  assert.strictEqual(d.items, null);
+  assert.ok(d.failures.some(f => f.includes('STATUS.md could not be read') && f.includes('STATUS.md:12: bad line')), JSON.stringify(d.failures));
+  assert.ok(B.buildReport({ ...d, totalMs: 1 }).join('\n').includes('NOT MEASURED -- 1 thing(s)'));
+});
+
+test('gather: a STATUS.md that cannot be read at all is a NOT MEASURED entry too', () => {
+  const d = B.gather(goodEnv({ readStatus: () => { throw new Error('EACCES'); } }));
+  assert.ok(d.failures.some(f => f.includes('EACCES')) && d.items === null);
+});
+
+test('gather: sync health that throws is a NOT MEASURED entry, and the rest of the report survives', () => {
+  const d = B.gather(goodEnv({ describeSyncHealth: () => { throw new Error('Z: hung'); } }));
+  assert.strictEqual(d.sync, null);
+  assert.ok(d.failures.some(f => f.includes('sync health could not run') && f.includes('Z: hung')), JSON.stringify(d.failures));
+  const text = B.buildReport({ ...d, totalMs: 1 }).join('\n');
+  assert.ok(text.includes('SYNC HEALTH -- NOT READ') && text.includes('[PASS]') && text.includes('Commands'), text);
+});
+
+test('gather: a malformed sync health result is a NOT MEASURED entry instead of a lost report', () => {
+  for (const bad of [{}, { lines: [] }, { lines: [], unmeasured: [] }, { lines: 'x', unmeasured: [], elapsedMs: 1 }, { lines: [], unmeasured: null, elapsedMs: 1 }, null, 42, undefined]) {
+    const d = B.gather(goodEnv({ describeSyncHealth: () => bad }));
+    assert.strictEqual(d.sync, null, JSON.stringify(bad));
+    assert.ok(d.failures.some(f => f.includes('sync health returned something the printer cannot use')), JSON.stringify(bad));
+    assert.doesNotThrow(() => B.buildReport({ ...d, totalMs: 1 }), JSON.stringify(bad));
+  }
+});
+
+test('gather: git that times out, fails, or throws leaves branch and head unmeasured and says why', () => {
+  const cases = [
+    [() => ({ status: null, error: { code: 'ETIMEDOUT' } }), 'ETIMEDOUT'],
+    [() => ({ status: 128, stdout: '' }), 'git exited 128'],
+    [() => { throw new Error('spawn blew up'); }, 'spawn blew up'],
+    [() => ({ status: 0, stdout: 'not a sha\nmain\n' }), 'could not answer'],
+  ];
+  for (const [git, expect] of cases) {
+    const d = B.gather(goodEnv({ git }));
+    assert.strictEqual(d.where.branch, null);
+    assert.strictEqual(d.where.head, null);
+    assert.ok(d.failures.some(f => f.includes('which branch and commit') && f.includes(expect)), `${expect}: ${JSON.stringify(d.failures)}`);
+  }
+});
+
+test('the header git call is bounded and takes no optional lock', () => {
+  const seen = [];
+  const git = B.makeGit('C:\\fixture\\tree', (cmd, args, opts) => { seen.push({ cmd, args, opts }); return { status: 0, stdout: '' }; });
+  git(['rev-parse', 'HEAD']);
+  assert.strictEqual(seen[0].cmd, 'git');
+  assert.ok(seen[0].args.includes('--no-optional-locks'), seen[0].args.join(' '));
+  assert.ok(Number.isFinite(seen[0].opts.timeout) && seen[0].opts.timeout > 0 && seen[0].opts.timeout <= 1500, `timeout ${seen[0].opts.timeout}`);
+  assert.strictEqual(B.GIT_TIMEOUT_MS, seen[0].opts.timeout);
+});
+
+// -- smaller fixes -------------------------------------------------------------------------------
+
+test('an item whose check is unknown, throws or is unusable keeps the owner\'s wait text', () => {
+  const owner = 'จะกลับมาใช้ Cursor อีกหรือไม่';
+  const cases = [
+    B.resolveItem(open({ checkId: 'gone', waitingOwner: owner }), {}),
+    B.resolveItem(open({ waitingOwner: owner }), checksOf(() => { throw new Error('boom'); })),
+    B.resolveItem(open({ waitingOwner: owner }), checksOf(() => null)),
+    B.resolveItem(open({ waitingOwner: owner }), checksOf({ verdict: 'PASS', evidence: '' })),
+  ];
+  for (const r of cases) {
+    assert.strictEqual(r.verdict, 'NOT-VERIFIED');
+    assert.ok(r.evidence.includes(owner) && r.evidence.includes('STATUS.md:7'), r.evidence);
+  }
+});
+
+test('"no lines" in sync health points at NOT MEASURED only when something is listed there', () => {
+  const empty = B.formatSyncHealth(sync([], [])).join('\n');
+  assert.ok(!/see NOT MEASURED|under NOT MEASURED/.test(empty), empty);
+  const reasons = B.formatSyncHealth(sync([], ['the NAS is unreachable'])).join('\n');
+  assert.ok(/under NOT MEASURED/.test(reasons), reasons);
+});
+
+// -- the slash command: the five holes the review found --------------------------------------------
+
+test('the slash command closes the five ways a reassuring table could be built', () => {
+  const md = fs.readFileSync(path.join(ROOT, '.claude', 'commands', 'backlog.md'), 'utf8');
+  const need = (cond, what) => assert.ok(cond, `backlog.md does not ${what}`);
+  // 1. the size column has no source in the output
+  need(/own estimate/.test(md) && md.includes('ประมาณเอง') && /not a measurement/.test(md), 'say the ขนาด value is the reporter\'s own estimate and require it to be marked');
+  // 2. handoff caveat
+  need(/HANDOFF/.test(md) && md.includes('ยังไม่ได้ตรวจโดยคำสั่งนี้') && /did not check/.test(md), 'require the "claim from STATUS.md, not checked" caveat on HANDOFF rows');
+  // 3. warnings, limit, and the read-by-hand sentence
+  need(/every line marked `WARNING`/.test(md) && /Never leave out the `LIMIT` line/.test(md) && /read\s+something by hand\s+before trusting the FAIL/.test(md) && /in Thai/.test(md), 'require the WARNING lines, the LIMIT line and the read-by-hand sentence, in Thai');
+  // 4. "none reported" must be quoted as an attribution
+  need(/none reported/.test(md) && /nothing was reported by/.test(md) && /nothing unmeasured/.test(md), 'forbid reading "none reported" as "nothing unmeasured"');
+  // 5. a PASS carries its evidence
+  need(/reported together with its evidence/.test(md) && /file\s+existing/.test(md), 'require a PASS to be reported with its evidence');
+  // and it must not say the command checks more than it does
+  need(/prints the HANDOFF items from `STATUS.md` without checking them/.test(md.replace(/\s+/g, ' ')), 'say HANDOFF items are not checked');
 });
 
 console.log(`\n${passed} passed`);

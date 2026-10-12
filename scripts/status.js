@@ -35,6 +35,9 @@ const path = require('path');
 const m = require('./lib/cache-markers');
 const { describeDataFiles } = require('./lib/data-files');
 const { describeRosterHealth } = require('./lib/roster-health');
+// One wording for what `npm run backlog` does, shared with its own command list (2026-10-13 review: the
+// first adverts said "every item re-checked" and "checks each claim", which it does not do).
+const { WHAT_IT_DOES } = require('./backlog');
 
 const { ROOT, git } = m;
 const out = (s = '') => console.log(s);
@@ -224,10 +227,13 @@ out();
 // --- the commands, so only this one has to be remembered -----------------------------------------
 out('Commands (you only need to remember the first):');
 out('  npm run status   this report');
-out('  npm run backlog  what is still open: every STATUS.md item re-checked against the code, with evidence');
+out(`  npm run backlog  what is still open: ${WHAT_IT_DOES}`);
 out('  npm run check    lint + every test; must end "N/N test files passed"');
 // 2026-10-13: the closing sentence used to say "this report is facts, STATUS.md is claims -- verify
 // each open item against the code", which left the verifying to whoever read it, by hand, every time.
-// That is now `npm run backlog`'s job, so this points at it instead of asking for it.
+// That is now `npm run backlog`'s job, so this points at it instead of asking for it. But it does not
+// check every claim: a handoff item and an owner wait are not code-checked. The old sentence's second
+// half, "say what you could not measure", was dropped in the first rewrite and is back.
 out('Before you answer "what is still open": run `npm run backlog`. This report is facts about the');
-out('checkout, STATUS.md is claims, and `npm run backlog` checks each claim and prints the evidence.');
+out('checkout and STATUS.md is claims; `npm run backlog` ' + WHAT_IT_DOES + '.');
+out('Say in your answer what it could not measure, and which items it did not check.');
