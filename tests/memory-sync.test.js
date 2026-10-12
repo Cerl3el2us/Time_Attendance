@@ -1,9 +1,16 @@
 // The memory folder is how one machine tells the other what it learned. Two failures made this
 // test necessary.
 //
-// 2026-10-12: opening a session spent 4.2s hashing 135 files across SMB before Claude could say
-// anything, because Test-SameContent hashed both sides of every file -- while reading every file's
-// size and timestamp in one directory listing costs 0.18s. The owner's complaint was the delay.
+// 2026-10-12: opening a session was slow enough that the owner complained about the delay, and
+// Test-SameContent hashed both sides of every file it was handed without looking at size first --
+// while reading every file's size and timestamp in one directory listing costs 0.18s.
+//
+// CORRECTED 2026-10-12 (whole-branch review): the "4.2s / 4.86s before" figure this header used to
+// quote was a cost the old script never paid. `git show f49b493:sync_memory.ps1` (2026-10-08) shows
+// the CALLER already skipped any file whose size and mtime matched, so hashing was never reached
+// for the common case; 4.2s was measured by calling Test-SameContent on every file directly. The
+// real win is tier 1 (different size => no hash). Tier 2 (same size, same ticks) is unreachable
+// from the only caller, which filters that case out first -- do not cite it as a measured saving.
 //
 // The second failure is older and quieter: memory only reached the other machine when someone
 // remembered to say "จบงาน". The fix is a hook, and a hook that misjudges "did anything change?"
