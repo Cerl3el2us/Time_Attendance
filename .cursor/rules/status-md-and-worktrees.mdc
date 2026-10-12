@@ -1,0 +1,58 @@
+---
+description: STATUS.md is the only record of open work and must change in the same commit as the work. Never edit Z:\Time_Attendance directly.
+alwaysApply: true
+---
+
+# STATUS.md is the record of open work, and it travels with the code (all AIs, all models)
+
+The owner works on two machines. They kept redoing work that was already finished, because the record of
+what was open lived in one assistant's memory instead of in the repository. **`STATUS.md` at the repo root
+is the only record of what work is open.** Not your memory, not a chat, not `MEMORY.md`, not a scratch file
+under `.superpowers/` (that folder is git-ignored and exists on one machine only).
+
+## Before you say anything about what is pending
+
+- Open `STATUS.md` and read it. Never answer "I don't know what was left open".
+- An entry may be stale. Re-check it against the real code before you believe it or act on it.
+- `docs/STATUS_CLOSED.md` holds finished work. **Do not propose anything listed there again.**
+
+## Update it in the same commit as the work it describes
+
+Never leave `STATUS.md` for "a later commit". A later commit is the one that does not happen.
+
+The shape (the three sections, in this order):
+
+- `## ส่งต่อรอบหน้า` — work handed to the next session. Each item needs four fields: a bold subject,
+  `**ให้ทำอะไร:**`, `**ที่มา:**`, `**หลักฐาน:**`. Do not touch the blockquote lines under this heading.
+- `## เปิดอยู่` — work still open. An item is a column-one `- ` bullet and needs at least one of
+  `· ตรวจ: <id>` (something a script or a person can check) or `· รอเจ้าของ: <what the owner must decide>`.
+  At most one line of each kind per item.
+- `## ปิดแล้ว (สารบัญ)` — one line per finished topic, written `- **YYYY-MM-DD** — <title>`.
+
+Every non-blank line inside those sections is a column-one `- ` item, an indented continuation, or a `>`
+blockquote. The file has hard size limits (150 lines, 20 KB).
+
+**`tests/status-structure.test.js` is the authority, not this summary.** It enforces all of the above and
+more, and its error messages say what to fix. Run `npm run check` before you finish, and do not finish
+while it is red. Never loosen the test to make a `STATUS.md` edit pass.
+
+## When you finish a piece of work
+
+1. Put a `Closes:` trailer in the commit message naming the item you closed (its `· ตรวจ:` id when it has
+   one, otherwise its bold title).
+2. Remove the item from `## เปิดอยู่`.
+3. Append the record of what was done, what was verified and who decided to `docs/STATUS_CLOSED.md`, under
+   the newest dated `## ` section. **Never edit the content already in that file** — it was copied verbatim
+   on purpose so that it works as evidence. Append only.
+4. Add the matching line to `## ปิดแล้ว (สารบัญ)`. Its title must be copied exactly from the bold title (or
+   heading) of the record you just appended.
+5. Never record something as done that you could not verify. Say plainly what was and was not checked.
+
+## Never edit `Z:\Time_Attendance` directly
+
+`Z:\Time_Attendance` is the **live website**. Open Cursor on a worktree (an ordinary local folder, for example
+`C:\Users\<you>\ta-work`), make changes on a branch there, and let them reach the live site only through
+the finishing steps in section 9 of `AGENTS.md`. Editing the live folder by hand is how production gets
+broken with no history to roll back to. If you think you need to write there, stop and ask the human.
+
+Read `AGENTS.md` before touching anything else.
