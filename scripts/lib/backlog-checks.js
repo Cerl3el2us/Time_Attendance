@@ -246,8 +246,17 @@ function describeLastRun(dir) {
 // FAIL evidence states that limit instead of pretending to cover it.
 const KNOWN_EXPR = '($rc -eq 0) -and ($null -ne $failed) -and ($failed -eq 0)';
 // Any scope prefix counts: `$script:pushOk = ...` is a second assignment, not an invisible one.
-const PUSHOK_ASSIGN = /\$(?:script:|global:|local:|private:)?pushOk\s*[-+*/]?=(?!=)/;
-const PUSHOK_STATEMENT = /^\s*\$(?:script:|global:|local:|private:)?pushOk\s*=\s*(.*)$/;
+// 2026-10-12 (re-review): and all three patterns below are case-insensitive, because PowerShell is.
+// `$PushOk = $pushOk -and (...)` was a second assignment this check could not see, which put it
+// straight back into printing the old defect text for a script somebody had fixed. KNOWN_EXPR is
+// still compared case-sensitively: it is one exact line of the real script, not a language rule.
+// Known limit, deliberate: `Set-Variable -Name pushOk ...` is a different form and is not matched.
+const PUSHOK_ASSIGN = /\$(?:script:|global:|local:|private:)?pushOk\s*[-+*/]?=(?!=)/i;
+const PUSHOK_STATEMENT = /^\s*\$(?:script:|global:|local:|private:)?pushOk\s*=\s*(.*)$/i;
+const PUSHOK_GUARD = /^\s*if\s*\(\s*\$pushOk\s*\)\s*\{\s*(#.*)?$/i;
+// Run on the un-stripped line, so a commented-out marker write counts as a second marker and the
+// shape reads unknown. That is the safe direction: NOT-VERIFIED asks for a human read.
+const MARKER_WRITE = /Set-Content\b.*"pushed\b/i;
 
 function matchPushShape(all) {
   // Splitting on the first `#` treats a `#` inside a quoted string as a comment, which can make the
@@ -262,8 +271,8 @@ function matchPushShape(all) {
   const firstAssign = assigns.length ? assigns[0] : -1;
   all.forEach((l, i) => {
     if (i <= firstAssign) return;
-    if (/^\s*if\s*\(\s*\$pushOk\s*\)\s*\{\s*(#.*)?$/.test(l)) guards.push(i);
-    if (/Set-Content\b.*"pushed\b/.test(l)) markers.push(i);
+    if (PUSHOK_GUARD.test(l)) guards.push(i);
+    if (MARKER_WRITE.test(l)) markers.push(i);
   });
 
   const problems = [];
@@ -285,7 +294,10 @@ function matchPushShape(all) {
   // line, closing its block and moving the marker write under `if ($rc -eq 0) {` left the verdict
   // FAIL while the evidence said "guarded only by the exact if ($pushOk)" -- which was then false.
   // Brace depth from the guard line; if the block never closes, the braces are not readable, and
-  // "not the known shape" is the safe answer.
+  // "not the known shape" is the safe answer. The count ignores string literals, so a brace inside
+  // a quoted string skews it -- deliberately tolerated, for the same reason as `codeOf` above: the
+  // skew lands on NOT-VERIFIED. What this does NOT look at is any condition nested inside the
+  // block around the marker write; the FAIL evidence states that limit rather than detecting it.
   if (guards.length === 1 && markers.length === 1) {
     let depth = 0;
     let closedAt = -1;
@@ -346,7 +358,7 @@ function checkSyncPushFalseSuccess(dir = NAS_MEMORY_DIR) {
       cite(shape.decideAt),
       'push counts as ok on the exit code and failed=0 alone: it never requires that anything was copied or that every dirty file was accounted for',
       `marker written at ${cite(shape.markerAt)}, inside the block opened by the exact "if ($pushOk) {" at :${shape.guardAt + 1}`,
-      `LIMIT of this check: it reads only the $pushOk decision, its guard and the marker write, so a fix made elsewhere in the script (for example forcing $failed before the decision) would not be seen; read ${scriptName} by hand before trusting this FAIL`,
+      `LIMIT of this check: it reads only the $pushOk decision, its guard and the marker write, so a fix made elsewhere in the script (for example forcing $failed before the decision) would not be seen, and neither would a condition nested inside the guard block around the marker write itself (for example "if ($copied -gt 0)"); read ${scriptName} by hand before trusting this FAIL`,
       logPart),
   };
 }
@@ -360,7 +372,7 @@ const RAW_CHECKS = {
     run: () => checkBacklogCommand(),
   },
   'sync-push-false-success': {
-    describe: 'Whether the automatic memory push (sync_if_dirty.ps1) can still write its clean marker after copying nothing: reads its success decision, the marker write and the latest sync.log run on the NAS; FAIL only while the known old shape of that code is still there, and it reads nothing but those three places, so a fix made elsewhere in the script would not be seen.',
+    describe: 'Whether the automatic memory push (sync_if_dirty.ps1) can still write its clean marker after copying nothing: reads its success decision, the marker write and the latest sync.log run on the NAS; FAIL only while the known old shape of that code is still there, and it reads nothing but those three places, so a fix made elsewhere in the script, or nested inside the guard block, would not be seen.',
     run: () => checkSyncPushFalseSuccess(),
   },
 };

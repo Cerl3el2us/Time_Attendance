@@ -175,6 +175,12 @@ test('sync: the FAIL states the limit of what it read, so an upstream fix is not
   assert.ok(/reads only the \$pushOk decision, its guard and the marker write/.test(r.evidence), r.evidence);
   assert.ok(/a fix made elsewhere in the script/.test(r.evidence), r.evidence);
   assert.ok(/read sync_if_dirty\.ps1 by hand before trusting this FAIL/.test(r.evidence), r.evidence);
+  // A fix nested INSIDE the guard block (`if ($copied -gt 0) { Set-Content ... }`) also reads FAIL,
+  // and "inside the block opened by the exact guard" stays literally true while the defect is gone.
+  // The limit sentence has to name that case, since nothing detects it.
+  assert.ok(/nested inside the guard block/.test(r.evidence), `the nested-fix limit is not stated: ${r.evidence}`);
+  assert.ok(/nested inside the guard block/.test(CHECKS['sync-push-false-success'].describe),
+    CHECKS['sync-push-false-success'].describe);
   // and the same limit is on the registry entry, which is what a reader of the backlog sees first
   assert.ok(/reads nothing but those three places/.test(CHECKS['sync-push-false-success'].describe),
     CHECKS['sync-push-false-success'].describe);
@@ -212,6 +218,55 @@ test('sync: one more condition on the known expression is NOT-VERIFIED, however 
   ]) {
     assertShapeChanged(checkSyncPushFalseSuccess(syncDir(name, { decide })), name);
   }
+});
+
+// The brace has to be ON the guard line, because that is where the depth walk starts. A
+// brace-on-the-next-line script is a shape this check has never read, so it must not be called
+// FAIL. Without this case, making the brace optional again left the suite green (mutation testing).
+test('sync: a guard whose brace is on the next line is NOT-VERIFIED, not FAIL', () => {
+  const d = dirFor('brace-next-line');
+  put(d, 'sync_if_dirty.ps1', [
+    '$rc = 0',
+    '$pushOk = ($rc -eq 0) -and ($null -ne $failed) -and ($failed -eq 0)',
+    'if ($pushOk)',
+    '{',
+    '  Set-Content -LiteralPath $markerFull -Value "pushed $stamp" -Encoding UTF8',
+    '}',
+    '',
+  ].join('\n'));
+  put(d, 'sync_memory.ps1', PATTERNS_PS1);
+  put(d, 'sync.log', DIRTY_LINE());
+  const r = checkSyncPushFalseSuccess(d);
+  assertShapeChanged(r, 'brace on the line after the guard');
+  assert.ok(r.evidence.includes('0 exact "if ($pushOk) {" guard line(s)'), r.evidence);
+});
+
+// PowerShell is case-insensitive, so `$PushOk = ...` is the same variable. Before this, such a
+// second assignment was invisible and the check printed the old defect text for a fixed script --
+// the failure class round 2 closed.
+test('sync: case does not hide a second assignment or the guard', () => {
+  const d = syncDir('case-second-assignment', {
+    decide: '$pushOk = ($rc -eq 0) -and ($null -ne $failed) -and ($failed -eq 0)\n$PushOk = $pushOk -and ($copied -gt 0)',
+  });
+  const r = checkSyncPushFalseSuccess(d);
+  assertShapeChanged(r, '$PushOk second assignment');
+  assert.ok(r.evidence.includes('2 assignments to $pushOk'), `the differently-cased assignment was not counted: ${r.evidence}`);
+  // and the mirror: a known shape written in other cases -- assignment, guard AND marker write --
+  // is still recognised, so the insensitivity cuts both ways rather than only adding problems.
+  const other = dirFor('case-known-shape');
+  put(other, 'sync_if_dirty.ps1', [
+    '$rc = 0',
+    '$PUSHOK = ($rc -eq 0) -and ($null -ne $failed) -and ($failed -eq 0)',
+    'IF ($PushOk) {',
+    '  set-content -literalpath $markerFull -value "pushed $stamp"',
+    '}',
+    '',
+  ].join('\n'));
+  put(other, 'sync_memory.ps1', PATTERNS_PS1);
+  put(other, 'sync.log', DIRTY_LINE());
+  const same = checkSyncPushFalseSuccess(other);
+  assert.strictEqual(same.verdict, 'FAIL', `a differently-cased known shape was not recognised: ${same.evidence}`);
+  assert.ok(same.evidence.includes('sync_if_dirty.ps1:4:'), `the lower-case marker write was not cited: ${same.evidence}`);
 });
 
 test('sync: a second assignment carrying a scope prefix is NOT-VERIFIED, not invisible', () => {
