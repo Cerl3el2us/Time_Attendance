@@ -15,6 +15,14 @@
 // would wrongly reject a legitimate value that is a single path or filename -- so telling those
 // apart stays a human review job.
 //
+// 2026-10-12, two rules the owner widened on purpose (each one's reasoning sits above its
+// validator): an open item may carry `· ตรวจ: <id>`, `· รอเจ้าของ: <text>` or both, because two
+// items in the file had an automatable half and an owner-decision half and one id per item could
+// state only one of them; and a closed-index line's title may name a `##`..`####` heading OR the
+// bold title of a column-one `- **…**` bullet of docs/STATUS_CLOSED.md, because every `## ` heading
+// there reads "ปิดไปแล้ว <date> — อย่าเสนอซ้ำ", so a heading-only rule forced every index line to
+// repeat the date and name no topic -- an index that cannot do its one job.
+//
 // Layout of this file:
 //   1. pure validators over text (no file access) -- each returns a list of problems, [] = ok
 //   2. fixture cases: small inline strings, one per bad shape, each of which MUST be rejected,
@@ -242,21 +250,55 @@ function validateHandoffRubric(lines) {
   ];
 }
 
-// An item under ## เปิดอยู่ must say which check proves it is still open -- with exactly one id, so
-// that "which check owns this item" has one answer. Ids are `[a-z0-9]` words joined by single
-// dashes: `[a-z0-9-]+` used to accept a lone `-`.
+// An item under ## เปิดอยู่ must say what would settle it. Two line types do that, and an item may
+// carry one of each (owner's decision 2026-10-12):
+//   `· ตรวจ: <id>`       -- the half a script can decide: one id, run from scripts/backlog.js.
+//   `· รอเจ้าของ: <text>` -- the half no script can decide: what is awaited from the owner.
+// Why the second type exists: `nas-password-scrubbed` named only the automatable half of its item
+// (the scrub) while the open half is a password the owner must change in the DSM admin UI, and
+// `cursor-rules-file` named work that is deliberately out of scope. With one id per item, a
+// registry check over those ids reports green or red opposite to the item's real state -- the one
+// failure `npm run backlog` exists to prevent. At most one line of each type, so "which check owns
+// this item" and "what is the owner holding" each have exactly one answer; at least one of the two,
+// so an item can never be open for no stated reason. Both must be indented continuation lines: a
+// column-one `· …` line is rejected by itemsOf too, but a block handed straight to this validator
+// was never parsed by itemsOf, so the indentation is required here as well.
+// Ids are `[a-z0-9]` words joined by single dashes: `[a-z0-9-]+` used to accept a lone `-`.
 const CHECK_LINE = /^[ \t]*·[ \t]*ตรวจ:/;
-const CHECK_ID_LINE = /^[ \t]*·[ \t]*ตรวจ:[ \t]*[a-z0-9]+(?:-[a-z0-9]+)*[ \t]*$/;
+const CHECK_ID_LINE = /^[ \t]+·[ \t]*ตรวจ:[ \t]*[a-z0-9]+(?:-[a-z0-9]+)*[ \t]*$/;
+const OWNER_LINE = /^[ \t]*·[ \t]*รอเจ้าของ:/;
+// Content = at least one letter or digit after the label on the SAME line, the same test the
+// handoff labels use. A bare `· รอเจ้าของ:` is the payload-free pointer all over again.
+const OWNER_CONTENT_LINE = /^[ \t]+·[ \t]*รอเจ้าของ:[^\n]*[\p{L}\p{N}]/u;
+const INDENTED_LINE = /^[ \t]/;
 function validateOpenItem(block) {
   const problems = [];
-  // Per line, so the id can never be matched across a newline (a plain `\s` with the `m` flag used
-  // to let the id sit on the NEXT line).
-  const checkLines = block.split('\n').filter(l => CHECK_LINE.test(l));
-  if (!checkLines.some(l => CHECK_ID_LINE.test(l))) {
-    problems.push(`no "· ตรวจ: <id>" line in: ${snip(firstLine(block))}`);
+  const head = snip(firstLine(block));
+  // Per line, so neither label can ever be satisfied across a newline (a plain `\s` with the `m`
+  // flag used to let the id sit on the NEXT line).
+  const lines = block.split('\n');
+  const checkLines = lines.filter(l => CHECK_LINE.test(l));
+  const ownerLines = lines.filter(l => OWNER_LINE.test(l));
+  for (const l of checkLines) {
+    if (CHECK_ID_LINE.test(l)) continue;
+    problems.push(INDENTED_LINE.test(l)
+      ? `"· ตรวจ:" names no single lower-case id: ${snip(l)}`
+      : `"· ตรวจ:" must be an indented continuation line: ${snip(l)}`);
+  }
+  for (const l of ownerLines) {
+    if (OWNER_CONTENT_LINE.test(l)) continue;
+    problems.push(INDENTED_LINE.test(l)
+      ? `"· รอเจ้าของ:" says nothing about what is awaited: ${snip(l)}`
+      : `"· รอเจ้าของ:" must be an indented continuation line: ${snip(l)}`);
   }
   if (checkLines.length > 1) {
-    problems.push(`${checkLines.length} "· ตรวจ:" lines, an item must carry exactly one: ${snip(firstLine(block))}`);
+    problems.push(`${checkLines.length} "· ตรวจ:" lines, an item may carry exactly one: ${head}`);
+  }
+  if (ownerLines.length > 1) {
+    problems.push(`${ownerLines.length} "· รอเจ้าของ:" lines, an item may carry exactly one: ${head}`);
+  }
+  if (!checkLines.length && !ownerLines.length) {
+    problems.push(`no "· ตรวจ: <id>" line and no "· รอเจ้าของ: <text>" line in: ${head}`);
   }
   return problems;
 }
@@ -299,39 +341,85 @@ function validateHandoffItem(block) {
   return problems;
 }
 
-// A closed-index item must be "- **YYYY-MM-DD** — <title>", the title must be a heading that
-// exists in the closed-work file (headings = that file's `##`..`####` lines), AND the date must
-// appear in that heading. The date used to be captured and thrown away, so
+// A closed-index item must be "- **YYYY-MM-DD** — <title>", the title must name something that
+// really exists in the closed-work file, AND the `## ` section that something sits under must carry
+// the index line's date. The date used to be captured and thrown away, so
 // `- **1999-01-01** — ปิดไปแล้ว 2026-10-12 …` passed and the index could point at the wrong day.
+//
+// 2026-10-12 (owner's decision): what a title may name was widened from a heading alone to a
+// heading (`##`..`####`) OR the bold title of a column-one `- **…**` bullet. Why: every `## `
+// heading of the closed file reads "ปิดไปแล้ว <date> — อย่าเสนอซ้ำ", so a title that had to be a
+// substring of a heading could only repeat the date, and each index line ended up saying nothing
+// about its topic -- while the index's whole job is to stop finished work from being proposed
+// again, which a line with no topic cannot do. The real topics are column-one bullets (`###` exists
+// under one section only, so matching `###` headings instead does not reach them), and the moved
+// text of docs/STATUS_CLOSED.md is kept byte-identical on purpose, so promoting those bullets to
+// headings was not an option either.
+//
+// The date is checked against the SECTION, not the matched text: bullet titles carry no date, so
+// the `## ` heading above a bullet is what files that topic under a day. For a `## ` heading the
+// section is the heading itself, which is exactly the older rule.
 const INDEX_LINE = /^- \*\*(\d{4}-\d{2}-\d{2})\*\* — (.+)$/;
-function validateIndexItem(block, headings) {
+// A column-one bullet whose first content is bold -- the shape itemsOf treats as an item, read here
+// for its bold title only. The backreference makes `**x**` and `__x__` close with the marker they
+// opened with, and the lazy body stops at that marker, so `- **a** และ **b**` has the title `a`.
+// The body is not `[^*_]+` on purpose: `` `session_start.ps1` `` is a real title with an underscore.
+const CLOSED_BULLET = /^- +(\*\*|__)(.+?)\1/;
+
+// Everything an index line may point at: `{ title, section }` for every heading and every
+// column-one bold bullet, where `section` is the `## ` heading it sits under (null above the first
+// one, which no date can match -- a topic outside every section cannot be filed under a day).
+function closedTargets(text) {
+  const targets = [];
+  let section = null;
+  for (const raw of splitLines(text)) {
+    const line = raw.trimEnd();
+    if (/^## /.test(line)) section = line;
+    if (/^#{2,4} /.test(line)) { targets.push({ title: line, section }); continue; }
+    const m = line.match(CLOSED_BULLET);
+    if (m) targets.push({ title: m[2].trim(), section });
+  }
+  return targets;
+}
+
+function validateIndexItem(block, targets) {
   const m = firstLine(block).match(INDEX_LINE);
   if (!m) return [`index line is not "- **YYYY-MM-DD** — <title>": ${snip(firstLine(block))}`];
   const [, date, rawTitle] = m;
   const title = rawTitle.trim();
-  const matching = headings.filter(h => h.includes(title));
-  if (!matching.length) return [`no heading in docs/STATUS_CLOSED.md contains: ${title}`];
-  if (!matching.some(h => h.includes(date))) {
-    return [`the heading this index line points at does not carry its date ${date}: ${snip(matching[0])}`];
+  // An empty title is a substring of everything, so it would match every target and name none.
+  if (title === '') return [`index line has no title after the em dash: ${snip(firstLine(block))}`];
+  const matching = targets.filter(t => t.title.includes(title));
+  if (!matching.length) {
+    return [`no heading and no "- **…**" bullet title in docs/STATUS_CLOSED.md contains: ${title}`];
+  }
+  if (!matching.some(t => t.section && t.section.includes(date))) {
+    return [`the docs/STATUS_CLOSED.md section holding what this index line names`
+      + ` does not carry its date ${date}: ${snip(matching[0].section || matching[0].title)}`];
   }
   return [];
 }
-
-function headingsOf(text) { return splitLines(text).filter(l => /^#{2,4} /.test(l)); }
 
 // The other direction, which nothing checked: every `## ` section of the closed-work file must be
 // named by some index line. Append a `## ปิดไปแล้ว 2026-10-13` section with no index line and the
 // work is invisible from STATUS.md -- so it can be proposed again, which is the one failure the
 // index exists to prevent. The file's own `# ` title is not a `## ` heading, so it is not required
-// to be indexed; the sub-headings (`###`) are details of a section and are not required either.
+// to be indexed.
+// A section counts as named when an index line names the section heading itself OR anything inside
+// it (a bullet title, a `###` sub-heading). It has to: with titles widened to bullet titles, a
+// section written as several topics is indexed by naming those topics, and demanding the heading
+// text on top of that would make the two rules contradict each other.
 function validateClosedCoverage(indexBlocks, closedText) {
   const titles = indexBlocks
     .map(b => firstLine(b).match(INDEX_LINE))
     .filter(Boolean)
-    .map(m => m[2].trim());
+    .map(m => m[2].trim())
+    .filter(t => t !== '');
+  const targets = closedTargets(closedText);
   const problems = [];
   for (const h of topHeadings(closedText)) {
-    if (!titles.some(t => h.includes(t))) {
+    const named = targets.some(t => t.section === h && titles.some(x => t.title.includes(x)));
+    if (!named) {
       problems.push(`no line in the closed index points at docs/STATUS_CLOSED.md heading: ${snip(h)}`);
     }
   }
@@ -362,6 +450,13 @@ const GOOD_OPEN = [
   '- **ข้อความโหมดซ้อม**',
   '  · รายละเอียดอยู่ในสเปก',
   '  · ตรวจ: superadmin-dryrun-pass-reasons',
+].join('\n');
+// An item nothing can check: it is open only because the owner has not decided. No check id, so a
+// registry cannot report it green or red -- it is reported as waiting on the owner.
+const GOOD_OPEN_OWNER = [
+  '- **ไฟล์กฎให้ Cursor**',
+  '  · จงใจไม่ทำในรอบนี้',
+  '  · รอเจ้าของ: จะกลับมาใช้ Cursor อีกหรือไม่',
 ].join('\n');
 
 // --- size -------------------------------------------------------------------------------------
@@ -573,8 +668,42 @@ for (const [name, lines, reason] of BAD_SHAPES) {
 test('fixture: validateOpenItem accepts an item with a "· ตรวจ: <id>" line', () => {
   expectClean(validateOpenItem(GOOD_OPEN));
 });
-test('fixture: validateOpenItem rejects an item with no check line', () => {
+test('fixture: validateOpenItem rejects an item with NEITHER "· ตรวจ:" nor "· รอเจ้าของ:"', () => {
+  // An item open for no stated reason: no check can settle it and nobody is named as holding it.
   expectRejected(validateOpenItem('- **x**\n  · detail only'), /ตรวจ/);
+  expectRejected(validateOpenItem('- **x**\n  · detail only'), /รอเจ้าของ/);
+});
+test('fixture: validateOpenItem accepts an item whose only settling line is "· รอเจ้าของ:"', () => {
+  // `cursor-rules-file` is this shape: the work is deliberately out of scope, so there is nothing
+  // for a script to check and a check id would be red for work nobody wants done.
+  expectClean(validateOpenItem(GOOD_OPEN_OWNER));
+  // and the two line types may coexist, which is the `nas-password-scrubbed` shape
+  expectClean(validateOpenItem(`${GOOD_OPEN}\n  · รอเจ้าของ: เปลี่ยนรหัสผ่านที่ DSM`));
+});
+test('fixture: validateOpenItem rejects a bare "· รอเจ้าของ:" with nothing after it', () => {
+  // Same defect as a bare handoff label: a pointer with no payload.
+  expectRejected(validateOpenItem('- **x**\n  · รอเจ้าของ:'), /says nothing about what is awaited/);
+  expectRejected(validateOpenItem('- **x**\n  · รอเจ้าของ:   '), /says nothing about what is awaited/);
+  expectRejected(validateOpenItem('- **x**\n  · รอเจ้าของ: ·'), /says nothing about what is awaited/);
+  // the id line being present does not excuse it: a malformed line of either type is a red
+  expectRejected(validateOpenItem(`${GOOD_OPEN}\n  · รอเจ้าของ:`), /says nothing about what is awaited/);
+});
+test('fixture: validateOpenItem rejects either line type written at column one', () => {
+  // itemsOf rejects such a line too, but a block handed straight to this validator never met it.
+  expectRejected(validateOpenItem('- **x**\n· รอเจ้าของ: เจ้าของต้องเปลี่ยนรหัส'), /รอเจ้าของ:" must be an indented/);
+  expectRejected(validateOpenItem('- **x**\n· ตรวจ: id-a'), /ตรวจ:" must be an indented/);
+  // and the same line indented is accepted, so the fixture isolates the indentation rule
+  expectClean(validateOpenItem('- **x**\n  · รอเจ้าของ: เจ้าของต้องเปลี่ยนรหัส'));
+});
+test('fixture: itemsOf also rejects a column-one "· รอเจ้าของ:" line as no continuation at all', () => {
+  expectRejected(itemsOf(['- **x**', '  · ตรวจ: id-a', '· รอเจ้าของ: x']).problems, /not indented/);
+});
+test('fixture: validateOpenItem rejects an item carrying two "· รอเจ้าของ:" lines', () => {
+  // Two answers to "what is the owner holding" is the same ambiguity as two check ids.
+  expectRejected(validateOpenItem('- **x**\n  · รอเจ้าของ: เปลี่ยนรหัส\n  · รอเจ้าของ: ตัดสินขอบเขต'), /exactly one/);
+  expectRejected(validateOpenItem(`${GOOD_OPEN}\n  · รอเจ้าของ: ก\n  · รอเจ้าของ: ข`), /"· รอเจ้าของ:" lines/);
+  // "รอเจ้าของ" prose with no colon is not the label, so it does not count as a second line
+  expectClean(validateOpenItem(`${GOOD_OPEN_OWNER}\n  · ข้อนี้รอเจ้าของ ตัดสิน 2026-10-12`));
 });
 test('fixture: validateOpenItem rejects an id that sits on the line AFTER "ตรวจ:"', () => {
   // `\s` crossing the newline used to accept this; the id must be on the same line as the label.
@@ -680,30 +809,97 @@ test('fixture: validateHandoffRubric rejects a rubric that is edited, trimmed or
 });
 
 // --- validateIndexItem ------------------------------------------------------------------------
+// One closed-work file in miniature: a section whose topics are column-one bullets, a section whose
+// topics are `###` sub-headings, and a bullet that sits above every `## ` heading.
+const CLOSED_SAMPLE = [
+  '# STATUS_CLOSED — รายละเอียด',
+  '- **บูลเล็ตที่อยู่เหนือหัวข้อทุกอัน**',
+  '',
+  '## ปิดไปแล้ว 2026-10-12 — อย่าเสนอซ้ำ',
+  '- **ไทล์สถิติ dashboard — กฎสำหรับแท็บเล็ตตาย**',
+  '  · บรรทัดย่อย ไม่ใช่ชื่อเรื่อง',
+  '- **`session_start.ps1` รอบสอง — ยามรอบแรกใช้ไม่ได้จริง**',
+  '',
+  '## กฎพิกัด — ตรวจบางส่วน (2026-10-11)',
+  '### ✅ กฎ "ต้องมีพิกัด" — ตรวจแล้วผ่าน',
+  '- ไม่ใช่บูลเล็ตตัวหนา',
+].join('\n');
+
+test('fixture: closedTargets collects headings and bullet titles, each with its "## " section', () => {
+  const t = closedTargets(CLOSED_SAMPLE);
+  const got = t.map(x => `${x.title} @ ${x.section}`);
+  const want = [
+    'บูลเล็ตที่อยู่เหนือหัวข้อทุกอัน @ null',
+    '## ปิดไปแล้ว 2026-10-12 — อย่าเสนอซ้ำ @ ## ปิดไปแล้ว 2026-10-12 — อย่าเสนอซ้ำ',
+    'ไทล์สถิติ dashboard — กฎสำหรับแท็บเล็ตตาย @ ## ปิดไปแล้ว 2026-10-12 — อย่าเสนอซ้ำ',
+    '`session_start.ps1` รอบสอง — ยามรอบแรกใช้ไม่ได้จริง @ ## ปิดไปแล้ว 2026-10-12 — อย่าเสนอซ้ำ',
+    '## กฎพิกัด — ตรวจบางส่วน (2026-10-11) @ ## กฎพิกัด — ตรวจบางส่วน (2026-10-11)',
+    '### ✅ กฎ "ต้องมีพิกัด" — ตรวจแล้วผ่าน @ ## กฎพิกัด — ตรวจบางส่วน (2026-10-11)',
+  ];
+  if (JSON.stringify(got) !== JSON.stringify(want)) {
+    throw new Error(`targets differ:\n       got  ${got.join('\n       got  ')}`);
+  }
+});
 test('fixture: validateIndexItem accepts a line whose title is a real heading', () => {
-  const headings = headingsOf('# t\n### 2026-10-12 — ไทล์สถิติ dashboard — กฎแท็บเล็ต\n');
-  expectClean(validateIndexItem('- **2026-10-12** — ไทล์สถิติ dashboard', headings));
+  const targets = closedTargets('# t\n## ปิดไปแล้ว 2026-10-12 — อย่าเสนอซ้ำ\n### 2026-10-12 — ไทล์สถิติ — กฎแท็บเล็ต\n');
+  expectClean(validateIndexItem('- **2026-10-12** — ไทล์สถิติ', targets));
 });
-test('fixture: validateIndexItem rejects a malformed line and a title with no heading', () => {
-  const headings = ['### 2026-10-12 — ไทล์สถิติ dashboard'];
-  expectRejected(validateIndexItem('- 2026-10-12 ไทล์สถิติ dashboard', headings), /is not "- \*\*YYYY-MM-DD\*\*/);
-  expectRejected(validateIndexItem('- **2026-10-12** — งานที่ไม่มีหัวข้อ', headings), /no heading/);
-  expectRejected(validateIndexItem('- **2026-10-12** — ไทล์สถิติ dashboard', []), /no heading/);
+test('fixture: validateIndexItem accepts a title taken from a column-one "- **…**" bullet', () => {
+  // The point of the 2026-10-12 widening: the topic is a bullet, not a heading, and the index line
+  // names the topic instead of repeating the date. A heading-only rule rejected exactly this.
+  const targets = closedTargets(CLOSED_SAMPLE);
+  expectClean(validateIndexItem('- **2026-10-12** — ไทล์สถิติ dashboard', targets));
+  // an underscore in the title is why the bullet body is not matched as `[^*_]+`
+  expectClean(validateIndexItem('- **2026-10-12** — `session_start.ps1` รอบสอง', targets));
+  // a sub-line under a bullet is not a title, and neither is a bullet with no bold
+  expectRejected(validateIndexItem('- **2026-10-12** — บรรทัดย่อย ไม่ใช่ชื่อเรื่อง', targets), /no heading and no/);
+  expectRejected(validateIndexItem('- **2026-10-11** — ไม่ใช่บูลเล็ตตัวหนา', targets), /no heading and no/);
 });
-test('fixture: validateIndexItem rejects a date the heading it points at does not carry', () => {
+test('fixture: validateIndexItem rejects a malformed line, an empty title and a title that names nothing', () => {
+  const targets = closedTargets(CLOSED_SAMPLE);
+  expectRejected(validateIndexItem('- 2026-10-12 ไทล์สถิติ dashboard', targets), /is not "- \*\*YYYY-MM-DD\*\*/);
+  expectRejected(validateIndexItem('- **2026-10-12** — งานที่ไม่มีอยู่ในไฟล์ปิดแล้ว', targets), /no heading and no/);
+  expectRejected(validateIndexItem('- **2026-10-12** — ไทล์สถิติ dashboard', []), /no heading and no/);
+  // an empty title is a substring of every target, so it would otherwise match all of them
+  expectRejected(validateIndexItem('- **2026-10-12** —  ', targets), /no title after the em dash/);
+});
+test('fixture: validateIndexItem rejects a date the section it points into does not carry', () => {
   // The date was captured and discarded, so an index line could date the work to any day at all.
-  const headings = ['## ปิดไปแล้ว 2026-10-12 — อย่าเสนอซ้ำ', '### 2026-10-12 — ไทล์สถิติ dashboard'];
-  expectRejected(validateIndexItem('- **1999-01-01** — ปิดไปแล้ว 2026-10-12 — อย่าเสนอซ้ำ', headings), /does not carry its date 1999-01-01/);
-  expectRejected(validateIndexItem('- **2026-10-11** — ไทล์สถิติ dashboard', headings), /does not carry its date 2026-10-11/);
-  expectClean(validateIndexItem('- **2026-10-12** — ไทล์สถิติ dashboard', headings));
-  // the date may sit anywhere in the heading, including in brackets at the end
-  expectClean(validateIndexItem('- **2026-10-11** — กฎพิกัด — ตรวจบางส่วน (2026-10-11)', ['## กฎพิกัด — ตรวจบางส่วน (2026-10-11)']));
+  const targets = closedTargets(CLOSED_SAMPLE);
+  expectRejected(validateIndexItem('- **1999-01-01** — ปิดไปแล้ว 2026-10-12 — อย่าเสนอซ้ำ', targets), /does not carry its date 1999-01-01/);
+  expectRejected(validateIndexItem('- **2026-10-11** — ไทล์สถิติ dashboard', targets), /does not carry its date 2026-10-11/);
+  expectClean(validateIndexItem('- **2026-10-12** — ไทล์สถิติ dashboard', targets));
+  // a bullet carries no date of its own: the "## " heading above it is what files it under a day,
+  // so a bullet that sits above every heading can be filed under none
+  expectRejected(validateIndexItem('- **2026-10-12** — บูลเล็ตที่อยู่เหนือหัวข้อทุกอัน', targets), /does not carry its date/);
+  // the date may sit anywhere in the section heading, including in brackets at the end
+  expectClean(validateIndexItem('- **2026-10-11** — กฎ "ต้องมีพิกัด" — ตรวจแล้วผ่าน', targets));
+  expectClean(validateIndexItem('- **2026-10-11** — กฎพิกัด — ตรวจบางส่วน', targets));
 });
 
 // --- validateClosedCoverage -------------------------------------------------------------------
 test('fixture: validateClosedCoverage accepts a closed file whose every "## " section is indexed', () => {
   const closed = '# title\n\n## ปิดไปแล้ว 2026-10-12 — อย่าเสนอซ้ำ\n### ✅ a detail heading\n- x\n';
   expectClean(validateClosedCoverage(['- **2026-10-12** — ปิดไปแล้ว 2026-10-12 — อย่าเสนอซ้ำ'], closed));
+});
+test('fixture: validateClosedCoverage accepts a section named only through one of its bullets', () => {
+  // The companion of the widened title rule: a section whose topics are bullets is covered by
+  // naming a topic. Demanding the heading text as well would make the two rules contradict -- the
+  // index would have to carry a topic-free line next to every topic line to stay green.
+  expectClean(validateClosedCoverage([
+    '- **2026-10-12** — ไทล์สถิติ dashboard',
+    '- **2026-10-11** — กฎ "ต้องมีพิกัด" — ตรวจแล้วผ่าน',
+  ], CLOSED_SAMPLE));
+  // one of the two sections named, the other not, is still a red
+  expectRejected(validateClosedCoverage(['- **2026-10-12** — ไทล์สถิติ dashboard'], CLOSED_SAMPLE), /กฎพิกัด/);
+  // a bullet that sits under NO "## " heading covers nothing
+  expectRejected(validateClosedCoverage(['- **2026-10-12** — บูลเล็ตที่อยู่เหนือหัวข้อทุกอัน'], CLOSED_SAMPLE), /ปิดไปแล้ว 2026-10-12/);
+  // and naming a topic of one section does not cover a different section
+  const twoSections = `${CLOSED_SAMPLE}\n\n## ปิดไปแล้ว 2026-10-13 — อย่าเสนอซ้ำ\n- **งานของวันที่ 13**\n`;
+  expectRejected(validateClosedCoverage([
+    '- **2026-10-12** — ไทล์สถิติ dashboard',
+    '- **2026-10-11** — กฎพิกัด — ตรวจบางส่วน',
+  ], twoSections), /2026-10-13/);
 });
 test('fixture: validateClosedCoverage rejects a "## " section that no index line points at', () => {
   // Appending a section with no index line leaves STATUS.md silent about it, so the work can be
@@ -761,7 +957,7 @@ test('every line in the three sections is a valid item or a continuation of one'
   expectClean(problems);
 });
 
-test('every open item names a check id', () => {
+test('every open item names a check id, a "รอเจ้าของ" line, or both', () => {
   const open = realItems(SEC_OPEN);
   if (open.length === 0) throw new Error('no items under ## เปิดอยู่ -- the parser or the file is wrong');
   for (const block of open) expectClean(validateOpenItem(block));
@@ -777,11 +973,12 @@ test('the handoff section holds the standing rubric and no other "> " prose', ()
   expectClean(validateHandoffRubric(lines));
 });
 
-test('every closed-index line points at a heading that exists and carries its date', () => {
+test('every closed-index line names a real heading or bullet title and sits under its date', () => {
   const index = realItems(SEC_CLOSED);
   if (index.length === 0) throw new Error('the closed index is empty -- "do not propose this again" has no teeth');
-  const headings = headingsOf(fs.readFileSync(CLOSED_PATH, 'utf8'));
-  for (const block of index) expectClean(validateIndexItem(block, headings));
+  const targets = closedTargets(fs.readFileSync(CLOSED_PATH, 'utf8'));
+  if (targets.length === 0) throw new Error('docs/STATUS_CLOSED.md has no heading and no bullet title -- the parser or the file is wrong');
+  for (const block of index) expectClean(validateIndexItem(block, targets));
 });
 
 test('every "## " section of docs/STATUS_CLOSED.md is named by a closed-index line', () => {
