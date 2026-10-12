@@ -31,7 +31,8 @@
 //   - every following non-blank line up to the next item is a continuation line and MUST be
 //     indented; an indented line that starts with a list marker (`-`, `*`, `+`, `•`, `–`, `・`,
 //     `1.`, `1)`) is a sub-list of the item above and is accepted as part of it -- EXCEPT when the
-//     marker is followed by bold text (`  - **b**`, `  1. **b**`). Every real item starts with a
+//     marker is followed by bold text, optionally after emoji/symbol decoration (`  - **b**`,
+//     `  1. **b**`, `  - 🔴 **b**`) but NOT after real words. Every real item starts with a
 //     bold subject, a bold date or an emoji plus bold, so that shape is an item that lost its
 //     column-one indentation; accepting it would let it hide inside the item above and escape its
 //     own check id / handoff labels / index lookup, so it is rejected;
@@ -110,7 +111,10 @@ function sectionLines(text, title) {
 // ASCII markers plus the three bullet glyphs people paste in from other tools (U+2022, U+2013, U+30FB).
 const LIST_MARKER = /^\s*([-*+•–・]|\d+[.)])(\s|$)/;
 // An indented line whose list marker is followed by bold text: an item that lost its indentation.
-const INDENTED_BOLD_ITEM = /^\s+([-*+•–・]|\d+[.)])\s+\*\*/;
+// Decoration between the marker and the bold (emoji such as 🔴 or ⚠️, symbols, punctuation, extra
+// asterisks) is skipped: `[^\p{L}\p{N}]*` consumes everything that is not a letter or digit, so the
+// bold must be the first real content. `  - ดูไฟล์ **app.js**` has words first and stays accepted.
+const INDENTED_BOLD_ITEM = /^\s+([-*+•–・]|\d+[.)])\s+[^\p{L}\p{N}]*\*\*/u;
 
 // Split a section's lines into items. Returns { blocks, problems }: blocks are the items as
 // newline-joined strings; problems lists every line that is none of: a column-one `- ` item, a
@@ -327,6 +331,9 @@ const LOST_INDENT_CASES = [
   ['"•" marker', ['- **a**', '  • **b**']],
   ['deeper indent', ['- **a**', '      - **b**']],
   ['dated item', ['- **a**', '  - **2026-10-12** — B']],
+  ['emoji + bold "- 🔴 **b**"', ['- **a**', '  - 🔴 **b**']],
+  ['emoji with variation selector + bold "- ⚠️ **b**"', ['- **a**', '  - ⚠️ **b**']],
+  ['numbered emoji + bold "1. 🔴 **b**"', ['- **a**', '  1. 🔴 **b**']],
 ];
 for (const [name, lines] of LOST_INDENT_CASES) {
   test(`fixture: itemsOf rejects an indented ${name} and says it must start at column one`, () => {
@@ -353,6 +360,8 @@ test('fixture: itemsOf still accepts indented sub-steps whose content is not bol
   }
   // bold INSIDE a sub-step is fine; only a marker immediately followed by bold is an item
   expectClean(itemsOf(['- **a**', '  1. ทำ **สำคัญ** ก่อน']).problems);
+  // bold after real words is a legitimate sub-step, with or without a leading emoji
+  expectClean(itemsOf(['- **a**', '  - ดูไฟล์ **app.js**', '  - plain sub-item', '  - 🔴 ดูไฟล์ **app.js**']).problems);
   // the middle dot used for labels is not a list marker
   expectClean(itemsOf(['- **a**', '  · **ที่มา:** x']).problems);
 });
