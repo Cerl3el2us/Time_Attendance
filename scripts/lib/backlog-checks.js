@@ -232,22 +232,37 @@ function describeLastRun(dir) {
   return out.join('\n');
 }
 
-// The shape this check knows (2026-10-12): ONE single-line `$pushOk = ...` whose expression is
-// complete on that line and says nothing about copied/dirty/conflict, ONE `if ($pushOk)` guard
-// after it, and the marker write inside that guard. Anything else -- a second assignment, a
-// continuation, a changed guard -- means somebody has touched the logic, and this check cannot say
-// whether the defect is still there. The verdict is FAIL only when the old shape is positively
-// matched; otherwise the caller returns NOT-VERIFIED and asks for a human read.
+// The shape this check knows (2026-10-12): ONE assignment to `$pushOk`, whose expression is exactly
+// KNOWN_EXPR below, ONE `if ($pushOk)` guard line that opens a block, and the marker write INSIDE
+// that block. Anything else at all -- a second assignment (in any scope), one more condition, a
+// wider guard, the marker moved out of the block -- means somebody has touched this logic, and the
+// check cannot then say whether the defect is still there. FAIL is returned only when the shape is
+// positively matched; otherwise the caller returns NOT-VERIFIED and asks for a human read.
+//
+// 2026-10-12 (re-review): the expression is compared verbatim instead of sniffed for words like
+// "copied". Sniffing let three real fixes through as FAIL -- `-and ($pushedN -gt 0)` added in line,
+// a second assignment written `$script:pushOk = ...`, and an upstream `if ($copied -eq 0) {
+// $failed = 1 }`. The first two are caught below; the third cannot be seen by shape at all, so the
+// FAIL evidence states that limit instead of pretending to cover it.
+const KNOWN_EXPR = '($rc -eq 0) -and ($null -ne $failed) -and ($failed -eq 0)';
+// Any scope prefix counts: `$script:pushOk = ...` is a second assignment, not an invisible one.
+const PUSHOK_ASSIGN = /\$(?:script:|global:|local:|private:)?pushOk\s*[-+*/]?=(?!=)/;
+const PUSHOK_STATEMENT = /^\s*\$(?:script:|global:|local:|private:)?pushOk\s*=\s*(.*)$/;
+
 function matchPushShape(all) {
+  // Splitting on the first `#` treats a `#` inside a quoted string as a comment, which can make the
+  // rest of the line look unbalanced. That is deliberate: the wrong answer here is "shape unknown"
+  // -> NOT-VERIFIED, which asks for a human read. A real PowerShell parser is not worth the risk of
+  // the other wrong answer.
   const codeOf = l => l.split('#')[0];
   const assigns = [];
-  all.forEach((l, i) => { if (/\$pushOk\s*[-+*/]?=(?!=)/.test(codeOf(l))) assigns.push(i); });
+  all.forEach((l, i) => { if (PUSHOK_ASSIGN.test(codeOf(l))) assigns.push(i); });
   const guards = [];
   const markers = [];
   const firstAssign = assigns.length ? assigns[0] : -1;
   all.forEach((l, i) => {
     if (i <= firstAssign) return;
-    if (/^\s*if\s*\(\s*\$pushOk\s*\)\s*\{?\s*(#.*)?$/.test(l)) guards.push(i);
+    if (/^\s*if\s*\(\s*\$pushOk\s*\)\s*\{\s*(#.*)?$/.test(l)) guards.push(i);
     if (/Set-Content\b.*"pushed\b/.test(l)) markers.push(i);
   });
 
@@ -256,16 +271,34 @@ function matchPushShape(all) {
   let decideAt = -1;
   if (assigns.length === 1) {
     decideAt = assigns[0];
-    const code = codeOf(all[decideAt]).trimEnd();
-    const opens = (code.match(/\(/g) || []).length;
-    const closes = (code.match(/\)/g) || []).length;
-    if (!/^\s*\$pushOk\s*=/.test(code)) problems.push('the $pushOk assignment is not a statement of its own');
-    if (opens !== closes || /(`|-and|-or|-not|,|\+|\|)$/.test(code)) problems.push('the $pushOk expression is not complete on its own line');
-    if (/copied|dirty|conflict|same/i.test(code)) problems.push('the $pushOk expression now mentions copied/dirty/conflict/same');
+    const m = codeOf(all[decideAt]).match(PUSHOK_STATEMENT);
+    if (!m) problems.push('the $pushOk assignment is not a statement of its own');
+    else {
+      const expr = m[1].replace(/\s+/g, ' ').trim();
+      if (expr !== KNOWN_EXPR) problems.push(`the $pushOk expression is not the known one (known: ${KNOWN_EXPR})`);
+    }
   }
-  if (guards.length !== 1) problems.push(`${guards.length} exact "if ($pushOk)" guard line(s) after it (the known shape has exactly 1)`);
+  if (guards.length !== 1) problems.push(`${guards.length} exact "if ($pushOk) {" guard line(s) after it (the known shape has exactly 1)`);
   if (markers.length !== 1) problems.push(`${markers.length} marker write(s) of the form Set-Content ... "pushed ..." after it (the known shape has exactly 1)`);
-  else if (guards.length === 1 && markers[0] < guards[0]) problems.push('the marker write comes before the guard');
+
+  // Inside the guard's block, not merely after its line. 2026-10-12 (re-review): keeping the guard
+  // line, closing its block and moving the marker write under `if ($rc -eq 0) {` left the verdict
+  // FAIL while the evidence said "guarded only by the exact if ($pushOk)" -- which was then false.
+  // Brace depth from the guard line; if the block never closes, the braces are not readable, and
+  // "not the known shape" is the safe answer.
+  if (guards.length === 1 && markers.length === 1) {
+    let depth = 0;
+    let closedAt = -1;
+    for (let i = guards[0]; i < all.length; i++) {
+      const code = codeOf(all[i]);
+      depth += (code.match(/\{/g) || []).length - (code.match(/\}/g) || []).length;
+      if (i > guards[0] && depth <= 0) { closedAt = i; break; }
+    }
+    if (closedAt === -1) problems.push('the block opened by the "if ($pushOk) {" guard does not close, so its braces could not be read');
+    else if (markers[0] <= guards[0] || markers[0] >= closedAt) {
+      problems.push(`the marker write at :${markers[0] + 1} is not inside the "if ($pushOk) {" block (lines ${guards[0] + 1}-${closedAt + 1})`);
+    }
+  }
   return {
     matched: problems.length === 0, problems, assigns, guards, markers, decideAt,
     guardAt: guards.length === 1 ? guards[0] : -1,
@@ -312,7 +345,8 @@ function checkSyncPushFalseSuccess(dir = NAS_MEMORY_DIR) {
     evidence: lines(
       cite(shape.decideAt),
       'push counts as ok on the exit code and failed=0 alone: it never requires that anything was copied or that every dirty file was accounted for',
-      `marker written at ${cite(shape.markerAt)}, guarded only by the exact "if ($pushOk)" at :${shape.guardAt + 1}`,
+      `marker written at ${cite(shape.markerAt)}, inside the block opened by the exact "if ($pushOk) {" at :${shape.guardAt + 1}`,
+      `LIMIT of this check: it reads only the $pushOk decision, its guard and the marker write, so a fix made elsewhere in the script (for example forcing $failed before the decision) would not be seen; read ${scriptName} by hand before trusting this FAIL`,
       logPart),
   };
 }
@@ -326,7 +360,7 @@ const RAW_CHECKS = {
     run: () => checkBacklogCommand(),
   },
   'sync-push-false-success': {
-    describe: 'Whether the automatic memory push (sync_if_dirty.ps1) can still write its clean marker after copying nothing: reads its success decision, the marker write and the latest sync.log run on the NAS; FAIL only while the known old shape of that code is still there.',
+    describe: 'Whether the automatic memory push (sync_if_dirty.ps1) can still write its clean marker after copying nothing: reads its success decision, the marker write and the latest sync.log run on the NAS; FAIL only while the known old shape of that code is still there, and it reads nothing but those three places, so a fix made elsewhere in the script would not be seen.',
     run: () => checkSyncPushFalseSuccess(),
   },
 };

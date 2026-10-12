@@ -145,14 +145,8 @@ function syncDir(name, { decide = '$pushOk = ($rc -eq 0) -and ($null -ne $failed
 }
 const NEVER_PASS = r => assert.notStrictEqual(r.verdict, 'PASS', `PASS without proof: ${r.evidence}`);
 
-test('sync: the known old shape is FAIL, citing the decision line, the marker line and the guard', () => {
-  const r = checkSyncPushFalseSuccess(syncDir('old-shape'));
-  assert.strictEqual(r.verdict, 'FAIL', r.evidence);
-  assert.ok(r.evidence.includes('sync_if_dirty.ps1:2: $pushOk = '), r.evidence);
-  assert.ok(r.evidence.includes('sync_if_dirty.ps1:5:'), `marker line not cited: ${r.evidence}`);
-  assert.ok(r.evidence.includes('"if ($pushOk)" at :4'), `guard line not cited: ${r.evidence}`);
-});
-
+// Declared above every case that calls it: each test() runs as the file is read, so a helper
+// defined further down would be in its temporal dead zone -- which eslint does not report.
 const HAND = 'read sync_if_dirty.ps1 by hand';
 const CLOSE = 'close the STATUS.md item (sync-push-false-success) and delete this check in the same commit';
 function assertShapeChanged(r, why) {
@@ -162,6 +156,74 @@ function assertShapeChanged(r, why) {
   assert.ok(r.evidence.includes(HAND) && r.evidence.includes(CLOSE), `${why}: no hand-read instruction: ${r.evidence}`);
   assert.ok(!r.evidence.includes('push counts as ok on the exit code'), `${why}: the old defect text survived: ${r.evidence}`);
 }
+
+test('sync: the known old shape is FAIL, citing the decision line, the marker line and the guard', () => {
+  const r = checkSyncPushFalseSuccess(syncDir('old-shape'));
+  assert.strictEqual(r.verdict, 'FAIL', r.evidence);
+  assert.ok(r.evidence.includes('sync_if_dirty.ps1:2: $pushOk = '), r.evidence);
+  assert.ok(r.evidence.includes('sync_if_dirty.ps1:5:'), `marker line not cited: ${r.evidence}`);
+  assert.ok(r.evidence.includes('inside the block opened by the exact "if ($pushOk) {" at :4'), `guard line not cited: ${r.evidence}`);
+});
+
+// 2026-10-12 (re-review): a FAIL claims the defect is live, and this check reads three places only.
+// An upstream fix (`if ($copied -eq 0) { $failed = 1 }` before the decision) cannot be seen by
+// shape, so the FAIL has to say so where it will be read rather than imply full coverage.
+test('sync: the FAIL states the limit of what it read, so an upstream fix is not implied away', () => {
+  const r = checkSyncPushFalseSuccess(syncDir('limit-stated'));
+  assert.strictEqual(r.verdict, 'FAIL', r.evidence);
+  assert.ok(r.evidence.includes('LIMIT of this check'), r.evidence);
+  assert.ok(/reads only the \$pushOk decision, its guard and the marker write/.test(r.evidence), r.evidence);
+  assert.ok(/a fix made elsewhere in the script/.test(r.evidence), r.evidence);
+  assert.ok(/read sync_if_dirty\.ps1 by hand before trusting this FAIL/.test(r.evidence), r.evidence);
+  // and the same limit is on the registry entry, which is what a reader of the backlog sees first
+  assert.ok(/reads nothing but those three places/.test(CHECKS['sync-push-false-success'].describe),
+    CHECKS['sync-push-false-success'].describe);
+});
+
+// The marker write has to be INSIDE the guard's block, not merely below its line. Keeping the guard
+// line, closing its block and writing the marker under another `if` left this FAIL while the
+// evidence said "guarded only by the exact if ($pushOk)" -- a sentence that was then false.
+test('sync: the marker write moved out of the if ($pushOk) block is NOT-VERIFIED, with no "guarded by" claim', () => {
+  const d = dirFor('marker-outside');
+  put(d, 'sync_if_dirty.ps1', [
+    '$rc = 0',
+    '$pushOk = ($rc -eq 0) -and ($null -ne $failed) -and ($failed -eq 0)',
+    'if ($pushOk) {',
+    "  $markerState = 'would-write'",
+    '}',
+    'if ($rc -eq 0) {',
+    '  Set-Content -LiteralPath $markerFull -Value "pushed $stamp" -Encoding UTF8',
+    '}',
+    '',
+  ].join('\n'));
+  put(d, 'sync_memory.ps1', PATTERNS_PS1);
+  put(d, 'sync.log', DIRTY_LINE());
+  const r = checkSyncPushFalseSuccess(d);
+  assertShapeChanged(r, 'marker outside the guard block');
+  assert.ok(!/guarded only by|inside the block opened/.test(r.evidence), `a guard claim survived: ${r.evidence}`);
+  assert.ok(r.evidence.includes('is not inside the "if ($pushOk) {" block'), r.evidence);
+});
+
+test('sync: one more condition on the known expression is NOT-VERIFIED, however it is worded', () => {
+  for (const [name, decide] of [
+    ['extended-unknown-var', '$pushOk = ($rc -eq 0) -and ($null -ne $failed) -and ($failed -eq 0) -and ($pushedN -gt 0)'],
+    ['extended-front', '$pushOk = ($copiedAny) -and ($rc -eq 0) -and ($null -ne $failed) -and ($failed -eq 0)'],
+    ['narrowed', '$pushOk = ($rc -eq 0) -and ($failed -eq 0)'],
+  ]) {
+    assertShapeChanged(checkSyncPushFalseSuccess(syncDir(name, { decide })), name);
+  }
+});
+
+test('sync: a second assignment carrying a scope prefix is NOT-VERIFIED, not invisible', () => {
+  for (const prefix of ['$script:', '$global:', '$private:']) {
+    const d = syncDir(`scoped-${prefix.replace(/[$:]/g, '')}`, {
+      decide: `$pushOk = ($rc -eq 0) -and ($null -ne $failed) -and ($failed -eq 0)\n${prefix}pushOk = $pushOk -and ($copied -gt 0)`,
+    });
+    const r = checkSyncPushFalseSuccess(d);
+    assertShapeChanged(r, `${prefix}pushOk second assignment`);
+    assert.ok(r.evidence.includes('2 assignments to $pushOk'), `the scoped assignment was not counted: ${r.evidence}`);
+  }
+});
 
 test('sync: a second $pushOk assignment (a plausible real fix) is NOT-VERIFIED, not FAIL', () => {
   const d = syncDir('two-assignments', { decide: '$pushOk = ($rc -eq 0) -and ($failed -eq 0)\n$pushOk = $pushOk -and ($copied -gt 0)' });
@@ -218,6 +280,17 @@ test('sync evidence: a dirty name no pattern matches is reported; matching names
   const ok = checkSyncPushFalseSuccess(syncDir('matched', { log: DIRTY_LINE({ files: 'MEMORY.md, feedback_attendance_x.md' }) }));
   assert.ok(ok.evidence.includes('no listed name is excluded by name'), ok.evidence);
   assert.ok(!ok.evidence.includes('no skipped file'), 'overstated claim came back');
+});
+
+// The caveat is the whole reason the sentence above is allowed to exist: sync_if_dirty.ps1 counts a
+// file in any non-dot SUBFOLDER as dirty, while sync_memory.ps1 copies only the top level and
+// archive\, so a name that passes the pattern test can still never be copied. Without this case,
+// deleting the caveat left the suite green (mutation testing, 2026-10-12).
+test('sync evidence: the name test carries its subfolder caveat, so it is not read as "nothing was skipped"', () => {
+  const r = checkSyncPushFalseSuccess(syncDir('caveat', { log: DIRTY_LINE({ files: 'MEMORY.md' }) }));
+  assert.ok(/subfolder/.test(r.evidence), `no subfolder caveat: ${r.evidence}`);
+  assert.ok(/names alone cannot show/.test(r.evidence), `the caveat lost its point: ${r.evidence}`);
+  assert.ok(/dirty but never copied/.test(r.evidence), `the caveat lost its consequence: ${r.evidence}`);
 });
 
 test('sync evidence: a sync.log with a byte-order mark and a single DIRTY run on line 1 is still read', () => {
