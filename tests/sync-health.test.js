@@ -42,7 +42,7 @@ function put(dir, rel, text) {
 const sized = size => 'x'.repeat(size);
 
 // What the printer must never see when something was not measured.
-const REASSURING = /in sync|identical|agree|up to date|all good|no pattern-matching file differs|every file/i;
+const REASSURING = /in sync|identical|agree|up to date|all good|no pattern-matching file differs|every (non-dot )?file/i;
 const CLEAN_GIT = args => (args.includes('status') ? '' : '0\n');
 
 // A NAS folder as sync_memory.ps1 leaves it. The patterns are not the real ones on purpose.
@@ -80,6 +80,46 @@ function run(deps) {
 }
 const warnings = r => r.lines.filter(l => l.startsWith('WARNING: '));
 const has = (r, text) => r.lines.some(l => l.includes(text));
+const asciiOnly = l => /^[\x20-\x7e]*$/.test(l);
+
+// The behavioural proof that the block performs no writes. While `fn` runs, every function of `fs`
+// (and `fs.promises`) that writes, deletes, renames, copies, creates, truncates or changes
+// attributes, and `open` with any flag but read-only, RECORDS the attempt and throws; with
+// `childProcess`, so does every way of starting a process (a `cmd /c del` would be one). The block
+// swallows its own errors by design, so the attempts are counted here, not inferred from the result.
+// Everything is restored in `finally`. Nothing may be logged while `fn` runs: console output can
+// itself go through fs.writeSync. A source scan cannot do this job: it misses async fs.unlink,
+// write-mode openSync, a spawned `del` and a computed method name.
+const WRITE_NAME = /^(write|append|unlink|rm|rename|copy|mkdir|truncate|chmod|chown|symlink|link|utimes|futimes|lutimes|lchown|lchmod|ftruncate|fsync|fdatasync|mkdtemp|cp|fchmod|fchown|createWriteStream|writev|opendir)/;
+const SPAWN_NAME = /^(exec|execSync|execFile|execFileSync|spawn|spawnSync|fork)$/;
+function withWritesForbidden(fn, { childProcess = false } = {}) {
+  const attempts = [];
+  const saved = [];
+  const swap = (obj, key, replacement) => { saved.push([obj, key, obj[key]]); obj[key] = replacement; };
+  const forbid = (obj, label, key) => swap(obj, key, function () {
+    attempts.push(`${label}.${key}`);
+    throw new Error(`write attempted: ${label}.${key}`);
+  });
+  for (const key of Object.keys(fs)) if (typeof fs[key] === 'function' && WRITE_NAME.test(key)) forbid(fs, 'fs', key);
+  for (const key of Object.keys(fs.promises)) if (typeof fs.promises[key] === 'function' && WRITE_NAME.test(key)) forbid(fs.promises, 'fs.promises', key);
+  for (const key of ['open', 'openSync']) {
+    const real = fs[key];
+    swap(fs, key, function (p, flags) {
+      if (flags !== undefined && flags !== 'r' && flags !== fs.constants.O_RDONLY) {
+        attempts.push(`fs.${key}(${String(flags)})`);
+        throw new Error(`write-mode open attempted: ${key}`);
+      }
+      return real.apply(this, arguments);
+    });
+  }
+  if (childProcess) {
+    const cp = require('child_process');
+    for (const key of Object.keys(cp)) if (typeof cp[key] === 'function' && SPAWN_NAME.test(key)) forbid(cp, 'child_process', key);
+  }
+  try { fn(); }
+  finally { for (let i = saved.length - 1; i >= 0; i--) saved[i][0][saved[i][1]] = saved[i][2]; }
+  return attempts;
+}
 
 // ---------------------------------------------------------------------------------------------
 // compareListings: pure
@@ -163,9 +203,11 @@ test('memory: two sides with the same names and sizes produce no WARNING, say wh
   assert.deepStrictEqual(warnings(r), [], r.lines.join('\n'));
   assert.ok(has(r, 'names and sizes only (no content hash)'), 'the line does not say what was compared');
   assert.ok(has(r, 'archive\\'), 'the archive folder is not named among the compared folders');
-  assert.ok(has(r, 'other subfolders are not synced and were not looked at'), 'the folders left out are not named');
+  assert.ok(has(r, 'its other subfolders were not looked at'), 'the folders left out are not named');
+  assert.ok(has(r, 'as of 2026-10-12'), 'the hardcoded claim about which folders sync does not say when it was read');
   assert.ok(has(r, 'equal sizes do not prove equal content'), 'the limit of a size comparison is not stated');
-  assert.ok(has(r, '3 pattern-matching file(s) here, 3 on the NAS'), `the counts are wrong or missing: ${r.lines[0]}`);
+  assert.ok(has(r, 'were not looked at); 3 pattern-matching file(s) here, 3 on the NAS'), `the counts are wrong or missing: ${r.lines[0]}`);
+  assert.ok(has(r, "every non-dot file in this machine's memory folder"), 'the clean line does not scope itself to non-dot files');
   assert.ok(!r.lines.some(l => /in sync|identical/i.test(l)), r.lines.join('\n'));
   // plans\ is not synced, so its pattern-matching file must not be reported as "NAS only".
   assert.ok(!has(r, 'note_plan.md'), 'a file in an unsynced subfolder was compared');
@@ -199,9 +241,58 @@ test('memory: differing size, one side only (both directions), archive, and outs
   assert.ok(!r.lines.some(l => l.includes('no pattern-matching file differs')), 'a clean line was printed next to real differences');
 });
 
-test('memory: one side only is REPORT ONLY -- the module has no way to delete or copy', () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'lib', 'sync-health.js'), 'utf8');
-  assert.ok(!/\b(unlinkSync|rmSync|rmdirSync|writeFileSync|copyFileSync|renameSync|appendFileSync)\b/.test(src), 'sync-health.js calls a function that writes or deletes');
+test('memory: the "no writes" harness works -- it records and blocks writes, deletes, write-mode opens and spawns, then restores', () => {
+  const realUnlink = fs.unlinkSync;
+  const realOpen = fs.openSync;
+  const gone = path.join(BASE, 'harness-self-check', 'no-such-file');
+  const attempts = withWritesForbidden(() => {
+    for (const f of [
+      () => fs.unlinkSync(gone), () => fs.unlink(gone, () => {}), () => fs.writeFileSync(gone, 'x'),
+      () => fs.appendFileSync(gone, 'x'), () => fs.rmSync(gone), () => fs.truncateSync(gone),
+      () => fs.openSync(gone, 'w'), () => fs.openSync(gone, 'a+'), () => fs.promises.unlink(gone),
+      () => require('child_process').execSync('cmd /c del x'), () => require('child_process').execFileSync('cmd', ['/c', 'del', 'x']),
+    ]) { try { f(); } catch (e) { /* recorded */ } }
+  }, { childProcess: true });
+  assert.strictEqual(attempts.length, 11, `the harness missed an attempt: ${attempts.join(', ')}`);
+  assert.strictEqual(fs.unlinkSync, realUnlink, 'fs.unlinkSync was not restored');
+  assert.strictEqual(fs.openSync, realOpen, 'fs.openSync was not restored');
+  // A read-only open still works inside the window.
+  const reads = [];
+  assert.deepStrictEqual(withWritesForbidden(() => { reads.push(fs.readFileSync(__filename, 'utf8').length > 0); }), []);
+  assert.deepStrictEqual(reads, [true]);
+});
+
+test('memory: the block performs NO writes, deletes or spawns -- proved by running it with all of them forbidden', () => {
+  // Fixtures are built BEFORE the window; inside it only the block runs, over folders that exercise
+  // every reader: listing (both folders), patterns, sync.log, and the unreachable and missing paths.
+  const both = fixture('no-writes-both', {
+    nas: { 'note_a.md': 10, 'note_nas.md': 1, 'archive/note_old.md': 3, 'RECOVERY_x.md': 9 },
+    local: { 'note_a.md': 20, 'note_local.md': 2, 'lesson_new.md': 3 },
+    log: `﻿${LOG_CLEAN.replace('conflict=0', 'conflict=1')} FAILED\n`,
+  });
+  const noLog = fixture('no-writes-nolog', { nas: { 'note_a.md': 1 }, local: { 'note_a.md': 1 }, log: null, script: null });
+  const results = [];
+  const attempts = withWritesForbidden(() => {
+    results.push(describeSyncHealth({ ...both, git: CLEAN_GIT }));
+    results.push(describeSyncHealth({ ...noLog, git: CLEAN_GIT }));
+    results.push(describeSyncHealth({ nasDir: path.join(BASE, 'no-such-nas'), localDir: both.localDir, git: CLEAN_GIT }));
+    results.push(describeSyncHealth({ nasDir: both.nasDir, localDir: path.join(BASE, 'no-such-local'), git: CLEAN_GIT }));
+  }, { childProcess: true });
+  RESULTS.push(...results);
+  assert.deepStrictEqual(attempts, [], `the block tried to write or spawn: ${attempts.join(', ')}`);
+  // The run must really have measured things; a block whose every read threw would also make no attempts.
+  assert.ok(warnings(results[0]).some(w => w.includes('differ in size')), results[0].lines.join('\n'));
+  assert.ok(warnings(results[0]).some(w => w.includes('conflict=1')), results[0].lines.join('\n'));
+  assert.ok(results.every(r => !r.unmeasured.some(u => u.includes('write attempted'))), JSON.stringify(results.map(r => r.unmeasured)));
+  assert.ok(results[1].unmeasured.some(u => u.includes('$Patterns')) && results[1].unmeasured.some(u => u.startsWith('sync.log NOT read')));
+});
+
+test('memory: the zero-argument call (real default readers, real git) also performs no writes', () => {
+  let r;
+  // childProcess stays allowed here: the default git runner legitimately starts `git`, read-only.
+  const attempts = withWritesForbidden(() => { r = describeSyncHealth(); });
+  RESULTS.push(r);
+  assert.deepStrictEqual(attempts, [], `the block tried to write: ${attempts.join(', ')}`);
 });
 
 test('memory: a missing archive\\ folder is an empty one, and the other side\'s archive files are reported', () => {
@@ -367,9 +458,102 @@ test('git: unpushed commits and an uncommitted STATUS.md warn; an unreadable ans
 // ---------------------------------------------------------------------------------------------
 // The limitation, the call style, and the shape
 // ---------------------------------------------------------------------------------------------
+test('git: the real runner is pinned -- command, 1500 ms timeout, cwd at the repo root, and git\'s own stderr is the reason', () => {
+  const calls = [];
+  const dirs = fixture('git-runner', { nas: { 'note_a.md': 1 }, local: { 'note_a.md': 1 } });
+  const ok = run({ ...dirs, git: undefined, execFile: (cmd, args, opts) => { calls.push({ cmd, args, opts }); return args.includes('status') ? '' : '0\n'; } });
+  assert.strictEqual(calls.length, 2);
+  for (const c of calls) {
+    assert.strictEqual(c.cmd, 'git');
+    assert.strictEqual(c.opts.timeout, 1500, 'the git timeout is not the ruled 1.5 s');
+    assert.strictEqual(path.resolve(c.opts.cwd), path.resolve(__dirname, '..'), 'git does not run from the repository root');
+    assert.strictEqual(c.opts.encoding, 'utf8');
+  }
+  assert.deepStrictEqual(calls.map(c => c.args[c.args.length - 1]), ['STATUS.md', '@{u}..HEAD']);
+  assert.ok(has(ok, '0 commits ahead'), ok.lines.join('\n'));
+  // A timeout lands in unmeasured; git's stderr, not Node's generic text, is the reason when there is one.
+  const slow = run({ ...dirs, git: undefined, execFile: () => { throw Object.assign(new Error('spawnSync git ETIMEDOUT'), { code: 'ETIMEDOUT' }); } });
+  assert.strictEqual(slow.unmeasured.filter(u => u.includes('ETIMEDOUT')).length, 2, JSON.stringify(slow.unmeasured));
+  assert.ok(!slow.lines.some(l => l.startsWith('git:') || /^WARNING: git:/.test(l)), slow.lines.join('\n'));
+  const noUp = run({ ...dirs, git: undefined, execFile: (c, args) => {
+    if (args[0] === 'rev-list') throw Object.assign(new Error('Command failed: git rev-list'), { stderr: 'fatal: no upstream configured for branch \'x\'\n' });
+    return '';
+  } });
+  assert.ok(noUp.unmeasured.some(u => u.includes('no upstream to compare with') && u.includes('fatal: no upstream configured')), JSON.stringify(noUp.unmeasured));
+});
+
+test('the block reports its own elapsed milliseconds, as a whole number that grows with the work', () => {
+  const dirs = fixture('elapsed', { nas: { 'note_a.md': 1 }, local: { 'note_a.md': 1 } });
+  const fast = run(dirs);
+  assert.ok(Number.isInteger(fast.elapsedMs) && fast.elapsedMs >= 0, String(fast.elapsedMs));
+  const spin = () => { const t = Date.now(); while (Date.now() - t < 60); };
+  const slow = run({ ...dirs, listDir: d => { spin(); return fs.readdirSync(d, { withFileTypes: true }).filter(e => e.isFile()).map(e => ({ name: e.name, size: 1 })); } });
+  assert.ok(slow.elapsedMs >= 100, `4 listings of 60 ms were measured as ${slow.elapsedMs} ms`);
+});
+
+test('the conflict warning claims nothing it did not measure: no "the log does not say", and it points at needs-eyes=', () => {
+  const conflict = LOG_CLEAN.replace('conflict=0', 'conflict=2').replace('needs-eyes=none', 'needs-eyes=MEMORY.md');
+  const r = withLog('log-conflict-wording', `${conflict}\n`);
+  const w = warnings(r).find(x => x.includes('conflict=2'));
+  assert.ok(w, r.lines.join('\n'));
+  assert.ok(!/does not say|newer|equally recent/.test(w), `the warning asserts a cause or a gap it did not measure: ${w}`);
+  assert.ok(w.includes('needs-eyes='), w);
+  // The names ARE in the log line, and the next warning prints them.
+  assert.ok(warnings(r).some(x => x.includes('needs-eyes=MEMORY.md')), r.lines.join('\n'));
+});
+
+test('the differing-size warning gives no cause it did not measure', () => {
+  const r = run(fixture('differ-wording', { nas: { 'note_a.md': 2 }, local: { 'note_a.md': 1 } }));
+  const w = warnings(r).find(x => x.includes('differ in size'));
+  assert.ok(w && !/pushed|pulled/.test(w) && w.includes('do not say which side is newer'), w);
+});
+
+test('the memory counts are per side: "here" is this machine, "on the NAS" is the NAS, and files outside the patterns are not counted', () => {
+  const r = run(fixture('counts', {
+    nas: { 'note_1.md': 1, 'note_2.md': 1, 'note_3.md': 1, 'note_4.md': 1, 'note_5.md': 1, 'lesson_nas.md': 1, '.sync_marker': 1 },
+    local: { 'note_1.md': 1, 'note_2.md': 1, 'note_3.md': 1, 'archive/note_a.md': 1, 'lesson_a.md': 1, 'lesson_b.md': 1 },
+  }));
+  assert.ok(has(r, '4 pattern-matching file(s) here, 5 on the NAS'), r.lines[0]);
+});
+
+test('the sync.log line is console-safe and cut at 300 characters, with a mark only when it was cut', () => {
+  const thai = withLog('log-thai', `${LOG_CLEAN} note_ไทย.md\n`);
+  assert.ok(thai.lines.every(asciiOnly), thai.lines.filter(l => !asciiOnly(l)).join('\n'));
+  assert.ok(has(thai, 'note_???.md'), thai.lines.join('\n'));
+  const head = 'sync.log, last line: ';
+  const exact = withLog('log-300', `${'a'.repeat(300)}\n`).lines.find(l => l.startsWith(head));
+  assert.strictEqual(exact, head + 'a'.repeat(300), 'a line of exactly 300 characters was cut or marked');
+  const longLine = withLog('log-301', `${'a'.repeat(300)}TAILMARK\n`).lines.find(l => l.startsWith(head));
+  assert.strictEqual(longLine, `${head}${'a'.repeat(300)} ...`, 'a longer line was not cut at 300 and marked');
+});
+
+test('a Thai directory name never reaches the output raw (the no-argument call prints this machine\'s own path)', () => {
+  const dirs = fixture('thai-ไทย-dir', { nas: { 'note_a.md': 1 }, local: { 'note_a.md': 1 } });
+  const ok = run(dirs);
+  assert.ok(ok.lines.every(asciiOnly) && ok.unmeasured.every(asciiOnly), ok.lines.filter(l => !asciiOnly(l)).join('\n'));
+  assert.ok(ok.lines[0].includes('thai-???-dir'), ok.lines[0]);
+  const down = run({ nasDir: path.join(dirs.nasDir, 'ไทย'), localDir: dirs.localDir });
+  assert.ok(down.unmeasured.every(asciiOnly) && down.unmeasured.some(u => u.includes('???')), JSON.stringify(down.unmeasured));
+});
+
+test('the limitation line stays true when the NAS comparison never happened', () => {
+  const down = run({ nasDir: path.join(BASE, 'no-such-nas-2'), localDir: path.join(BASE, 'no-such-local-2') });
+  assert.ok(!down.lines.some(l => l.startsWith('memory:')));
+  const last = down.lines[down.lines.length - 1];
+  assert.ok(!/everything above/i.test(last), `the limitation claims a comparison that did not happen: ${last}`);
+  assert.ok(last.includes('where they were made'), last);
+});
+
+test('a name shown in the NAS-only "outside the patterns" list is not blessed as expected', () => {
+  const r = run(fixture('no-blessing', { nas: { 'note_a.md': 1, 'stray_note.md': 1 }, local: { 'note_a.md': 1 } }));
+  const l = r.lines.find(x => x.includes('stray_note.md'));
+  assert.ok(l && !/expected/i.test(l), l);
+});
+
 test('describeSyncHealth() with no argument works, and has the documented shape on any machine', () => {
   const r = describeSyncHealth();
-  assert.deepStrictEqual(Object.keys(r).sort(), ['lines', 'unmeasured']);
+  assert.deepStrictEqual(Object.keys(r).sort(), ['elapsedMs', 'lines', 'unmeasured']);
+  assert.ok(Number.isInteger(r.elapsedMs) && r.elapsedMs >= 0);
   assert.ok(Array.isArray(r.lines) && r.lines.every(l => typeof l === 'string'));
   assert.ok(Array.isArray(r.unmeasured) && r.unmeasured.every(l => typeof l === 'string'));
   // With the NAS mapped it measured something; without, it said it could not. Never neither.

@@ -4,7 +4,7 @@
 // answer can be trusted: does THIS machine's memory and git state agree with the NAS and the other
 // machine? It composes strings and prints nothing; scripts/backlog.js lays them out.
 //
-//   describeSyncHealth(deps?) -> { lines: string[], unmeasured: string[] }
+//   describeSyncHealth(deps?) -> { lines: string[], unmeasured: string[], elapsedMs: number }
 //   compareListings(localList, nasList, patterns) -> { differing, localOnly, nasOnly, outsidePatterns }
 //
 // THE RULE, and the reason this block exists: never print a reassuring line that was not measured.
@@ -20,6 +20,14 @@
 //
 // Nothing here throws. A reader that fails puts its reason in `unmeasured`.
 //
+// KNOWN LIMIT, stated rather than solved (2026-10-12 review): the time is only partly bounded. Each
+// git call has a timeout (GIT_TIMEOUT_MS), but Node's synchronous `fs` has none, so a listing or a
+// read of Z: that hangs (a dropped VPN can leave an SMB share that blocks instead of failing) blocks
+// this block, and the whole command, for as long as Windows takes to give up. Moving the NAS reads
+// into a worker or child process was judged far too much machinery for a status block. What is done
+// instead: the block measures its own elapsed milliseconds and returns them as `elapsedMs`, so the
+// printer can show the number, and a slow run is visible rather than promised away.
+//
 // All text is English on purpose: this runs in a plain Windows console where Thai prints as `?`.
 'use strict';
 const fs = require('fs');
@@ -29,6 +37,10 @@ const { execFileSync } = require('child_process');
 const { readSyncPatterns, wildcardToRegExp } = require('./backlog-checks');
 
 const ROOT = path.join(__dirname, '..', '..');
+// Two calls at this value reach 3.0 s at worst; the budget for the whole command is 5 s. A timeout
+// lands in `unmeasured`. Both git calls here are lock-free (see gitSection), so being killed leaves
+// nothing behind.
+const GIT_TIMEOUT_MS = 1500;
 
 // The NAS side is Z:\claude_memory. The local side is the memory folder Claude Code derives from the
 // project directory Z:\ by replacing ":" and "\" with "-" (sync_memory.ps1 computes
@@ -39,7 +51,10 @@ const ROOT = path.join(__dirname, '..', '..');
 const NAS_DIR = 'Z:\\claude_memory';
 const LOCAL_DIR = path.join(os.homedir(), '.claude', 'projects', 'Z--', 'memory');
 // sync_memory.ps1 syncs this subfolder too, with the same patterns ($ArchiveName). Its other
-// subfolders (plans\, .sync_backup\, .git\) are not synced.
+// subfolders (plans\, .sync_backup\, .git\) are not synced. The name, and the claim in the printed
+// memory line that these two are the synced folders, were read from the script on 2026-10-12 and are
+// NOT re-read at run time (that would be a second parser of the script); the printed line says "as of
+// 2026-10-12" for that reason. If the script gains a folder, this constant and that line change together.
 const ARCHIVE = 'archive';
 
 const errText = e => (e && e.message ? e.message : String(e));
@@ -139,10 +154,10 @@ function readLogLastLine(dir) {
 }
 
 // One git call, run from the repository root. Throws with git's own message on failure.
-function runGit(args) {
+function runGit(args, exec = execFileSync) {
   try {
-    return execFileSync('git', args, {
-      cwd: ROOT, encoding: 'utf8', timeout: 2500, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+    return exec('git', args, {
+      cwd: ROOT, encoding: 'utf8', timeout: GIT_TIMEOUT_MS, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
     });
   } catch (e) {
     const stderr = e && e.stderr ? String(e.stderr).trim() : '';
@@ -205,13 +220,13 @@ function memorySection(nasDir, localDir, deps, out) {
 
   const res = patterns.map(wildcardToRegExp);
   const count = side => [...side.top, ...side.archive].filter(f => !f.name.startsWith('.') && res.some(r => r.test(f.name))).length;
-  out.lines.push(`memory: compared file names and sizes only (no content hash) between this machine (${localDir}) and the NAS (${nasDir}), in the top-level folder and in ${ARCHIVE}\\ (the two folders sync_memory.ps1 syncs; its other subfolders are not synced and were not looked at); ${count(local)} pattern-matching file(s) here, ${count(nas)} on the NAS`);
+  out.lines.push(`memory: compared file names and sizes only (no content hash) between this machine (${localDir}) and the NAS (${nasDir}), in the top-level folder and in ${ARCHIVE}\\ (the two folders sync_memory.ps1 syncs as of 2026-10-12; its other subfolders were not looked at); ${count(local)} pattern-matching file(s) here, ${count(nas)} on the NAS`);
   out.lines.push(`memory: sync patterns, read from sync_memory.ps1: ${patterns.join(', ')}`);
 
   if (differing.length) {
     out.lines.push(`WARNING: ${differing.length} pattern-matching file(s) differ in size between this machine and the NAS: `
       + names(differing, d => `${ascii(d.name)} (here ${bytes(d.localSize)}, NAS ${bytes(d.nasSize)})`)
-      + '; one side is newer or has not been pushed or pulled yet (the sizes say nothing about which)');
+      + '; the sizes alone do not say which side is newer, or why they differ');
   }
   if (localOnly.length) {
     out.lines.push(`WARNING: ${localOnly.length} pattern-matching file(s) exist on this machine only: ${names(localOnly, d => ascii(d.name))}; report only, whether to copy, delete or leave them is the owner's call (sync_memory.ps1 never deletes, on purpose)`);
@@ -228,10 +243,10 @@ function memorySection(nasDir, localDir, deps, out) {
   if (here.length) {
     out.lines.push(`WARNING: ${here.length} file(s) in this machine's memory folder match none of the sync patterns, so sync_memory.ps1 never copies them to the NAS or the other machine: ${names(here, d => ascii(d.name))}`);
   } else {
-    out.lines.push(`memory: every file in this machine's memory folder (top level and ${ARCHIVE}\\) matches a sync pattern`);
+    out.lines.push(`memory: every non-dot file in this machine's memory folder (top level and ${ARCHIVE}\\) matches a sync pattern`);
   }
   if (nasSide.length) {
-    out.lines.push(`memory: ${nasSide.length} file(s) on the NAS match none of the sync patterns and never travel to a local memory folder (sync scripts and other projects' notes are expected here): ${names(nasSide, d => ascii(d.name))}`);
+    out.lines.push(`memory: ${nasSide.length} file(s) on the NAS match none of the sync patterns and never travel to a local memory folder: ${names(nasSide, d => ascii(d.name))}`);
   }
 }
 
@@ -251,7 +266,7 @@ function logSection(nasDir, deps, out) {
   // counts cover every pattern-matching file in the folder, not only the dirty ones.
   const conflict = line.match(/\bconflict=(\d+)/);
   if (conflict && Number(conflict[1]) > 0) {
-    out.lines.push(`WARNING: the last sync.log line records conflict=${conflict[1]}: a file was not copied because the other side holds a newer or equally recent copy, and the log does not say which file`);
+    out.lines.push(`WARNING: the last sync.log line records conflict=${conflict[1]}: the script did not copy at least one file; the needs-eyes= field of that line is where sync_if_dirty.ps1 records which files`);
   } else if (!conflict) {
     out.lines.push('sync.log: that line has no conflict= field, so no conflict count was read from it');
   }
@@ -266,7 +281,7 @@ function logSection(nasDir, deps, out) {
 
 // At most one `git status` and one `git rev-list` (a git process costs ~0.3 s on Windows).
 function gitSection(deps, out) {
-  const git = deps.git || runGit;
+  const git = deps.git || (args => runGit(args, deps.execFile));
   try {
     // --no-optional-locks: a plain `git status` opportunistically takes index.lock to refresh the
     // index, and a reader that is killed by its timeout while holding it leaves a stale lock that
@@ -297,12 +312,13 @@ function gitSection(deps, out) {
 }
 
 // Printed on EVERY run, not only on failure. It is the one thing no measurement here can remove.
-const LIMIT = 'LIMIT: if the other machine has not pushed, this machine cannot know what is waiting there; everything above compares this machine only with the NAS and with the last-fetched upstream';
+const LIMIT = 'LIMIT: if the other machine has not pushed, this machine cannot know what is waiting there; the comparisons above, where they were made, involve only this machine, the NAS and the last-fetched upstream';
 
 // `deps` exists so the readers can be pointed at fixtures: { nasDir, localDir, listDir(dir),
-// readPatterns(dir), readLogLastLine(dir), git(args) }. Every one has a real default, so
+// readPatterns(dir), readLogLastLine(dir), git(args), execFile }. Every one has a real default, so
 // describeSyncHealth() with no argument measures the real thing.
 function describeSyncHealth(deps) {
+  const started = process.hrtime.bigint();
   const out = { lines: [], unmeasured: [] };
   try {
     const d = deps || {};
@@ -315,6 +331,11 @@ function describeSyncHealth(deps) {
     out.unmeasured.push(`sync health NOT fully measured: unexpected error (${ascii(errText(e))}); anything not listed above was not checked`);
   }
   out.lines.push(LIMIT);
+  // One scrub for everything that leaves this module: a directory, a file name, an error message or a
+  // log line may carry Thai, and a plain Windows console renders it as `?` without warning.
+  out.lines = out.lines.map(ascii);
+  out.unmeasured = out.unmeasured.map(ascii);
+  out.elapsedMs = Math.round(Number(process.hrtime.bigint() - started) / 1e6);
   return out;
 }
 
