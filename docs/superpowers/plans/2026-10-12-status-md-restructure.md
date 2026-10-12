@@ -205,6 +205,14 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
   `nas-password-scrubbed` · `superadmin-dryrun-pass-reasons` · `cursor-rules-file` · `backlog-command`
   (`ask-owner` เป็น id สงวนสำหรับข้อที่ตรวจอัตโนมัติไม่ได้)
 
+> **แก้สัญญาข้อนี้ (2026-10-12, รีวิวก่อน merge) — รายการสี่ตัวข้างบนล้าสมัยแล้ว** · วันเดียวกันนั้น
+> เจ้าของสั่งปิดสองข้อ ⇒ **`nas-password-scrubbed` และ `cursor-rules-file` ถูกปิดเมื่อ 2026-10-12
+> และไม่มีข้อไหนใน `STATUS.md` ใช้แล้ว ⇒ แผนที่ 3 ต้อง *ไม่* ลงทะเบียนสองตัวนี้** (เทสต์สองทางของแผนที่ 3
+> แดงที่ "id ใน registry ที่ไม่มีข้อไหนใช้") · id ที่มีจริงตอนนี้เหลือ **3 ตัว**:
+> `superadmin-dryrun-pass-reasons` · `backlog-command` · `sync-push-false-success` (ตัวท้ายเกิดหลังเขียนแผนนี้)
+> · และ id สงวน `ask-owner` ถูกยกเลิกไปแล้ว บรรทัดชนิด `· รอเจ้าของ:` ทำหน้าที่นั้นแทน · **รายการที่เชื่อได้
+> คือผลของ `grep -n '· ตรวจ:' STATUS.md` ตอนลงมือ ไม่ใช่รายการในแผน**
+
 - [ ] **Step 1: สร้าง `docs/STATUS_CLOSED.md` โดยคัดลอกตรงตัว**
 
 หัวข้อ `## ปิดไปแล้ว...` ทั้งหมดใน `STATUS.md` ปัจจุบันเริ่มที่บรรทัด 93 จนจบไฟล์ (หัวข้อของวันที่

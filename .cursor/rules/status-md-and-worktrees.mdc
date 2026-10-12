@@ -42,10 +42,16 @@ while it is red. Never loosen the test to make a `STATUS.md` edit pass.
    one, otherwise its bold title).
 2. Remove the item from `## เปิดอยู่`.
 3. Append the record of what was done, what was verified and who decided to `docs/STATUS_CLOSED.md`, under
-   the newest dated `## ` section. **Never edit the content already in that file** — it was copied verbatim
-   on purpose so that it works as evidence. Append only.
-4. Add the matching line to `## ปิดแล้ว (สารบัญ)`. Its title must be copied exactly from the bold title (or
-   heading) of the record you just appended.
+   the `## ปิดไปแล้ว <date>` section whose date **is the date you are closing on** — and create that section
+   if it does not exist yet. Do not append under the newest section when its date is an earlier day: the
+   index line you add in step 4 carries the date of the heading its record sits under, and the test compares
+   the two. A brand-new section needs nothing extra: the index line from step 4 is what keeps it covered by
+   the both-directions rule. **Never edit the content already in that file** — it was copied verbatim on
+   purpose so that it works as evidence. Append only.
+4. Add the matching line to `## ปิดแล้ว (สารบัญ)`, written `- **YYYY-MM-DD** — <title>`. Its title must be
+   copied exactly from the bold title (or heading) of the record you just appended, and its date must be the
+   date of the `## ` heading that record sits under. Never backdate it to match an older heading — move the
+   record under the right heading instead.
 5. Never record something as done that you could not verify. Say plainly what was and was not checked.
 
 ## Never edit `Z:\Time_Attendance` directly
