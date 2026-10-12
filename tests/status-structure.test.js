@@ -9,22 +9,36 @@
 // superadmin" reached the other machine intact, but the knowledge of what to remind about and what
 // to do did not travel with it, so that machine could not act on it. A pointer with no payload.
 // This test refuses the shape that allowed it: every handoff item must carry an action, a source
-// and evidence, each with real content after the label (a bare label is the same pointer again).
+// and evidence, each followed by non-empty text on the same line (a bare label is the same pointer
+// again). What is verified is only that one letter or digit follows the label: `TBD` or `ดูในแชท`
+// pass. No mechanical check can tell a real instruction from a placeholder, and a word-count rule
+// would wrongly reject a legitimate value that is a single path or filename -- so telling those
+// apart stays a human review job.
 //
 // Layout of this file:
 //   1. pure validators over text (no file access) -- each returns a list of problems, [] = ok
 //   2. fixture cases: small inline strings, one per bad shape, each of which MUST be rejected,
 //      plus a well-formed positive for every validator. A negative case that is never asserted
 //      to fail proves nothing, so these exist to show the validators can actually go red.
-//   3. assertions against the real STATUS.md and docs/STATUS_CLOSED.md. These are EXPECTED to be
-//      red until STATUS.md is restructured; they must not be "fixed" by loosening the validators.
+//   3. assertions against the real STATUS.md and docs/STATUS_CLOSED.md. Most of these are EXPECTED
+//      to be red until STATUS.md is restructured (size, missing sections, no check ids, empty
+//      closed index); they must not be "fixed" by loosening the validators. Not all of them are red
+//      today: the section-shape test and the handoff test pass while the sections they inspect are
+//      absent or already well-formed, so a green there says nothing about the restructure.
 //
 // Item syntax the validators enforce inside the three managed sections:
 //   - an item starts with `- ` in column one (one or more spaces, then text);
 //   - every following non-blank line up to the next item is a continuation line and MUST be
-//     indented, and must not itself look like a list marker (`-`, `*`, `+`, `1.`, `1)`) or a table row;
-//   - nothing non-blank may come before the first item.
+//     indented; an indented line that starts with a list marker (`-`, `*`, `+`, `•`, `–`, `・`,
+//     `1.`, `1)`) is a sub-list of the item above and is accepted as part of it;
+//   - a list marker in column one that is not a `- ` item is rejected, and so is a table row;
+//   - a line whose first non-space character is `>` is a markdown blockquote: section explanation
+//     prose is allowed, but ONLY in that form. It is not part of any item, so it can never supply a
+//     handoff label's content or a check id;
+//   - any other prose in column one is rejected (that is how a loose handoff note is kept from
+//     hiding), and nothing but a blockquote may come before the first item.
 // Anything else is rejected rather than silently ignored or swallowed into the previous item.
+// A section starts at a column-one `## <title>` heading and ends at the next column-one `## `.
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -73,20 +87,24 @@ function checkSize(text) {
 }
 
 // Lines belonging to one `## ` section, excluding the heading itself. null if the section is absent.
+// Start and end both require the heading at column one (trailing whitespace is tolerated), so an
+// indented `  ## title` is neither the start of a section nor the end of one.
 function sectionLines(text, title) {
   const lines = splitLines(text);
-  const start = lines.findIndex(l => l.trim() === `## ${title}`);
+  const start = lines.findIndex(l => l.trimEnd() === `## ${title}`);
   if (start === -1) return null;
   const rest = lines.slice(start + 1);
   const end = rest.findIndex(l => /^## /.test(l));
   return end === -1 ? rest : rest.slice(0, end);
 }
 
-const LIST_MARKER = /^\s*([-*+]|\d+[.)])(\s|$)/;
+// ASCII markers plus the three bullet glyphs people paste in from other tools (U+2022, U+2013, U+30FB).
+const LIST_MARKER = /^\s*([-*+•–・]|\d+[.)])(\s|$)/;
 
 // Split a section's lines into items. Returns { blocks, problems }: blocks are the items as
-// newline-joined strings; problems lists every line that is neither a column-one `- ` item nor a
-// continuation line of one.
+// newline-joined strings; problems lists every line that is none of: a column-one `- ` item, a
+// continuation line of one (indented, including an indented sub-list), or a `>` blockquote line.
+// Blockquote lines are explanation, not content: they are dropped from the blocks.
 function itemsOf(lines) {
   const blocks = [];
   const problems = [];
@@ -94,7 +112,10 @@ function itemsOf(lines) {
     if (l.trim() === '') return;
     const at = `section line ${i + 1}`;
     if (/^- +\S/.test(l)) { blocks.push([l]); return; }
-    if (LIST_MARKER.test(l)) {
+    if (/^\s*>/.test(l)) return;
+    // A list marker is only a problem in column one; indented, it is a sub-list of the item above
+    // (and is caught below as "before the first item" if there is no item above).
+    if (!/^\s/.test(l) && LIST_MARKER.test(l)) {
       problems.push(`${at}: list marker in a shape that is not a column-one "- " item: ${snip(l)}`);
     } else if (/^\s*\|/.test(l)) {
       problems.push(`${at}: table row is not an item: ${snip(l)}`);
@@ -113,7 +134,8 @@ function firstLine(block) { return block.split('\n')[0]; }
 
 // An item under ## เปิดอยู่ must say which check proves it is still open.
 function validateOpenItem(block) {
-  if (/^\s*·\s*ตรวจ:\s*([a-z0-9-]+)\s*$/m.test(block)) return [];
+  // Horizontal whitespace only: with the `m` flag a plain `\s` would let the id sit on the NEXT line.
+  if (/^[ \t]*·[ \t]*ตรวจ:[ \t]*([a-z0-9-]+)[ \t]*$/m.test(block)) return [];
   return [`no "· ตรวจ: <id>" line in: ${snip(firstLine(block))}`];
 }
 
@@ -229,6 +251,13 @@ test('fixture: sectionLines finds a section, stops at the next ## and reports a 
   if (JSON.stringify(b) !== JSON.stringify(['- b1', '- b2'])) throw new Error(`B = ${JSON.stringify(b)}`);
   if (sectionLines(text, 'C') !== null) throw new Error('missing section should be null');
 });
+test('fixture: sectionLines needs the heading at column one to start AND to end a section', () => {
+  if (sectionLines('# t\n  ## A\n- a1\n', 'A') !== null) throw new Error('an indented heading started a section');
+  const a = sectionLines('## A\n- a1\n  ## B\n- a2\n', 'A');
+  if (JSON.stringify(a) !== JSON.stringify(['- a1', '  ## B', '- a2'])) throw new Error(`indented heading ended the section: ${JSON.stringify(a)}`);
+  const trailing = sectionLines('## A  \n- a1\n', 'A');
+  if (JSON.stringify(trailing) !== JSON.stringify(['- a1'])) throw new Error('trailing whitespace on the heading should be tolerated');
+});
 
 // --- itemsOf ----------------------------------------------------------------------------------
 test('fixture: itemsOf accepts column-one items with indented continuations and blank lines', () => {
@@ -240,12 +269,45 @@ test('fixture: itemsOf accepts column-one items with indented continuations and 
   }
 });
 
+test('fixture: itemsOf accepts indented sub-lists ("1.", "1)", "-", "*", "•") as part of the item above', () => {
+  const lines = ['- ok', '  1. first step', '  2) second step', '    - nested', '  * starred', '  • bullet', '- next'];
+  const r = itemsOf(lines);
+  expectClean(r.problems);
+  if (r.blocks.length !== 2) throw new Error(`expected 2 items, got ${r.blocks.length}`);
+  for (const frag of ['1. first step', '2) second step', '- nested', '* starred', '• bullet']) {
+    if (!r.blocks[0].includes(frag)) throw new Error(`sub-list line not attached to its item: ${frag}`);
+  }
+});
+test('fixture: itemsOf accepts a ">" explanation line before, between and after items, and keeps it out of the blocks', () => {
+  const lines = ['> สิ่งที่ต้องรู้ก่อนอ่านหัวข้อนี้', '', '- one', '  > indented note', '> note between items', '- two'];
+  const r = itemsOf(lines);
+  expectClean(r.problems);
+  if (r.blocks.length !== 2) throw new Error(`expected 2 items, got ${r.blocks.length}`);
+  if (r.blocks.some(b => b.includes('>'))) throw new Error('a blockquote line leaked into an item');
+});
+test('fixture: itemsOf accepts a ">" line but rejects the same sentence written as plain prose', () => {
+  const sentence = 'รอบหน้าให้เตือนเรื่อง superadmin';
+  expectClean(itemsOf([`> ${sentence}`, '- ok']).problems);
+  expectClean(itemsOf(['- ok', `> ${sentence}`]).problems);
+  expectRejected(itemsOf([sentence, '- ok']).problems, /before the first item/);
+  expectRejected(itemsOf(['- ok', sentence]).problems, /not indented/);
+});
+test('fixture: a blockquote line cannot stand in for a handoff label or a check id', () => {
+  const noAction = GOOD_HANDOFF.replace('  · **ให้ทำอะไร:** อ่านสเปกแล้วทำข้อ 4–6', '  > **ให้ทำอะไร:** อ่านสเปกแล้วทำข้อ 4–6');
+  expectRejected(validateHandoffItem(itemsOf(noAction.split('\n')).blocks[0]), /no content after \*\*ให้ทำอะไร:\*\*/);
+  expectRejected(validateOpenItem(itemsOf(['- **x**', '  > ตรวจ: some-id']).blocks[0]), /ตรวจ/);
+});
+
 const BAD_SHAPES = [
   ['"* " bullet before the first item', ['* foo'], /list marker/],
   ['"* " bullet after a valid item', ['- ok', '* foo'], /list marker/],
   ['"+ " bullet', ['- ok', '+ foo'], /list marker/],
-  ['indented "- " bullet before the first item', ['  - foo'], /list marker/],
-  ['indented "- " bullet after a valid item (nested bullet)', ['- ok', '  - foo'], /list marker/],
+  ['column-one "• " entry', ['- ok', '• foo'], /list marker/],
+  ['column-one "• " entry before the first item', ['• foo'], /list marker/],
+  ['column-one "– " entry', ['- ok', '– foo'], /list marker/],
+  ['column-one "・ " entry', ['- ok', '・ foo'], /list marker/],
+  ['indented "- " bullet before the first item', ['  - foo'], /before the first item/],
+  ['indented "1. " step before the first item', ['  1. foo', '- ok'], /before the first item/],
   ['numbered entry "1. "', ['1. foo'], /list marker/],
   ['numbered entry "1) " after a valid item', ['- ok', '2) foo'], /list marker/],
   ['"-" with no space', ['-foo'], /before the first item/],
@@ -253,8 +315,8 @@ const BAD_SHAPES = [
   ['table row after a valid item', ['- ok', '| a | b |'], /table row/],
   ['stray prose before the first item', ['some intro prose', '- ok'], /before the first item/],
   ['indented prose before the first item', ['  some intro prose', '- ok'], /before the first item/],
-  ['blockquote before the first item', ['> a quoted rule', '- ok'], /before the first item/],
   ['unindented prose after an item', ['- ok', 'prose that is not indented'], /not indented/],
+  ['plain prose that would be fine as a ">" line', ['รอบหน้าให้เตือนเรื่อง superadmin', '- ok'], /before the first item/],
 ];
 for (const [name, lines, reason] of BAD_SHAPES) {
   test(`fixture: itemsOf rejects ${name}`, () => {
@@ -268,6 +330,11 @@ test('fixture: validateOpenItem accepts an item with a "· ตรวจ: <id>" l
 });
 test('fixture: validateOpenItem rejects an item with no check line', () => {
   expectRejected(validateOpenItem('- **x**\n  · detail only'), /ตรวจ/);
+});
+test('fixture: validateOpenItem rejects an id that sits on the line AFTER "ตรวจ:"', () => {
+  // `\s` crossing the newline used to accept this; the id must be on the same line as the label.
+  expectRejected(validateOpenItem('- **x**\n  · ตรวจ:\n  superadmin-dryrun-pass-reasons'), /ตรวจ/);
+  expectRejected(validateOpenItem('- **x**\n  · ตรวจ:\n\n  some-id'), /ตรวจ/);
 });
 test('fixture: validateOpenItem rejects an empty id, an upper-case id and a prose "ตรวจ" line', () => {
   expectRejected(validateOpenItem('- **x**\n  · ตรวจ:'), /ตรวจ/);
