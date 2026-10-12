@@ -219,7 +219,7 @@ function formatTiming(totalMs, syncMs) {
   const s = (totalMs / 1000).toFixed(2);
   const sync = syncMs === null ? 'sync health did not report a time' : `sync health took ${syncMs} ms of it`;
   const over = totalMs > BUDGET_MS ? ` -- OVER BUDGET by ${((totalMs - BUDGET_MS) / 1000).toFixed(2)} s` : '';
-  return [`Elapsed: ${s} s for this process (${sync}); budget ${BUDGET_MS / 1000} s, judged on this process alone${over}. \`npm run\` adds roughly 1.0-1.4 s of start-up on top (measured 2026-10-13: 3.2-3.9 s at the terminal for 2.1-2.5 s here), so the margin at the terminal is that much smaller than this number shows.`];
+  return [`Elapsed: ${s} s for this process (${sync}); budget ${BUDGET_MS / 1000} s, judged on this process alone${over}. \`npm run\` adds its own start-up time on top of this number, and how much varies from run to run and from shell to shell, so the time you wait at the terminal is longer than this figure and the margin under the budget is smaller than it shows.`];
 }
 
 function formatCommands() {

@@ -328,7 +328,16 @@ test('the slash command exists and enforces its three rules', () => {
 // 4. fix round 1 (2026-10-13 review)
 // ---------------------------------------------------------------------------------------------
 
-const { CHECKS: REAL_CHECKS } = require('../scripts/lib/backlog-checks');
+const { CHECKS: REAL_CHECKS, VERDICTS: REGISTRY_VERDICTS } = require('../scripts/lib/backlog-checks');
+
+// 2026-10-13 (final review): guarded() accepts the registry's VERDICTS and the printer ranks only its own
+// ORDER, so a verdict added to one list alone would be accepted and then silently printed as NOT-VERIFIED.
+test('the verdict list of the registry and the ORDER of the printer name exactly the same verdicts', () => {
+  assert.ok(Array.isArray(REGISTRY_VERDICTS) && REGISTRY_VERDICTS.length > 0, 'the registry exports no VERDICTS');
+  assert.deepStrictEqual([...REGISTRY_VERDICTS].sort(), [...B.ORDER].sort(),
+    `registry VERDICTS ${JSON.stringify(REGISTRY_VERDICTS)} vs printer ORDER ${JSON.stringify(B.ORDER)}`);
+  assert.strictEqual(new Set(B.ORDER).size, B.ORDER.length, 'ORDER repeats a verdict');
+});
 
 // -- what an OPEN verdict is, and what the command says it does ---------------------------------
 
@@ -429,7 +438,11 @@ test('the real run: its printed total lies between sync health\'s time and the w
 
 test('the Elapsed line is honest about npm run\'s start-up and what the budget is judged on', () => {
   const t = B.formatTiming(2500, 1500).join('\n');
-  assert.ok(t.includes('judged on this process alone') && t.includes('1.0-1.4 s'), t);
+  assert.ok(t.includes('judged on this process alone') && t.includes('`npm run` adds its own start-up time'), t);
+  // 2026-10-13 (final review): the hardcoded "measured ... s at the terminal" range was wrong on re-measurement
+  // (some runs fell below its floor, others went over the 5 s budget). No second, remembered number may sit
+  // next to the one this process measured.
+  assert.ok(!/measured 20\d\d-|\d\.\d+-\d\.\d+ s/.test(t), `a remembered timing range is back: ${t}`);
 });
 
 // -- gather: every failure branch, driven by a lib that throws -------------------------------------

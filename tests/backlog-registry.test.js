@@ -215,6 +215,46 @@ test('parse: a malformed marker or a stray line throws and names the line', () =
   assert.throws(() => parseStatus('## ส่งต่อรอบหน้า\n- ไม่มีตัวหนา'), /STATUS\.md:2:/);
 });
 
+// 2026-10-13 (final review): prose between a handoff item's subject and its first label used to be
+// dropped without a word, although the parser promises to throw on anything it cannot read.
+const LABELS = ['  · **ให้ทำอะไร:** a', '  · **ที่มา:** b', '  · **หลักฐาน:** c'];
+test('parse: prose above the first label of a handoff item throws and names its line', () => {
+  const at = (extra, n) => {
+    const text = ['## ส่งต่อรอบหน้า', '- **h**', ...extra, ...LABELS].join('\n');
+    assert.throws(() => parseStatus(text), new RegExp(`STATUS\\.md:${n}: text before the first field label`),
+      `no throw naming line ${n} for ${JSON.stringify(extra)}`);
+  };
+  at(['  เนื้อหาจริงที่อยู่เหนือป้ายแรก'], 3);
+  at(['  · เนื้อหาจริงที่อยู่เหนือป้ายแรก'], 3);
+  at(['', '  บรรทัดแรกที่มีเนื้อหา'], 4);                              // a blank line does not hide it
+  const head = ['## ส่งต่อรอบหน้า', '- **h** และข้อความหลังหัวข้อ', ...LABELS].join('\n');
+  assert.throws(() => parseStatus(head), /STATUS\.md:2: text before the first field label/);
+});
+
+test('parse: a legal handoff item (bold subject, quote, blank and bare-dot lines above the labels) still parses', () => {
+  const text = ['## ส่งต่อรอบหน้า', '> คำอธิบายของหัวข้อ', '', '- **h**', '', '  >  อ้างอิง', '  ·', ...LABELS].join('\n');
+  const { handoff } = parseStatus(text);
+  assert.strictEqual(handoff.length, 1);
+  assert.strictEqual(handoff[0].subject, 'h');
+  assert.deepStrictEqual(handoff[0].fields, { action: 'a', source: 'b', evidence: 'c' });
+  // and the labels may share the head line with the subject
+  const same = parseStatus('## ส่งต่อรอบหน้า\n- **h** **ให้ทำอะไร:** a · **ที่มา:** b · **หลักฐาน:** c').handoff[0];
+  assert.deepStrictEqual(same.fields, { action: 'a', source: 'b', evidence: 'c' });
+});
+
+// 2026-10-13 (final review): the owner gate finds an item by check id with .find(), so a second item
+// with the same id would be answered with the first one's owner-wait text, or never at all.
+test('parse: the same check id on two open items throws, naming both lines', () => {
+  const text = ['## เปิดอยู่', '- **ก**', '  · ตรวจ: same-id', '', '- **ข**', '  · ตรวจ: same-id', '  · รอเจ้าของ: อะไรสักอย่าง'].join('\n');
+  assert.throws(() => parseStatus(text), e => /STATUS\.md:5:/.test(e.message) && /line 2\b/.test(e.message) && /same-id/.test(e.message),
+    'no throw naming line 5 and line 2');
+  // different ids are fine, and so are several items with no id
+  const ok = parseStatus(['## เปิดอยู่', '- **ก**', '  · ตรวจ: one', '- **ข**', '  · ตรวจ: two', '- **ค**', '  · รอเจ้าของ: x', '- **ง**', '  · รอเจ้าของ: y'].join('\n'));
+  assert.strictEqual(ok.open.length, 4);
+  // the same id in the closed index is not an open item, so it is not a duplicate
+  parseStatus(['## เปิดอยู่', '- **ก**', '  · ตรวจ: one', '## ปิดแล้ว (สารบัญ)', '- **x**', '  · ตรวจ: one'].join('\n'));
+});
+
 // ---------------------------------------------------------------------------------------------
 // 2. The real STATUS.md against the real registry
 // ---------------------------------------------------------------------------------------------

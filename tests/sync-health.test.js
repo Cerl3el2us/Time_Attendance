@@ -55,7 +55,9 @@ const SCRIPT = [
   ')',
   '',
 ].join('\n');
-const LOG_CLEAN = '2026-10-12T21:10:36+07:00  DIRTY 3  push=ok  rc=0  copied=0 same=129 conflict=0 failed=0  needs-eyes=none  snapshot=ok:a792d84,nothing-to-commit  marker=written  files=MEMORY.md';
+// A run that copied what was dirty. (Until 2026-10-13 this fixture said copied=0 -- the very run the open
+// item sync-push-false-success is about -- and the cases below called it clean.)
+const LOG_CLEAN = '2026-10-12T21:10:36+07:00  DIRTY 3  push=ok  rc=0  copied=3 same=129 conflict=0 failed=0  needs-eyes=none  snapshot=ok:a792d84,nothing-to-commit  marker=written  files=MEMORY.md';
 
 // Builds { nasDir, localDir } for one case. `nas` and `local` map a relative path to a size.
 function fixture(name, { nas = {}, local = {}, script = SCRIPT, log = LOG_CLEAN } = {}) {
@@ -404,6 +406,57 @@ test('sync.log: a last line with no conflict= field is shown but says no conflic
   const r = withLog('log-other-entry', LOG_CLEAN + '\n2026-10-12T22:00:00+07:00  CLEAN\n');
   assert.ok(has(r, 'sync.log, last line: 2026-10-12T22:00:00+07:00  CLEAN'), r.lines.join('\n'));
   assert.ok(has(r, 'no conflict= field, so no conflict count was read'), r.lines.join('\n'));
+});
+
+// 2026-10-13 (final review): the line that records the open defect was printed under "0 warning(s)"
+// with nothing saying it was 29 hours old.
+const AGE_NOW = Date.parse('2026-10-13T02:14:36+07:00'); // 5 h 4 min after LOG_CLEAN's timestamp
+const withLogAt = (name, log, now) => run({ ...fixture(name, { nas: { 'note_a.md': 1 }, local: { 'note_a.md': 1 }, log }), now });
+const ageLine = r => r.lines.find(l => l.startsWith('sync.log: that line is '));
+
+test('sync.log: the age of the last line is always printed, computed from its own timestamp', () => {
+  const r = withLogAt('log-age', LOG_CLEAN + '\n', AGE_NOW);
+  assert.strictEqual(ageLine(r), "sync.log: that line is about 5 h 4 min old (by its own timestamp, against this machine's clock)", r.lines.join('\n'));
+  assert.deepStrictEqual(r.unmeasured, []);
+  // the same line, a day later: the number follows the clock, it is not a constant
+  const later = withLogAt('log-age-later', LOG_CLEAN + '\n', AGE_NOW + 24 * 3600 * 1000);
+  assert.ok(ageLine(later).includes('about 29 h 4 min old'), later.lines.join('\n'));
+  const young = withLogAt('log-age-young', LOG_CLEAN + '\n', Date.parse('2026-10-12T21:12:36+07:00'));
+  assert.ok(ageLine(young).includes('about 2 min old'), young.lines.join('\n'));
+  // with no injected clock the real one is used, and the line is still there
+  assert.ok(ageLine(withLog('log-age-real', LOG_CLEAN + '\n')), 'no age line with the real clock');
+});
+
+test('sync.log: an age that cannot be computed lands in unmeasured and prints no age', () => {
+  for (const [name, line] of [
+    ['no-timestamp', 'DIRTY 3  push=ok  rc=0  copied=3 same=1 conflict=0 failed=0  needs-eyes=none  snapshot=ok:a  marker=written'],
+    ['no-offset', LOG_CLEAN.replace('+07:00', '')],
+    ['impossible-date', LOG_CLEAN.replace('2026-10-12T21:10:36', '2026-13-45T25:61:61')],
+  ]) {
+    const r = withLogAt(`log-age-${name}`, line + '\n', AGE_NOW);
+    assert.strictEqual(ageLine(r), undefined, `${name}: ${r.lines.join('\n')}`);
+    assert.ok(r.unmeasured.some(u => u.startsWith('age of the last sync.log line NOT computed')), `${name}: ${JSON.stringify(r.unmeasured)}`);
+  }
+  const future = withLogAt('log-age-future', LOG_CLEAN + '\n', Date.parse('2026-10-12T20:00:00+07:00'));
+  assert.strictEqual(ageLine(future), undefined);
+  assert.ok(future.unmeasured.some(u => u.includes('in the future')), JSON.stringify(future.unmeasured));
+});
+
+test('sync.log: DIRTY n with copied=0, push=ok and marker=written warns; no other combination does', () => {
+  const defect = LOG_CLEAN.replace('copied=3', 'copied=0');
+  const hit = withLogAt('log-nothing-copied', defect + '\n', AGE_NOW);
+  const w = warnings(hit).filter(x => x.includes('copied=0'));
+  assert.strictEqual(w.length, 1, hit.lines.join('\n'));
+  assert.ok(w[0].includes('DIRTY 3') && w[0].includes('marker=written') && w[0].includes('cannot say why'), w[0]);
+  for (const [name, line] of [
+    ['copied', LOG_CLEAN],
+    ['push-failed', defect.replace('push=ok', 'push=error')],
+    ['marker-kept', defect.replace('marker=written', 'marker=kept-old')],
+    ['nothing-dirty', defect.replace('DIRTY 3', 'DIRTY 0')],
+  ]) {
+    const r = withLogAt(`log-nc-${name}`, line + '\n', AGE_NOW);
+    assert.deepStrictEqual(warnings(r), [], `${name}: ${r.lines.join('\n')}`);
+  }
 });
 
 test('sync.log: a long log is read from its tail, and a missing or empty one is unmeasured', () => {

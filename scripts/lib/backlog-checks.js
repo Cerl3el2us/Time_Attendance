@@ -79,9 +79,17 @@ function readSyncPatterns(dir) {
     const end = text.indexOf('\n)', start);
     if (end === -1) return null;
     const found = [];
-    for (const l of text.slice(start, end).split(/\r?\n/).slice(1)) {
-      const m = l.match(/^\s*'([^']+)'/); // a commented-out pattern starts with `#`, so it is skipped
-      if (m) found.push(m[1]);
+    const rows = text.slice(start, end).split(/\r?\n/);
+    if (!/@\(\s*(?:#.*)?$/.test(rows[0])) return null; // a pattern on the opening line would be skipped below
+    for (const l of rows.slice(1)) {
+      if (l.trim() === '' || /^\s*#/.test(l)) continue; // blank, or a commented-out pattern
+      // One single-quoted pattern per line, optionally followed by a comma and a comment. Any other
+      // non-comment line (a double-quoted pattern, two patterns on one line, a variable) is a pattern
+      // this reader would otherwise skip without a record, and every caller then compares and counts
+      // against a list that is not THE list. Refuse the whole list instead (2026-10-13 review).
+      const m = l.match(/^\s*'([^']+)'\s*,?\s*(?:#.*)?$/);
+      if (!m) return null;
+      found.push(m[1]);
     }
     return found.length ? found : null;
   } catch (e) { return null; }
@@ -371,5 +379,5 @@ for (const id of Object.keys(RAW_CHECKS)) CHECKS[id] = guarded(id, RAW_CHECKS[id
 // exported for the sync-health block, which needs the same pattern list.
 module.exports = {
   CHECKS, checkSyncPushFalseSuccess, applyOwnerGate, guarded,
-  readSyncPatterns, wildcardToRegExp,
+  readSyncPatterns, wildcardToRegExp, VERDICTS,
 };

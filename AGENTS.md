@@ -30,8 +30,10 @@ three sections: `## ส่งต่อรอบหน้า` (items handed to th
 `## ปิดแล้ว (สารบัญ)`; details of closed work are in `docs/STATUS_CLOSED.md`. Every entry records
 when it was last checked against real code, because an entry you do not re-verify is how a
 finished job gets reopened.
-To re-verify, run `npm run backlog` (in Claude Code, `/backlog`) -- the one command to remember. It re-checks
-each open item against the code and prints the evidence as `file:line`. It does not check the
+To re-verify, run `npm run backlog` (in Claude Code, `/backlog`) -- the one command to remember. It re-runs
+the registered check for each open item that names one, and prints what it could not measure; the
+evidence of a check is printed as `file:line`, and an item that names only an owner wait is shown
+from its own STATUS.md text and is not re-checked. It does not check the
 `## ส่งต่อรอบหน้า` items, it does not decide anything the owner must decide (those print as
 WAITING-OWNER), and a PASS means only the evidence printed under it. Still verify against the code
 before you act: the command is how you do that now, not a reason to skip it.

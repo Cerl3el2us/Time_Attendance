@@ -365,4 +365,18 @@ test('readSyncPatterns: reads the quoted patterns, skips commented ones, null wh
   assert.strictEqual(readSyncPatterns(path.join(BASE, 'no-such-folder')), null);
 });
 
-console.log(`backlog-checks: ${passed} passed, ${failed} failed`);
+// 2026-10-13 (final review): a pattern the reader cannot parse used to be skipped without a record, so
+// the sync-health block printed "sync patterns, read from sync_memory.ps1" for a list missing members.
+test('readSyncPatterns: a list with any pattern it cannot read is refused whole, not returned partial', () => {
+  const ps1 = lines => `$Patterns = @(\n${lines.join('\n')}\n)\n`;
+  const read = (name, lines) => readSyncPatterns(syncDir(name, { patterns: ps1(lines) }));
+  // control: the same shape with every line readable still reads, comments and trailing comments included
+  assert.deepStrictEqual(read('pat-ok', ["  'a*.md', # why", '  # "old*.md"', '', "  'MEMORY.md'"]), ['a*.md', 'MEMORY.md']);
+  assert.strictEqual(read('pat-mixed', ["  'a*.md',", '  "b*.md",', "  'MEMORY.md'"]), null);       // double-quoted in the middle
+  assert.strictEqual(read('pat-two-one-line', ["  'a*.md', 'b*.md',", "  'MEMORY.md'"]), null);     // second pattern on a line
+  assert.strictEqual(read('pat-variable', ["  'a*.md',", '  $extra,', "  'MEMORY.md'"]), null);      // not a literal
+  assert.strictEqual(readSyncPatterns(syncDir('pat-opening-line', { patterns: "$Patterns = @('a*.md',\n  'MEMORY.md'\n)\n" })), null);
+  assert.strictEqual(read('pat-all-double', ['  "a*.md",', '  "MEMORY.md"']), null);                // the old all-or-nothing case
+});
+
+console.log(`backlog-checks:${passed} passed, ${failed} failed`);

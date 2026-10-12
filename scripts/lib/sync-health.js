@@ -246,11 +246,24 @@ function memorySection(nasDir, localDir, deps, out) {
     out.lines.push(`memory: every non-dot file in this machine's memory folder (top level and ${ARCHIVE}\\) matches a sync pattern`);
   }
   if (nasSide.length) {
-    out.lines.push(`memory: ${nasSide.length} file(s) on the NAS match none of the sync patterns and never travel to a local memory folder: ${names(nasSide, d => ascii(d.name))}`);
+    out.lines.push(`memory: ${nasSide.length} file(s) on the NAS match none of the sync patterns, so sync_memory.ps1 never copies them to a local memory folder: ${names(nasSide, d => ascii(d.name))}`);
   }
 }
 
-// The last line of sync.log, and the two things the owner asked to be warned about.
+// Age of a sync.log line from the ISO timestamp it starts with: { text } or { why }. The timestamp must
+// carry its UTC offset (sync_if_dirty.ps1 writes one): without it the instant is a guess.
+function lastLineAge(line, nowMs) {
+  const m = String(line).match(/^\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))(?=\s|$)/);
+  if (!m) return { why: 'the line does not start with a timestamp of the form 2026-10-12T21:10:36+07:00' };
+  const then = Date.parse(m[1]);
+  if (!Number.isFinite(then) || !Number.isFinite(nowMs)) return { why: `the timestamp ${m[1]} could not be parsed` };
+  const mins = Math.floor((nowMs - then) / 60000);
+  if (mins < 0) return { why: `the timestamp ${m[1]} is ${-mins} min in the future of this machine's clock` };
+  const text = mins < 60 ? `${mins} min` : `${Math.floor(mins / 60)} h ${mins % 60} min`;
+  return { text: `about ${text}` };
+}
+
+// The last line of sync.log, and the things the owner asked to be warned about.
 function logSection(nasDir, deps, out) {
   const readLast = deps.readLogLastLine || readLogLastLine;
   let line;
@@ -262,6 +275,11 @@ function logSection(nasDir, deps, out) {
   line = String(line);
   const shown = ascii(line).slice(0, 300) + (line.length > 300 ? ' ...' : '');
   out.lines.push(`sync.log, last line: ${shown}`);
+  // How old that line is, from its own timestamp against this machine's clock. A line that records an
+  // open defect reads very differently at 2 minutes and at 29 hours, and the line alone does not say.
+  const age = lastLineAge(line, deps.now === undefined ? Date.now() : deps.now);
+  if (age.text) out.lines.push(`sync.log: that line is ${age.text} old (by its own timestamp, against this machine's clock)`);
+  else out.unmeasured.push(`age of the last sync.log line NOT computed: ${age.why}`);
   // Only what the line itself says. `DIRTY n` is NOT compared with copied+same+conflict+failed: those
   // counts cover every pattern-matching file in the folder, not only the dirty ones.
   const conflict = line.match(/\bconflict=(\d+)/);
@@ -272,6 +290,14 @@ function logSection(nasDir, deps, out) {
   }
   if (line.includes('FAILED')) {
     out.lines.push('WARNING: the last sync.log line contains FAILED');
+  }
+  // The one run shape the owner's open item (sync-push-false-success) is about, read from the line's
+  // own fields and nothing else: it does not say WHY nothing was copied, and the judgement of the
+  // code behind it stays in backlog-checks.js. Without this the same line that item calls a false
+  // success sat under a "0 warning(s)" heading.
+  const dirty = line.match(/\bDIRTY (\d+)\b/);
+  if (dirty && Number(dirty[1]) > 0 && /\bcopied=0\b/.test(line) && /\bpush=ok\b/.test(line) && /\bmarker=written\b/.test(line)) {
+    out.lines.push(`WARNING: the last sync.log line records DIRTY ${dirty[1]} with copied=0, push=ok and marker=written: nothing was copied to the NAS, yet the folder was marked clean (the open item sync-push-false-success; this line cannot say why nothing was copied)`);
   }
   const eyes = line.match(/\bneeds-eyes=(.*?)(?:\s+snapshot=|$)/);
   if (eyes && eyes[1].trim() !== '' && eyes[1].trim() !== 'none') {
@@ -315,7 +341,7 @@ function gitSection(deps, out) {
 const LIMIT = 'LIMIT: if the other machine has not pushed, this machine cannot know what is waiting there; the comparisons above, where they were made, involve only this machine, the NAS and the last-fetched upstream';
 
 // `deps` exists so the readers can be pointed at fixtures: { nasDir, localDir, listDir(dir),
-// readPatterns(dir), readLogLastLine(dir), git(args), execFile }. Every one has a real default, so
+// readPatterns(dir), readLogLastLine(dir), git(args), execFile, now (ms since the epoch, for the log age) }. Every one has a real default, so
 // describeSyncHealth() with no argument measures the real thing.
 function describeSyncHealth(deps) {
   const started = process.hrtime.bigint();

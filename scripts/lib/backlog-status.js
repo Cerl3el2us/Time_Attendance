@@ -64,15 +64,26 @@ function readFields(lines) {
   const parts = {};
   for (const [key] of HANDOFF_FIELDS) parts[key] = [];
   let cur = null; // the field the text being read belongs to; null until the first label
-  for (const l of lines) {
+  lines.forEach((l, idx) => {
     const pieces = l.text.split(LABEL_RE);
     // pieces[0] precedes any label on this line: it continues the field above, or is the subject.
-    if (cur) parts[cur].push(pieces[0].replace(/^[\s·]+/, ''));
+    if (cur) {
+      parts[cur].push(pieces[0].replace(/^[\s·]+/, ''));
+    } else {
+      // Nothing above to continue. On the head line the bold subject is expected here; anything
+      // else (the rest of the head line, or a whole continuation line) is prose that belongs to no
+      // field and would vanish. Throw instead of dropping it (2026-10-13 review): the header of
+      // this file promises it never drops anything it could not read.
+      const stray = idx === 0 ? pieces[0].replace(/^- +\*\*.+?\*\*/, '') : pieces[0];
+      if (HAS_CONTENT.test(stray)) {
+        throw new Error(`STATUS.md:${l.no}: text before the first field label of a handoff item would be dropped: ${snip(stray)}`);
+      }
+    }
     for (let i = 1; i < pieces.length; i += 2) {
       cur = FIELD_OF_LABEL.get(pieces[i]);
       parts[cur].push(pieces[i + 1]);
     }
-  }
+  });
   const out = {};
   for (const [key] of HANDOFF_FIELDS) {
     out[key] = parts[key].join(' ').replace(/\s+/g, ' ').replace(/^[\s·]+|[\s·]+$/g, '');
@@ -124,11 +135,24 @@ function parseStatus(text) {
   const open = [];
   let section = null;     // title of the current column-one `## ` section
   let current = null;     // { head, cont } of the item being collected
+  const seenIds = new Map(); // check id -> line of the open item that uses it
 
   const flush = () => {
     if (!current) return;
     if (section === SEC_HANDOFF) handoff.push(readHandoff(current.head, current.cont));
-    else if (section === SEC_OPEN) open.push(readOpen(current.head, current.cont));
+    else if (section === SEC_OPEN) {
+      const item = readOpen(current.head, current.cont);
+      // One id, one item. The registry is keyed by id and the owner gate looks an item up by id, so
+      // two items sharing one would each be answered with the first item's owner-wait text (or the
+      // second's would never be applied) -- a WAITING-OWNER citing the wrong line (2026-10-13 review).
+      if (item.checkId !== null) {
+        if (seenIds.has(item.checkId)) {
+          throw new Error(`STATUS.md:${item.line}: check id "${item.checkId}" is already used by the item at line ${seenIds.get(item.checkId)}; one id may belong to only one item`);
+        }
+        seenIds.set(item.checkId, item.line);
+      }
+      open.push(item);
+    }
     current = null;
   };
 
