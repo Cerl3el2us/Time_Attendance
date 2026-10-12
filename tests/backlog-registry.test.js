@@ -146,6 +146,58 @@ test('parse: CRLF line endings give the same lines and the same ids', () => {
   assert.deepStrictEqual(crlf, parseStatus(FIXTURE_TEXT));
 });
 
+// A handoff field is its label's text through every continuation line, up to the next label of the
+// item. The first version kept only the label's own line, so "start with 3 commands" arrived with
+// the three commands cut off -- the pointer-with-no-payload failure the four-field rule exists for.
+const MULTI = [
+  '## ส่งต่อรอบหน้า',
+  '',
+  '- **หัวข้อ**',
+  '  · **ให้ทำอะไร:** เริ่มจาก 2 คำสั่งนี้',
+  '    (1) `git pull`',
+  '    (2) `npm run check` — ถ้าไม่ผ่าน **หยุด** ·',                  // a `·` that ends a line is a separator
+  '    ต่อจากเครื่องหมายคั่น',
+  '  · **ที่มา:** เจ้าของสั่ง',
+  '    ต่อบรรทัดที่สอง',
+  '  · **หลักฐาน:** `ls plan.md` ต้องพบไฟล์ ·',                      // trailing `·` at the very end of the field
+];
+const multiFields = () => parseStatus(MULTI.join('\n')).handoff[0].fields;
+
+test('parse: a handoff field keeps all of its continuation lines, numbered list included', () => {
+  assert.strictEqual(multiFields().action,
+    'เริ่มจาก 2 คำสั่งนี้ (1) `git pull` (2) `npm run check` — ถ้าไม่ผ่าน **หยุด** · ต่อจากเครื่องหมายคั่น');
+  assert.strictEqual(multiFields().source, 'เจ้าของสั่ง ต่อบรรทัดที่สอง');
+});
+
+test('parse: a field stops at the next label on a LATER line and does not swallow it', () => {
+  const f = multiFields();
+  assert.ok(!f.action.includes('ที่มา') && !f.action.includes('เจ้าของสั่ง'), `action swallowed the next field: ${f.action}`);
+  assert.ok(!f.source.includes('หลักฐาน') && !f.source.includes('plan.md'), `source swallowed the next field: ${f.source}`);
+  assert.ok(!f.evidence.includes('ต่อบรรทัดที่สอง'), `evidence took the previous field's text: ${f.evidence}`);
+  // and on ONE line, each label still gets its own value
+  const one = parseStatus('## ส่งต่อรอบหน้า\n- **h**\n  · **ให้ทำอะไร:** A · **ที่มา:** B · **หลักฐาน:** C').handoff[0].fields;
+  assert.deepStrictEqual(one, { action: 'A', source: 'B', evidence: 'C' });
+});
+
+test('parse: the middle dots at the two ends of a field are trimmed, those inside are kept', () => {
+  assert.strictEqual(multiFields().evidence, '`ls plan.md` ต้องพบไฟล์');           // trailing `·` gone
+  const lead = parseStatus('## ส่งต่อรอบหน้า\n- **h**\n  · **ให้ทำอะไร:** · A\n  · **ที่มา:** B\n  · **หลักฐาน:** C').handoff[0].fields;
+  assert.strictEqual(lead.action, 'A');                                              // leading `·` gone
+  // a continuation line that starts with `·` loses that dot, its indentation and nothing else
+  const cont = parseStatus('## ส่งต่อรอบหน้า\n- **h**\n  · **ให้ทำอะไร:** A\n    · B · C\n  · **ที่มา:** s\n  · **หลักฐาน:** e').handoff[0].fields;
+  assert.strictEqual(cont.action, 'A B · C');
+});
+
+test('parse: the last item of the file is returned, with or without a final newline', () => {
+  // The final flush is the only thing that emits an item no later line closes.
+  for (const tail of ['', '\n']) {
+    const o = parseStatus(`## เปิดอยู่\n- **ท้ายไฟล์**\n  · ตรวจ: tail-id${tail}`).open;
+    assert.deepStrictEqual(o, [{ subject: 'ท้ายไฟล์', line: 2, checkId: 'tail-id', waitingOwner: null }]);
+  }
+  const h = parseStatus('## ส่งต่อรอบหน้า\n- **h**\n  · **ให้ทำอะไร:** a\n  · **ที่มา:** b\n  · **หลักฐาน:** c').handoff;
+  assert.strictEqual(h.length, 1);
+});
+
 // parseStatus does not re-validate the format, but it must not hide what it cannot read.
 test('parse: a malformed marker or a stray line throws and names the line', () => {
   const at = (extra, n) => {
@@ -190,21 +242,53 @@ function realStatus() {
   return parseStatus(text);
 }
 
+// The truncation case on the real file: the first handoff item's action starts "start with 3
+// commands" and the commands live on continuation lines. Each substring below sits on a LATER line
+// than the label, so this goes red the moment a field is cut back to its first line.
+test('parse (real STATUS.md): the first handoff item keeps the text on its continuation lines', () => {
+  const { handoff } = realStatus();
+  assert.ok(handoff.length >= 1, 'STATUS.md has no handoff item, so there is nothing to read');
+  const f = handoff[0].fields;
+  assert.ok(f.action.includes('`npm run check`'), `action lost its (2) command: ${f.action}`);
+  assert.ok(f.action.includes('36/36 test files passed'), `action lost the stop-and-report condition: ${f.action}`);
+  assert.ok(f.action.includes('(3) '), `action lost its third command: ${f.action}`);
+  assert.ok(f.source.includes('ให้ถามเฉพาะเรื่อง'), `source lost its second line: ${f.source}`);
+  assert.ok(f.evidence.includes('git log --oneline main'), `evidence lost its second line: ${f.evidence}`);
+  // and it still stops where the next label begins
+  assert.ok(!f.action.includes('เจ้าของสั่ง 2026-10-12 ว่า'), `action swallowed the source field: ${f.action}`);
+});
+
+// Own properties only: an id such as `constructor` or `toString` is "in" every object, so `in` or a
+// bare `checks[id]` would call a check defined that the registry never wrote.
 const has = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+const idsMissingFrom = (open, checks) => open
+  .filter(o => o.checkId !== null && !has(checks, o.checkId))
+  .map(o => `${o.checkId} (STATUS.md:${o.line})`);
+const idsUnused = (open, checks) => {
+  const used = new Set(open.map(o => o.checkId).filter(id => id !== null));
+  return Object.keys(checks).filter(id => !used.has(id));
+};
+
+test('registry: the comparison is by own property and goes red in both directions', () => {
+  const run = () => {};
+  const open = [{ checkId: 'constructor', line: 7 }, { checkId: 'real-one', line: 9 }, { checkId: null, line: 11 }];
+  // `constructor` is inherited by {} and must not count as defined
+  assert.deepStrictEqual(idsMissingFrom(open, { 'real-one': { describe: 'x', run } }), ['constructor (STATUS.md:7)']);
+  assert.deepStrictEqual(idsMissingFrom(open, { constructor: { describe: 'x', run }, 'real-one': { describe: 'x', run } }), []);
+  assert.deepStrictEqual(idsUnused(open, { 'real-one': { describe: 'x', run }, ghost: { describe: 'x', run } }), ['ghost']);
+  assert.deepStrictEqual(idsUnused(open, { 'real-one': { describe: 'x', run } }), []);
+});
 
 test('registry: every check id used in STATUS.md exists in CHECKS', () => {
   const checks = loadRegistry();
-  const missing = realStatus().open
-    .filter(o => o.checkId !== null && !has(checks, o.checkId))
-    .map(o => `${o.checkId} (STATUS.md:${o.line})`);
+  const missing = idsMissingFrom(realStatus().open, checks);
   assert.deepStrictEqual(missing, [],
     `STATUS.md names check ids that ${REGISTRY_REL} does not define: ${missing.join(', ')}`);
 });
 
 test('registry: every id in CHECKS is used by some item of STATUS.md', () => {
   const checks = loadRegistry();
-  const used = new Set(realStatus().open.map(o => o.checkId).filter(id => id !== null));
-  const dead = Object.keys(checks).filter(id => !used.has(id));
+  const dead = idsUnused(realStatus().open, checks);
   assert.deepStrictEqual(dead, [],
     `${REGISTRY_REL} defines checks that no item of STATUS.md uses: ${dead.join(', ')}`);
 });

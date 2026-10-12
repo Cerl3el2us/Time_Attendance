@@ -45,30 +45,50 @@ const HAS_CONTENT = /[\p{L}\p{N}]/u;
 
 function snip(s) { return String(s).replace(/\s+/g, ' ').trim().slice(0, 70); }
 
-// What follows `label` on one line, up to the next handoff label, with the separators trimmed off.
-function fieldText(line, label) {
-  const at = line.indexOf(label);
-  if (at === -1) return null;
-  let rest = line.slice(at + label.length);
-  for (const [, other] of HANDOFF_FIELDS) {
-    const cut = rest.indexOf(other);
-    if (cut !== -1) rest = rest.slice(0, cut);
+// The three labels as one splitting pattern. String.split with a capture group returns
+// [text before the first label, label, text after it, label, text after it, ...], so a line holding
+// several labels gives each one its own text.
+const LABEL_RE = new RegExp('(' + HANDOFF_FIELDS.map(([, l]) => l.replace(/[*]/g, '\\$&')).join('|') + ')');
+const FIELD_OF_LABEL = new Map(HANDOFF_FIELDS.map(([key, label]) => [label, key]));
+
+// A field is the text after its label, through every following line of the item, up to the next
+// label OF THAT ITEM (on the same line or a later one) or the end of the item. 2026-10-12 (review):
+// the first version kept only the label's own line, so the real first handoff item came back as
+// "start with 3 commands" with the three commands cut off -- the pointer-with-no-payload failure
+// the four-field rule exists to stop, produced by the reader instead of the writer.
+// What is kept: the continuation lines' text joined by single spaces, whitespace collapsed, `·`
+// separators inside the text left alone (they separate sentences, even when one ends a line). What
+// is dropped: the indentation and a leading `·` of each continuation line, and `·`/whitespace at
+// the two ends of the finished value.
+function readFields(lines) {
+  const parts = {};
+  for (const [key] of HANDOFF_FIELDS) parts[key] = [];
+  let cur = null; // the field the text being read belongs to; null until the first label
+  for (const l of lines) {
+    const pieces = l.text.split(LABEL_RE);
+    // pieces[0] precedes any label on this line: it continues the field above, or is the subject.
+    if (cur) parts[cur].push(pieces[0].replace(/^[\s·]+/, ''));
+    for (let i = 1; i < pieces.length; i += 2) {
+      cur = FIELD_OF_LABEL.get(pieces[i]);
+      parts[cur].push(pieces[i + 1]);
+    }
   }
-  return HAS_CONTENT.test(rest) ? rest.replace(/^[\s·]+|[\s·]+$/g, '') : null;
+  const out = {};
+  for (const [key] of HANDOFF_FIELDS) {
+    out[key] = parts[key].join(' ').replace(/\s+/g, ' ').replace(/^[\s·]+|[\s·]+$/g, '');
+  }
+  return out;
 }
 
 // One item: `head` is { text, no } for the `- ` line, `cont` the continuation lines as { text, no }.
 function readHandoff(head, cont) {
   const m = head.text.match(/^- +\*\*(.+?)\*\*/);
   if (!m) throw new Error(`STATUS.md:${head.no}: handoff item has no bold subject: ${snip(head.text)}`);
-  const all = [head, ...cont];
-  const fields = {};
+  const fields = readFields([head, ...cont]);
   for (const [key, label] of HANDOFF_FIELDS) {
-    const hit = all.map(l => fieldText(l.text, label)).find(t => t !== null);
-    if (hit === undefined) {
+    if (!HAS_CONTENT.test(fields[key])) {
       throw new Error(`STATUS.md:${head.no}: handoff item has no content after ${label}: ${snip(head.text)}`);
     }
-    fields[key] = hit;
   }
   return { subject: m[1].trim(), line: head.no, fields };
 }
