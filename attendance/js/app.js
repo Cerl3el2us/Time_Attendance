@@ -1701,6 +1701,8 @@ let APP_SETTINGS = {
     // 2026-07-31: centralized from per-employee fields -- see server.js DEFAULT_APP_SETTINGS.
     diligence: 200, longDistance: 150, longDistanceThresholdKm: 250, personalCar: 1000, phone: 1000
   },
+  // 2026-10-13: see server.js DEFAULT_APP_SETTINGS -- ships OFF with no role configured.
+  allowanceRoleRates: { enabled: false, byRole: {} },
   workSchedule: { standardStartHour: 8, standardStartMinute: 30 },
   // 2026-09-25: web check-in geofence (Paso Tower). Editable in Settings; `enabled:false` restores
   // the pre-geofence behaviour exactly.
@@ -3035,6 +3037,40 @@ function holidayWorkSubmitBlockedMessage(result) {
   }
   return L('Cannot submit holiday work for this date', 'ไม่สามารถยื่นขอทำงานวันหยุดวันนี้ได้');
 }
+// ===== PER-ROLE EARLY-MORNING / LATE-NIGHT RATES =====
+// 2026-10-13 (owner's decision): manager is to be paid a different early-morning / late-night
+// rate from everyone else. What the owner asked for is a SWITCH plus EDITABLE AMOUNTS, not the
+// number itself, so no role's rate appears here or in DEFAULT_APP_SETTINGS -- the table ships
+// empty and the owner fills it in on the Settings page. Before this, the four amounts in
+// `allowances` were one company-wide value each with no role dimension at all.
+//
+// DUAL-SYNC: EARLY_LATE_RATE_KEYS and earlyLateRateFor() must stay IDENTICAL TEXT in
+// this file and attendance-server/backend/server.js. tests/role-allowance-rates.test.js extracts
+// both copies and compares them, because a drift here shows one number on the web and pays a
+// different one, with nothing failing.
+//
+// A configured 0 is legal and means "do not pay this tier", so the guard is
+// Number.isFinite && >= 0. NEVER write `|| 240` around this function's result: `0 || 240`
+// pays 240 (see project memory feedback_attendance_falsy_zero_settings.md).
+//
+// This is deliberately only about the rate. Whether the role may be paid at all stays with
+// isAllowanceEligible(..., 'earlyLate'), which every caller already checks first; a row here for
+// an ineligible role must therefore never cause a payment.
+const EARLY_LATE_RATE_KEYS = ['earlyMorning1', 'earlyMorning2', 'lateNight1', 'lateNight2'];
+function earlyLateRateFor(role, key, S) {
+  const central = S && S.allowances ? S.allowances[key] : undefined;
+  if (!EARLY_LATE_RATE_KEYS.includes(key)) return central;
+  const cfg = S && S.allowanceRoleRates;
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg) || cfg.enabled !== true || !role) return central;
+  const byRole = cfg.byRole;
+  if (!byRole || typeof byRole !== 'object' || Array.isArray(byRole)) return central;
+  const row = byRole[role];
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return central;
+  const v = row[key];
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) return central;
+  return v;
+}
+
 function earlyMorningThresholdMins(tier) {
   const S = APP_SETTINGS.allowances;
   return tier === 2 ? (S.earlyThreshold2Min || 390) : (S.earlyThreshold1Min || 450);

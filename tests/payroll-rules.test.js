@@ -47,7 +47,11 @@ const SETTINGS = {
   payroll: { periodStartDay: 21 },
 };
 
-const SHARED = ['isVoidLeaveStatus', 'round2HalfUp', 'round1HalfUp', 'deriveOfficeOtFromEndTime', 'lateNightCheckoutMins', 'lateNightThresholdMins', 'lateNightThresholdHourOf', 'parseHHMMToMins',
+const SHARED = [
+  // 2026-10-13: the per-role early/late rate reader. It lives in both files under the dual-sync
+  // rule, so the payroll sandboxes below must have it available once payroll reads rates through it.
+  'earlyLateRateFor',
+  'isVoidLeaveStatus', 'round2HalfUp', 'round1HalfUp', 'deriveOfficeOtFromEndTime', 'lateNightCheckoutMins', 'lateNightThresholdMins', 'lateNightThresholdHourOf', 'parseHHMMToMins',
   'isHolidayWorkDay', 'isNonWorkDayForComp', 'isHolidayWorkOtRecord', 'companyTripDateInRange',
   'isFullDayPersonalLeaveStatus', 'isRestAttendanceDay', 'isDeviceScanSource', 'isEarlyMorningDayStatus',
   'deviceScanQualifiesForEarlyMorning', 'earlyMorningCheckInOk', 'deviceScanQualifiesForLateNight', 'lateNightCheckoutOk',

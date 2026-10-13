@@ -9328,6 +9328,9 @@ const DEFAULT_APP_SETTINGS = {
     // one real value each was ever set to in production, so this is behavior-neutral on deploy.
     diligence: 200, longDistance: 150, longDistanceThresholdKm: 250, personalCar: 1000, phone: 1000
   },
+  // 2026-10-13: ships OFF with no role configured, so deploying this changes nobody's pay.
+  // The owner turns it on and types the amounts in Settings -- see earlyLateRateFor().
+  allowanceRoleRates: { enabled: false, byRole: {} },
   workSchedule: { standardStartHour: 8, standardStartMinute: 30 },
   // 2026-09-25: web check-in geofence (Paso Tower). Editable in Settings; `enabled:false` restores
   // the pre-geofence behaviour exactly.
@@ -9367,6 +9370,40 @@ const DEFAULT_APP_SETTINGS = {
 const BUSINESS_DAY_START_MINS = 330; // 05:30
 const ALLOWANCE_KEYS = ['diligence', 'longDistance', 'personalCar', 'upcountry', 'earlyLate', 'ot', 'phone', 'holidayWork', 'abroad'];
 const ROLE_KEYS = ['md', 'manager', 'accounting', 'user', 'marketing', 'driver'];
+// ===== PER-ROLE EARLY-MORNING / LATE-NIGHT RATES =====
+// 2026-10-13 (owner's decision): manager is to be paid a different early-morning / late-night
+// rate from everyone else. What the owner asked for is a SWITCH plus EDITABLE AMOUNTS, not the
+// number itself, so no role's rate appears here or in DEFAULT_APP_SETTINGS -- the table ships
+// empty and the owner fills it in on the Settings page. Before this, the four amounts in
+// `allowances` were one company-wide value each with no role dimension at all.
+//
+// DUAL-SYNC: EARLY_LATE_RATE_KEYS and earlyLateRateFor() must stay IDENTICAL TEXT in
+// attendance/js/app.js and this file. tests/role-allowance-rates.test.js extracts both copies
+// and compares them, because a drift here shows one number on the web and pays a different one,
+// with nothing failing.
+//
+// A configured 0 is legal and means "do not pay this tier", so the guard is
+// Number.isFinite && >= 0. NEVER write `|| 240` around this function's result: `0 || 240`
+// pays 240 (see project memory feedback_attendance_falsy_zero_settings.md).
+//
+// This is deliberately only about the rate. Whether the role may be paid at all stays with
+// isAllowanceEligible(..., 'earlyLate'), which every caller already checks first; a row here for
+// an ineligible role must therefore never cause a payment.
+const EARLY_LATE_RATE_KEYS = ['earlyMorning1', 'earlyMorning2', 'lateNight1', 'lateNight2'];
+function earlyLateRateFor(role, key, S) {
+  const central = S && S.allowances ? S.allowances[key] : undefined;
+  if (!EARLY_LATE_RATE_KEYS.includes(key)) return central;
+  const cfg = S && S.allowanceRoleRates;
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg) || cfg.enabled !== true || !role) return central;
+  const byRole = cfg.byRole;
+  if (!byRole || typeof byRole !== 'object' || Array.isArray(byRole)) return central;
+  const row = byRole[role];
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return central;
+  const v = row[key];
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) return central;
+  return v;
+}
+
 const DEFAULT_ALLOWANCE_ELIGIBILITY = {
   diligence:    ['driver'],
   longDistance: ['driver'],
