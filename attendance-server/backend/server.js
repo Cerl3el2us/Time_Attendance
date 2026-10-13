@@ -1978,6 +1978,8 @@ app.post('/api/hikvision/event', hikAuth, webScanLimiter, withEventsLock((req, r
           // text if `reason` itself somehow goes missing.
           'geofence-inside': 'Company policy: check-in must be made with the face scanner at the office. Please scan at the device, or submit a time-correction request if you cannot.',
           'geofence-no-position': 'Clocking in or out from the web requires your location.',
+          // 2026-10-14: fallback only -- the client localizes by `reason`, same as the two above.
+          'web-clock-off': 'Company policy: clocking in and out from the web is turned off. Please use the face scanner at the office.',
         };
         return res.status(403).json({ success: false, reason, message: messages[reason] });
       }
@@ -3683,6 +3685,107 @@ app.delete('/api/announcements/:id', (req, res) => {
 // { "<userId>_<YYYY-MM-DD>": { decision:'allow'|'deny', checkOut, rawCheckOut, by, byId, at } }
 // Own file, not a settings key -- PUT /api/settings deep-merges object keys, which would make a
 // cleared review impossible to delete. Unreadable/corrupt file => null => callers fail closed.
+// ===== CHECK-IN TIME CORRECTIONS: storage and routes (2026-10-14) =====
+// Same shape as checkout-reviews below -- its own file, keyed `${userId}_${date}`, a handler lock
+// so two admins cannot interleave, and a GET scoped by role. Attendance events themselves are
+// never rewritten: the correction is an overlay, so the original door-pass time stays on record.
+const CHECKIN_EDITS_FILE = 'checkin-time-edits.json';
+const CHECKIN_EDITS_UNAVAILABLE = 'Service temporarily unavailable';
+const withCheckinEditsLock = makeHandlerLock('CHECKIN_EDITS');
+function readCheckinEdits() {
+  const data = readJSON(CHECKIN_EDITS_FILE, {});
+  if (data === null) return null;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  return data;
+}
+function handleGetCheckinTimeEdits(req, res) {
+  const users = readUsers();
+  if (users === null) return res.status(503).json({ success: false, message: CHECKIN_EDITS_UNAVAILABLE });
+  const live = users.find(u => u.id === req.user.sub);
+  if (!live) return res.status(403).json({ success: false, message: 'Forbidden' });
+  const all = readCheckinEdits();
+  if (all === null) return res.status(503).json({ success: false, message: CHECKIN_EDITS_UNAVAILABLE });
+  // An employee sees the corrections on their OWN days -- the corrected time is their attendance,
+  // so hiding it from them would mean the page shows a number they cannot account for.
+  if (isLeaveFullAccess(live)) return res.json({ success: true, edits: all });
+  const prefix = `${live.id}_`;
+  const own = {};
+  Object.keys(all).forEach(k => { if (k.startsWith(prefix)) own[k] = all[k]; });
+  return res.json({ success: true, edits: own });
+}
+function handlePutCheckinTimeEdit(req, res) {
+  try {
+    const users = readUsers();
+    if (users === null) return res.status(503).json({ success: false, message: CHECKIN_EDITS_UNAVAILABLE });
+    const live = users.find(u => u.id === req.user.sub);
+    if (!live) return res.status(403).json({ success: false, message: 'Forbidden: user record not found' });
+    const body = parseBody(req) || {};
+    const userId = Number(body.userId);
+    const dateStr = body.date;
+    const newTime = body.checkIn;
+    const reason = body.reason;
+    if (!Number.isInteger(userId) || userId <= 0) return res.status(400).json({ success: false, message: 'userId is required' });
+    if (typeof dateStr !== 'string' || !isValidDateStr(dateStr)) return res.status(400).json({ success: false, message: 'date must be YYYY-MM-DD' });
+    const target = users.find(u => u.id === userId);
+    if (!target) return res.status(404).json({ success: false, message: 'employee not found' });
+    // The raw door-pass time is re-derived here, never taken from the client: it is what decides
+    // whether this day may be corrected at all.
+    const day = buildAttendanceLogForUser(target)[dateStr];
+    const rawCheckIn = day ? (day.rawCheckIn || day.checkIn) : null;
+    // lockedPeriodInRange() reads settings through readSettings(), which turns a read failure into
+    // {} (= "nothing locked") -- check the raw read first so a failure refuses instead of allowing
+    // a correction into a period that may well be locked. Same guard the checkout review uses.
+    if (readJSON('settings.json', {}) === null) {
+      return res.status(503).json({ success: false, message: CHECKIN_EDITS_UNAVAILABLE });
+    }
+    if (accountingConfirmedInRange(dateStr, dateStr, userId)) {
+      return res.status(409).json({ success: false, message: 'Accounting has already confirmed tax for this period — unconfirm before making changes' });
+    }
+    if (mdApprovedPeriodInRange(dateStr, dateStr, userId)) {
+      return res.status(409).json({ success: false, message: 'Payroll for this period has already been approved by the Managing Director -- ask them to revoke approval first' });
+    }
+    const refusal = checkinEditRefusalReason({
+      editor: { id: live.id, role: live.role }, target: { id: target.id, role: target.role },
+      rawCheckIn, newTime, reason, periodLocked: lockedPeriodInRange(dateStr, dateStr),
+    });
+    if (refusal) {
+      const messages = {
+        'role': 'Only Accounting and MD may correct a check-in time',
+        'own-record': 'You cannot correct your own attendance',
+        'period-locked': 'This pay period is locked',
+        'not-editable': 'This day has no door pass between 05:30 and 07:30, so its check-in cannot be corrected',
+        'bad-time': 'The new time must be a valid HH:MM time',
+        'reason-required': 'A reason is required',
+        'reason-too-long': 'The reason is too long (500 characters maximum)',
+      };
+      return res.status(refusal === 'role' || refusal === 'own-record' ? 403 : 400)
+        .json({ success: false, reason: refusal, message: messages[refusal] || 'Refused' });
+    }
+    const all = readCheckinEdits();
+    if (all === null) return res.status(503).json({ success: false, message: CHECKIN_EDITS_UNAVAILABLE });
+    const key = `${userId}_${dateStr}`;
+    const prev = (all[key] && typeof all[key] === 'object' && !Array.isArray(all[key])) ? all[key] : null;
+    const history = Array.isArray(prev && prev.history) ? prev.history.slice(-99) : [];
+    const entry = {
+      from: prev ? prev.checkIn : rawCheckIn,
+      to: newTime,
+      reason: String(reason).trim(),
+      by: live.name, byId: live.id, at: new Date().toISOString(),
+    };
+    history.push(entry);
+    all[key] = { checkIn: newTime, rawCheckIn, reason: entry.reason, by: live.name, byId: live.id, at: entry.at, history };
+    if (!writeJSON(CHECKIN_EDITS_FILE, all)) {
+      return res.status(503).json({ success: false, message: CHECKIN_EDITS_UNAVAILABLE });
+    }
+    // The audit trail the owner asked for lives in `history` above -- who corrected it, from what
+    // time to what time, and why -- stored with the record itself rather than in a separate log
+    // that could drift from it.
+    return res.json({ success: true, edit: all[key] });
+  } catch (e) {
+    return res.status(503).json({ success: false, message: CHECKIN_EDITS_UNAVAILABLE });
+  }
+}
+
 const CHECKOUT_REVIEWS_FILE = 'checkout-reviews.json';
 const CHECKOUT_REVIEWS_UNAVAILABLE = 'Service temporarily unavailable';
 const withCheckoutReviewsLock = makeHandlerLock('CHECKOUT_REVIEWS');
@@ -3810,6 +3913,8 @@ function handlePutCheckoutReview(req, res) {
     return res.status(unavailable ? 503 : 500).json({ success: false, message: unavailable ? CHECKOUT_REVIEWS_UNAVAILABLE : 'Server error' });
   }
 }
+app.get('/api/checkin-time-edits', handleGetCheckinTimeEdits);
+app.put('/api/checkin-time-edits', requireRole('md', 'accounting'), withCheckinEditsLock(handlePutCheckinTimeEdit));
 app.get('/api/checkout-reviews', handleGetCheckoutReviews);
 app.put('/api/checkout-reviews', requireRole('md', 'accounting'), withCheckoutReviewsLock(handlePutCheckoutReview));
 // 2026-10-02 (owner): the morning twin of the check-out review above. Same storage shape, same
@@ -4691,7 +4796,7 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
   // 2026-10-13: 'allowanceRoleRates' MUST stay on this list. The deep-merge further down rebuilds
   // current.appSettings from this list alone, so a section missing from it is silently DELETED
   // from disk by the next unrelated Settings save -- not merely refused on the way in.
-  const ALLOWED_APPSETTINGS_KEYS = ['company', 'payroll', 'sso', 'allowances', 'workSchedule', 'geofence', 'leave', 'allowanceTypes', 'lateDeductPolicy', 'tax', 'allowanceEligibility', 'allowanceRoleRates', 'map', 'updatedAt'];
+  const ALLOWED_APPSETTINGS_KEYS = ['company', 'payroll', 'sso', 'allowances', 'workSchedule', 'geofence', 'leave', 'allowanceTypes', 'lateDeductPolicy', 'tax', 'allowanceEligibility', 'allowanceRoleRates', 'webClock', 'map', 'updatedAt'];
   if (body.appSettings) {
     const A = body.appSettings;
     if (Object.keys(A).length > 30) {
@@ -4708,7 +4813,7 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
     // further below) only guards `incoming`/`existing` being non-array objects at the point it
     // decides whether to merge -- a scalar `incoming` still gets stored verbatim as that key's new
     // value, corrupting every downstream reader that expects an object.
-    for (const sub of ['company', 'payroll', 'sso', 'allowances', 'workSchedule', 'geofence', 'leave', 'allowanceEligibility', 'allowanceRoleRates', 'lateDeductPolicy', 'tax', 'map']) {
+    for (const sub of ['company', 'payroll', 'sso', 'allowances', 'workSchedule', 'geofence', 'leave', 'allowanceEligibility', 'allowanceRoleRates', 'webClock', 'lateDeductPolicy', 'tax', 'map']) {
       if (A[sub] !== undefined && (!A[sub] || typeof A[sub] !== 'object' || Array.isArray(A[sub]))) {
         return res.status(400).json({ success: false, message: `appSettings.${sub} must be an object` });
       }
@@ -4905,6 +5010,23 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
         }
       }
       RR.byRole = byRole;
+    }
+    // 2026-10-14: the web-clock switch. Same reasoning as allowanceRoleRates above -- its own
+    // section (not inside `allowances`, whose validator demands a number from every key), on both
+    // allowlists so the save path cannot drop it, and validated here.
+    if (A.webClock !== undefined) {
+      const W = A.webClock;
+      if (Object.keys(W).some(k => !['enabled', 'exemptRoles'].includes(k))) {
+        return res.status(400).json({ success: false, message: 'appSettings.webClock accepts only enabled and exemptRoles' });
+      }
+      if (typeof W.enabled !== 'boolean') {
+        return res.status(400).json({ success: false, message: 'appSettings.webClock.enabled must be true or false' });
+      }
+      const roles = W.exemptRoles === undefined ? [] : W.exemptRoles;
+      if (!Array.isArray(roles) || roles.length > ROLE_KEYS.length || !roles.every(r => ROLE_KEYS.includes(r))) {
+        return res.status(400).json({ success: false, message: 'appSettings.webClock.exemptRoles must be an array of known roles' });
+      }
+      W.exemptRoles = [...new Set(roles)];
     }
   }
   if (body.appSettings) {
@@ -5398,8 +5520,11 @@ function earlyMorningTierAllowed(checkIn, tier, S) {
   return mins <= thr;
 }
 // 2026-10-13: takes the employee's role so the per-role rate table applies here too
-// (earlyLateRateFor). Omitting `role` keeps the company-wide amount, which is what every
-// caller got before this parameter existed.
+// (earlyLateRateFor). NOTE: this function currently has NO CALLERS anywhere in the repo -- it was
+// already unreachable before this change, and the `role` parameter was added so that whoever
+// revives it does not silently pay company-wide rates. Omitting `role` yields the company-wide
+// amount. It is left in place rather than deleted because removing unrelated dead code was out of
+// scope for this change; anyone revisiting it should delete it or give it a caller.
 function earlyMorningBonusFromWorkStartTime(workStartTime, S, role) {
   const mins = parseHHMMToMins(workStartTime);
   if (!Number.isFinite(mins)) return { earlyCount: 0, bonus: 0 };
@@ -9383,6 +9508,10 @@ const DEFAULT_APP_SETTINGS = {
   // 2026-09-25: web check-in geofence (Paso Tower). Editable in Settings; `enabled:false` restores
   // the pre-geofence behaviour exactly.
   geofence: { enabled: true, lat: 13.7268315, lng: 100.52847, radiusM: 150, exemptRoles: ['driver'] },
+  // 2026-10-14 (owner): ships ON, so deploying changes nobody. Off = attendance is recorded at the
+  // face scanner only. `driver` is exempt by default for the same reason geofence exempts it --
+  // drivers are not at the office, so a company-wide off switch would strand them.
+  webClock: { enabled: true, exemptRoles: ['driver'] },
   leave: { carryForwardMax: 5, carryForwardExpiryEnabled: true, carryForwardExpiryMonth: 3, carryForwardExpiryDay: 31, carryForwardNotifyDays: 30, annualLeaveMinMonths: 6, annualLeaveTiers: DEFAULT_ANNUAL_LEAVE_TIERS.map(t => ({ ...t })), sickLeaveDays: DEFAULT_SICK_LEAVE_DAYS, businessLeaveDays: DEFAULT_BUSINESS_LEAVE_DAYS },
   map: { cartoApiKey: '' },
   allowanceTypes: [],
@@ -9730,6 +9859,13 @@ function getAppSettings() {
     leave:        { ...DEFAULT_APP_SETTINGS.leave,        ...(raw.leave       || {}) },
     allowanceTypes:   raw.allowanceTypes   || DEFAULT_APP_SETTINGS.allowanceTypes,
     lateDeductPolicy: raw.lateDeductPolicy || DEFAULT_APP_SETTINGS.lateDeductPolicy,
+    // 2026-10-13 (review C1): this object is built from an explicit key list with no spread of
+    // `raw`, so a section missing HERE is invisible to every engine that runs off getAppSettings()
+    // -- computePayroll included. The section was on both PUT allowlists and still unreachable:
+    // the owner could save 360 for manager, the file would hold it, and payroll would keep paying
+    // the company-wide amount with nothing failing anywhere.
+    allowanceRoleRates: raw.allowanceRoleRates || DEFAULT_APP_SETTINGS.allowanceRoleRates,
+    webClock: raw.webClock || DEFAULT_APP_SETTINGS.webClock,
     allowanceEligibility: raw.allowanceEligibility || {},
     tax: { personalAllowanceAnnual: DEFAULT_APP_SETTINGS.tax.personalAllowanceAnnual, brackets: DEFAULT_APP_SETTINGS.tax.brackets }
   };
@@ -9992,7 +10128,10 @@ function buildAttendanceLogForUser(user, start, end) {
       rec.lastScan = timePart;
     }
   });
-  return log;
+  // 2026-10-14: the single choke point every server-side consumer goes through -- payroll, the
+  // web-scan gates, the attendance API. Applying the correction here means nothing downstream has
+  // to know the feature exists, and no call site can be forgotten.
+  return applyCheckinEdits(log, user.id, readCheckinEdits() || {});
 }
 
 // 2026-09-25: would this WebScan become the day's CHECK-IN? Mirrors buildAttendanceLogForUser()'s
@@ -10006,6 +10145,66 @@ function webScanWouldBeCheckIn(user, eventTimeIso) {
   if (timePart >= CHECKIN_CUTOFF) return false;           // first scan after the cutoff = check-out
   const log = buildAttendanceLogForUser(user);
   return !(log[datePart] && log[datePart].checkIn);
+}
+
+// ===== CHECK-IN TIME CORRECTIONS (2026-10-14, owner's decision) =====
+// Accounting/MD may correct the recorded check-in on a day whose door pass falls between 05:30 and
+// 07:30 -- the window where someone passes the door early without actually starting work then.
+// The usual correction is to a LATER time (passed at 07:00, actually started 08:30), which removes
+// the early-morning allowance, so this is money-bearing: applyCheckinEdits() is DUAL-SYNC and must
+// stay identical text in app.js and server.js, or the web and payroll disagree about what was paid.
+// The window is written out here rather than read from a module constant so the two copies of this
+// function are self-contained and can be compared as text; 05:30-07:30 is the owner's rule.
+function checkinEditWindowOk(rawCheckIn) {
+  const mins = parseHHMMToMins(rawCheckIn);
+  if (!Number.isFinite(mins)) return false;
+  return mins >= (5 * 60 + 30) && mins <= (7 * 60 + 30);
+}
+// Returns '' to allow, or a reason code. Pure, so the rules can be exercised without a request.
+// Takes one options object rather than destructured parameters on purpose: this repo's test
+// helpers locate a function body by the first `{` after its name, so a destructured parameter
+// list truncates the extraction and the function cannot be exercised in a sandbox at all.
+function checkinEditRefusalReason(opts) {
+  const { editor, target, rawCheckIn, newTime, reason, periodLocked } = opts || {};
+  if (!editor || !['md', 'accounting'].includes(editor.role)) return 'role';
+  // Nobody corrects their own attendance. The owner's rule that an accounting record is MD-only
+  // falls straight out of this: accounting may correct others but never itself.
+  if (!target || Number(editor.id) === Number(target.id)) return 'own-record';
+  if (periodLocked) return 'period-locked';
+  if (!checkinEditWindowOk(rawCheckIn)) return 'not-editable';
+  if (!HHMM_RE.test(String(newTime || ''))) return 'bad-time';
+  if (typeof reason !== 'string' || !reason.trim()) return 'reason-required';
+  if (reason.length > 500) return 'reason-too-long';
+  return '';
+}
+function applyCheckinEdits(log, userId, edits) {
+  if (!log || !edits || typeof edits !== 'object' || Array.isArray(edits)) return log;
+  for (const logKey of Object.keys(log)) {
+    // The two callers key their logs differently: the server's is per-user and keyed by date,
+    // the browser's is global and keyed `${userId}_${date}`. Both shapes are accepted so this
+    // stays ONE function -- it decides what payroll is paid from, and a second copy of a money
+    // rule is how the web and the payslip start disagreeing.
+    const e = edits[logKey] || edits[`${userId}_${logKey}`];
+    if (!e || typeof e !== 'object' || Array.isArray(e)) continue;
+    if (!HHMM_RE.test(String(e.checkIn || ''))) continue;
+    const day = log[logKey];
+    if (!day || !day.checkIn) continue;
+    day.rawCheckIn = day.checkIn;
+    day.checkIn = e.checkIn;
+    day.checkInEdited = true;
+  }
+  return log;
+}
+
+// 2026-10-14 (web-clock switch): did THIS day's check-in come from the web?
+// The owner's rule is that web check-ins already recorded stay usable. Without this, flipping the
+// switch off at lunchtime strands everyone who clocked in from the web that morning -- they could
+// not record a check-out at all, and a day with no check-out loses every claim that needs one.
+function webScanHasWebCheckInToday(user, eventTimeIso) {
+  const datePart = String(eventTimeIso || '').substring(0, 10);
+  if (!datePart) return false;
+  const day = buildAttendanceLogForUser(user)[datePart];
+  return !!(day && day.checkIn && day.checkInSource === 'web');
 }
 
 // 2026-09-25: the whole WebScan geofence decision in one call. Returns '' to allow, or the reason
@@ -10045,6 +10244,23 @@ function webScanGateReason(hikUser, eventTimeIso, gps, gpsAgeSecRaw) {
   // that call goes through buildAttendanceLogForUser() -> a full readEvents() + log build on
   // every single web scan (check-outs included), which is wasted work when the distance rule
   // cannot refuse anything anyway. Only the position check above now runs ahead of it.
+  // 2026-10-14 (owner): the web-clock switch. Off means attendance is recorded at the face scanner
+  // only -- so it refuses a check-OUT as well, because hiding the button is not the rule and the
+  // server has to be the one that says no. Two deliberate carve-outs:
+  //   * roles the owner exempts. Defaults to `driver`, and that default is not cosmetic: drivers
+  //     are already exempt from the geofence precisely because they are not at the office, so a
+  //     company-wide off switch would leave them no way to clock in at all.
+  //   * a day whose check-in was itself a web scan can still be closed from the web, or flipping
+  //     the switch mid-day strands everyone who clocked in that morning.
+  // `enabled !== false` (not `=== true`): an older settings file with no webClock section, or a
+  // malformed one, must behave exactly as it always did rather than lock everybody out.
+  const W = getAppSettings().webClock;
+  if (W && typeof W === 'object' && !Array.isArray(W) && W.enabled === false) {
+    const exempt = Array.isArray(W.exemptRoles) && W.exemptRoles.includes(hikUser.role);
+    if (!exempt && !(!webScanWouldBeCheckIn(hikUser, eventTimeIso) && webScanHasWebCheckInToday(hikUser, eventTimeIso))) {
+      return 'web-clock-off';
+    }
+  }
   const G = getAppSettings().geofence;
   if (!G || typeof G !== 'object' || G.enabled !== true) return '';
   if (!webScanWouldBeCheckIn(hikUser, eventTimeIso)) return '';
