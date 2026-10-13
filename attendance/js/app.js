@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 102;
+const APP_BUILD = 103;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -13956,6 +13956,11 @@ function computePayroll(user, start, end, periodIndex) {
   // affect grossIncome/allowance2/any paid amount either way, purely additional diagnostic detail.
   let early2Count = 0, early2Amount = 0, early1Count = 0, early1Amount = 0;
   let lateNight2Count = 0, lateNight2Amount = 0, lateNight1Count = 0, lateNight1Amount = 0;
+  // 2026-10-13: the rate for THIS employee's role -- the same reader and the same role the
+  // server's computePayroll uses, so the web preview and the payslip cannot diverge from what
+  // payroll pays (project rule: the money formula lives in two files and must agree).
+  const _elRate = (key) => earlyLateRateFor(user.role, key, S);
+  const _r = { early1: _elRate('earlyMorning1'), early2: _elRate('earlyMorning2'), lateNight1: _elRate('lateNight1'), lateNight2: _elRate('lateNight2') };
   const earlyScanPaidDates = new Set();
   if (canEarlyLate) {
     const _ln1Thr = lateNightThresholdHourOf(S.allowances, 1);
@@ -13965,8 +13970,8 @@ function computePayroll(user, start, end, periodIndex) {
       if (deviceScanQualifiesForEarlyMorning(d, holidayWorkDates)) {
         const [h, m] = d.checkIn.split(':').map(Number);
         const mins = h * 60 + m;
-        if (mins <= S.allowances.earlyThreshold2Min) { earlyCount += 2; earlyLateBonus += S.allowances.earlyMorning2; early2Count++; early2Amount += S.allowances.earlyMorning2; earlyScanPaidDates.add(d.date); }
-        else if (mins <= S.allowances.earlyThreshold1Min) { earlyCount += 1; earlyLateBonus += S.allowances.earlyMorning1; early1Count++; early1Amount += S.allowances.earlyMorning1; earlyScanPaidDates.add(d.date); }
+        if (mins <= S.allowances.earlyThreshold2Min) { earlyCount += 2; earlyLateBonus += _r.early2; early2Count++; early2Amount += _r.early2; earlyScanPaidDates.add(d.date); }
+        else if (mins <= S.allowances.earlyThreshold1Min) { earlyCount += 1; earlyLateBonus += _r.early1; early1Count++; early1Amount += _r.early1; earlyScanPaidDates.add(d.date); }
       }
       if (deviceScanQualifiesForLateNight(d, holidayWorkDates)) {
         const lnPts = lateNightPoints(d.lateOut, _ln2Thr);
@@ -13974,8 +13979,8 @@ function computePayroll(user, start, end, periodIndex) {
         // definition (crossed the ×2 threshold counts as 2, since it also crossed the ×1
         // threshold on the way) rather than a flat +1 per day -- display-only, does not affect
         // earlyLateBonus/any paid amount either way.
-        if (lnPts === 2) { lateNightCount += 2; earlyLateBonus += S.allowances.lateNight2; lateNight2Count++; lateNight2Amount += S.allowances.lateNight2; }
-        else { lateNightCount += 1; earlyLateBonus += S.allowances.lateNight1; lateNight1Count++; lateNight1Amount += S.allowances.lateNight1; }
+        if (lnPts === 2) { lateNightCount += 2; earlyLateBonus += _r.lateNight2; lateNight2Count++; lateNight2Amount += _r.lateNight2; }
+        else { lateNightCount += 1; earlyLateBonus += _r.lateNight1; lateNight1Count++; lateNight1Amount += _r.lateNight1; }
       }
     });
     approvedEarlyMorning.forEach(l => {
@@ -13986,8 +13991,8 @@ function computePayroll(user, start, end, periodIndex) {
       // Rest-day web request pays only with approved holiday-work (user 2026-09-01).
       if (isHolidayWorkDay(l.dateFrom) && !holidayWorkDates.has(l.dateFrom)) return;
       const tier = Number(l.earlyMorningTier) || 0;
-      if (tier === 2) { earlyCount += 2; earlyLateBonus += S.allowances.earlyMorning2; early2Count++; early2Amount += S.allowances.earlyMorning2; }
-      else if (tier === 1) { earlyCount += 1; earlyLateBonus += S.allowances.earlyMorning1; early1Count++; early1Amount += S.allowances.earlyMorning1; }
+      if (tier === 2) { earlyCount += 2; earlyLateBonus += _r.early2; early2Count++; early2Amount += _r.early2; }
+      else if (tier === 1) { earlyCount += 1; earlyLateBonus += _r.early1; early1Count++; early1Amount += _r.early1; }
     });
   }
 
@@ -14114,6 +14119,10 @@ function computePayroll(user, start, end, periodIndex) {
     grossIncome, ssf, pvd, autoPit,
     upcountryCount: totalUpcountryCount, holidayWorkUpcountryCount, earlyLateBonus, earlyCount, lateNightCount,
     early2Count, early2Amount, early1Count, early1Amount, lateNight2Count, lateNight2Amount, lateNight1Count, lateNight1Amount,
+    // 2026-10-13: the rate actually used for this employee, so anything printing "rate x days"
+    // prints what was paid instead of looking the company-wide amount up a second time -- with a
+    // per-role rate those two answers differ, and the payslip must not contradict itself.
+    early1Rate: _r.early1, early2Rate: _r.early2, lateNight1Rate: _r.lateNight1, lateNight2Rate: _r.lateNight2,
     ot15Amount, ot15Hours, ot20Amount, ot20Hours, ot30Amount, ot30Hours, otTotalHours,
     longDistanceCount, personalCarCount, holidayWorkOtCount,
     approvedOTs, approvedLD, approvedPC,
@@ -14648,10 +14657,16 @@ async function renderPayslip() {
     // frozen payslip approved before this fix, since those snapshots don't carry the new per-tier
     // fields -- silence is safer than a formula that was never right.
     const c = view.calc;
-    if (c.early2Count > 0) calcLines.push(`* Allowance 2 (Early Morning, before ${APP_SETTINGS.allowances.earlyThreshold2Min != null ? Math.floor(APP_SETTINGS.allowances.earlyThreshold2Min/60)+':'+String(APP_SETTINGS.allowances.earlyThreshold2Min%60).padStart(2,'0') : ''}): ${fmt2(APP_SETTINGS.allowances.earlyMorning2)}/day x ${c.early2Count} days = ${fmt2(c.early2Amount)}`);
-    if (c.early1Count > 0) calcLines.push(`* Allowance 2 (Early Morning): ${fmt2(APP_SETTINGS.allowances.earlyMorning1)}/day x ${c.early1Count} days = ${fmt2(c.early1Amount)}`);
-    if (c.lateNight2Count > 0) calcLines.push(`* Allowance 2 (Late Night): ${fmt2(APP_SETTINGS.allowances.lateNight2)}/day x ${c.lateNight2Count} days = ${fmt2(c.lateNight2Amount)}`);
-    if (c.lateNight1Count > 0) calcLines.push(`* Allowance 2 (Late Night): ${fmt2(APP_SETTINGS.allowances.lateNight1)}/day x ${c.lateNight1Count} days = ${fmt2(c.lateNight1Amount)}`);
+    // 2026-10-13: the rate comes from the engine (c.*Rate), not from a second lookup of the
+    // company-wide amount -- with a per-role rate the two disagree and the slip would print a
+    // rate that does not multiply out to the total beside it. A snapshot computed BEFORE this
+    // change has no *Rate field and must keep printing the figure it was paid (snapshots are
+    // immutable), so it falls back to amount/count.
+    const _slipRate = (rate, amount, count) => (rate != null ? rate : (count > 0 ? amount / count : 0));
+    if (c.early2Count > 0) calcLines.push(`* Allowance 2 (Early Morning, before ${APP_SETTINGS.allowances.earlyThreshold2Min != null ? Math.floor(APP_SETTINGS.allowances.earlyThreshold2Min/60)+':'+String(APP_SETTINGS.allowances.earlyThreshold2Min%60).padStart(2,'0') : ''}): ${fmt2(_slipRate(c.early2Rate, c.early2Amount, c.early2Count))}/day x ${c.early2Count} days = ${fmt2(c.early2Amount)}`);
+    if (c.early1Count > 0) calcLines.push(`* Allowance 2 (Early Morning): ${fmt2(_slipRate(c.early1Rate, c.early1Amount, c.early1Count))}/day x ${c.early1Count} days = ${fmt2(c.early1Amount)}`);
+    if (c.lateNight2Count > 0) calcLines.push(`* Allowance 2 (Late Night): ${fmt2(_slipRate(c.lateNight2Rate, c.lateNight2Amount, c.lateNight2Count))}/day x ${c.lateNight2Count} days = ${fmt2(c.lateNight2Amount)}`);
+    if (c.lateNight1Count > 0) calcLines.push(`* Allowance 2 (Late Night): ${fmt2(_slipRate(c.lateNight1Rate, c.lateNight1Amount, c.lateNight1Count))}/day x ${c.lateNight1Count} days = ${fmt2(c.lateNight1Amount)}`);
     const _legacyA2Count = (earlyCount || 0) + (lateNightCount || 0);
     if (_legacyA2Count > 0 && c.early2Count === undefined) {
       // Frozen payslip from before this fix -- old blended fields exist, new per-tier ones don't.

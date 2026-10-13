@@ -53,7 +53,11 @@ const SETTINGS = {
     sickLeaveDays: 30, businessLeaveDays: 3 },
 };
 
-const SHARED = ['isVoidLeaveStatus', 'round2HalfUp', 'round1HalfUp', 'lateNightCheckoutMins', 'lateNightThresholdMins', 'lateNightThresholdHourOf', 'parseHHMMToMins',
+const SHARED = [
+  // 2026-10-13: the per-role early/late rate reader. computePayroll calls it, so a sandbox
+  // without it throws "earlyLateRateFor is not defined" the moment payroll touches a rate.
+  'earlyLateRateFor',
+  'isVoidLeaveStatus', 'round2HalfUp', 'round1HalfUp', 'lateNightCheckoutMins', 'lateNightThresholdMins', 'lateNightThresholdHourOf', 'parseHHMMToMins',
   'isHolidayWorkDay', 'isNonWorkDayForComp', 'isHolidayWorkOtRecord', 'isFullDayPersonalLeaveStatus',
   'isRestAttendanceDay', 'isDeviceScanSource', 'isEarlyMorningDayStatus', 'deviceScanQualifiesForEarlyMorning', 'earlyMorningCheckInOk',
   'deviceScanQualifiesForLateNight', 'lateNightCheckoutOk', 'addOtHours', 'accumulateApprovedOtHours', 'otPayFromHourBuckets', 'effectiveOtMultiplier',
@@ -90,7 +94,7 @@ function makeClient(w) {
   };
   ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
-  vm.runInContext(CLIENT_FNS.map(n => extractFunction(APP_SRC, n)).join('\n'), ctx);
+  vm.runInContext(constLine(APP_SRC, 'EARLY_LATE_RATE_KEYS') + '\n' + CLIENT_FNS.map(n => extractFunction(APP_SRC, n)).join('\n'), ctx);
   return ctx;
 }
 function makeServer(w) {
@@ -107,6 +111,7 @@ function makeServer(w) {
   ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
   vm.runInContext(constLine(SERVER_SRC, 'DATE_OVERLAP_LEAVE_TYPES') + '\n' +
+    constLine(SERVER_SRC, 'EARLY_LATE_RATE_KEYS') + '\n' +
     SERVER_FNS.map(n => extractFunction(SERVER_SRC, n)).join('\n'), ctx);
   return ctx;
 }

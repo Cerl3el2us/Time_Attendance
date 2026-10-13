@@ -192,5 +192,74 @@ test('server payroll takes the rate for the employee being paid, not a global', 
     'server computePayroll must resolve rates against user.role');
 });
 
+// ---- the web engine ----
+// The Settings page legitimately reads and writes the COMPANY-WIDE amounts: those are the values
+// the role table overrides, not a bypass of it. Pre-flight ruling 2026-10-13: identify those
+// lines by the `set-*-amt` field id they carry, not by a line range -- this task and Task 7 both
+// insert lines into app.js, and a range would drift off the code it means to exempt.
+const SETTINGS_FIELD_RE = /set-(early|late)[12]-amt/;
+function directRateReads(src) {
+  const offenders = [];
+  src.split('\n').forEach((line, i) => {
+    if (line.trim().startsWith('//')) return;
+    if (SETTINGS_FIELD_RE.test(line)) return;
+    if (/(S|APP_SETTINGS)\.allowances\.(earlyMorning1|earlyMorning2|lateNight1|lateNight2)\b/.test(line)) {
+      offenders.push(`${i + 1}: ${line.trim()}`);
+    }
+  });
+  return offenders;
+}
+
+// 2026-10-13 (ruling): scoped to the two money regions this task owns. The file-wide version of
+// this sweep lands with the last app.js routing task, because until then the display and FAQ
+// lines legitimately still read the company-wide amount and a file-wide assertion here would be
+// a test that is expected to fail -- which teaches the executor to ignore red.
+test('app.js payroll and the payslip lines read no early/late amount directly', () => {
+  const regions = [
+    ['computePayroll', extractFunction(APP_SRC, 'computePayroll')],
+    ['payslip calc lines', between(APP_SRC, 'Allowance 2 (Early Morning, before', 'Allowance 2 (Late Night):', 400)],
+  ];
+  for (const [label, src] of regions) {
+    const offenders = directRateReads(src);
+    assert.deepStrictEqual(offenders, [], `${label} still reads the amount directly:\n  ${offenders.join('\n  ')}`);
+  }
+});
+
+test('the Settings page is still allowed to read the company-wide amounts', () => {
+  // Guards the exemption above: if these inputs ever stop reading `allowances`, the Settings page
+  // has been rewired and the exemption is hiding something.
+  const count = APP_SRC.split('\n').filter(l => SETTINGS_FIELD_RE.test(l) && /allowances\./.test(l)).length;
+  assert.ok(count >= 8, `expected the 8 Settings read/save lines to keep using allowances, found ${count}`);
+});
+
+test('app computePayroll resolves rates against the employee being paid', () => {
+  const fn = extractFunction(APP_SRC, 'computePayroll');
+  assert.ok(/earlyLateRateFor\(\s*user\.role/.test(fn),
+    'app computePayroll must resolve rates against user.role, not the signed-in viewer');
+});
+
+test('computePayroll reports the rate it used, so the payslip cannot print a different one', () => {
+  const fn = extractFunction(APP_SRC, 'computePayroll');
+  for (const f of ['early1Rate', 'early2Rate', 'lateNight1Rate', 'lateNight2Rate']) {
+    assert.ok(new RegExp(`\\b${f}\\b`).test(fn), `computePayroll must return ${f}`);
+  }
+});
+
+test('the payslip calculation lines print the engine\'s rate, not a fresh lookup', () => {
+  const calc = between(APP_SRC, 'Allowance 2 (Early Morning, before', 'Allowance 2 (Late Night)', 200);
+  for (const f of ['early2Rate', 'early1Rate', 'lateNight2Rate', 'lateNight1Rate']) {
+    assert.ok(calc.includes(f) || APP_SRC.includes(`c.${f}`), `the payslip lines must use ${f}`);
+  }
+});
+
+test('an old payroll snapshot still prints the figure it was paid', () => {
+  // Snapshots are immutable (project rule). One computed before this change carries no *Rate
+  // field, so the payslip line must derive the rate from the stored amount and count instead of
+  // printing undefined.
+  const calc = between(APP_SRC, 'Allowance 2 (Early Morning, before', 'Allowance 2 (Late Night):', 400);
+  assert.ok(/!=\s*null\s*\?/.test(calc) || /\?\?/.test(calc),
+    'the payslip rate must fall back for a snapshot that predates the *Rate fields');
+});
+
 console.log(`\n${passed} assertions passed`);
 module.exports = { between };
