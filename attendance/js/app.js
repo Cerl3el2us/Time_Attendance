@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 114;
+const APP_BUILD = 115;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -3636,6 +3636,15 @@ async function savePayrollSettings() {
       const data = await res.json();
       if (data.settings && data.settings.appSettings && data.settings.appSettings.updatedAt) {
         APP_SETTINGS_UPDATED_AT = data.settings.appSettings.updatedAt;
+      }
+      // 2026-10-14 (final review): whatever optional section this PUT actually carried, the server
+      // now holds it -- so record that here rather than waiting for the next settings load. Without
+      // this the flag stayed false after a save, and the FOLLOWING save filtered the section out
+      // again: turning a feature back on, or clearing the per-role rate table, would have been
+      // dropped from the request while the page showed it as done and the server kept the old
+      // value. On the rate table that is a payroll amount.
+      for (const k of ['allowanceRoleRates', 'webClock']) {
+        if (Object.prototype.hasOwnProperty.call(payrollOnlyAppSettings, k)) _settingsSectionsOnServer[k] = true;
       }
       return { success: true };
     }
@@ -8935,6 +8944,9 @@ function checkinEditBtnHtml(row, targetUser) {
   if (!row || !row.checkIn || !targetUser) return '';
   if (!['md', 'accounting'].includes(effectiveRole())) return '';
   if (currentUser && Number(currentUser.id) === Number(targetUser.id)) return '';
+  // 2026-10-14 (final review): mirror the server's accounting-is-md-only rule, or a second
+  // accounting employee gets a pencil that always ends in a red refusal toast.
+  if (targetUser.role === 'accounting' && effectiveRole() !== 'md') return '';
   if (!checkinEditWindowOk(row.rawCheckIn || row.checkIn)) return '';
   const edited = row.checkInEdited ? ' ✎' : '';
   return `<button class="btn btn-ghost btn-sm" style="padding:0 4px;color:#f59e0b" title="${
@@ -9063,6 +9075,22 @@ function geofenceMessage(reason) {
 // caller -- is only ever reachable after login (geofenceUiState() has no load-time caller of its
 // own now that applyGeofenceToScanButton() is gone; the guard just costs nothing to keep).
 function geofenceUiState() {
+  // 2026-10-14 (final review): the web-clock switch is judged FIRST, before anything about a
+  // position. It needs no GPS, and placing it after the position check meant that on a freshly
+  // opened page -- where watchPosition has not produced a fix yet -- the answer was the
+  // missing-position reason instead, so the button the owner asked to hide stayed visible, then
+  // appeared and disappeared as the 60-second fix aged. It also means a refused person sees the
+  // ("clocking in from the web is turned off") instead of being asked to enable location for a
+  // button that is switched off, which was the wrong thing to say.
+  // Behind _geofenceSettingsFresh for the same reason the distance rule is: never refuse locally
+  // on settings this session has not actually loaded.
+  const _wc = APP_SETTINGS.webClock;
+  if (_geofenceSettingsFresh && _wc && typeof _wc === 'object' && !Array.isArray(_wc) && _wc.enabled === false) {
+    const _wcExempt = Array.isArray(_wc.exemptRoles) && _wc.exemptRoles.includes(effectiveRole());
+    if (!_wcExempt && !(!webCheckinWouldBeCheckIn() && webCheckinHasWebCheckInToday())) {
+      return { blocked: true, reason: 'web-clock-off', text: geofenceMessage('web-clock-off') };
+    }
+  }
   // Critical #1: a stale fix (see gpsIsFresh()'s own comment) must be treated as no position at
   // all -- same reason code as never having gotten a fix in the first place.
   const fresh = currentGPS && gpsIsFresh(currentGPS, Date.now()) ? currentGPS : null;
@@ -9079,19 +9107,6 @@ function geofenceUiState() {
   // the server never applies the distance rule to a check-out, so an on-site employee checking out
   // in the evening (or a late-night return, or a first press after CHECKIN_CUTOFF) must never be
   // refused for being at the office.
-  // 2026-10-14 (owner): the web-clock switch, judged BEFORE the check-in/check-out split because
-  // when it is off it refuses both directions. Mirrors webScanGateReason() on the server, which
-  // refuses independently -- this block only saves a round trip and explains it on the page.
-  // Behind _geofenceSettingsFresh for the same reason the distance rule is: never refuse locally
-  // on settings this session has not actually loaded. Both carve-outs match the server exactly:
-  // an exempt role, and a day whose own check-in was a web scan.
-  const _wc = APP_SETTINGS.webClock;
-  if (_geofenceSettingsFresh && _wc && typeof _wc === 'object' && !Array.isArray(_wc) && _wc.enabled === false) {
-    const _wcExempt = Array.isArray(_wc.exemptRoles) && _wc.exemptRoles.includes(effectiveRole());
-    if (!_wcExempt && !(!webCheckinWouldBeCheckIn() && webCheckinHasWebCheckInToday())) {
-      return { blocked: true, reason: 'web-clock-off', text: geofenceMessage('web-clock-off') };
-    }
-  }
   if (!webCheckinWouldBeCheckIn()) return { blocked: false, reason: '', text: '' };
   // Important #2a/#2b (fail OPEN): until this session has genuinely fresh settings AND fresh
   // attendance, never refuse locally -- let the server's own 403 decide instead. See
@@ -10104,10 +10119,11 @@ function updateScanButton() {
   // The decision comes from geofenceUiState(), the same gate the press uses and the mirror of the
   // server's, so there is exactly one place that knows the rule. Its carve-outs apply here too: an
   // exempt role, and a day whose own check-in was a web scan, both keep the button.
+  // Hides the BUTTON, not its wrapper: #scan-times lives inside that wrapper, and today's
+  // check-in/check-out line must stay readable for someone who scanned at the office.
   const _wcNote = document.getElementById('webclock-off-note');
-  const _wcWrap = btn.closest('.scan-btn-wrap');
   const _wcOff = geofenceUiState().reason === 'web-clock-off';
-  if (_wcWrap) _wcWrap.style.display = _wcOff ? 'none' : '';
+  btn.style.display = _wcOff ? 'none' : '';
   if (_wcNote) {
     _wcNote.style.display = _wcOff ? '' : 'none';
     if (_wcOff) _wcNote.textContent = geofenceMessage('web-clock-off');

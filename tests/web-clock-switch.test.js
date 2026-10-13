@@ -258,6 +258,18 @@ test('the save path routes through the filter', () => {
   assert.ok(/omitUnstoredDefaults\(/.test(fn), 'savePayrollSettings must send the filtered object');
 });
 
+test('a section that was just saved is remembered as stored, so the NEXT save still sends it', () => {
+  // 2026-10-14 (final review): the flag was only ever written by the settings LOAD. After a
+  // successful save that is not followed by a completed reload, it stayed false -- so turning a
+  // feature back on, or clearing the rate table, was filtered out of the next PUT and the server
+  // silently kept the old value while the page showed the new one. On the rate table that is a
+  // payroll amount. The save now records it itself, so the invariant does not depend on a
+  // fire-and-forget reload.
+  const fn = extractFunction(APP_SRC, 'savePayrollSettings');
+  assert.ok(/_settingsSectionsOnServer/.test(fn),
+    'savePayrollSettings must record which optional sections it actually sent');
+});
+
 // --- 6c. the button disappears, which is what the owner actually asked for --------------
 // 2026-10-14 (owner): "ซ่อนปุ่มตอกบัตรไปเลยตอนปิดสวิตช์". The first cut only refused the press,
 // which was safe but not what was asked -- and it meant a confirm() dialog ("this will be recorded
@@ -266,11 +278,43 @@ test('the save path routes through the filter', () => {
 test('the clock-in button is hidden when the switch refuses this person', () => {
   const fn = extractFunction(APP_SRC, 'updateScanButton');
   assert.ok(/web-clock-off/.test(fn), 'updateScanButton must know about the switch');
-  assert.ok(/scan-btn-wrap|webclock-hidden/.test(fn), 'it must hide the button, not merely restyle it');
+  assert.ok(/btn.style.display/.test(fn), "it must hide the button itself, not the wrapper that also holds today's times");
   // and it must decide from the shared gate rather than re-reading the setting itself
   assert.ok(/geofenceUiState\(/.test(fn),
     'the hide must come from geofenceUiState(), or the rule exists in two places and they will drift');
   assert.ok(!/APP_SETTINGS\.webClock/.test(fn), 'updateScanButton must not re-implement the rule');
+});
+
+test('the switch is judged BEFORE the position check, so the button hides with no GPS fix', () => {
+  // 2026-10-14 (final review): the hide was placed after the "no fresh position" early return, so
+  // on a freshly opened page -- where watchPosition has not produced a fix yet -- the reason was
+  // 'geofence-no-position' and the button stayed visible. It then appeared and disappeared as the
+  // 60-second fix aged, which reads as a ghost. The switch needs no position to be decided.
+  const fn = extractFunction(APP_SRC, 'geofenceUiState');
+  const wc = fn.indexOf('web-clock-off');
+  const pos = fn.indexOf('geofence-no-position');
+  assert.ok(wc > -1 && pos > -1, 'geofenceUiState must still handle both reasons');
+  assert.ok(wc < pos, 'the web-clock decision must come first -- it does not depend on a position');
+});
+
+test('with no position at all, a refused person is told the policy, not asked for GPS', () => {
+  const ctx = {
+    currentGPS: null,
+    APP_SETTINGS: { geofence: { enabled: false, exemptRoles: [] }, webClock: { enabled: false, exemptRoles: [] } },
+    currentUser: { id: 1, role: 'user' },
+    _geofenceSettingsFresh: true, _geofenceAttendanceFresh: true,
+    gpsIsFresh: () => false,
+    geofenceMessage: (r) => `msg:${r}`,
+    webCheckinWouldBeCheckIn: () => true,
+    webCheckinHasWebCheckInToday: () => false,
+    effectiveRole: () => 'user',
+    geofenceCheckinReason: () => '',
+    Number, Object, Array, String, Math, Date,
+  };
+  vm.createContext(ctx);
+  vm.runInContext(`${extractFunction(APP_SRC, 'geofenceUiState')}\nthis.out = geofenceUiState();`, ctx);
+  assert.strictEqual(ctx.out.reason, 'web-clock-off',
+    'asking someone to turn on location for a button that is switched off is the wrong answer');
 });
 
 test('the person is told why the button is gone, in all three languages', () => {
