@@ -162,15 +162,35 @@ test('no role rate is hardcoded anywhere in either source', () => {
 // A read that bypasses earlyLateRateFor() is the failure the spec calls most likely: it pays the
 // company-wide rate while the web shows the role rate, and no test would otherwise notice.
 // Dot notation only -- earlyLateRateFor's own `S.allowances[key]` is the one legitimate read.
-test('server.js payroll reads no early/late amount directly', () => {
-  const offenders = [];
-  SERVER_SRC.split('\n').forEach((line, i) => {
-    if (line.trim().startsWith('//')) return;
-    if (/S\.allowances\.(earlyMorning1|earlyMorning2|lateNight1|lateNight2)\b/.test(line)) {
-      offenders.push(`${i + 1}: ${line.trim()}`);
-    }
-  });
-  assert.deepStrictEqual(offenders, [], `these server.js lines still read the amount directly instead of calling earlyLateRateFor():\n  ${offenders.join('\n  ')}`);
+test('server.js names the four amounts nowhere outside their declaration and defaults', () => {
+  const offenders = strayRateKeyNames(SERVER_SRC);
+  assert.deepStrictEqual(offenders, [], `these server.js lines reach for an early/late amount by name instead of going through earlyLateRateFor():\n  ${offenders.join('\n  ')}`);
+});
+
+test('the sweep itself catches the shapes a review got past the old one', () => {
+  // Guards the guard. Each sample is a real bypass that the previous line-regex sweep missed.
+  const samples = [
+    "x = S.allowances['earlyMorning1'];",
+    'x = S.allowances[`lateNight2`];',
+    'const { earlyMorning1, lateNight2 } = S.allowances;',
+    'const { earlyMorning1: a } = S.allowances;',
+    'x = appSettings.allowances.earlyMorning2;',
+    'x = raw.allowances?.["lateNight1"];',
+    "x = Object.entries(S.allowances).find(([k]) => k === 'lateNight1')[1];",
+    'inp(\'set-early1-amt\', s.allowances.earlyMorning1);',
+  ];
+  for (const line of samples) {
+    assert.ok(strayRateKeyNames(line).length > 0, `the sweep does not catch: ${line}`);
+  }
+  // and it must not fire on the legitimate forms
+  for (const ok of [
+    "x = earlyLateRateFor(role, 'earlyMorning2', S);",
+    'x = S.allowances[EARLY_LATE_RATE_KEYS[i]];',
+    '// earlyMorning1 mentioned only in prose',
+    "const EARLY_LATE_RATE_KEYS = ['earlyMorning1', 'earlyMorning2', 'lateNight1', 'lateNight2'];",
+  ]) {
+    assert.deepStrictEqual(strayRateKeyNames(ok), [], `false positive on: ${ok}`);
+  }
 });
 
 // Review Focus 3: a rate row must never become permission to be paid.
@@ -197,6 +217,91 @@ test('server payroll takes the rate for the employee being paid, not a global', 
 // the role table overrides, not a bypass of it. Pre-flight ruling 2026-10-13: identify those
 // lines by the `set-*-amt` field id they carry, not by a line range -- this task and Task 7 both
 // insert lines into app.js, and a range would drift off the code it means to exempt.
+// 2026-10-13 (test-quality review): the sweep below used to be a line regex for ONE spelling of
+// one holder (`S.allowances.earlyMorning1`). A review demonstrated ten ways past it -- bracket
+// notation in any quote style, a template-literal or computed or variable key, plain and renamed
+// destructuring, optional chaining, an Object.entries scan, a read split across two lines, and
+// (server-side) any holder name other than the literal `S`. Patching the regex would just invite
+// an eleventh. So the invariant is now absolute and holder-agnostic:
+//
+//   after comments and string/template literals are removed, THE FOUR KEY NAMES MUST NOT APPEAR
+//   ANYWHERE in either source, except in their own EARLY_LATE_RATE_KEYS declaration and in the
+//   `allowances:` defaults block (where they are property definitions, not reads).
+//
+// Every read therefore has to go through earlyLateRateFor() or index EARLY_LATE_RATE_KEYS, which
+// is exactly the thing being enforced. The Settings page's legitimate reads of the company-wide
+// amounts were converted to that bracket form (centralEarlyLateRate / SETTINGS_EARLY_LATE_FIELDS)
+// for the same reason: a name-based exemption is a hole, so there are no exemptions.
+// Blanks out // comments, /* */ comments, '...', "..." and `...` so that a key name mentioned in
+// prose or passed as a string argument is not mistaken for a property read.
+function stripCommentsAndStrings(src, opts) {
+  const keepStrings = !!(opts && opts.keepStrings);
+  let out = '';
+  let i = 0;
+  while (i < src.length) {
+    const two = src.slice(i, i + 2);
+    if (two === '//') { const n = src.indexOf('\n', i); const end = n < 0 ? src.length : n; out += ' '.repeat(end - i); i = end; continue; }
+    if (two === '/*') { const n = src.indexOf('*/', i + 2); const end = n < 0 ? src.length : n + 2; out += src.slice(i, end).replace(/[^\n]/g, ' '); i = end; continue; }
+    const c = src[i];
+    if (c === '"' || c === "'" || c === '`') {
+      let j = i + 1;
+      while (j < src.length) {
+        if (src[j] === '\\') { j += 2; continue; }
+        if (src[j] === c) { j++; break; }
+        if (c !== '`' && src[j] === '\n') break; // unterminated: a regex or division, bail out
+        j++;
+      }
+      out += keepStrings ? src.slice(i, j) : src.slice(i, j).replace(/[^\n]/g, ' ');
+      i = j;
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+// The one place each source is allowed to spell the four names: their own declaration, and the
+// `allowances:` defaults object where they are property definitions rather than reads.
+function stripLegitimateDeclarations(src) {
+  let s = src.replace(/const EARLY_LATE_RATE_KEYS = \[[^\]]*\];/g, m => ' '.repeat(m.length));
+  s = s.replace(/allowances: \{[\s\S]*?\n  \},/g, m => m.replace(/[^\n]/g, ' '));
+  return s;
+}
+// Two passes, because a key name inside quotes means opposite things in the two places it can
+// appear: `x[`'earlyMorning1'`]` is a READ of the amount, while
+// `earlyLateRateFor(role, 'earlyMorning1', S)` is the legitimate way to ask for it. So bracket
+// subscripts are matched BEFORE strings are blanked out, and everything else after.
+//
+// Known limit, stated rather than papered over: a key assembled at runtime
+// (`allowances[`earlyMorning${tier}`]`) contains no complete key name and no textual rule can see
+// it. That shape is covered instead by tests/payroll-rules.test.js, which runs both engines with
+// the table SWITCHED ON and asserts the override amount -- any engine that reaches the
+// company-wide amount by any means answers the central number there and goes red.
+function strayRateKeyNames(src) {
+  // Built per call: a shared /g/ regex carries lastIndex between calls, and a const declared here
+  // would be in its temporal dead zone for the tests that run above this point in the file.
+  const bareName = /\b(earlyMorning[12]|lateNight[12])\b/;
+  // A quoted key name is legitimate ONLY in argument position -- `earlyLateRateFor(role,
+  // 'lateNight2', S)` or `_elRateTarget('earlyMorning1')` -- so the test is what comes before the
+  // opening quote. `(` or `,` means "being passed to the reader"; anything else (`[`, `===`, `:`)
+  // means the code is reaching for the amount itself. `?` and `:` are allowed too, for a ternary
+  // sitting in argument position (`earlyLateRateFor(r, t === 2 ? 'lateNight2' : 'lateNight1', S)`);
+  // a quoted OBJECT KEY cannot hide behind that, because there the quote comes before the colon.
+  const quotedNotArgument = /(^|[^(,?:\s])\s*(['"`])(earlyMorning[12]|lateNight[12])\2/;
+  const original = src.split('\n');
+  const noComments = stripLegitimateDeclarations(stripCommentsAndStrings(src, { keepStrings: true }));
+  const noStrings = stripLegitimateDeclarations(stripCommentsAndStrings(src));
+  const hits = [];
+  const n = Math.max(noComments.split('\n').length, noStrings.split('\n').length);
+  const a = noComments.split('\n'), b = noStrings.split('\n');
+  for (let i = 0; i < n; i++) {
+    if (quotedNotArgument.test(a[i] || '') || bareName.test(b[i] || '')) {
+      hits.push(`${i + 1}: ${(original[i] || '').trim()}`);
+    }
+  }
+  return hits;
+}
+
 const SETTINGS_FIELD_RE = /set-(early|late)[12]-amt/;
 // 2026-10-13: matches a PROPERTY READ of any of the four rate keys through any object, not just
 // `S.allowances.x` -- the first version of this sweep looked for the two spellings it happened to
@@ -230,11 +335,20 @@ test('app.js payroll and the payslip lines read no early/late amount directly', 
   }
 });
 
-test('the Settings page is still allowed to read the company-wide amounts', () => {
-  // Guards the exemption above: if these inputs ever stop reading `allowances`, the Settings page
-  // has been rewired and the exemption is hiding something.
-  const count = APP_SRC.split('\n').filter(l => SETTINGS_FIELD_RE.test(l) && /allowances\./.test(l)).length;
-  assert.ok(count >= 8, `expected the 8 Settings read/save lines to keep using allowances, found ${count}`);
+test('the Settings page still reads and writes the four company-wide amounts', () => {
+  // The sweep has no name-based exemption, so the Settings page reaches the company-wide amounts
+  // by POSITION. This proves it still reaches all four of them in both directions -- otherwise an
+  // accidental deletion would read as "sweep clean" rather than "a Settings field stopped working".
+  const fields = /const SETTINGS_EARLY_LATE_FIELDS = \{([^}]*)\}/.exec(APP_SRC);
+  assert.ok(fields, 'SETTINGS_EARLY_LATE_FIELDS not found');
+  for (const id of ['set-early1-amt', 'set-early2-amt', 'set-late1-amt', 'set-late2-amt']) {
+    assert.ok(fields[1].includes(id), `${id} is not mapped to a rate position`);
+  }
+  for (let i = 0; i < 4; i++) {
+    assert.ok(APP_SRC.includes(`centralEarlyLateRate(s, ${i})`), `the Settings form does not render rate position ${i}`);
+  }
+  assert.ok(/APP_SETTINGS\.allowances\[EARLY_LATE_RATE_KEYS\[i\]\] = fi\(fieldId\)/.test(APP_SRC),
+    'the Settings save no longer writes the four amounts through the field map');
 });
 
 test('app computePayroll resolves rates against the employee being paid', () => {
@@ -251,19 +365,29 @@ test('computePayroll reports the rate it used, so the payslip cannot print a dif
 });
 
 test('the payslip calculation lines print the engine\'s rate, not a fresh lookup', () => {
-  const calc = between(APP_SRC, 'Allowance 2 (Early Morning, before', 'Allowance 2 (Late Night)', 200);
+  // 2026-10-13 (test-quality review): this had a `|| APP_SRC.includes('c.' + f)` disjunct, a
+  // file-wide substring search that a COMMENT satisfied. Scoped to the four calc lines only.
+  // Window = the four calc lines exactly: from the _slipRate helper they all use, to the legacy
+  // blended line that follows them.
+  const calc = between(APP_SRC, 'const _slipRate =', '_legacyA2Count', 0);
   for (const f of ['early2Rate', 'early1Rate', 'lateNight2Rate', 'lateNight1Rate']) {
-    assert.ok(calc.includes(f) || APP_SRC.includes(`c.${f}`), `the payslip lines must use ${f}`);
+    assert.ok(calc.includes(f), `the payslip lines must print ${f}, the rate the engine actually used`);
   }
 });
 
 test('an old payroll snapshot still prints the figure it was paid', () => {
   // Snapshots are immutable (project rule). One computed before this change carries no *Rate
   // field, so the payslip line must derive the rate from the stored amount and count instead of
-  // printing undefined.
-  const calc = between(APP_SRC, 'Allowance 2 (Early Morning, before', 'Allowance 2 (Late Night):', 400);
-  assert.ok(/!=\s*null\s*\?/.test(calc) || /\?\?/.test(calc),
-    'the payslip rate must fall back for a snapshot that predates the *Rate fields');
+  // printing undefined. Run the real _slipRate rather than grepping for `!= null ?` in a window:
+  // that window already contains an unrelated pre-existing `earlyThreshold2Min != null ?`, so the
+  // old assertion could never fail (test-quality review 2026-10-13).
+  const ctx = { Number };
+  vm.createContext(ctx);
+  vm.runInContext(`${/const _slipRate = [^;]+;/.exec(APP_SRC)[0]}\nthis.f = _slipRate;`, ctx);
+  assert.strictEqual(ctx.f(360, 720, 2), 360, 'a stored rate is printed as-is');
+  assert.strictEqual(ctx.f(0, 0, 2), 0, 'a deliberate 0 rate is printed as 0, not re-derived');
+  assert.strictEqual(ctx.f(undefined, 720, 3), 240, 'a pre-change snapshot derives the rate it was paid');
+  assert.strictEqual(ctx.f(undefined, 0, 0), 0, 'no days: no division by zero');
 });
 
 // ---- what people see ----
@@ -390,20 +514,88 @@ test('the legend still reads thresholds (times) centrally -- only money is per r
   assert.ok(/_legA\.earlyThreshold2Min/.test(legend), 'thresholds are company-wide and must stay so');
 });
 
-test('the FAQ answer carries the rate in all three languages', () => {
-  const faq = between(APP_SRC, 'Check in at the face scanner before', '_faqNotEligibleText(\'earlyLate\')', 600);
-  for (const marker of ['Check in at the face scanner', 'สแกนเข้าที่เครื่องก่อน', '顔認証端末で']) {
-    assert.ok(faq.includes(marker), `the ${marker} language variant went missing -- all three ship together`);
+// 2026-10-13 (test-quality review): the old version of this test asserted that three language
+// marker strings still existed and that one spelling was absent. It never asserted that a RATE
+// APPEARS AT ALL -- deleting the amounts from all three answers, or hardcoding them, left it
+// green. This runs the real _faqRulesItems() in each language with sentinel rates and reads the
+// answer it produces.
+function faqEarlyAnswer(lang, em1, em2) {
+  const ctx = {
+    currentLang: lang,
+    APP_SETTINGS: {
+      // Every numeric allowance the other FAQ answers interpolate. The four early/late AMOUNTS are
+      // deliberately absent: the FAQ must get those from earlyMorningAllowanceForTier /
+      // lateOutAllowanceForHour (stubbed with sentinels below), never from here.
+      allowances: {
+        earlyThreshold1Min: 450, earlyThreshold2Min: 390, lateNightThreshold1Hour: 19, lateNightThreshold2Hour: 20,
+        upcountry: 240, holidayTransport: 500, diligence: 200, longDistance: 150,
+        longDistanceThresholdKm: 250, personalCar: 1000, phone: 1000, abroad: 1100,
+      },
+      lateDeductPolicy: { tiers: [{ fromMin: 1, toMin: 10, deductMin: 10 }, { fromMin: 11, toMin: 20, deductMin: 20 }] },
+      workSchedule: { standardStartHour: 8, standardStartMinute: 30 },
+      allowanceEligibility: {},
+      sso: { rate: 5, minSalary: 1650, maxSalary: 17500, maxAmount: 875 },
+      tax: { personalAllowanceAnnual: 60000, brackets: [{ upTo: 150000, rate: 0 }] },
+      leave: { carryForwardMax: 5, carryForwardExpiryEnabled: true, carryForwardExpiryMonth: 3, carryForwardExpiryDay: 31, annualLeaveMinMonths: 6, annualLeaveTiers: [{ afterMonths: 0, days: 6 }], sickLeaveDays: 30, businessLeaveDays: 3 },
+      payroll: { periodStartDay: 21 },
+      geofence: { enabled: true, radiusM: 150 },
+      company: { name: 'X' },
+    },
+    ROLE_KEYS: ['md', 'manager', 'accounting', 'user', 'marketing', 'driver'],
+    isAllowanceEligible: () => true,
+    // Sentinels: whatever the FAQ prints for the early-morning tiers must come from here.
+    earlyMorningAllowanceForTier: (tier) => (tier === 2 ? em2 : em1),
+    lateOutThresholdHour: (tier) => (tier === 2 ? 20 : 19),
+    lateOutAllowanceForHour: (h) => (h >= 20 ? 8888 : 7777),
+    L: (en, th) => (lang === 'th' ? th : en),
+    Object, Array, Number, Math, String, JSON,
+  };
+  // _faqRulesItems() builds the WHOLE FAQ list, so it reaches for a dozen helpers belonging to
+  // other answers (leave quotas, carry-forward text, late deductions). Rather than stub each one
+  // and have this test break whenever an unrelated FAQ entry is added, any identifier not named
+  // above resolves to a harmless empty-string function. Everything the assertions depend on --
+  // the rates, the thresholds, L() and currentLang -- IS named above, so nothing under test is
+  // being faked away.
+  const sandbox = new Proxy(ctx, {
+    has: () => true,
+    // Returns [] rather than '': an array has .map/.join/.length for the helpers that chain off
+    // them, and still interpolates into a template as the empty string.
+    get: (t, k) => (k in t ? t[k] : (typeof k === 'symbol' ? undefined : () => [])),
+  });
+  vm.createContext(sandbox);
+  vm.runInContext(
+    ['minsToTime', 'officeOtStdStartHHMM', '_faq', '_faqEligibleRoles', '_faqNotEligibleText', '_faqRulesItems']
+      .map(n => extractFunction(APP_SRC, n)).join('\n') + '\n' +
+    `const _faqRoleLabel = ${/const _faqRoleLabel = (\{[\s\S]*?\});/.exec(APP_SRC)[1]};\n` +
+    'this.items = _faqRulesItems();', sandbox);
+  const early = ctx.items.find(it => /Early Morning|มาเช้า|早朝|face scanner|顔認証|สแกนเข้า/.test(String(it.a)) && /🌅|face scanner|顔認証|สแกนเข้า/.test(String(it.a)));
+  assert.ok(early, `no early-morning FAQ answer found for lang=${lang}`);
+  return String(early.a);
+}
+
+test('the FAQ quotes the reader\'s own early-morning rate, in each of the three languages', () => {
+  for (const lang of ['en', 'th', 'ja']) {
+    const a = faqEarlyAnswer(lang, 1234, 5678);
+    assert.ok(a.includes('1234'), `lang=${lang}: the x1 rate is missing from the FAQ answer: ${a.slice(0, 160)}`);
+    assert.ok(a.includes('5678'), `lang=${lang}: the x2 rate is missing from the FAQ answer: ${a.slice(0, 160)}`);
   }
-  assert.ok(!/S\.allowances\.(earlyMorning1|earlyMorning2)\b/.test(faq),
-    'the FAQ still quotes the company-wide amount directly');
+});
+
+test('the FAQ\'s three early-morning answers are genuinely different text', () => {
+  // Guards against one language variant being deleted and another silently standing in for it.
+  const [en, th, ja] = ['en', 'th', 'ja'].map(l => faqEarlyAnswer(l, 1234, 5678));
+  assert.notStrictEqual(en, th);
+  assert.notStrictEqual(th, ja);
+  assert.notStrictEqual(en, ja);
+  assert.ok(/[฀-๿]/.test(th), 'the Thai answer contains no Thai');
+  assert.ok(/[぀-ヿ一-龯]/.test(ja), 'the Japanese answer contains no Japanese');
 });
 
 // The file-wide sweep, deferred here by the Task 3 ruling: with the legend and the FAQ routed,
 // NOTHING outside the Settings page may read the four amounts directly any more.
-test('nothing in app.js outside the Settings page reads an early/late amount directly', () => {
-  const offenders = directRateReads(APP_SRC);
-  assert.deepStrictEqual(offenders, [], `these app.js lines still read the amount directly:\n  ${offenders.join('\n  ')}`);
+test('app.js names the four amounts nowhere outside their declaration and defaults', () => {
+  const offenders = strayRateKeyNames(APP_SRC);
+  assert.deepStrictEqual(offenders, [], `these app.js lines reach for an early/late amount by name instead of going through earlyLateRateFor() or EARLY_LATE_RATE_KEYS:\n  ${offenders.join('\n  ')}`);
 });
 
 // ---- the server accepts the section, and never silently drops it ----
@@ -464,7 +656,10 @@ const RR_VALIDATOR_SRC = (() => {
 
 function runRRValidator(payload) {
   const ctx = {
-    ROLE_KEYS: ['md', 'manager', 'accounting', 'user', 'marketing', 'driver'],
+    // 2026-10-13 (test-quality review): ROLE_KEYS used to be retyped here. A review removed
+    // 'manager' from the real list -- which would 400 every manager row, the one role this feature
+    // was built for -- and this harness stayed green. Both lists now come from the real source.
+    ROLE_KEYS: JSON.parse(/const ROLE_KEYS = (\[[^\]]*\]);/.exec(SERVER_SRC)[1].replace(/'/g, '"')),
     EARLY_LATE_RATE_KEYS: JSON.parse(extractKeys(SERVER_SRC).replace(/'/g, '"')),
     Object, Number, Array, JSON,
   };
@@ -537,17 +732,11 @@ test('the switch and every cell round-trip through the save path', () => {
   assert.ok(/EARLY_LATE_RATE_KEYS/.test(save), 'the save loop must cover all four keys');
 });
 
-test('a blank cell is omitted on save, so it stays different from a deliberate 0', () => {
-  const save = between(APP_SRC, 'const _byRole = {};', 'APP_SETTINGS.allowanceRoleRates =', 0);
-  assert.ok(/value === ''/.test(save) || /\.value\s*===\s*''/.test(save),
-    'a blank input must be skipped, not coerced -- Number("") is 0, which means "do not pay"');
-});
-
-test('a row for a role that has since lost the allowance is carried forward, not dropped', () => {
-  const save = between(APP_SRC, 'const _byRole = {};', 'APP_SETTINGS.allowanceRoleRates =', 400);
-  assert.ok(/_prevByRole/.test(save),
-    'the page must carry forward rows it does not render, or an unrelated save erases the owner\'s data');
-});
+// The blank-vs-zero rule and the carry-forward of hidden rows were asserted here by grepping the
+// save block's source. Both are now proven by running the real readRoleRateTableFromForm()
+// against a fake DOM further down ("the form reader keeps blanks out, keeps 0 in, and carries
+// forward hidden rows"), so the source-grep versions were deleted rather than re-anchored: they
+// could pass while the code did the wrong thing, and they broke on a rename that changed nothing.
 
 test('toggling the switch does not re-render the page and discard unsaved edits', () => {
   assert.ok(!/onchange="renderSettingsPage\(\)"[^>]*set-rolerate-enabled|set-rolerate-enabled[^>]*onchange="renderSettingsPage\(\)"/.test(APP_SRC),
@@ -555,11 +744,73 @@ test('toggling the switch does not re-render the page and discard unsaved edits'
   assert.ok(/function onRoleRateToggle\(/.test(APP_SRC), 'the switch needs its own handler');
 });
 
-test('the table ships with no amount for any role in the source', () => {
-  assert.ok(!/byRole:\s*\{\s*[^}\s]/.test(APP_SRC));
-  const seg = between(APP_SRC, '_roleRateRoles', 'set-rolerate-enabled', 3000);
-  assert.ok(!/\b(360|240|480)\b/.test(seg.replace(/100000/g, '')),
-    'no rate may be baked into the role-rate table markup');
+// 2026-10-13 (test-quality review): this used to assert the absence of the literals 360/240/480,
+// which protects nothing the day the owner's rate becomes 500 -- and wrote a real rate into a test
+// file. It now requires every rate cell's `value=` to be interpolated from the stored table, which
+// is the actual rule: no amount ships in the markup, whatever the amount happens to be.
+test('no amount is baked into the rate table markup', () => {
+  assert.ok(!/byRole:\s*\{\s*[^}\s]/.test(APP_SRC), 'a non-empty byRole ships in the source');
+  const fn = extractFunction(APP_SRC, 'renderRoleRateTable');
+  for (const m of fn.matchAll(/value="([^"]*)"/g)) {
+    assert.ok(/^\$\{/.test(m[1]), `a rate cell ships a literal value="${m[1]}" instead of the stored one`);
+  }
+});
+
+// A real render, not a grep: runs renderRoleRateTable() -- a pure string function -- and reads the
+// HTML it produces. This is the shape the review asked the display-group tests to take.
+function renderTable(settings) {
+  const ctx = {
+    L: (en) => en, currentLang: 'en',
+    escapeHtml: (s) => String(s == null ? '' : s),
+    Number, Object, Array, String,
+  };
+  vm.createContext(ctx);
+  vm.runInContext(
+    `const EARLY_LATE_RATE_KEYS = ${extractKeys(APP_SRC)};\n` +
+    extractFunction(APP_SRC, 'roleRateRolesFrom') + '\n' +
+    extractFunction(APP_SRC, 'renderRoleRateTable') + '\n' +
+    `this.html = renderRoleRateTable(${JSON.stringify(settings)});`, ctx);
+  return ctx.html;
+}
+
+test('the rendered table shows each role its own stored amount, and the central one as placeholder', () => {
+  const html = renderTable({
+    allowances: { earlyMorning1: 11, earlyMorning2: 22, lateNight1: 33, lateNight2: 44 },
+    allowanceEligibility: { earlyLate: ['manager', 'user'] },
+    allowanceRoleRates: { enabled: true, byRole: { manager: { earlyMorning1: 7, lateNight2: 0 } } },
+  });
+  assert.ok(/id="set-rolerate-manager-earlyMorning1"[^>]*value="7"/.test(html), 'the manager cell must show its stored 7');
+  assert.ok(/id="set-rolerate-manager-lateNight2"[^>]*value="0"/.test(html), 'a stored 0 must render as 0, not as blank');
+  assert.ok(/id="set-rolerate-manager-earlyMorning2"[^>]*value=""/.test(html), 'an unset cell must render blank');
+  assert.ok(/id="set-rolerate-user-earlyMorning1"[^>]*value=""/.test(html), 'an unconfigured role must render blank');
+  assert.ok(/id="set-rolerate-manager-earlyMorning2"[^>]*placeholder="22"/.test(html),
+    'a blank cell must show the company-wide amount it falls back to');
+  assert.ok(!/disabled/.test(html), 'with the switch on, no cell is disabled');
+  assert.ok(/checked/.test(html), 'the switch must render ticked when enabled');
+});
+
+test('the rendered table is disabled and dimmed while the switch is off, without losing amounts', () => {
+  const html = renderTable({
+    allowances: { earlyMorning1: 11, earlyMorning2: 22, lateNight1: 33, lateNight2: 44 },
+    allowanceEligibility: { earlyLate: ['manager'] },
+    allowanceRoleRates: { enabled: false, byRole: { manager: { earlyMorning1: 7 } } },
+  });
+  assert.ok(/value="7"/.test(html), 'switching off must not erase what the owner typed');
+  assert.strictEqual((html.match(/disabled/g) || []).length, 4, 'all four cells must be disabled');
+  assert.ok(!/checked/.test(html), 'the switch must render unticked');
+  assert.ok(/opacity:\.55/.test(html), 'the block must read as inactive');
+});
+
+test('the rendered table says so when no role is eligible, instead of showing an empty grid', () => {
+  for (const elig of [[], undefined, 'nonsense']) {
+    const html = renderTable({
+      allowances: { earlyMorning1: 11, earlyMorning2: 22, lateNight1: 33, lateNight2: 44 },
+      allowanceEligibility: { earlyLate: elig },
+      allowanceRoleRates: { enabled: true, byRole: {} },
+    });
+    assert.ok(/No role is eligible/.test(html), `eligibility ${JSON.stringify(elig)} should render the empty-state row`);
+    assert.ok(!/set-rolerate-\w+-earlyMorning1/.test(html), 'no rate cells should be rendered');
+  }
 });
 
 test('the new Settings labels have Japanese entries', () => {
@@ -568,12 +819,211 @@ test('the new Settings labels have Japanese entries', () => {
   const needed = [
     'Use a different early-morning / late-night rate per role',
     'A blank cell uses the company-wide amount above.',
+    'No role is eligible for this allowance',
     'Role',
+    'Early ×1', 'Early ×2', 'Late ×1', 'Late ×2',
+    '⚠️ A per-role allowance rate must be a number between 0 and 100000',
   ];
-  for (const en of needed) {
-    assert.ok(JA_SRC.includes(JSON.stringify(en).slice(1, -1)) || JA_SRC.includes(en),
-      `attendance/lang/ja.js has no entry for "${en}" -- JA mode would show English`);
+  // 2026-10-13 (test-quality review): this used to be a bare substring search, so the needle
+  // 'Role' was already satisfied by the pre-existing "Allowance Eligibility by Role" entry -- a
+  // pure tautology. It now requires the string to be a KEY, and requires the Japanese value to
+  // differ from the English, since an entry whose value is the English text is the very silent
+  // leak this test exists to prevent.
+  const entries = {};
+  for (const m of JA_SRC.matchAll(/^\s*"((?:[^"\\]|\\.)*)":\s*"((?:[^"\\]|\\.)*)"/gm)) {
+    entries[JSON.parse(`"${m[1]}"`)] = JSON.parse(`"${m[2]}"`);
   }
+  for (const en of needed) {
+    assert.ok(Object.prototype.hasOwnProperty.call(entries, en),
+      `attendance/lang/ja.js has no entry keyed "${en}" -- JA mode would show English`);
+    assert.notStrictEqual(entries[en], en,
+      `the Japanese entry for "${en}" is still the English text`);
+    assert.ok(/[぀-ヿ一-龯]/.test(entries[en]),
+      `the Japanese entry for "${en}" contains no Japanese: ${entries[en]}`);
+  }
+});
+
+// ---- THE PLUMBING: does the saved section actually reach either engine? ----
+// 2026-10-13: added after review. Everything above this point fed earlyLateRateFor() an `S` built
+// by hand in this file, which proved the reader and proved NOTHING about whether the real code
+// ever puts allowanceRoleRates into an `S`. It did not: the server rebuilt its settings from a
+// fixed key list that omitted the section, and the browser never read it back from the API. The
+// feature was unreachable while 46 assertions here were green. These tests run the REAL
+// getAppSettings() and the REAL load block instead.
+
+// Slices `const NAME = {...};` out of a source, braces balanced -- for injecting object constants
+// that extractFunction cannot carry.
+function constBlock(src, name) {
+  const m = new RegExp(`^const ${name} = `, 'm').exec(src);
+  if (!m) throw new Error(`const ${name} not found`);
+  const open = src.indexOf('{', m.index);
+  let depth = 0;
+  for (let j = open; j < src.length; j++) {
+    if (src[j] === '{') depth++;
+    else if (src[j] === '}') { depth--; if (depth === 0) return src.slice(m.index, j + 1) + ';'; }
+  }
+  throw new Error(`unbalanced ${name}`);
+}
+// Slices a statement that starts with `startsWith` and ends at its matching closing brace.
+function statementBlock(src, startsWith) {
+  const i = src.indexOf(startsWith);
+  if (i < 0) throw new Error(`statement not found: ${startsWith}`);
+  const open = src.indexOf('{', i);
+  let depth = 0;
+  for (let j = open; j < src.length; j++) {
+    if (src[j] === '{') depth++;
+    else if (src[j] === '}') { depth--; if (depth === 0) return src.slice(i, j + 1); }
+  }
+  throw new Error(`unbalanced statement: ${startsWith}`);
+}
+
+const SAVED_TABLE = { enabled: true, byRole: { manager: { earlyMorning1: 7, earlyMorning2: 8, lateNight1: 9, lateNight2: 10 } } };
+
+test('the server hands payroll the saved rate table, not a settings object without it', () => {
+  const ctx = {
+    DEFAULT_ANNUAL_LEAVE_TIERS: [{ afterMonths: 0, days: 6 }],
+    DEFAULT_SICK_LEAVE_DAYS: 30,
+    DEFAULT_BUSINESS_LEAVE_DAYS: 3,
+    normalizeAnnualLeaveTiers: (t) => t,
+    normalizeQuotaDays: (v, d) => (v == null ? d : v),
+    Object, Array, Infinity, Number,
+    // The real file on disk, as an owner who has saved the table would have it.
+    readSettings: () => ({ appSettings: { allowances: { earlyMorning1: 240, earlyMorning2: 480, lateNight1: 240, lateNight2: 480 }, allowanceRoleRates: SAVED_TABLE } }),
+  };
+  vm.createContext(ctx);
+  vm.runInContext(
+    constBlock(SERVER_SRC, 'DEFAULT_APP_SETTINGS') + '\n' +
+    `const EARLY_LATE_RATE_KEYS = ${extractKeys(SERVER_SRC)};\n` +
+    extractFunction(SERVER_SRC, 'earlyLateRateFor') + '\n' +
+    extractFunction(SERVER_SRC, 'getAppSettings') + '\n' +
+    'this.S = getAppSettings();\nthis.rate = earlyLateRateFor;', ctx);
+  assert.ok(ctx.S.allowanceRoleRates,
+    'getAppSettings() dropped allowanceRoleRates -- the engine that pays can never see the table, so turning the switch on changes nothing');
+  assert.strictEqual(ctx.rate('manager', 'earlyMorning1', ctx.S), 7,
+    'payroll must pay the configured role rate');
+  assert.strictEqual(ctx.rate('user', 'earlyMorning1', ctx.S), 240,
+    'an unconfigured role must still get the company-wide amount');
+});
+
+test('the browser loads the saved rate table back from the API', () => {
+  const block = statementBlock(APP_SRC, 'if (data.appSettings) {');
+  const ctx = {
+    data: { appSettings: { allowances: { earlyMorning1: 240 }, allowanceRoleRates: SAVED_TABLE } },
+    APP_SETTINGS: { company: {}, payroll: {}, sso: {}, allowances: {}, workSchedule: {}, geofence: {}, leave: {}, map: {}, allowanceEligibility: {}, tax: { brackets: [] }, allowanceRoleRates: { enabled: false, byRole: {} } },
+    normalizeAnnualLeaveTiers: (t) => t || [],
+    sickLeaveEntitlementDays: () => 30,
+    businessLeaveEntitlementDays: () => 3,
+    Object, Array, Infinity, Number,
+  };
+  vm.createContext(ctx);
+  vm.runInContext(block, ctx);
+  assert.ok(ctx.APP_SETTINGS.allowanceRoleRates && ctx.APP_SETTINGS.allowanceRoleRates.enabled === true,
+    'the load path dropped allowanceRoleRates -- the Settings page would show an empty table and the next save would erase the stored amounts');
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(ctx.APP_SETTINGS.allowanceRoleRates)), SAVED_TABLE);
+});
+
+// The structural guard: this bug class is "a new appSettings section is added and one of the two
+// plumbing paths is not told about it". Keyed off DEFAULT_APP_SETTINGS so it catches the NEXT
+// section too, not just this one.
+test('every appSettings section survives both plumbing paths', () => {
+  const defaults = constBlock(SERVER_SRC, 'DEFAULT_APP_SETTINGS');
+  const sections = [...defaults.matchAll(/^\s{2}(\w+):/gm)].map(m => m[1]).filter(k => k !== 'updatedAt');
+  assert.ok(sections.length >= 10, `expected to find the appSettings sections, found ${sections.join(',')}`);
+  const serverRead = extractFunction(SERVER_SRC, 'getAppSettings');
+  const clientRead = statementBlock(APP_SRC, 'if (data.appSettings) {');
+  const missingServer = sections.filter(k => !new RegExp(`\\b${k}\\b`).test(serverRead));
+  const missingClient = sections.filter(k => !new RegExp(`\\b${k}\\b`).test(clientRead));
+  assert.deepStrictEqual(missingServer, [],
+    `getAppSettings() never reads these sections, so the server's engines cannot see them: ${missingServer.join(', ')}`);
+  assert.deepStrictEqual(missingClient, [],
+    `the browser's settings load never reads these sections, so the page cannot show them and the next save erases them: ${missingClient.join(', ')}`);
+});
+
+// Review finding I1.
+test('a late-out record shows the requester\'s rate, not the approver\'s', () => {
+  const fn = extractFunction(APP_SRC, 'formatTimePart');
+  assert.ok(/l\.userId/.test(fn),
+    'formatTimePart must resolve the role from the record owner -- approval cards render other people\'s late-out requests');
+  const ctx = {
+    APP_SETTINGS: { allowances: { lateNight1: 240, lateNight2: 480, lateNightThreshold1Hour: 19, lateNightThreshold2Hour: 20 }, allowanceRoleRates: SAVED_TABLE },
+    DATA_USERS: [{ id: 1, role: 'manager' }, { id: 2, role: 'user' }],
+    currentUser: { id: 1, role: 'manager' }, realUser: { id: 1, role: 'manager' },
+    previewRole: '', previewUserId: 0, currentLang: 'en',
+    L: (en) => en, escapeHtml: (s) => String(s == null ? '' : s),
+    // Read out of the real source, so the business-day boundary cannot drift from the app's.
+    BUSINESS_DAY_START_MINS: Number(/const BUSINESS_DAY_START_MINS = (\d+);/.exec(APP_SRC)[1]),
+    Object, Array, Number, Math, String, isNaN, parseInt,
+  };
+  vm.createContext(ctx);
+  vm.runInContext(
+    `const EARLY_LATE_RATE_KEYS = ${extractKeys(APP_SRC)};\n` +
+    ['earlyLateRateFor', 'parseHHMMToMins', 'lateNightCheckoutMins', 'lateNightThresholdMins',
+      'lateNightThresholdHourOf', 'lateOutThresholdHour', 'lateOutAllowanceForHour',
+      'loggedInUser', 'isSuperAdmin', 'isImpersonatingPerson', 'effectiveRole', 'formatTimePart']
+      .map(n => extractFunction(APP_SRC, n)).join('\n') +
+    '\nthis.fmt = formatTimePart;', ctx);
+  // userId 2 is a `user`: unconfigured, so the company-wide 240/480 -- NOT the manager's 9/10,
+  // even though the signed-in viewer (currentUser) is a manager.
+  const asUser = ctx.fmt({ type: 'late-out', lateOutTime: '21:00', userId: 2 });
+  assert.ok(/฿480|฿240/.test(asUser), `expected the viewed employee's company-wide rate, got: ${asUser}`);
+  assert.ok(!/฿9\b|฿10\b/.test(asUser), `showed the approver's own configured rate on someone else's record: ${asUser}`);
+  // The manager's own record does get the configured rate.
+  const asManager = ctx.fmt({ type: 'late-out', lateOutTime: '21:00', userId: 1 });
+  assert.ok(/฿10\b|฿9\b/.test(asManager), `expected the manager's configured rate, got: ${asManager}`);
+});
+
+// Review finding I4: an out-of-range cell was dropped silently and the save still said "saved",
+// so the owner's typo left that role quietly on the company-wide rate. Every other money field on
+// this page comes back with a specific refusal. Runs the real form reader against a fake DOM.
+function runFormReader(cells, enabled, prevByRole) {
+  const el = (id) => (Object.prototype.hasOwnProperty.call(cells, id) ? { value: String(cells[id]) } : null);
+  const ctx = {
+    document: {
+      getElementById: (id) => (id === 'set-rolerate-enabled' ? { checked: !!enabled } : el(id)),
+    },
+    APP_SETTINGS: { allowanceEligibility: { earlyLate: ['manager', 'user'] }, allowanceRoleRates: { enabled: false, byRole: prevByRole || {} } },
+    L: (en) => en,
+    Object, Number, Array,
+  };
+  vm.createContext(ctx);
+  vm.runInContext(
+    `const EARLY_LATE_RATE_KEYS = ${extractKeys(APP_SRC)};\n` +
+    extractFunction(APP_SRC, 'roleRateRolesFrom') + '\n' +
+    extractFunction(APP_SRC, 'readRoleRateTableFromForm') + '\n' +
+    'this.out = readRoleRateTableFromForm();', ctx);
+  return ctx.out;
+}
+
+test('an out-of-range or non-numeric cell is refused, naming the field', () => {
+  for (const bad of ['200000', '-360', 'abc']) {
+    const got = runFormReader({ 'set-rolerate-manager-earlyMorning1': bad }, true);
+    assert.strictEqual(got.ok, false, `"${bad}" should be refused, not silently dropped`);
+    assert.strictEqual(got.fieldId, 'set-rolerate-manager-earlyMorning1',
+      'the refusal must name the offending cell so settingsFieldError can highlight it');
+    assert.ok(got.message && /0.*100000|number/i.test(got.message), `unhelpful message: ${got.message}`);
+  }
+});
+
+test('the form reader keeps blanks out, keeps 0 in, and carries forward hidden rows', () => {
+  const got = runFormReader({
+    'set-rolerate-manager-earlyMorning1': '0',
+    'set-rolerate-manager-earlyMorning2': '',
+    'set-rolerate-user-lateNight1': '123',
+  }, true, { driver: { earlyMorning1: 55 } });
+  assert.strictEqual(got.ok, true, got.message);
+  const v = JSON.parse(JSON.stringify(got.value));
+  assert.strictEqual(v.enabled, true);
+  assert.strictEqual(v.byRole.manager.earlyMorning1, 0, '0 is a real rate and must be stored');
+  assert.ok(!('earlyMorning2' in v.byRole.manager), 'a blank cell must be omitted, not stored as 0');
+  assert.strictEqual(v.byRole.user.lateNight1, 123);
+  assert.deepStrictEqual(v.byRole.driver, { earlyMorning1: 55 },
+    'a row for a role no longer eligible must be carried forward, not erased');
+});
+
+test('the save path aborts on a refused cell instead of reporting success', () => {
+  const save = between(APP_SRC, 'readRoleRateTableFromForm()', 'APP_SETTINGS.allowanceRoleRates =', 300);
+  assert.ok(/settingsFieldError\(/.test(save), 'a refused cell must go through settingsFieldError');
+  assert.ok(/return;/.test(save), 'the save must abort, not continue and report success');
 });
 
 console.log(`\n${passed} assertions passed`);

@@ -55,6 +55,13 @@ const SETTINGS = {
   workSchedule: { standardStartHour: 8, standardStartMinute: 30 },
   allowanceEligibility: {},
   payroll: { periodStartDay: 21 },
+  // 2026-10-13 (test-quality review): the per-role rate table, SWITCHED ON for USER.role ('user')
+  // with values deliberately unlike the central ones above. Without this the two engines were only
+  // ever compared in the fallback path, where the role rate and the company-wide rate are the same
+  // number -- so a server engine that read the amount directly (under any holder name) would pay
+  // the central amount while the web paid the override, and every assertion below stayed green.
+  // The early/late money assertions in this file now ride on these numbers, in BOTH engines.
+  allowanceRoleRates: { enabled: true, byRole: { user: { earlyMorning1: 555, earlyMorning2: 666, lateNight1: 777, lateNight2: 888 } } },
 };
 
 const SHARED = [
@@ -295,7 +302,10 @@ test('computePayroll: device check-out at 01:30 pays Late Night x2 on both engin
   const s = makeServer(w).computePayroll(w.user, start, end, 1);
   for (const [side, r] of [['client', c], ['server', s]]) {
     assert.strictEqual(r.lateNightCount, 2, `${side} lateNightCount`);
-    assert.strictEqual(r.allowance2, 200, `${side} Late Night x2 money`);
+    // 888 is SETTINGS.allowanceRoleRates.byRole.user.lateNight2, not the central 200: asserting it
+    // on BOTH sides is what proves the two engines read the role rate the same way. An engine that
+    // bypassed the reader -- under any holder name or any read syntax -- would answer 200 here.
+    assert.strictEqual(r.allowance2, 888, `${side} Late Night x2 money at the role rate`);
   }
 });
 
@@ -357,7 +367,8 @@ test('computePayroll: trip-day early morning / OT / HW / personal car pay nothin
   const hourly = 24000 / 30 / 8; // 100
   for (const [side, r] of [['client', c], ['server', s]]) {
     assert.strictEqual(r.earlyCount, 1, `${side} earlyCount`);
-    assert.strictEqual(r.allowance2, 240, `${side} early money`);
+    // 555 is the role rate for USER.role, not the central 240 -- see the Late Night x2 test above.
+    assert.strictEqual(r.allowance2, 555, `${side} early money at the role rate`);
     assert.strictEqual(r.otTotalHours, 2 + 3, `${side} OT hours (office 2 + HW 3)`);
     assert.strictEqual(r.otAmount, Math.round(hourly * 1.5 * 2) + Math.round(hourly * 2 * 2) + Math.round(hourly * 3 * 1), `${side} OT amount`);
     assert.strictEqual(r.holidayTransportTotal, 500, `${side} transport (one HW day)`);

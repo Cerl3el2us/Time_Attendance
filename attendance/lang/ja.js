@@ -1290,6 +1290,7 @@ window.LANG_JA = {
   // page has no currentLang === 'ja' branches -- L(en, th) resolves JA through this dictionary --
   // so a missing entry here is a silent English leak in Japanese mode.
   "Use a different early-morning / late-night rate per role": "早朝・深夜手当の金額を役職ごとに変える",
+  "⚠️ A per-role allowance rate must be a number between 0 and 100000": "⚠️ 役職ごとの手当額は0〜100000の数値で入力してください",
   "A blank cell uses the company-wide amount above.": "空欄の場合は上記の全社共通額を使用します。",
   "No role is eligible for this allowance": "この手当の対象となる役職がありません",
   "Role": "役職",

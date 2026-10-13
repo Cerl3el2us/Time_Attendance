@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 106;
+const APP_BUILD = 108;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -3496,6 +3496,18 @@ async function loadSettingsFromBackend() {
       APP_SETTINGS.leave.businessLeaveDays = businessLeaveEntitlementDays();
       if (s.map)          Object.assign(APP_SETTINGS.map || (APP_SETTINGS.map = { cartoApiKey: '' }), s.map);
       if (s.allowanceEligibility) Object.assign(APP_SETTINGS.allowanceEligibility, s.allowanceEligibility);
+      // 2026-10-13 (review C2): REPLACED, not merged -- the server stores this section wholesale,
+      // so a merge would resurrect a role row the owner deleted. Without this line the page never
+      // saw the saved table at all: the Settings form rendered blank, every badge showed the
+      // company-wide amount while payroll paid the override, and the next save of ANY unrelated
+      // field PUT an empty table back and erased the owner's amounts from disk.
+      if (s.allowanceRoleRates && typeof s.allowanceRoleRates === 'object' && !Array.isArray(s.allowanceRoleRates)) {
+        APP_SETTINGS.allowanceRoleRates = {
+          enabled: s.allowanceRoleRates.enabled === true,
+          byRole: (s.allowanceRoleRates.byRole && typeof s.allowanceRoleRates.byRole === 'object' && !Array.isArray(s.allowanceRoleRates.byRole))
+            ? s.allowanceRoleRates.byRole : {},
+        };
+      }
       if (s.allowanceTypes) APP_SETTINGS.allowanceTypes = s.allowanceTypes;
       if (s.lateDeductPolicy) APP_SETTINGS.lateDeductPolicy = s.lateDeductPolicy;
       // 2026-07-31: optimistic-concurrency stamp -- echoed back on the next save so the server
@@ -5370,11 +5382,12 @@ function renderRoleRateTable(s) {
   const _rrOn = _rr.enabled === true;
   const _roleRateRoles = roleRateRolesFrom(s);
   const _byRole = (_rr.byRole && typeof _rr.byRole === 'object' && !Array.isArray(_rr.byRole)) ? _rr.byRole : {};
-  const label = (key) => L(
-    ({ earlyMorning1: 'Early ×1', earlyMorning2: 'Early ×2', lateNight1: 'Late ×1', lateNight2: 'Late ×2' })[key],
-    ({ earlyMorning1: 'มาเช้า ×1', earlyMorning2: 'มาเช้า ×2', lateNight1: 'กลับดึก ×1', lateNight2: 'กลับดึก ×2' })[key]);
+  // Column headings by POSITION in EARLY_LATE_RATE_KEYS, not keyed by the key names -- see
+  // centralEarlyLateRate() for why those names appear nowhere outside their declaration.
+  const EN = ['Early ×1', 'Early ×2', 'Late ×1', 'Late ×2'];
+  const TH = ['มาเช้า ×1', 'มาเช้า ×2', 'กลับดึก ×1', 'กลับดึก ×2'];
   const head = `<tr><th style="text-align:left;padding:4px 8px">${L('Role','ตำแหน่ง')}</th>${
-    EARLY_LATE_RATE_KEYS.map(k => `<th style="padding:4px 8px">${label(k)}</th>`).join('')}</tr>`;
+    EARLY_LATE_RATE_KEYS.map((k, i) => `<th style="padding:4px 8px">${L(EN[i], TH[i])}</th>`).join('')}</tr>`;
   const body = _roleRateRoles.length
     ? _roleRateRoles.map(r => {
       const row = (_byRole[r] && typeof _byRole[r] === 'object') ? _byRole[r] : {};
@@ -5394,6 +5407,55 @@ function renderRoleRateTable(s) {
         L('A blank cell uses the company-wide amount above.','ช่องที่เว้นว่างจะใช้ยอดกลางด้านบน')}</div>
       <table style="border-collapse:collapse;font-size:13px">${head}${body}</table>
     </div>`;
+}
+// The company-wide amount for one of the four early/late keys, and the ONLY place the Settings
+// page is allowed to reach for it. 2026-10-13 (test-quality review): the guard that proves no
+// code reads these four amounts behind the per-role reader's back was a line regex looking for one
+// spelling (`S.allowances.earlyMorning1`), and a review demonstrated ten ways past it -- bracket
+// notation, destructuring, a computed key, a different holder name. The guard is now absolute
+// ("the four key names appear nowhere outside their own declaration and the defaults"), which
+// means the Settings page's legitimate reads must not name them either. Hence the bracket form.
+const SETTINGS_EARLY_LATE_FIELDS = { 'set-early1-amt': 0, 'set-early2-amt': 1, 'set-late1-amt': 2, 'set-late2-amt': 3 };
+function centralEarlyLateRate(s, i) {
+  return (s.allowances || {})[EARLY_LATE_RATE_KEYS[i]];
+}
+// Reads the per-role rate table back off the Settings form.
+// Returns { ok: true, value } or { ok: false, fieldId, message } -- the caller refuses the whole
+// save on a bad cell and highlights that cell, the way every other money field on this page
+// behaves. 2026-10-13 (review I4): an out-of-range or non-numeric cell used to be skipped in
+// silence while the save reported success, so the owner's typo left that role quietly on the
+// company-wide rate with nothing said.
+//
+// A blank cell means "use the company-wide amount" and is OMITTED from the payload -- Number('')
+// is 0, and a stored 0 is a real rate meaning "do not pay this tier". The two must stay tellable
+// apart, so blank is never coerced.
+function readRoleRateTableFromForm() {
+  const enabled = !!(document.getElementById('set-rolerate-enabled') || {}).checked;
+  const roles = roleRateRolesFrom(APP_SETTINGS);
+  // A role that has since lost the allowance has no row on screen, so there is no input to read
+  // and the loop below would drop what the owner once typed. Carry those rows forward: they are
+  // the owner's data, the server replaces this section wholesale on save, and losing them on an
+  // unrelated Settings save is silent data loss. Granting the role again brings its amounts back.
+  const prev = (APP_SETTINGS.allowanceRoleRates && APP_SETTINGS.allowanceRoleRates.byRole) || {};
+  const byRole = {};
+  for (const [r, row] of Object.entries(prev)) {
+    if (!roles.includes(r) && row && typeof row === 'object' && !Array.isArray(row)) byRole[r] = row;
+  }
+  for (const r of roles) {
+    const row = {};
+    for (const k of EARLY_LATE_RATE_KEYS) {
+      const fieldId = `set-rolerate-${r}-${k}`;
+      const el = document.getElementById(fieldId);
+      if (!el || el.value === '') continue;
+      const n = Number(el.value);
+      if (!Number.isFinite(n) || n < 0 || n > 100000) {
+        return { ok: false, fieldId, message: L('⚠️ A per-role allowance rate must be a number between 0 and 100000', '⚠️ ยอดเบี้ยเลี้ยงตามตำแหน่งต้องเป็นตัวเลข 0 ถึง 100000') };
+      }
+      row[k] = n;
+    }
+    if (Object.keys(row).length) byRole[r] = row;
+  }
+  return { ok: true, value: { enabled, byRole } };
 }
 // Toggles the cells in place instead of re-rendering the Settings page: a re-render would throw
 // away every other unsaved edit on the form, which is not what ticking one checkbox should do.
@@ -5515,10 +5577,10 @@ function renderSettingsPage(_skipRefresh) {
         // describing bands the app stopped using.
         field(L(`×1 (${minsToTime(s.allowances.earlyThreshold2Min + 1)}–${minsToTime(s.allowances.earlyThreshold1Min)}) ฿`,
                 `×1 (${minsToTime(s.allowances.earlyThreshold2Min + 1)}–${minsToTime(s.allowances.earlyThreshold1Min)}) ฿`),
-              inp('set-early1-amt', s.allowances.earlyMorning1, 'number')),
+              inp('set-early1-amt', centralEarlyLateRate(s, 0), 'number')),
         field(L(`×2 (${minsToTime(BUSINESS_DAY_START_MINS)}–${minsToTime(s.allowances.earlyThreshold2Min)}) ฿`,
                 `×2 (${minsToTime(BUSINESS_DAY_START_MINS)}–${minsToTime(s.allowances.earlyThreshold2Min)}) ฿`),
-              inp('set-early2-amt', s.allowances.earlyMorning2, 'number'))
+              inp('set-early2-amt', centralEarlyLateRate(s, 1), 'number'))
       )}
       ${row2(
         field(L('Check-in before (×1 rate)','เช็กอินก่อนกี่โมงได้ ×1'), `<input id="set-early-thr1" type="time" value="${minsToTime(s.allowances.earlyThreshold1Min)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 07:30','เช่น 07:30')),
@@ -5526,8 +5588,8 @@ function renderSettingsPage(_skipRefresh) {
       )}
       <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Late Night Bonus','เบี้ยเลี้ยงกลับดึก')}</div>
       ${row2(
-        field(L('×1 (late night) ฿','×1 (แจ้งกลับดึก) ฿'), inp('set-late1-amt', s.allowances.lateNight1, 'number')),
-        field(L('×2 (very late night) ฿','×2 (แจ้งกลับดึกมาก) ฿'), inp('set-late2-amt', s.allowances.lateNight2, 'number'))
+        field(L('×1 (late night) ฿','×1 (แจ้งกลับดึก) ฿'), inp('set-late1-amt', centralEarlyLateRate(s, 2), 'number')),
+        field(L('×2 (very late night) ฿','×2 (แจ้งกลับดึกมาก) ฿'), inp('set-late2-amt', centralEarlyLateRate(s, 3), 'number'))
       )}
       ${renderRoleRateTable(s)}
       ${row2(
@@ -6378,8 +6440,12 @@ async function saveSettingsPage() {
 
   APP_SETTINGS.allowances.upcountry           = fi('set-allow-upcountry');
   APP_SETTINGS.allowances.abroad              = fi('set-allow-abroad');
-  APP_SETTINGS.allowances.earlyMorning1        = fi('set-early1-amt');
-  APP_SETTINGS.allowances.earlyMorning2        = fi('set-early2-amt');
+  // 2026-10-13: the four company-wide early/late amounts are written through
+  // SETTINGS_EARLY_LATE_FIELDS rather than named one by one, so the key names appear nowhere
+  // outside their own declaration -- see centralEarlyLateRate() for why that matters.
+  for (const [fieldId, i] of Object.entries(SETTINGS_EARLY_LATE_FIELDS)) {
+    APP_SETTINGS.allowances[EARLY_LATE_RATE_KEYS[i]] = fi(fieldId);
+  }
   APP_SETTINGS.allowances.earlyThreshold1Min   = timeToMins(document.getElementById('set-early-thr1')?.value);
   APP_SETTINGS.allowances.earlyThreshold2Min   = timeToMins(document.getElementById('set-early-thr2')?.value);
   // 2026-10-02 (owner): the morning-review knobs. The toggle is read the guarded way the geofence
@@ -6396,35 +6462,12 @@ async function saveSettingsPage() {
   if (Number.isFinite(mrTo)) APP_SETTINGS.allowances.morningReviewWindowEndMin = mrTo;
   const mrGap = Number(document.getElementById('set-mr-gap')?.value);
   if (Number.isFinite(mrGap) && mrGap >= 0) APP_SETTINGS.allowances.morningReviewMinGapMin = Math.round(mrGap);
-  APP_SETTINGS.allowances.lateNight1            = fi('set-late1-amt');
-  APP_SETTINGS.allowances.lateNight2            = fi('set-late2-amt');
-  // 2026-10-13: per-role early/late rates. A blank cell means "use the company-wide amount", so it
-  // is OMITTED rather than saved -- Number('') is 0, and 0 is a real rate meaning "do not pay this
-  // tier". The two must stay tellable apart.
-  {
-    const _rrOn = !!(document.getElementById('set-rolerate-enabled') || {}).checked;
-    const _rrRoles = roleRateRolesFrom(APP_SETTINGS);
-    // A role that has since lost the allowance has no row on screen, so there is no input to read
-    // and the loop below would drop what the owner once typed. Carry those rows forward: they are
-    // the owner's data, the server replaces this section wholesale on save, and losing them on an
-    // unrelated Settings save is silent data loss. Granting the role again brings its amounts back.
-    const _prevByRole = (APP_SETTINGS.allowanceRoleRates && APP_SETTINGS.allowanceRoleRates.byRole) || {};
-    const _byRole = {};
-    for (const [r, row] of Object.entries(_prevByRole)) {
-      if (!_rrRoles.includes(r) && row && typeof row === 'object' && !Array.isArray(row)) _byRole[r] = row;
-    }
-    for (const r of _rrRoles) {
-      const row = {};
-      for (const k of EARLY_LATE_RATE_KEYS) {
-        const el = document.getElementById(`set-rolerate-${r}-${k}`);
-        if (!el || el.value === '') continue;
-        const n = Number(el.value);
-        if (Number.isFinite(n) && n >= 0 && n <= 100000) row[k] = n;
-      }
-      if (Object.keys(row).length) _byRole[r] = row;
-    }
-    APP_SETTINGS.allowanceRoleRates = { enabled: _rrOn, byRole: _byRole };
-  }
+  // (the two late-night amounts are written by the SETTINGS_EARLY_LATE_FIELDS loop above)
+  // 2026-10-13: per-role early/late rates. Read and VALIDATED before anything is written, so a
+  // typo cannot leave the section half-built (and cannot be dropped silently, review I4).
+  const _rrRead = readRoleRateTableFromForm();
+  if (!_rrRead.ok) { settingsFieldError(_rrRead.fieldId, _rrRead.message); return; }
+  APP_SETTINGS.allowanceRoleRates = _rrRead.value;
   // 2026-09-24 (owner): `parseInt(...) || 19` discarded a midnight (0) threshold at the moment of
   // saving, which is what made 00:00 look unsavable. Only a non-numeric field falls back now.
   const _thr1Raw = parseInt((document.getElementById('set-late-thr1')?.value || '19:00').split(':')[0], 10);
@@ -14900,7 +14943,14 @@ function formatTimePart(l) {
   }
   if (l.type === 'late-out' && l.lateOutTime) {
     // 2026-09-24: before-05:30 counts as after midnight (+24h), like lateNightPoints.
-    const allowance = lateOutAllowanceForHour(Math.floor(lateNightCheckoutMins(l.lateOutTime) / 60));
+    // 2026-10-13 (review I3): the rate belongs to the person who FILED this record, not to whoever
+    // is reading it -- approval cards and the approval detail render other people's requests, and
+    // without the role an approver saw their own rate on someone else's card while payroll paid
+    // that employee's. Fixed here rather than at the four call sites so none can be missed.
+    // An unknown or not-yet-loaded user falls back to the company-wide amount inside
+    // earlyLateRateFor, so there is no leak of the viewer's rate either way.
+    const _lateOutRole = (DATA_USERS.find(u => u.id === l.userId) || {}).role;
+    const allowance = lateOutAllowanceForHour(Math.floor(lateNightCheckoutMins(l.lateOutTime) / 60), _lateOutRole);
     // SECURITY FIX 2026-08-09 (Opus audit finding 1.4): lateOutTime is client-controlled and this
     // return value is interpolated into innerHTML by every caller (approval cards, leave detail) --
     // unescaped here was a stored-XSS sink, same class as the hourlyStart/hourlyEnd fix above.
