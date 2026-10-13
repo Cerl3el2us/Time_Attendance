@@ -617,6 +617,21 @@ test('fixture: itemsOf accepts a ">" line but rejects the same sentence written 
   expectRejected(itemsOf([sentence, '- ok']).problems, /before the first item/);
   expectRejected(itemsOf(['- ok', sentence]).problems, /not indented/);
 });
+// 2026-10-13: the real-file case for "เปิดอยู่" used to throw whenever it parsed zero items, with
+// the message "the parser or the file is wrong". But zero open items is a real state -- it means
+// nothing is open -- and a test that is red for it pushes the next reader to invent an item to
+// satisfy it. The guard could go because itemsOf already refuses the case it was written for: any
+// content line with no item above it. This pins both halves, so removing the guard loses nothing.
+test('fixture: itemsOf reads an empty section as no items, but refuses content with no item', () => {
+  const empty = itemsOf([]);
+  expectClean(empty.problems);
+  if (empty.blocks.length !== 0) throw new Error(`an empty section has no items, got ${empty.blocks.length}`);
+  const blanks = itemsOf(['', '   ', '']);
+  expectClean(blanks.problems);
+  if (blanks.blocks.length !== 0) throw new Error('blank lines are not items');
+  expectClean(itemsOf(['> only the standing rubric']).problems);
+  expectRejected(itemsOf(['เนื้อหาที่ไม่ได้อยู่ในข้อไหน']).problems, /before the first item/);
+});
 test('fixture: a blockquote line cannot stand in for a handoff label', () => {
   // The label text is present with content; only dropping the `>` line from the block makes it fail.
   const noAction = GOOD_HANDOFF.replace('  · **ให้ทำอะไร:** อ่านสเปกแล้วทำข้อ 4–6', '  > **ให้ทำอะไร:** อ่านสเปกแล้วทำข้อ 4–6');
@@ -1097,8 +1112,9 @@ test('every line in the three sections is a valid item or a continuation of one'
 });
 
 test('every open item names a check id, a "รอเจ้าของ" line, or both', () => {
+  // No guard on a zero count: nothing open is a real state, and realItems already throws on any
+  // content line that is not part of an item (see the itemsOf fixture above for both halves).
   const open = realItems(SEC_OPEN);
-  if (open.length === 0) throw new Error('no items under ## เปิดอยู่ -- the parser or the file is wrong');
   for (const block of open) expectClean(validateOpenItem(block));
 });
 

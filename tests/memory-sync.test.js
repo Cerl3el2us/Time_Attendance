@@ -388,3 +388,69 @@ test('sync_if_dirty: when it cannot read where the NAS folder is, it says so and
   if (/push=ok/.test(r.log)) throw new Error(`it proved nothing, so it must not claim ok: ${r.log}`);
   if (r.markerExists) throw new Error('"cannot tell" must not be treated as done');
 });
+
+// 2026-10-13, found while fixing the drive-root bug and deliberately left for its own case: the
+// name Claude Code gives a project folder replaces dots too, not only ":" and "\". The evidence is
+// on this machine -- the project at \\192.168.100.100\web has the folder --192-168-100-100-web --
+// while the script replaced only ":" and "\", which would have derived --192.168.100.100-web and
+// found nothing. The hook only ever passes Z:\, so this never fired; it was a trap waiting for the
+// day anyone pointed -ProjectDir at a path with a dot in it. The case uses an unmapped drive on
+// purpose: the real UNC folder EXISTS here, so deriving it correctly would send the script on to
+// push another project's memory, which a test must never do.
+test('sync_if_dirty: a dot in the project path becomes a dash, as it does in the folder Claude Code made', () => {
+  if (!SLOW) skip('--slow only');
+  requireScript(DIRTY_SCRIPT);
+  const dir = tmp('dotpath');
+  const log = path.join(dir, 'dot.log');
+  const r = ps(DIRTY_SCRIPT, ['-ProjectDir', 'Q:\\a.b', '-LogFile', log]);
+  if (r.code !== 0) throw new Error(`a hook must never fail the session: exit ${r.code} ${r.err}`);
+  if (r.out !== 'UNREACHABLE') throw new Error(`expected UNREACHABLE, got: ${JSON.stringify(r.out)}`);
+  const body = fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '';
+  const m = /memorydir=(.+)$/m.exec(body);
+  if (!m) throw new Error(`no memorydir line logged; log was ${JSON.stringify(body)}`);
+  const got = m[1].trim();
+  if (!got.endsWith('\\projects\\Q--a-b\\memory')) {
+    throw new Error(`derived ${got} -- it must end in \\projects\\Q--a-b\\memory`);
+  }
+});
+
+// The file's own header promises "-WhatIf writes nothing at all (neither the marker nor the log)".
+// That was true of the push path, which is inside `if (-not $WhatIf)`, but not of the UNREACHABLE,
+// listing-failed and ERROR paths, which logged regardless. A dry run that writes to the NAS log is
+// both a false promise and a line in the record for a run that did nothing -- and sync.log is now
+// read back at session start, so a stray line there is a sentence in the owner's face.
+test('sync_if_dirty: -WhatIf writes no log line either, as the file promises', () => {
+  if (!SLOW) skip('--slow only');
+  requireScript(DIRTY_SCRIPT);
+  const dir = tmp('whatif-log');
+  const log = path.join(dir, 'should-stay-absent.log');
+  const r = ps(DIRTY_SCRIPT, ['-ProjectDir', 'Q:\\', '-LogFile', log, '-WhatIf']);
+  if (r.code !== 0) throw new Error(`a hook must never fail the session: exit ${r.code} ${r.err}`);
+  if (r.out !== 'UNREACHABLE') throw new Error(`expected UNREACHABLE, got: ${JSON.stringify(r.out)}`);
+  if (fs.existsSync(log)) {
+    throw new Error(`-WhatIf wrote the log: ${JSON.stringify(fs.readFileSync(log, 'utf8'))}`);
+  }
+});
+
+// The two scripts derive the memory folder name from -ProjectDir with the same expression, and
+// sync_if_dirty.ps1 says so in a comment ("ต้องเหมือน sync_memory.ps1 เป๊ะ"). Nothing enforced it.
+// 2026-10-13: adding the dot rule to one of them put the two out of step for the length of one
+// commit, which is exactly the silent disagreement the rest of this work is about -- one script
+// would push into ...\Q--a-b\memory while the other judged ...\Q--a.b\memory. Neither script has a
+// dry run, so a behavioural case would have to perform a real pull or push; what is asserted here
+// is the invariant itself, that the one line is identical in both files.
+test('sync_memory.ps1 and sync_if_dirty.ps1 derive the folder name with the same expression', () => {
+  requireScript(DIRTY_SCRIPT);
+  requireScript(SYNC_SCRIPT);
+  const lineOf = (p) => {
+    const hit = fs.readFileSync(p, 'utf8').split(/\r?\n/).find(l => /^\s*\$sanitized\s*=/.test(l));
+    if (!hit) throw new Error(`no $sanitized assignment in ${path.basename(p)}`);
+    return hit.replace(/\s+/g, ' ').trim();
+  };
+  const a = lineOf(DIRTY_SCRIPT);
+  const b = lineOf(SYNC_SCRIPT);
+  if (a !== b) throw new Error(`the two scripts disagree:\n  sync_if_dirty.ps1: ${a}\n  sync_memory.ps1:   ${b}`);
+  for (const needle of ["-replace ':', '-'", "-replace '\\\\', '-'", "-replace '\\.', '-'"]) {
+    if (!a.includes(needle)) throw new Error(`the shared expression is missing ${needle}: ${a}`);
+  }
+});
