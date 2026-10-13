@@ -294,6 +294,10 @@
                 <span class="status-dot none" id="checkin-status-dot"></span>
                 <span id="checkin-status-text">ยังไม่ได้ลงเวลา</span>
               </div>
+              <!-- 2026-10-14 (owner): shown in place of the clock-in button when web clocking is
+                   switched off for this person. Text is set by updateScanButton() from
+                   geofenceMessage('web-clock-off'), so it stays in the three languages. -->
+              <div id="webclock-off-note" style="display:none;padding:14px 16px;border-radius:12px;background:#fef2f2;color:#b91c1c;font-size:13px;line-height:1.6"></div>
               <div class="scan-btn-wrap">
                 <button class="scan-btn scan-ready" id="scan-btn" onclick="doScan('web')">
                   <span class="scan-btn-icon"  id="scan-btn-icon">⏱</span>
@@ -2758,6 +2762,6 @@
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ja.js" integrity="sha384-mKor8U8jwukUkfxaFPCsxKF9S62PXq4gG7zcZ5yQ2x3KL1msprJZeFlKFEDeeb5V" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/th.js" integrity="sha384-E6OVFg1zUc/pckGxry0YZ6VeZ1E17l7Jl8ZQx58jbEfxxkz9LqknQhiIrA9zg/8b" crossorigin="anonymous"></script>
 
-<script src="js/app.js?v=20261014e"></script>
+<script src="js/app.js?v=20261014f"></script>
 </body>
 </html>

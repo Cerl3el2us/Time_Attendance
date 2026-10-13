@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 113;
+const APP_BUILD = 114;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -10098,6 +10098,23 @@ async function doScan(source) {
 function updateScanButton() {
   const btn = document.getElementById('scan-btn');
   if (!btn) return;
+  // 2026-10-14 (owner: "ซ่อนปุ่มตอกบัตรไปเลยตอนปิดสวิตช์"): when web clocking is switched off for
+  // this person the whole control disappears, rather than staying visible and refusing on press --
+  // which also removes the check-OUT confirm() that used to appear before the refusal.
+  // The decision comes from geofenceUiState(), the same gate the press uses and the mirror of the
+  // server's, so there is exactly one place that knows the rule. Its carve-outs apply here too: an
+  // exempt role, and a day whose own check-in was a web scan, both keep the button.
+  const _wcNote = document.getElementById('webclock-off-note');
+  const _wcWrap = btn.closest('.scan-btn-wrap');
+  const _wcOff = geofenceUiState().reason === 'web-clock-off';
+  if (_wcWrap) _wcWrap.style.display = _wcOff ? 'none' : '';
+  if (_wcNote) {
+    _wcNote.style.display = _wcOff ? '' : 'none';
+    if (_wcOff) _wcNote.textContent = geofenceMessage('web-clock-off');
+  }
+  // Deliberately NOT returning here: only the button goes away. The status dot and today's times
+  // below it live outside the button's wrapper and must keep updating, because someone who scans
+  // at the office still needs this page to tell them whether they are clocked in.
   const dateStr = businessDateStr();
   const key     = currentUser ? attKey(currentUser.id, dateStr) : null;
   const rec     = key ? attendanceLog[key] : null;

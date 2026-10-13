@@ -258,6 +258,29 @@ test('the save path routes through the filter', () => {
   assert.ok(/omitUnstoredDefaults\(/.test(fn), 'savePayrollSettings must send the filtered object');
 });
 
+// --- 6c. the button disappears, which is what the owner actually asked for --------------
+// 2026-10-14 (owner): "ซ่อนปุ่มตอกบัตรไปเลยตอนปิดสวิตช์". The first cut only refused the press,
+// which was safe but not what was asked -- and it meant a confirm() dialog ("this will be recorded
+// as your check-OUT") could appear before the refusal. The hide reuses geofenceUiState(), so there
+// is exactly ONE place that decides whether web clocking is allowed.
+test('the clock-in button is hidden when the switch refuses this person', () => {
+  const fn = extractFunction(APP_SRC, 'updateScanButton');
+  assert.ok(/web-clock-off/.test(fn), 'updateScanButton must know about the switch');
+  assert.ok(/scan-btn-wrap|webclock-hidden/.test(fn), 'it must hide the button, not merely restyle it');
+  // and it must decide from the shared gate rather than re-reading the setting itself
+  assert.ok(/geofenceUiState\(/.test(fn),
+    'the hide must come from geofenceUiState(), or the rule exists in two places and they will drift');
+  assert.ok(!/APP_SETTINGS\.webClock/.test(fn), 'updateScanButton must not re-implement the rule');
+});
+
+test('the person is told why the button is gone, in all three languages', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'attendance/index.html'), 'utf8');
+  assert.ok(/id="webclock-off-note"/.test(html), 'there must be somewhere to say why');
+  const fn = extractFunction(APP_SRC, 'updateScanButton');
+  assert.ok(/geofenceMessage\('web-clock-off'\)/.test(fn),
+    'reuse the wording that already exists in three languages rather than writing a second one');
+});
+
 // --- 7. the two sides agree ------------------------------------------------------------
 test('the browser blocks the press for the same reason the server would refuse it', () => {
   const uiReason = (webClock, role) => {
