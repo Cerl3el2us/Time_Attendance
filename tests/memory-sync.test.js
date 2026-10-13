@@ -658,3 +658,77 @@ test('sync_if_dirty: verified means same size, not same content, and says so by 
   if (!/verified=1/.test(r.log)) throw new Error(`equal size counts as proven by design: ${r.log}`);
   if (!/push=ok/.test(r.log)) throw new Error(`so the push is a success: ${r.log}`);
 });
+
+// -----------------------------------------------------------------------------------------------
+// 2026-10-13, the owner's question: "will the other machine actually update its worktree, or will
+// it redo the work?" Two layers existed and both are instructions, not guarantees -- a line in
+// MEMORY.md that has to be read and obeyed, and a warning from `npm run backlog` that only appears
+// if somebody runs it. A checkout behind main carries its own stale STATUS.md, which is exactly how
+// finished work gets done twice. This is the layer that needs nobody to ask: the session-start hook
+// looks at every worktree of the project that exists on THIS machine and says which are behind.
+//
+// It never fetches. The answer is only as fresh as the last fetch, and the line says so.
+// -----------------------------------------------------------------------------------------------
+
+function git(cwd, args) {
+  const r = require('child_process').spawnSync('git', args, { cwd, encoding: 'utf8' });
+  if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed in ${cwd}: ${(r.stderr || '').trim()}`);
+  return (r.stdout || '').trim();
+}
+
+// A repo whose main checkout is level with origin/main and whose extra worktree is one behind.
+function repoWithStaleWorktree(name) {
+  const base = tmp(name);
+  const bare = path.join(base, 'origin.git');
+  const repo = path.join(base, 'repo');
+  const wt = path.join(base, 'behind');
+  fs.mkdirSync(bare); fs.mkdirSync(repo);
+  git(bare, ['init', '--bare', '--initial-branch=main']);
+  git(repo, ['init', '--initial-branch=main']);
+  git(repo, ['config', 'user.email', 't@example.com']);
+  git(repo, ['config', 'user.name', 'test']);
+  fs.writeFileSync(path.join(repo, 'STATUS.md'), 'first\n', 'utf8');
+  git(repo, ['add', '-A']); git(repo, ['commit', '-m', 'first']);
+  git(repo, ['branch', 'old']);                       // old points at the first commit
+  git(repo, ['remote', 'add', 'origin', bare]);
+  fs.writeFileSync(path.join(repo, 'STATUS.md'), 'second\n', 'utf8');
+  git(repo, ['add', '-A']); git(repo, ['commit', '-m', 'second']);
+  git(repo, ['push', '-q', 'origin', 'main']);        // origin/main is now the second commit
+  git(repo, ['worktree', 'add', '-q', wt, 'old']);    // this checkout is one commit behind
+  return { repo, wt };
+}
+
+test('session_start -WorktreeStatus: a worktree behind main is named, with how far behind it is', () => {
+  if (!SLOW) skip('--slow only');
+  requireScript(START_SCRIPT);
+  const { repo, wt } = repoWithStaleWorktree('wt-behind');
+  const r = ps(START_SCRIPT, ['-WorktreeStatus', '-Repo', repo]);
+  if (r.code !== 0) throw new Error(`a hook must never fail the session: exit ${r.code} ${r.err}`);
+  if (!/WARNING/.test(r.out)) throw new Error(`a checkout behind main must warn: ${r.out}`);
+  // git prints worktree paths with forward slashes on Windows; the folder is what matters, not the
+  // separator, so both sides are normalised rather than loosening what is asserted.
+  const slash = s => s.replace(/\\/g, '/');
+  if (!slash(r.out).includes(slash(wt))) throw new Error(`the warning must name the folder to update: ${r.out}`);
+  if (!/\b1\b/.test(r.out)) throw new Error(`the warning must say how far behind: ${r.out}`);
+  if (!/STATUS\.md/.test(r.out)) throw new Error(`it must say why that matters to the reader: ${r.out}`);
+});
+
+test('session_start -WorktreeStatus: a repo whose checkouts are all level does not warn', () => {
+  if (!SLOW) skip('--slow only');
+  requireScript(START_SCRIPT);
+  const { repo, wt } = repoWithStaleWorktree('wt-level');
+  git(wt, ['merge', '--ff-only', 'origin/main']);     // bring the stale one up to date
+  const r = ps(START_SCRIPT, ['-WorktreeStatus', '-Repo', repo]);
+  if (r.code !== 0) throw new Error(`a hook must never fail the session: exit ${r.code} ${r.err}`);
+  if (/WARNING/.test(r.out)) throw new Error(`nothing is behind, so nothing to warn about: ${r.out}`);
+  if (r.out.trim() === '') throw new Error('silence is what hid every other problem today; it must say it looked');
+});
+
+test('session_start -WorktreeStatus: a repo it cannot read says so instead of reporting all clear', () => {
+  if (!SLOW) skip('--slow only');
+  requireScript(START_SCRIPT);
+  const r = ps(START_SCRIPT, ['-WorktreeStatus', '-Repo', path.join(tmp('wt-missing'), 'no-such-repo')]);
+  if (r.code !== 0) throw new Error(`a hook must never fail the session: exit ${r.code} ${r.err}`);
+  if (/level with|all up to date/i.test(r.out)) throw new Error(`it read nothing, so it cannot say that: ${r.out}`);
+  if (r.out.trim() === '') throw new Error('not knowing must be said out loud');
+});
