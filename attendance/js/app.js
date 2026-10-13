@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 111;
+const APP_BUILD = 112;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -2190,6 +2190,9 @@ let DATA_LEAVES = [];
 // "<userId>_<YYYY-MM-DD>" (same format as attKey). GET /api/checkout-reviews is scoped server-side:
 // md/accounting/manager get all, everyone else only their own.
 let DATA_CHECKOUT_REVIEWS = {};
+// 2026-10-14: check-in corrections made by Accounting/MD, keyed `${userId}_${date}`. The server
+// scopes the GET: a full-access role receives all of them, everyone else only their own days.
+let DATA_CHECKIN_EDITS = {};
 // 2026-10-02 (owner): the morning twin -- Accounting's allow/deny on an early scan that was
 // followed by another door pass. Same shape, same scoping rules, same key (`<userId>_<date>`).
 let DATA_MORNING_REVIEWS = {};
@@ -7480,6 +7483,25 @@ async function loadCheckoutReviewsFromBackend() {
   }
 }
 
+// 2026-10-14: loads the check-in corrections. Kept separate from the attendance fetch so a failure
+// here cannot blank the attendance log -- on failure the page simply shows the uncorrected times,
+// which is the state it was in before this feature existed.
+async function loadCheckinEditsFromBackend() {
+  try {
+    const res = await apiFetch('/api/checkin-time-edits');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    if (!data || !data.success || !data.edits || typeof data.edits !== 'object' || Array.isArray(data.edits)) {
+      throw new Error('bad payload');
+    }
+    DATA_CHECKIN_EDITS = data.edits;
+    return true;
+  } catch(e) {
+    console.error('[APP] loadCheckinEditsFromBackend error:', e.message);
+    return false;
+  }
+}
+
 function rerenderAfterCheckoutReviews() {
   updateApprovalBadge();
   renderDashboard();
@@ -7683,6 +7705,12 @@ async function loadAttendanceFromBackend() {
     // Re-render whichever page is currently active
     renderDashboard();
     if (currentPage === 'attendance')   renderAttendanceTable();
+    // 2026-10-14: apply the Accounting/MD check-in corrections at the one place this log is built,
+    // the twin of server.js's buildAttendanceLogForUser(). attendanceLog is keyed
+    // `${userId}_${date}`, which is also how the corrections are keyed, so the shared overlay
+    // matches on the key directly. Everything derived from attendanceLog -- the table, the pay
+    // preview, the payslip -- then shows the corrected time without knowing the feature exists.
+    applyCheckinEdits(attendanceLog, null, DATA_CHECKIN_EDITS);
     if (currentPage === 'myattendance') {
       if (typeof window._maTriggerLoad === 'function') window._maTriggerLoad();
     }
@@ -8193,6 +8221,9 @@ function initApp(startPage) {
     initNotificationPolling();
   });
   loadCheckoutReviewsFromBackend().then(ok => { if (ok) rerenderAfterCheckoutReviews(); });
+  // 2026-10-14: corrections must be in hand before the attendance log is used, so reload the log
+  // once they arrive rather than leaving the page showing uncorrected times until the next fetch.
+  loadCheckinEditsFromBackend().then(ok => { if (ok) loadAttendanceFromBackend().then(() => rerenderAfterCheckoutReviews()); });
   loadMorningReviewsFromBackend().then(ok => { if (ok) rerenderAfterCheckoutReviews(); });
   if (currentPage === 'dashboard') fetchExchangeRate();
   loadAttendanceFromBackend().then(ok => {
@@ -8820,6 +8851,131 @@ function webCheckinWouldBeCheckIn() {
   const isPreDawn = bk.h * 60 + bk.min < BUSINESS_DAY_START_MINS;
   return !isPreDawn && !attendanceLog[key]?.checkIn && timeStr < CHECKIN_CUTOFF;
 }
+// ===== CHECK-IN TIME CORRECTIONS (2026-10-14, owner's decision) =====
+// Accounting/MD may correct the recorded check-in on a day whose door pass falls between 05:30 and
+// 07:30. The usual correction is to a LATER time (passed 07:00, actually started 08:30), which
+// removes the early-morning allowance -- so this decides money, and applyCheckinEdits() is
+// DUAL-SYNC: identical text here and in server.js, proven by tests/checkin-time-edit.test.js.
+// The window is written out rather than read from a constant so each copy is self-contained.
+function checkinEditWindowOk(rawCheckIn) {
+  const mins = parseHHMMToMins(rawCheckIn);
+  if (!Number.isFinite(mins)) return false;
+  return mins >= (5 * 60 + 30) && mins <= (7 * 60 + 30);
+}
+function applyCheckinEdits(log, userId, edits) {
+  if (!log || !edits || typeof edits !== 'object' || Array.isArray(edits)) return log;
+  for (const logKey of Object.keys(log)) {
+    // The two callers key their logs differently: the server's is per-user and keyed by date,
+    // the browser's is global and keyed `${userId}_${date}`. Both shapes are accepted so this
+    // stays ONE function -- it decides what payroll is paid from, and a second copy of a money
+    // rule is how the web and the payslip start disagreeing.
+    const e = edits[logKey] || edits[`${userId}_${logKey}`];
+    if (!e || typeof e !== 'object' || Array.isArray(e)) continue;
+    if (!HHMM_RE.test(String(e.checkIn || ''))) continue;
+    const day = log[logKey];
+    if (!day || !day.checkIn) continue;
+    day.rawCheckIn = day.checkIn;
+    day.checkIn = e.checkIn;
+    day.checkInEdited = true;
+  }
+  return log;
+}
+
+// 2026-10-14: the ✎ beside a check-in time. Shown only to Accounting/MD, never on their own
+// record, and only on a day whose ORIGINAL door pass falls in 05:30-07:30 -- the owner's rule. The
+// raw time is what decides eligibility, so a day already corrected stays correctable.
+function checkinEditBtnHtml(row, targetUser) {
+  if (!row || !row.checkIn || !targetUser) return '';
+  if (!['md', 'accounting'].includes(effectiveRole())) return '';
+  if (currentUser && Number(currentUser.id) === Number(targetUser.id)) return '';
+  if (!checkinEditWindowOk(row.rawCheckIn || row.checkIn)) return '';
+  const edited = row.checkInEdited ? ' ✎' : '';
+  return `<button class="btn btn-ghost btn-sm" style="padding:0 4px;color:#f59e0b" title="${
+    L('Correct this check-in time', 'แก้ไขเวลาเข้างานนี้')}" onclick="openCheckinEditModal('${escapeJsAttr(row.date)}')">✎${edited}</button>`;
+}
+// The modal itself is built here rather than living in index.html: it is admin-only, opened from
+// one place, and carries a history list whose length is not known ahead of time.
+function openCheckinEditModal(dateStr) {
+  const target = (typeof selectedAttUserId !== 'undefined' && canViewOtherEmployees())
+    ? (DATA_USERS.find(u => u.id === selectedAttUserId) || currentUser) : currentUser;
+  if (!target) return;
+  const rec = attendanceLog[attKey(target.id, dateStr)] || {};
+  const raw = rec.rawCheckIn || rec.checkIn || '';
+  const edit = checkinEditRecordFor(target.id, dateStr);
+  const conflict = checkinEditApprovedRequestConflict(target.id, dateStr);
+  const hist = (edit && Array.isArray(edit.history)) ? edit.history : [];
+  const histHtml = hist.length
+    ? `<div style="margin-top:12px"><div style="font-size:12px;font-weight:600;color:#374151;margin-bottom:4px">${
+        L('Correction history', 'ประวัติการแก้ไข')}</div>${hist.slice().reverse().map(h =>
+        `<div style="font-size:12px;color:#64748b;border-left:2px solid #e2e8f0;padding:2px 8px;margin-bottom:4px">
+          <b>${escapeHtml(h.from || '—')} → ${escapeHtml(h.to || '—')}</b> · ${escapeHtml(h.by || '')} · ${escapeHtml(String(h.at || '').substring(0, 16).replace('T', ' '))}<br>${escapeHtml(h.reason || '')}
+        </div>`).join('')}</div>`
+    : '';
+  const warn = conflict
+    ? `<div style="margin:8px 0;padding:8px 10px;border-radius:8px;background:#fef2f2;color:#b91c1c;font-size:12px">${
+        L('This day already has an APPROVED time-correction request, which is applied after this correction and therefore wins. Revoke that request first, or this change will have no effect.',
+          'วันนี้มีคำขอแก้ไขเวลาที่อนุมัติแล้วอยู่ ซึ่งถูกนำมาใช้ทีหลังและจะทับค่าที่แก้ตรงนี้ ⇒ ต้องยกเลิกคำขอนั้นก่อน ไม่งั้นการแก้ตรงนี้จะไม่มีผล')}</div>`
+    : '';
+  const _cieBody = document.getElementById('checkin-edit-modal-body');
+  if (!_cieBody) return;
+  _cieBody.innerHTML = `
+    <h3 style="margin:0 0 4px">${L('Correct check-in time', 'แก้ไขเวลาเข้างาน')}</h3>
+    <div style="font-size:13px;color:#64748b;margin-bottom:10px">${escapeHtml(target.name || '')} · ${escapeHtml(dateStr)}</div>
+    ${warn}
+    <div style="font-size:13px;margin-bottom:8px">${L('Door pass recorded at', 'เวลาที่ผ่านประตูจริง')}: <b>${escapeHtml(raw || '—')}</b></div>
+    <label style="font-size:12px;font-weight:600;color:#374151">${L('New check-in time', 'เวลาเข้างานใหม่')}</label>
+    <input id="cie-time" type="time" value="${escapeHtml((edit && edit.checkIn) || raw)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;margin:4px 0 10px;box-sizing:border-box">
+    <label style="font-size:12px;font-weight:600;color:#374151">${L('Reason (required)', 'เหตุผล (จำเป็น)')}</label>
+    <textarea id="cie-reason" rows="3" maxlength="500" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;margin:4px 0 4px;box-sizing:border-box"></textarea>
+    <div style="font-size:11px;color:#94a3b8">${
+      L('Setting a later time usually removes the early-morning allowance for this day.',
+        'การแก้ให้เป็นเวลาสายขึ้น โดยปกติจะทำให้วันนั้นไม่ได้เบี้ยเลี้ยงมาเช้า')}</div>
+    ${histHtml}
+    <div style="display:flex;gap:8px;margin-top:14px">
+      <button class="btn btn-primary" onclick="submitCheckinEdit(${Number(target.id)},'${escapeJsAttr(dateStr)}')">${L('Save', 'บันทึก')}</button>
+      <button class="btn btn-ghost" onclick="closeCheckinEditModal()">${L('Cancel', 'ยกเลิก')}</button>
+    </div>`;
+  document.getElementById('checkin-edit-modal').classList.add('show');
+}
+function closeCheckinEditModal() {
+  const m = document.getElementById('checkin-edit-modal');
+  if (m) m.classList.remove('show');
+}
+async function submitCheckinEdit(userId, dateStr) {
+  const time = (document.getElementById('cie-time') || {}).value || '';
+  const reason = ((document.getElementById('cie-reason') || {}).value || '').trim();
+  if (!reason) { showToast(L('⚠️ A reason is required', '⚠️ ต้องกรอกเหตุผล'), 'warning'); return; }
+  try {
+    const res = await apiFetch('/api/checkin-time-edits', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId, date: dateStr, checkIn: time, reason }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) {
+      showToast('❌ ' + (data.message || `HTTP ${res.status}`), 'danger');
+      return;
+    }
+    closeCheckinEditModal();
+    showToast(L('✅ Check-in time corrected', '✅ แก้ไขเวลาเข้างานแล้ว'), 'success');
+    await loadCheckinEditsFromBackend();
+    await loadAttendanceFromBackend();
+    renderAttendanceTable();
+  } catch (e) {
+    showToast('❌ ' + e.message, 'danger');
+  }
+}
+function checkinEditRecordFor(userId, dateStr) {
+  const e = DATA_CHECKIN_EDITS[`${userId}_${dateStr}`];
+  return (e && typeof e === 'object' && !Array.isArray(e)) ? e : null;
+}
+// An APPROVED time-correction request (the existing MD-approved flow) is applied after this
+// overlay in attendanceTimesForDate(), so it wins. Saying so in the modal is the difference
+// between "your correction had no effect" and "your correction had no effect and nobody told you".
+function checkinEditApprovedRequestConflict(userId, dateStr) {
+  return DATA_LEAVES.some(l => l.userId == userId && l.status === 'approved'
+    && l.type === 'time-correction' && l.dateFrom === dateStr && l.correctionField === 'checkIn');
+}
+
 // 2026-10-14 (web-clock switch): did today's check-in come from the web? Twin of the server's
 // webScanHasWebCheckInToday(). The owner's rule is that web check-ins already recorded stay
 // usable, so a day started on the web can still be closed on the web after the switch goes off.
@@ -10202,7 +10358,7 @@ async function setCheckoutReview(userId, dateStr, decision, checkOut) {
         // re-fetch both attendance (the real check-out moved) and reviews, then re-render,
         // instead of leaving a stale row/chip on screen.
         showToast(L('⚠️ Check-out time changed — reload and review again', '⚠️ เวลาออกเปลี่ยนไปแล้ว — โหลดใหม่แล้วตรวจสอบอีกครั้ง'), 'warning');
-        await Promise.all([loadAttendanceFromBackend(), loadCheckoutReviewsFromBackend(), loadMorningReviewsFromBackend()]);
+        await Promise.all([loadCheckinEditsFromBackend().then(() => loadAttendanceFromBackend()), loadCheckoutReviewsFromBackend(), loadMorningReviewsFromBackend()]);
         rerenderAfterCheckoutReviews();
         return;
       }
@@ -10840,7 +10996,7 @@ function renderAttendanceTable() {
       <td>${row.partialLeave && row.partialLeave.coverage === 'am' && !row.checkIn
         ? buildPartialLeaveChip(row.partialLeave)
         : (row.checkIn
-          ? `<span class="time-chip in">⬆️ ${escapeHtml(row.checkIn)}</span>${earlyWarnBadge}${inSrc}${abroadLocalTimeHtml(row, 'in')}${gpsInBtn}`
+          ? `<span class="time-chip in">⬆️ ${escapeHtml(row.checkIn)}</span>${checkinEditBtnHtml(row, targetUser)}${earlyWarnBadge}${inSrc}${abroadLocalTimeHtml(row, 'in')}${gpsInBtn}`
           : (row.checkOut ? `<span style="color:#f59e0b;font-size:11px">⚠️ ${L('No check-in', 'ไม่มีข้อมูลเข้า')}</span>` : '<span style="color:#cbd5e1">—</span>'))
       }</td>
       <td>${row.partialLeave && row.partialLeave.coverage === 'pm' && !row.checkOut

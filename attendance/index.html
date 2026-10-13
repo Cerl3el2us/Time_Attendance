@@ -2732,6 +2732,14 @@
      scan button is never disabled by the geofence any more (see geofenceUiState()/doScan()/
      openGeofenceModal() in app.js); this popup is what a blocked press (or a 403 that slips
      through) raises instead. -->
+<!-- 2026-10-14: Accounting/MD correcting a recorded check-in time. The body is built by
+     openCheckinEditModal() in app.js because it carries a correction history of unknown length. -->
+<div class="modal-overlay" id="checkin-edit-modal" onclick="if(event.target===this)closeCheckinEditModal()">
+  <div class="modal" style="max-width:460px">
+    <div class="modal-body" id="checkin-edit-modal-body" style="font-size:14px;line-height:1.6"></div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="geofence-modal" onclick="if(event.target===this)closeGeofenceModal()">
   <div class="modal" style="max-width:420px">
     <div class="modal-header">
@@ -2750,6 +2758,6 @@
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ja.js" integrity="sha384-mKor8U8jwukUkfxaFPCsxKF9S62PXq4gG7zcZ5yQ2x3KL1msprJZeFlKFEDeeb5V" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/th.js" integrity="sha384-E6OVFg1zUc/pckGxry0YZ6VeZ1E17l7Jl8ZQx58jbEfxxkz9LqknQhiIrA9zg/8b" crossorigin="anonymous"></script>
 
-<script src="js/app.js?v=20261014c"></script>
+<script src="js/app.js?v=20261014d"></script>
 </body>
 </html>
