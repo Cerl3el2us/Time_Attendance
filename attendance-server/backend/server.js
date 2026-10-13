@@ -4688,7 +4688,10 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
   // Hoisted out of the `if (body.appSettings)` block below (4th re-audit, Finding B) so the
   // deep-merge further down can filter `current.appSettings` through the same whitelist -- see
   // that comment for why.
-  const ALLOWED_APPSETTINGS_KEYS = ['company', 'payroll', 'sso', 'allowances', 'workSchedule', 'geofence', 'leave', 'allowanceTypes', 'lateDeductPolicy', 'tax', 'allowanceEligibility', 'map', 'updatedAt'];
+  // 2026-10-13: 'allowanceRoleRates' MUST stay on this list. The deep-merge further down rebuilds
+  // current.appSettings from this list alone, so a section missing from it is silently DELETED
+  // from disk by the next unrelated Settings save -- not merely refused on the way in.
+  const ALLOWED_APPSETTINGS_KEYS = ['company', 'payroll', 'sso', 'allowances', 'workSchedule', 'geofence', 'leave', 'allowanceTypes', 'lateDeductPolicy', 'tax', 'allowanceEligibility', 'allowanceRoleRates', 'map', 'updatedAt'];
   if (body.appSettings) {
     const A = body.appSettings;
     if (Object.keys(A).length > 30) {
@@ -4705,7 +4708,7 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
     // further below) only guards `incoming`/`existing` being non-array objects at the point it
     // decides whether to merge -- a scalar `incoming` still gets stored verbatim as that key's new
     // value, corrupting every downstream reader that expects an object.
-    for (const sub of ['company', 'payroll', 'sso', 'allowances', 'workSchedule', 'geofence', 'leave', 'allowanceEligibility', 'lateDeductPolicy', 'tax', 'map']) {
+    for (const sub of ['company', 'payroll', 'sso', 'allowances', 'workSchedule', 'geofence', 'leave', 'allowanceEligibility', 'allowanceRoleRates', 'lateDeductPolicy', 'tax', 'map']) {
       if (A[sub] !== undefined && (!A[sub] || typeof A[sub] !== 'object' || Array.isArray(A[sub]))) {
         return res.status(400).json({ success: false, message: `appSettings.${sub} must be an object` });
       }
@@ -4860,6 +4863,48 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
         return res.status(400).json({ success: false, message: 'appSettings.leave.businessLeaveDays must be a number between 0 and 365' });
       }
       A.leave.businessLeaveDays = normalizeQuotaDays(A.leave.businessLeaveDays, DEFAULT_BUSINESS_LEAVE_DAYS);
+    }
+    // 2026-10-13: per-role early/late rates (owner's decision). A SEPARATE appSettings section,
+    // not a nested object inside `allowances`, because that section's validator demands a number
+    // from every key -- the morningReviewEnabled incident showed a nested non-number there makes
+    // EVERY later Settings save fail, the whole page, until an exception is added for it.
+    // ALSO on ALLOWED_APPSETTINGS_KEYS above, or the deep-merge below rebuilds appSettings without
+    // this section and the owner's table is wiped from disk by the next unrelated save.
+    if (A.allowanceRoleRates !== undefined) {
+      const RR = A.allowanceRoleRates;
+      if (Object.keys(RR).some(k => !['enabled', 'byRole'].includes(k))) {
+        return res.status(400).json({ success: false, message: 'appSettings.allowanceRoleRates accepts only enabled and byRole' });
+      }
+      if (typeof RR.enabled !== 'boolean') {
+        return res.status(400).json({ success: false, message: 'appSettings.allowanceRoleRates.enabled must be true or false' });
+      }
+      const byRole = RR.byRole === undefined ? {} : RR.byRole;
+      if (!byRole || typeof byRole !== 'object' || Array.isArray(byRole)) {
+        return res.status(400).json({ success: false, message: 'appSettings.allowanceRoleRates.byRole must be an object' });
+      }
+      if (Object.keys(byRole).length > ROLE_KEYS.length) {
+        return res.status(400).json({ success: false, message: `appSettings.allowanceRoleRates.byRole must have ${ROLE_KEYS.length} or fewer entries` });
+      }
+      for (const [role, row] of Object.entries(byRole)) {
+        if (!ROLE_KEYS.includes(role)) {
+          return res.status(400).json({ success: false, message: `appSettings.allowanceRoleRates.byRole."${role}" is not a known role` });
+        }
+        if (!row || typeof row !== 'object' || Array.isArray(row)) {
+          return res.status(400).json({ success: false, message: `appSettings.allowanceRoleRates.byRole.${role} must be an object` });
+        }
+        for (const [k, v] of Object.entries(row)) {
+          if (!EARLY_LATE_RATE_KEYS.includes(k)) {
+            return res.status(400).json({ success: false, message: `appSettings.allowanceRoleRates.byRole.${role}.${k} is not an early-morning or late-night rate` });
+          }
+          // Same 0-100000 money rule the rest of `allowances` uses. 0 is legal: it means this
+          // tier is not paid to this role, which is different from leaving the cell blank
+          // (blank = use the company-wide amount, and the page omits the key entirely).
+          if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 100000) {
+            return res.status(400).json({ success: false, message: `appSettings.allowanceRoleRates.byRole.${role}.${k} must be a number 0-100000` });
+          }
+        }
+      }
+      RR.byRole = byRole;
     }
   }
   if (body.appSettings) {

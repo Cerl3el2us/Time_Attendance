@@ -406,5 +406,114 @@ test('nothing in app.js outside the Settings page reads an early/late amount dir
   assert.deepStrictEqual(offenders, [], `these app.js lines still read the amount directly:\n  ${offenders.join('\n  ')}`);
 });
 
+// ---- the server accepts the section, and never silently drops it ----
+// Review Focus 5: the save path rebuilds current.appSettings from ALLOWED_APPSETTINGS_KEYS, so a
+// section missing from that list is DELETED from disk by the next unrelated Settings save -- and
+// a section in the request body but not in the list makes the whole page refuse to save, which is
+// the trap the spec warns about from the morningReviewEnabled incident.
+test('allowanceRoleRates is on both server allowlists', () => {
+  const allow = /const ALLOWED_APPSETTINGS_KEYS = (\[[^\]]*\]);/.exec(SERVER_SRC);
+  assert.ok(allow, 'ALLOWED_APPSETTINGS_KEYS not found');
+  assert.ok(/'allowanceRoleRates'/.test(allow[1]),
+    'without this, saving Settings once wipes the rate table off disk');
+  const objList = /for \(const sub of (\[[^\]]*'allowanceEligibility'[^\]]*\])\)/.exec(SERVER_SRC);
+  assert.ok(objList, 'the must-be-an-object list not found');
+  assert.ok(/'allowanceRoleRates'/.test(objList[1]),
+    'a client could otherwise store a scalar where every reader expects an object');
+});
+
+test('the carry-forward filter really is driven by that allowlist', () => {
+  // Pins WHY the allowlist entry matters, so the entry cannot be removed as "redundant".
+  assert.ok(/for \(const k of ALLOWED_APPSETTINGS_KEYS\)[\s\S]{0,200}cleanCurrentAppSettings\[k\] = current\.appSettings\[k\]/.test(SERVER_SRC),
+    'the save path no longer rebuilds appSettings from the allowlist -- re-check what keeps a section on disk');
+});
+
+test('the saved shape is validated: known roles, the four keys, money in range', () => {
+  const block = /if \(A\.allowanceRoleRates !== undefined\) \{[\s\S]*?\n    \}\n/.exec(SERVER_SRC);
+  assert.ok(block, 'no validation block for allowanceRoleRates');
+  const b = block[0];
+  assert.ok(/ROLE_KEYS\.includes/.test(b), 'an unknown role must be refused');
+  assert.ok(/EARLY_LATE_RATE_KEYS\.includes/.test(b), 'a key outside the four must be refused');
+  assert.ok(/100000/.test(b), 'the same 0-100000 money cap as the rest of allowances');
+  assert.ok(/typeof RR\.enabled !== 'boolean'/.test(b), 'enabled must be a boolean');
+});
+
+test('the rate table is NOT nested inside allowances, which demands a number from every key', () => {
+  // The spec's reason: allowances' validator requires a number (or a boolean for ...Enabled) from
+  // every key, so a nested object there makes EVERY Settings save fail until an exception is added.
+  assert.ok(!/allowances\.allowanceRoleRates/.test(SERVER_SRC));
+  assert.ok(!/allowances\.allowanceRoleRates/.test(APP_SRC));
+  const defaults = /allowances: \{[\s\S]*?\n  \},/.exec(SERVER_SRC);
+  assert.ok(defaults && !/byRole/.test(defaults[0]), 'allowanceRoleRates must be its own section');
+});
+
+// The validator is inline in a route handler, so run the REAL block rather than a hand-copied
+// mirror of its rules: extract its text, wrap it in a function, and give it a stub res. A mirror
+// would keep passing after the real rule changed.
+const RR_VALIDATOR_SRC = (() => {
+  const start = SERVER_SRC.indexOf('if (A.allowanceRoleRates !== undefined) {');
+  assert.ok(start > -1, 'the allowanceRoleRates validation block was not found');
+  let depth = 0;
+  const open = SERVER_SRC.indexOf('{', start);
+  for (let j = open; j < SERVER_SRC.length; j++) {
+    if (SERVER_SRC[j] === '{') depth++;
+    else if (SERVER_SRC[j] === '}') { depth--; if (depth === 0) return SERVER_SRC.slice(start, j + 1); }
+  }
+  throw new Error('unbalanced allowanceRoleRates block');
+})();
+
+function runRRValidator(payload) {
+  const ctx = {
+    ROLE_KEYS: ['md', 'manager', 'accounting', 'user', 'marketing', 'driver'],
+    EARLY_LATE_RATE_KEYS: JSON.parse(extractKeys(SERVER_SRC).replace(/'/g, '"')),
+    Object, Number, Array, JSON,
+  };
+  vm.createContext(ctx);
+  // `res.status(400).json(x)` is the refusal path; returning it ends the handler.
+  vm.runInContext(
+    'this.check = function (A) {\n' +
+    '  const res = { status: () => ({ json: (x) => ({ refused: true, message: x.message }) }) };\n' +
+    `  ${RR_VALIDATOR_SRC}\n` +
+    '  return { refused: false, normalized: A.allowanceRoleRates };\n' +
+    '};', ctx);
+  return ctx.check({ allowanceRoleRates: payload });
+}
+
+test('a Settings save carrying the new section is accepted and normalised', () => {
+  // Compared through JSON: the validator runs in a vm realm, so an object literal it creates has
+  // that realm's prototype and deepStrictEqual rejects it on identity, not on content.
+  const plain = (x) => JSON.parse(JSON.stringify(x));
+  const ok = runRRValidator({ enabled: false, byRole: {} });
+  assert.strictEqual(ok.refused, false, ok.message);
+  assert.deepStrictEqual(plain(ok.normalized), { enabled: false, byRole: {} });
+  // byRole omitted entirely is filled in, so later readers never meet undefined.
+  const filled = runRRValidator({ enabled: true });
+  assert.strictEqual(filled.refused, false, filled.message);
+  assert.deepStrictEqual(plain(filled.normalized.byRole), {});
+  // a real-shaped table, with 0 accepted as a deliberate "do not pay"
+  const real = runRRValidator({ enabled: true, byRole: { manager: { earlyMorning1: 1, lateNight2: 0 } } });
+  assert.strictEqual(real.refused, false, real.message);
+});
+
+test('the validator refuses what would corrupt the table', () => {
+  const cases = [
+    [{ enabled: 'yes', byRole: {} }, 'enabled must be true or false'],
+    [{ enabled: true, byRole: [] }, 'byRole must be an object'],
+    [{ enabled: true, byRole: { nosuchrole: { earlyMorning1: 1 } } }, 'not a known role'],
+    [{ enabled: true, byRole: { manager: { upcountry: 1 } } }, 'not an early-morning or late-night rate'],
+    [{ enabled: true, byRole: { manager: { earlyMorning1: -1 } } }, 'must be a number 0-100000'],
+    [{ enabled: true, byRole: { manager: { earlyMorning1: 100001 } } }, 'must be a number 0-100000'],
+    [{ enabled: true, byRole: { manager: { earlyMorning1: '360' } } }, 'must be a number 0-100000'],
+    [{ enabled: true, byRole: { manager: null } }, 'must be an object'],
+    [{ enabled: true, byRole: {}, somethingElse: 1 }, 'accepts only enabled and byRole'],
+  ];
+  for (const [payload, needle] of cases) {
+    const got = runRRValidator(payload);
+    assert.strictEqual(got.refused, true, `should have been refused: ${JSON.stringify(payload)}`);
+    assert.ok(String(got.message).includes(needle),
+      `refusal for ${JSON.stringify(payload)} said "${got.message}", expected to mention "${needle}"`);
+  }
+});
+
 console.log(`\n${passed} assertions passed`);
 module.exports = { between, previewPassesRole };
