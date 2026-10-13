@@ -38,6 +38,10 @@ function extractFunction(src, name) {
 }
 
 const FNS = [
+  // 2026-10-13: the per-role early/late rate reader, which the two allowance helpers below call.
+  // The sandbox deliberately has no currentUser: the preview must resolve the rate from the
+  // FORM'S employee, so a missing viewer must never be what makes these tests pass.
+  'earlyLateRateFor',
   'round2HalfUp', 'isVoidLeaveStatus', 'parseHHMMToMins', 'lateNightCheckoutMins', 'lateNightThresholdHourOf',
   'lateNightThresholdMins', 'lateOutAllowanceForHour', 'isDeviceScanSource',
   'isEarlyMorningDayStatus', 'isRestAttendanceDay', 'deviceScanQualifiesForEarlyMorning', 'earlyMorningCheckInOk',
@@ -87,7 +91,10 @@ function makeWorld(opts = {}) {
   };
   sandbox.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(sandbox);
-  vm.runInContext(FNS.map(n => extractFunction(APP_SRC, n)).join('\n'), sandbox);
+  // earlyLateRateFor closes over a module-level const, which extractFunction cannot carry.
+  // Evaluate its real declaration line so the sandbox can never hold a stale copy of the list.
+  const keysLine = APP_SRC.match(/^const EARLY_LATE_RATE_KEYS = .*$/m)[0].replace(/^const /, '');
+  vm.runInContext(keysLine + '\n' + FNS.map(n => extractFunction(APP_SRC, n)).join('\n'), sandbox);
   return sandbox;
 }
 

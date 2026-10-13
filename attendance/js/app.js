@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 103;
+const APP_BUILD = 104;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -2892,7 +2892,9 @@ function estimateDayEarnings(opts) {
       const tier = earlyMorningTierFromCheckIn(row.checkIn, S);
       if (tier) {
         lines.push({ key: 'early', label: `🌅 ${L('Early Morning', 'เบี้ยเลี้ยงมาเช้า')} ×${tier}`,
-          amount: earlyMorningAllowanceForTier(tier),
+          // 2026-10-13: `role` is the FORM'S employee, like isApprovedAbroadDate above -- an
+          // admin filing on someone's behalf must be previewed that person's rate, not their own.
+          amount: earlyMorningAllowanceForTier(tier, role),
           note: currentLang === 'ja' ? `打刻 ${row.checkIn}` : L(`scan ${row.checkIn}`, `สแกน ${row.checkIn}`) });
       }
     } else if (row && row.checkIn && !isDeviceScanSource(row.checkInSource) &&
@@ -2907,7 +2909,8 @@ function estimateDayEarnings(opts) {
   // --- Late Night, only when this form bundles it ---
   if (canEarlyLate && !onAbroad && Number(o.lateOutHour) > 0) {
     lines.push({ key: 'late-night', label: `🌙 ${L('Late Night', 'เบี้ยเลี้ยงกลับดึก')}`,
-      amount: lateOutAllowanceForHour(Number(o.lateOutHour)) });
+      // 2026-10-13: the form's employee, not the viewer -- see earlyMorningAllowanceForTier above.
+      amount: lateOutAllowanceForHour(Number(o.lateOutHour), role) });
   }
 
   // --- Holiday transport: paid-mode Holiday Work only ---
@@ -3075,9 +3078,16 @@ function earlyMorningThresholdMins(tier) {
   const S = APP_SETTINGS.allowances;
   return tier === 2 ? (S.earlyThreshold2Min || 390) : (S.earlyThreshold1Min || 450);
 }
-function earlyMorningAllowanceForTier(tier) {
-  const S = APP_SETTINGS.allowances;
-  return tier === 2 ? (S.earlyMorning2 || 480) : (S.earlyMorning1 || 240);
+// 2026-10-13: `role` picks whose rate to report. It defaults to effectiveRole() because every
+// existing caller is a self-service screen; a screen showing someone else must pass that person's
+// role, or an admin would be shown their own rate on another employee's row.
+// effectiveRole() and NOT currentUser.role: a superadmin previewing as Manager must be told the
+// Manager rate, not the rate of the superadmin account. tests/superadmin-reach.test.js enforces
+// this for every "what do I get" read, and caught exactly that mistake here on 2026-10-13.
+// It is null-safe before sign-in (returns 'user'), so nothing that renders pre-login throws.
+function earlyMorningAllowanceForTier(tier, role) {
+  const r = role === undefined ? effectiveRole() : role;
+  return earlyLateRateFor(r, tier === 2 ? 'earlyMorning2' : 'earlyMorning1', APP_SETTINGS);
 }
 function earlyMorningTierAllowed(checkIn, tier) {
   if (![1, 2].includes(tier) || !checkIn) return false;
@@ -10384,6 +10394,10 @@ function renderAttendanceTable() {
     const dateStr = fmtDate(d);
 
     const _ATallowances = APP_SETTINGS.allowances;
+    // 2026-10-13: the rate belongs to the EMPLOYEE WHOSE ROW THIS IS (targetUser), not to whoever
+    // is looking. Accounting/MD browse other people here, and showing them their own rate on
+    // someone else's row reads as the system miscalculating.
+    const _elRateTarget = (key) => earlyLateRateFor(targetUser.role, key, APP_SETTINGS);
     let earlyBadge = '';
     let earlyWarnBadge = '';
     if (canEarlyLateTarget && row.checkIn && row.status !== 'company-trip') {
@@ -10392,8 +10406,8 @@ function renderAttendanceTable() {
       if (mins <= (_ATallowances.earlyThreshold1Min || 450) && isDeviceScanSource(row.checkInSource)
           && (!isRestAttendanceDay(row) || hasHolidayWorkClaimOnDate(row.date, targetUserId, false))) {
         const bonus = mins <= (_ATallowances.earlyThreshold2Min || 390)
-          ? `฿${_ATallowances.earlyMorning2 || 480}`
-          : `฿${_ATallowances.earlyMorning1 || 240}`;
+          ? `฿${_elRateTarget('earlyMorning2')}`
+          : `฿${_elRateTarget('earlyMorning1')}`;
         // 2026-10-02 (owner): the 🌅 kept its normal look while the money behind it was being
         // held, so the row read as "paid" on a day nothing had been paid for. A held day says so
         // on its face -- greyed, with (awaiting review) next to it -- and a refused one says that
@@ -10453,7 +10467,7 @@ function renderAttendanceTable() {
     ).map(l => l.dateFrom));
     if (canEarlyLateTarget && deviceScanQualifiesForLateNight(row, _lnHwDates)) {
       const _ln2Thr = lateNightThresholdHourOf(_ATallowances, 2);
-      const bonus = lateNightPoints(row.lateOut, _ln2Thr) === 2 ? `฿${_ATallowances.lateNight2 || 480}` : `฿${_ATallowances.lateNight1 || 240}`;
+      const bonus = lateNightPoints(row.lateOut, _ln2Thr) === 2 ? `฿${_elRateTarget('lateNight2')}` : `฿${_elRateTarget('lateNight1')}`;
       lateBadge = attAllowIcon('🌙', `${L('Late Night', 'Late Night')} ${row.lateOut} (${bonus})`);
     }
 
@@ -17058,7 +17072,10 @@ function showApprovalDetail(id) {
       + row(L('Compensation', 'การชดเชย'), mode);
   } else if (l.type === 'early-morning') {
     const tier = Number(l.earlyMorningTier) || 0;
-    const bonus = tier === 2 ? (APP_SETTINGS.allowances.earlyMorning2 || 480) : tier === 1 ? (APP_SETTINGS.allowances.earlyMorning1 || 240) : 0;
+    // 2026-10-13: the rate of the person who filed the request, not of the approver reading it.
+    const _reqRole = (DATA_USERS.find(u => u.id === l.userId) || {}).role;
+    const bonus = tier === 2 ? earlyLateRateFor(_reqRole, 'earlyMorning2', APP_SETTINGS)
+      : tier === 1 ? earlyLateRateFor(_reqRole, 'earlyMorning1', APP_SETTINGS) : 0;
     detailHtml = row(L('Tier', 'อัตรา'), `🌅 ×${tier} (฿${bonus})`);
   } else if (l.type === 'long-distance') {
     const ldThreshDisp = APP_SETTINGS.allowances.longDistanceThresholdKm || LONG_DISTANCE_THRESHOLD_KM;
@@ -18147,10 +18164,13 @@ function lateOutThresholdHour(tier) {
   const S = APP_SETTINGS.allowances;
   return lateNightThresholdHourOf(S, tier);
 }
-function lateOutAllowanceForHour(hour) {
+// 2026-10-13: `role` as in earlyMorningAllowanceForTier -- defaults to effectiveRole(), so a
+// superadmin previewing a role is told that role's rate.
+function lateOutAllowanceForHour(hour, role) {
   const S = APP_SETTINGS.allowances;
   const thr2 = lateNightThresholdHourOf(S, 2);
-  return lateNightThresholdMins(hour) >= lateNightThresholdMins(thr2) ? (S.lateNight2 || 480) : (S.lateNight1 || 240);
+  const r = role === undefined ? effectiveRole() : role;
+  return earlyLateRateFor(r, lateNightThresholdMins(hour) >= lateNightThresholdMins(thr2) ? 'lateNight2' : 'lateNight1', APP_SETTINGS);
 }
 
 // 2026-09-23 (web check-out review): reads ONE generatePeriodDays() row -- the same source payroll
@@ -20806,7 +20826,8 @@ function showAttendanceDetail(date) {
     const mins = eh * 60 + em;
     if (mins <= (_dA.earlyThreshold1Min ?? 450) && isDeviceScanSource(row.checkInSource)
         && (!isRestAttendanceDay(row) || hasHolidayWorkClaimOnDate(row.date, targetUserId, false))) {
-      const bonus = `฿${mins <= (_dA.earlyThreshold2Min ?? 390) ? (_dA.earlyMorning2 || 480) : (_dA.earlyMorning1 || 240)}`;
+      // 2026-10-13: targetRole is the row owner, already used by the eligibility gate above.
+      const bonus = `฿${mins <= (_dA.earlyThreshold2Min ?? 390) ? earlyLateRateFor(targetRole, 'earlyMorning2', APP_SETTINGS) : earlyLateRateFor(targetRole, 'earlyMorning1', APP_SETTINGS)}`;
       tagsEl.innerHTML += `<span class="badge badge-success">🌅 ${L('Early In', 'เข้าเช้า')} ${escapeHtml(row.checkIn)} (+${bonus})</span>`;
     }
   }
@@ -20814,7 +20835,7 @@ function showAttendanceDetail(date) {
       && lateNightCheckoutOk(row)
       && (!isRestAttendanceDay(row) || hasHolidayWorkClaimOnDate(row.date, targetUserId, false))) {
     const _ln2Thr = lateNightThresholdHourOf(_dA, 2);
-    const bonus = `฿${lateNightPoints(row.lateOut, _ln2Thr) === 2 ? (_dA.lateNight2 || 480) : (_dA.lateNight1 || 240)}`;
+    const bonus = `฿${lateNightPoints(row.lateOut, _ln2Thr) === 2 ? earlyLateRateFor(targetRole, 'lateNight2', APP_SETTINGS) : earlyLateRateFor(targetRole, 'lateNight1', APP_SETTINGS)}`;
     const approved = row.lateApproved;
     tagsEl.innerHTML += `<span class="badge ${approved?'badge-success':'badge-warning'}">🌙 ${L('Late Night', 'ทำงานดึก')} ${escapeHtml(row.lateOut)} (+${bonus}) ${approved?L('✓ Approved','✓ อนุมัติแล้ว'):L('⏳ Pending','⏳ รออนุมัติ')}</span>`;
   }

@@ -261,5 +261,105 @@ test('an old payroll snapshot still prints the figure it was paid', () => {
     'the payslip rate must fall back for a snapshot that predates the *Rate fields');
 });
 
+// ---- what people see ----
+// Review Focus 1 again, at the display sites: seven of these lines were written `(x || 480)`, and
+// keeping the `||` after routing them re-breaks the one value that means "stop paying".
+test('no rate is wrapped in || default anywhere', () => {
+  const offenders = [];
+  APP_SRC.split('\n').forEach((line, i) => {
+    if (/earlyLateRateFor\([^)]*\)\s*\|\|/.test(line)) offenders.push(`${i + 1}: ${line.trim()}`);
+    if (/(earlyMorningAllowanceForTier|lateOutAllowanceForHour)\([^)]*\)\s*\|\|/.test(line)) offenders.push(`${i + 1}: ${line.trim()}`);
+  });
+  assert.deepStrictEqual(offenders, [], `a rate must never be wrapped in "|| default" -- 0 is a legal rate:\n  ${offenders.join('\n  ')}`);
+});
+
+test('the self-service helpers take an optional role and default to the signed-in user', () => {
+  assert.ok(/function earlyMorningAllowanceForTier\(tier, role\)/.test(APP_SRC),
+    'earlyMorningAllowanceForTier must accept a role');
+  assert.ok(/function lateOutAllowanceForHour\(hour, role\)/.test(APP_SRC),
+    'lateOutAllowanceForHour must accept a role');
+});
+
+// 2026-10-13: this started out asserting a helper that read currentUser.role directly. The
+// project's superadmin-reach guard rejected it, correctly: a superadmin previewing as Manager
+// would have been quoted the superadmin account's rate. The requirement is effectiveRole().
+test('the self-service default is effectiveRole(), not the account\'s own role', () => {
+  for (const name of ['earlyMorningAllowanceForTier', 'lateOutAllowanceForHour']) {
+    const fn = extractFunction(APP_SRC, name);
+    assert.ok(/role === undefined \? effectiveRole\(\)/.test(fn),
+      `${name} must default to effectiveRole() so a previewed role is quoted its own rate`);
+    assert.ok(!/currentUser\s*&&\s*currentUser\.role/.test(fn),
+      `${name} must not read the raw account role`);
+  }
+  assert.ok(!/function selfRateRole\(/.test(APP_SRC),
+    'selfRateRole was removed in favour of effectiveRole() -- do not reintroduce a second answer');
+});
+
+test('the self-service default survives a pre-login render', () => {
+  // effectiveRole() is the default, and it must not throw when nobody is signed in.
+  const fns = ['loggedInUser', 'isSuperAdmin', 'isImpersonatingPerson', 'effectiveRole']
+    .map(n => extractFunction(APP_SRC, n)).join('\n');
+  const ctx = { currentUser: null, realUser: null, previewRole: '', previewUserId: 0 };
+  vm.createContext(ctx);
+  vm.runInContext(`${fns}\nthis.out = effectiveRole();`, ctx);
+  assert.strictEqual(ctx.out, 'user', 'pre-login effectiveRole() must answer, not throw');
+});
+
+// Review Focus 4: an admin must see the row owner's rate, not their own.
+test('the attendance table badges use the viewed employee\'s rate', () => {
+  const table = between(APP_SRC, 'const _ATallowances = APP_SETTINGS.allowances;', 'deviceScanQualifiesForLateNight(row, _lnHwDates)', 1200);
+  assert.ok(/_elRateTarget\(/.test(table) || /earlyLateRateFor\(\s*targetUser\.role/.test(table),
+    'renderAttendanceTable badges must take the rate for targetUser.role');
+  assert.ok(!/earlyLateRateFor\(\s*(currentUser|selfRateRole\(\))/.test(table),
+    'renderAttendanceTable must not use the viewer\'s role');
+  const offenders = directRateReads(table);
+  assert.deepStrictEqual(offenders, [], `the table still reads the amount directly:\n  ${offenders.join('\n  ')}`);
+});
+
+test('the attendance detail modal uses the viewed employee\'s rate', () => {
+  const modal = between(APP_SRC, "const _dA = APP_SETTINGS.allowances || {};", 'buildCheckoutReviewHtml(row, targetUserObj, false)', 400);
+  assert.ok(/earlyLateRateFor\(\s*targetRole/.test(modal) || /_elRateTarget\(/.test(modal),
+    'the attendance detail modal must take the rate for targetRole');
+  assert.ok(!/_dA\.(earlyMorning1|earlyMorning2|lateNight1|lateNight2)/.test(modal),
+    'the modal still reads the company-wide amount directly');
+});
+
+test('the request detail shows the requester\'s rate, not the approver\'s', () => {
+  const req = between(APP_SRC, "} else if (l.type === 'early-morning') {", "} else if (l.type === 'long-distance') {", 0);
+  assert.ok(/earlyLateRateFor\(/.test(req), 'the early-morning request detail must use the reader');
+  assert.ok(/l\.userId/.test(req), 'it must resolve the role from the record owner (l.userId)');
+  assert.ok(!/APP_SETTINGS\.allowances\.(earlyMorning1|earlyMorning2)/.test(req),
+    'the request detail still reads the company-wide amount directly');
+});
+
+// 2026-10-13: found while fixing the day-pay-preview sandbox. estimateDayEarnings() is the pay
+// preview inside a request form, and `user` there may be someone an admin is filing on behalf of
+// (the function already carries a comment about exactly this trap for isApprovedAbroadDate).
+// Both allowance lines must therefore pass that employee's role, not fall back to the viewer.
+function previewPassesRole(src) {
+  const fn = (() => {
+    const re = /^function estimateDayEarnings\(/m;
+    const m = re.exec(src);
+    if (!m) throw new Error('estimateDayEarnings not found');
+    const i = src.indexOf('{', m.index);
+    let depth = 0;
+    for (let j = i; j < src.length; j++) {
+      if (src[j] === '{') depth++;
+      else if (src[j] === '}') { depth--; if (depth === 0) return src.slice(m.index, j + 1); }
+    }
+    throw new Error('unbalanced estimateDayEarnings');
+  })();
+  return {
+    early: /earlyMorningAllowanceForTier\(tier,\s*role\)/.test(fn),
+    late: /lateOutAllowanceForHour\(Number\(o\.lateOutHour\),\s*role\)/.test(fn),
+  };
+}
+
+test('the in-form pay preview quotes the form employee\'s rate, not the viewer\'s', () => {
+  const got = previewPassesRole(APP_SRC);
+  assert.ok(got.early, 'the early-morning preview line must pass the form employee\'s role');
+  assert.ok(got.late, 'the late-night preview line must pass the form employee\'s role');
+});
+
 console.log(`\n${passed} assertions passed`);
-module.exports = { between };
+module.exports = { between, previewPassesRole };
