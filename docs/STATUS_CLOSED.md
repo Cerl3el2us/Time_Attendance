@@ -594,3 +594,32 @@ superadmin ไม่มี `employeeNo` ⇒ ได้ `400 Account not linked to
   · บทเรียนตอนลบ: ลืมลบชื่อใน `module.exports` = `ReferenceError` ตอน require (แดงดังๆ) แต่ import ที่เหลือใน
     เทสต์กับ helper ที่ไม่มีใครใช้ **เงียบ** เพราะ `no-unused-vars` เป็น `off` และ `scripts/` อยู่นอก `npm run lint`
     ⇒ ต้อง grep เอง ไม่ใช่เชื่อเครื่องมือ
+
+- **เครื่องบ้าน (`Teerawat`) reset Windows แล้ว และตั้งกลับมาทำงานกับโปรเจกต์นี้ได้ครบ (`home-machine-rebuild`)**
+  · **วัดเมื่อ 2026-10-13 บนเครื่องบ้าน:** `InstallDate` = 2026-10-13 14:31 (ค่าเดิมที่ข้อส่งต่อบันทึกไว้คือ
+    2026-07-15) · `LastBootUpTime` = 2026-10-13 14:20 · โฟลเดอร์ `Start Menu\Programs` ใน `%APPDATA%`
+    กลับมาแล้ว ⇒ **reset เกิดขึ้นจริง** ตามเกณฑ์ที่ข้อส่งต่อเขียนไว้เองว่าให้ตัดสินด้วยอะไร
+  · **reset แบบ Keep my files** ⇒ `Downloads`, `C:\Users\Teerawat\.claude` (ปลั๊กอิน + memory) และ worktree
+    `C:\Users\Teerawat\ta-office` **รอดทั้งหมด** · `.git` ของ worktree เป็นไฟล์ pointer ไปที่
+    `//192.168.100.100/web/Time_Attendance/.git/worktrees/ta-office` ซึ่งอยู่บน NAS ⇒ **ไม่ต้อง `git clone` ใหม่**
+    และข้อ 3.3 ของคู่มือกู้เครื่องข้ามได้ (คู่มือเขียนตอนยังไม่รู้ว่าจะ reset โหมดไหน จึงสั่ง clone ไว้ก่อน)
+  · **ที่หายจริงคือโปรแกรมใน `Program Files`** — ลงกลับด้วย `winget` ซึ่งกลับมาใช้ได้แล้วหลัง reset
+    จึงไม่ต้องโหลดไฟล์ติดตั้งเอง: Git `2.55.0.windows.5` · Node.js LTS `v24.20.0` (npm `11.19.0`) ·
+    Python `3.14.7` ที่ `AppData\Local\Programs\Python\Python314` (ก่อนหน้านี้คำว่า `python` ชี้ไปที่ alias
+    ขนาด 0 ไบต์ของ Microsoft Store) · เลือกสาย **3.14 ไม่ใช่ 3.15** ตามเหตุผลในคู่มือ: skill `ui-ux-pro-max`
+    เรียกด้วยคำว่า `python` บนสายนี้มาตลอด · เบราว์เซอร์ของ Playwright โหลดกลับครบ (chromium/firefox/webkit/ffmpeg)
+  · **ปลั๊กอิน 11 ตัวไม่ต้องลงใหม่เลย** — `C:\Users\Teerawat\.claude\settings.json` รอด `enabledPlugins`
+    เป็น `True` ครบทั้ง 11 ตัว และ `ui-theme-designer` ยังเป็น `False` ตรงตามที่คู่มือสั่ง ⇒ skill ครบตามไปด้วย
+    เพราะคู่มือระบุว่าเครื่องนี้ไม่มีโฟลเดอร์ `skills` เดี่ยว skill ทุกตัวมาจากปลั๊กอิน
+  · **บทเรียนที่ใช้ซ้ำได้ — MCP ที่ต่อไม่ติดหลังล้างเครื่อง ไม่ได้แปลว่าปลั๊กอินหาย:** MCP ที่สั่งด้วย `npx`
+    (ปลั๊กอิน playwright เขียน `"command": "npx"` ตรงๆ) ขึ้น `CONNECTION_CLOSED` เพราะ session เปิดตอนที่ยัง
+    ไม่มี node ⇒ แก้ด้วยการ**เปิด session ใหม่หลังลง node** ไม่ใช่ลงปลั๊กอินซ้ำ · ส่วน `github` ขึ้น
+    "Authorization header is badly formatted" เพราะ header เขียนว่า `Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}`
+    แต่ตัวแปรนั้นว่าง — **ไม่เกี่ยวกับ `git push`/`fetch`** ซึ่งวัดแล้วใช้ได้ปกติ และคู่มือระบุว่าไม่จำเป็นกับงานนี้
+  · **ยืนยันว่าโค้ดกลับมาใช้งานได้จริง ไม่ใช่แค่ลงเครื่องมือเสร็จ:** `npm install` = up to date ·
+    `npm run check` = **40/40 test files passed** (ตรงกับตัวเลขที่คู่มือบอกว่าต้องได้) · `npm run backlog`
+    รันได้ใน 2.98 วิ จากงบ 5 วิ และรายงานข้อเปิด 1 ข้อเป็น FAIL ตามที่คู่มือบอกว่าควรเห็น ·
+    `git fetch` ติดโดยไม่ถาม credential · worktree สะอาด ไม่มี commit ค้างไม่ได้ push
+  · **ของที่ Claude ทำแทนไม่ได้ ยังเหลือให้เจ้าของทำเอง:** ปักไอคอนทาสก์บาร์ · ตั้ง wallpaper ·
+    bookmark เบราว์เซอร์ (หายถาวรตั้งแต่ 2026-10-12 ต้องดึงจาก sync) · ล็อกอิน Cursor / LINE / Discord ·
+    รายการเต็มอยู่ในคู่มือ `Z:\claude_memory\RECOVERY_2026-10-12_appdata_loss.md`
