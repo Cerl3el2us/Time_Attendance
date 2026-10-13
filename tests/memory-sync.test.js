@@ -289,6 +289,8 @@ function fakeNas(name, mem, summaryLine, stubOpts = {}) {
   const nas = tmp(name);
   fs.copyFileSync(DIRTY_SCRIPT, path.join(nas, 'sync_if_dirty.ps1'));
   const decl = stubOpts.nasDir === false ? '' : `$NasMemoryDir = '${nas}'\n`;
+  const patterns = stubOpts.patterns
+    || "$Patterns = @(\n  'feedback_attendance*.md',\n  'MEMORY.md'\n)\n";
   const copy = stubOpts.copy
     ? `foreach ($f in @(Get-ChildItem -Path (Join-Path '${mem}' '*') -File -Include $Patterns)) {\n`
       + `  Copy-Item -LiteralPath $f.FullName -Destination '${nas}' -Force\n}\n`
@@ -296,7 +298,7 @@ function fakeNas(name, mem, summaryLine, stubOpts = {}) {
   fs.writeFileSync(path.join(nas, 'sync_memory.ps1'),
     'param([Parameter(Position=0)][string]$Mode, [string]$ProjectDir)\n'
     + decl
-    + "$Patterns = @(\n  'feedback_attendance*.md',\n  'MEMORY.md'\n)\n"
+    + patterns
     + copy
     + `Write-Host '${summaryLine}'\n`, 'utf8');
   return nas;
@@ -453,4 +455,206 @@ test('sync_memory.ps1 and sync_if_dirty.ps1 derive the folder name with the same
   for (const needle of ["-replace ':', '-'", "-replace '\\\\', '-'", "-replace '\\.', '-'"]) {
     if (!a.includes(needle)) throw new Error(`the shared expression is missing ${needle}: ${a}`);
   }
+});
+
+// -----------------------------------------------------------------------------------------------
+// 2026-10-13, asked for after the fact ("is the bug checking comprehensive?"): the five cases above
+// all use files at the top level, so the archive\ branch of the placement rule -- the one piece of
+// Test-DirtyInStep with a condition in it -- had no case at all. sync_memory.ps1 copies the top
+// level and archive\ with two calls of Copy-MemoryFiles, neither recursive, so archive\x.md travels
+// and archive\old\x.md never can. These pin both sides of that, and the pattern reader's refusal.
+// -----------------------------------------------------------------------------------------------
+
+function writeIn(dir, rel, body) {
+  const p = path.join(dir, rel);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, body, 'utf8');
+  return p;
+}
+
+test('sync_if_dirty: a file in archive\\ counts as proven when the NAS has it, like a top-level one', () => {
+  if (!SLOW) skip('--slow only');
+  requireScript(DIRTY_SCRIPT);
+  const mem = tmp('archive-mem');
+  writeIn(mem, path.join('archive', 'feedback_attendance_old.md'), 'archived note');
+  const nas = fakeNas('archive-nas', mem, summary(1, 0, 0, 0));
+  // The stub copies only the top level, so put the archive copy in place the way a real push would.
+  writeIn(nas, path.join('archive', 'feedback_attendance_old.md'), 'archived note');
+  const r = runDirty(nas, mem);
+  if (r.code !== 0) throw new Error(`a hook must never fail the session: exit ${r.code} ${r.err}`);
+  if (/unsynced=/.test(r.log)) throw new Error(`archive\\ is synced, so it is not unsyncable: ${r.log}`);
+  if (!/verified=1/.test(r.log)) throw new Error(`the archive file was not counted as proven: ${r.log}`);
+  if (!/push=ok/.test(r.log)) throw new Error(`everything dirty is in step, so this is a success: ${r.log}`);
+  if (!r.markerExists) throw new Error('a proven push must write the marker');
+});
+
+test('sync_if_dirty: a file in archive\\ that the NAS lacks blocks the marker, like a top-level one', () => {
+  if (!SLOW) skip('--slow only');
+  requireScript(DIRTY_SCRIPT);
+  const mem = tmp('archive-missing-mem');
+  writeIn(mem, path.join('archive', 'feedback_attendance_old.md'), 'archived note');
+  const nas = fakeNas('archive-missing-nas', mem, summary(1, 0, 0, 0));
+  const r = runDirty(nas, mem);
+  if (r.code !== 0) throw new Error(`a hook must never fail the session: exit ${r.code} ${r.err}`);
+  if (!/not-in-step=/.test(r.log)) throw new Error(`an archive file missing on the NAS is left behind: ${r.log}`);
+  if (!r.log.includes('archive')) throw new Error(`the name must carry its folder, not just the file: ${r.log}`);
+  if (r.markerExists) throw new Error('the marker was written, so the archived file is now forgotten');
+});
+
+test('sync_if_dirty: a file deeper than archive\\ can never be copied, so it is named and does not block', () => {
+  if (!SLOW) skip('--slow only');
+  requireScript(DIRTY_SCRIPT);
+  const mem = tmp('deep-mem');
+  write(mem, 'feedback_attendance_x.md', 'this one travels');
+  writeIn(mem, path.join('archive', 'old', 'feedback_attendance_buried.md'), 'nothing copies this');
+  const nas = fakeNas('deep-nas', mem, summary(1, 0, 0, 0), { copy: true });
+  const r = runDirty(nas, mem);
+  if (r.code !== 0) throw new Error(`a hook must never fail the session: exit ${r.code} ${r.err}`);
+  if (!/unsynced=/.test(r.log)) throw new Error(`neither Copy-MemoryFiles call recurses, so this file can never travel: ${r.log}`);
+  if (!r.log.includes('feedback_attendance_buried.md')) throw new Error(`the buried file is not named: ${r.log}`);
+  if (!r.markerExists) throw new Error('pushing again can never copy it, so it must not block the marker');
+});
+
+test('sync_if_dirty: a $Patterns list it cannot read whole is UNREADABLE, not a guess', () => {
+  if (!SLOW) skip('--slow only');
+  requireScript(DIRTY_SCRIPT);
+  const mem = tmp('badpat-mem');
+  write(mem, 'feedback_attendance_x.md', 'written in this session');
+  // A variable in the list: the reader cannot know what it expands to, so the list is not complete.
+  const nas = fakeNas('badpat-nas', mem, summary(1, 0, 0, 0), {
+    copy: false,
+    patterns: "$Patterns = @(\n  'feedback_attendance*.md',\n  $extra,\n  'MEMORY.md'\n)\n",
+  });
+  const r = runDirty(nas, mem);
+  if (r.code !== 0) throw new Error(`a hook must never fail the session: exit ${r.code} ${r.err}`);
+  if (!/verify=UNREADABLE/.test(r.log)) throw new Error(`a partial pattern list must not be used: ${r.log}`);
+  if (/push=ok/.test(r.log)) throw new Error(`it proved nothing, so it must not claim ok: ${r.log}`);
+  if (r.markerExists) throw new Error('"cannot tell" must not be treated as done');
+});
+
+// -----------------------------------------------------------------------------------------------
+// 2026-10-13: the four -PushStatus cases above each used a line I wrote by hand, with the field
+// under test last. Run against the shape sync_if_dirty.ps1 actually writes, the reader broke: a
+// field's value can contain a space (names are joined with ", "), and it was read with [^\s]+, so
+// "needs-eyes=x.md, y.md" came back as "x.md," -- one file and a dangling comma, where two files
+// were waiting. Fields are separated by TWO spaces, so that is the boundary to read to.
+//
+// The same run showed a judgement error: a push with conflicts was reported without a WARNING. The
+// field is called needs-eyes; it means a file did not reach the NAS and a person has to look. The
+// heartbeat exists to surface exactly that, so it warns.
+// -----------------------------------------------------------------------------------------------
+
+// The shape sync_if_dirty.ps1 writes: fields separated by two spaces, names inside a field by ", ".
+const RUN = (proof, extra = {}) => [
+  '2026-10-13T18:00:00+07:00',
+  `DIRTY ${extra.dirty || 2}`,
+  `push=${extra.push || 'ok'}`,
+  'rc=0',
+  'copied=0 same=5 conflict=0 failed=0',
+  proof,
+  `needs-eyes=${extra.eyes || 'none'}`,
+  'snapshot=ABSENT',
+  `marker=${extra.marker || 'written'}`,
+  'files=a.md, b.md',
+].join('  ');
+
+test('session_start -PushStatus: every name in a field is reported, not just the first', () => {
+  if (!SLOW) skip('--slow only');
+  requireScript(START_SCRIPT);
+  const dir = tmp('pushstatus-names');
+  const log = writeLog(dir, [RUN('verified=0  unsynced=a.md, b.md')]);
+  const r = ps(START_SCRIPT, ['-PushStatus', '-LogFile', log]);
+  if (r.code !== 0) throw new Error(`a hook must never fail the session: exit ${r.code} ${r.err}`);
+  if (!/WARNING/.test(r.out)) throw new Error(`files left behind must warn: ${r.out}`);
+  for (const name of ['a.md', 'b.md']) {
+    if (!r.out.includes(name)) throw new Error(`${name} is missing from the warning: ${r.out}`);
+  }
+  if (/,\s*\./.test(r.out)) throw new Error(`the list was cut mid-way, leaving a dangling comma: ${r.out}`);
+});
+
+test('session_start -PushStatus: a push that left files for a human to look at warns and names them', () => {
+  if (!SLOW) skip('--slow only');
+  requireScript(START_SCRIPT);
+  const dir = tmp('pushstatus-eyes');
+  const log = writeLog(dir, [RUN('verified=0 conflicted=2', { eyes: 'x.md, y.md' })]);
+  const r = ps(START_SCRIPT, ['-PushStatus', '-LogFile', log]);
+  if (r.code !== 0) throw new Error(`a hook must never fail the session: exit ${r.code} ${r.err}`);
+  if (!/WARNING/.test(r.out)) throw new Error(`needs-eyes means a person has to look, so it warns: ${r.out}`);
+  for (const name of ['x.md', 'y.md']) {
+    if (!r.out.includes(name)) throw new Error(`${name} is missing from the warning: ${r.out}`);
+  }
+});
+
+test('session_start -PushStatus: a push that left a file behind names the file, not just "FAILED"', () => {
+  if (!SLOW) skip('--slow only');
+  requireScript(START_SCRIPT);
+  const dir = tmp('pushstatus-notinstep');
+  const log = writeLog(dir, [RUN('verified=0  not-in-step=a.md, b.md', { push: 'FAILED', marker: 'kept-old' })]);
+  const r = ps(START_SCRIPT, ['-PushStatus', '-LogFile', log]);
+  if (r.code !== 0) throw new Error(`a hook must never fail the session: exit ${r.code} ${r.err}`);
+  if (!/WARNING/.test(r.out)) throw new Error(`a failed push must warn: ${r.out}`);
+  for (const name of ['a.md', 'b.md']) {
+    if (!r.out.includes(name)) throw new Error(`${name} is missing from the warning: ${r.out}`);
+  }
+});
+
+test('session_start -PushStatus: a run that could not check the NAS says so, not just "FAILED"', () => {
+  if (!SLOW) skip('--slow only');
+  requireScript(START_SCRIPT);
+  const dir = tmp('pushstatus-unreadable');
+  const log = writeLog(dir, [RUN('verify=UNREADABLE', { push: 'FAILED', marker: 'kept-old' })]);
+  const r = ps(START_SCRIPT, ['-PushStatus', '-LogFile', log]);
+  if (r.code !== 0) throw new Error(`a hook must never fail the session: exit ${r.code} ${r.err}`);
+  if (!/WARNING/.test(r.out)) throw new Error(`a run that proved nothing must warn: ${r.out}`);
+  if (!/could not check|UNREADABLE/i.test(r.out)) {
+    throw new Error(`the reason must survive into the warning, not become a bare FAILED: ${r.out}`);
+  }
+});
+
+// -----------------------------------------------------------------------------------------------
+// 2026-10-13: sync_memory.ps1 reports conflicts by BASE NAME, with no folder, because it copies the
+// top level and archive\ in two separate calls and pools the names. So one name can mean either of
+// two dirty files. Exempting by name alone marked a file that had never reached the NAS as settled
+// -- measured: conflicted=2 for one real conflict, marker written, and the new work at the top level
+// forgotten for good. That is the loss this whole change exists to prevent.
+//
+// A file that really conflicted must EXIST on the NAS -- that is why it conflicted. So the exemption
+// needs the name AND a counterpart on the far side. Nothing loops: the file that is merely missing
+// is reported, the marker is withheld, and the next push copies it for real.
+// -----------------------------------------------------------------------------------------------
+test('sync_if_dirty: a conflict name shared by two dirty files only excuses the one the NAS holds', () => {
+  if (!SLOW) skip('--slow only');
+  requireScript(DIRTY_SCRIPT);
+  const mem = tmp('ambiguous-mem');
+  write(mem, 'feedback_attendance_dup.md', 'this session wrote this, and the NAS has never seen it');
+  writeIn(mem, path.join('archive', 'feedback_attendance_dup.md'), 'old copy');
+  const nas = fakeNas('ambiguous-nas', mem, summary(0, 0, 1, 0, 'feedback_attendance_dup.md'));
+  // Only the archived one exists on the far side, so only it can be the conflict that was reported.
+  writeIn(nas, path.join('archive', 'feedback_attendance_dup.md'), 'the NAS copy, newer');
+  const r = runDirty(nas, mem);
+  if (r.code !== 0) throw new Error(`a hook must never fail the session: exit ${r.code} ${r.err}`);
+  if (!/not-in-step=/.test(r.log)) {
+    throw new Error(`the top-level file is on no NAS at all, so it is not excused by a name: ${r.log}`);
+  }
+  if (!/conflicted=1\b/.test(r.log)) throw new Error(`exactly one file conflicted, not two: ${r.log}`);
+  if (r.markerExists) {
+    throw new Error('the marker was written, so work that never left this machine is now forgotten');
+  }
+});
+
+// Deliberate limit, pinned so nobody later reads "verified" as "the contents match". sync_memory.ps1
+// compares content with a hash before it copies, so by the time this runs, equal size on both sides
+// is the cheap end of a check that already happened. Hashing every dirty file again on the NAS would
+// pay for it twice, over SMB, on the path that already costs seconds.
+test('sync_if_dirty: verified means same size, not same content, and says so by counting it', () => {
+  if (!SLOW) skip('--slow only');
+  requireScript(DIRTY_SCRIPT);
+  const mem = tmp('samesize-mem');
+  write(mem, 'feedback_attendance_x.md', 'AAAA');
+  const nas = fakeNas('samesize-nas', mem, summary(1, 0, 0, 0));
+  fs.writeFileSync(path.join(nas, 'feedback_attendance_x.md'), 'BBBB', 'utf8'); // same length, other bytes
+  const r = runDirty(nas, mem);
+  if (r.code !== 0) throw new Error(`a hook must never fail the session: exit ${r.code} ${r.err}`);
+  if (!/verified=1/.test(r.log)) throw new Error(`equal size counts as proven by design: ${r.log}`);
+  if (!/push=ok/.test(r.log)) throw new Error(`so the push is a success: ${r.log}`);
 });
