@@ -117,6 +117,41 @@ test('that exception does not let a NEW web check-in through', () => {
   }), 'web-clock-off');
 });
 
+// --- 4b. the carve-out itself, run for real against a real-shaped log -------------------
+// 2026-10-14 (review): the two *HasWebCheckInToday helpers were stubbed out everywhere above, and
+// a review found they disagreed about which day they were asking about. buildAttendanceLogForUser
+// keys by BUSINESS date -- a scan before BUSINESS_DAY_START_MINS belongs to the previous day -- so
+// looking the day up by calendar date misses exactly the case this carve-out exists for: a web
+// check-OUT after midnight, on a day that was checked in from the web the morning before.
+function serverHasWebCheckInToday(eventTimeIso, logByBusinessDate) {
+  const ctx = {
+    BUSINESS_DAY_START_MINS: Number(/const BUSINESS_DAY_START_MINS = (\d+);/.exec(SERVER_SRC)[1]),
+    parseHHMMToMins: (t) => { const m = /^(\d{2}):(\d{2})$/.exec(String(t || '')); return m ? Number(m[1]) * 60 + Number(m[2]) : NaN; },
+    ta_localDateStr: (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`,
+    buildAttendanceLogForUser: () => logByBusinessDate,
+    Number, Object, Array, String, Date,
+  };
+  vm.createContext(ctx);
+  vm.runInContext(`${extractFunction(SERVER_SRC, 'webScanHasWebCheckInToday')}\nthis.out = webScanHasWebCheckInToday({ id: 9 }, ${JSON.stringify(eventTimeIso)});`, ctx);
+  return ctx.out;
+}
+
+test('the carve-out finds a web check-in made the same business day', () => {
+  const log = { '2026-10-14': { checkIn: '08:10', checkInSource: 'web' } };
+  assert.strictEqual(serverHasWebCheckInToday('2026-10-14T18:00:00.000Z', log), true);
+});
+test('the carve-out finds it for a check-out AFTER MIDNIGHT, which is the case it exists for', () => {
+  // 00:30 on the 15th is still business day the 14th. Asking by calendar date finds nothing and
+  // strands the check-out -- and a day with no check-out loses every claim that needs one.
+  const log = { '2026-10-14': { checkIn: '08:10', checkInSource: 'web' } };
+  assert.strictEqual(serverHasWebCheckInToday('2026-10-15T00:30:00.000Z', log), true);
+});
+test('the carve-out does not fire for a device check-in, or for a day with none', () => {
+  assert.strictEqual(serverHasWebCheckInToday('2026-10-14T18:00:00.000Z', { '2026-10-14': { checkIn: '08:10', checkInSource: 'device' } }), false);
+  assert.strictEqual(serverHasWebCheckInToday('2026-10-14T18:00:00.000Z', {}), false);
+  assert.strictEqual(serverHasWebCheckInToday('', { '2026-10-14': { checkIn: '08:10', checkInSource: 'web' } }), false);
+});
+
 // --- 5. ordering ----------------------------------------------------------------------
 test('a scan with no position is refused whatever the switch says', () => {
   for (const webClock of [undefined, { enabled: true, exemptRoles: [] }, { enabled: false, exemptRoles: [] }]) {
@@ -161,6 +196,8 @@ test('webClock survives getAppSettings() and the browser load, like allowanceRol
   const c = {
     data: { appSettings: { webClock: { enabled: false, exemptRoles: ['driver'] } } },
     APP_SETTINGS: { company: {}, payroll: {}, sso: {}, allowances: {}, workSchedule: {}, geofence: {}, leave: {}, map: {}, allowanceEligibility: {}, tax: { brackets: [] }, allowanceRoleRates: { enabled: false, byRole: {} }, webClock: { enabled: true, exemptRoles: [] } },
+    // The load block records which optional sections the server actually holds.
+    _settingsSectionsOnServer: { allowanceRoleRates: false, webClock: false },
     normalizeAnnualLeaveTiers: (t) => t || [], sickLeaveEntitlementDays: () => 30, businessLeaveEntitlementDays: () => 3,
     Object, Array, Infinity, Number,
   };
@@ -175,6 +212,50 @@ test('webClock is on both server allowlists, or a save erases it', () => {
   assert.ok(allow && /'webClock'/.test(allow[1]), 'missing from ALLOWED_APPSETTINGS_KEYS');
   const objList = /for \(const sub of (\[[^\]]*'allowanceEligibility'[^\]]*\])\)/.exec(SERVER_SRC);
   assert.ok(objList && /'webClock'/.test(objList[1]), 'missing from the must-be-an-object list');
+});
+
+// --- 6b. the deploy window: what the page sends to a server that may still be the old one ---
+// 2026-10-14 (review): merging publishes app.js immediately while the backend keeps running the
+// old server.js until it is restarted over SSH. An old server rejects an unknown appSettings key
+// with a 400 for the WHOLE request, so sending `webClock` unconditionally breaks every Settings
+// save for the length of that window -- the morningReviewEnabled incident a third time.
+// The rule is NOT "omit while it looks inert": that would make turning a feature back off
+// impossible to persist, because the server keeps whatever it already has for a key you stop
+// sending. It is "omit only a section the server has never stored, while it still matches what
+// the server would default to anyway".
+function runSendFilter(appSettings, stored) {
+  const ctx = { Object, Array };
+  vm.createContext(ctx);
+  vm.runInContext(`${extractFunction(APP_SRC, 'omitUnstoredDefaults')}\nthis.out = omitUnstoredDefaults(${JSON.stringify(appSettings)}, ${JSON.stringify(stored)});`, ctx);
+  return ctx.out;
+}
+const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+
+test('a webClock the server has never stored, still at its default, is not sent', () => {
+  const out = runSendFilter({ allowances: {}, webClock: { enabled: true, exemptRoles: ['driver'] } }, { webClock: false, allowanceRoleRates: false });
+  assert.ok(!has(out, 'webClock'), 'an old backend must never meet a key it does not know');
+  assert.ok(has(out, 'allowances'), 'nothing else may be dropped');
+});
+test('turning the switch OFF is sent even though the server has never stored it', () => {
+  const out = runSendFilter({ webClock: { enabled: false, exemptRoles: ['driver'] } }, { webClock: false, allowanceRoleRates: false });
+  assert.ok(has(out, 'webClock'), 'this is the owner actually using the feature');
+});
+test('once the server has stored it, it is ALWAYS sent -- including switching back on', () => {
+  // This is the case "omit while inert" got wrong: stop sending a key and the server keeps what it
+  // had, so the owner could never switch the feature back on again.
+  const out = runSendFilter({ webClock: { enabled: true, exemptRoles: [] } }, { webClock: true, allowanceRoleRates: false });
+  assert.ok(has(out, 'webClock'), 'switching back on must reach the server');
+});
+test('the same rule covers the per-role rate table', () => {
+  const inert = { enabled: false, byRole: {} };
+  assert.ok(!has(runSendFilter({ allowanceRoleRates: inert }, { webClock: false, allowanceRoleRates: false }), 'allowanceRoleRates'));
+  assert.ok(has(runSendFilter({ allowanceRoleRates: inert }, { webClock: false, allowanceRoleRates: true }), 'allowanceRoleRates'),
+    'a stored table must keep being sent, or clearing it could never be saved');
+  assert.ok(has(runSendFilter({ allowanceRoleRates: { enabled: true, byRole: {} } }, { webClock: false, allowanceRoleRates: false }), 'allowanceRoleRates'));
+});
+test('the save path routes through the filter', () => {
+  const fn = extractFunction(APP_SRC, 'savePayrollSettings');
+  assert.ok(/omitUnstoredDefaults\(/.test(fn), 'savePayrollSettings must send the filtered object');
 });
 
 // --- 7. the two sides agree ------------------------------------------------------------

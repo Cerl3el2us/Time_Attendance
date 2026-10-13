@@ -980,6 +980,7 @@ test('the browser loads the saved rate table back from the API', () => {
     data: { appSettings: { allowances: { earlyMorning1: 240 }, allowanceRoleRates: SAVED_TABLE } },
     APP_SETTINGS: { company: {}, payroll: {}, sso: {}, allowances: {}, workSchedule: {}, geofence: {}, leave: {}, map: {}, allowanceEligibility: {}, tax: { brackets: [] }, allowanceRoleRates: { enabled: false, byRole: {} } },
     normalizeAnnualLeaveTiers: (t) => t || [],
+    _settingsSectionsOnServer: { allowanceRoleRates: false, webClock: false },
     sickLeaveEntitlementDays: () => 30,
     businessLeaveEntitlementDays: () => 3,
     Object, Array, Infinity, Number,
@@ -1128,12 +1129,17 @@ test('the save path aborts on a refused cell instead of reporting success', () =
 // that always sent allowanceRoleRates would break every Settings save during that window -- the
 // same whole-page-refusal the spec warns about from the morningReviewEnabled incident.
 // So the inert default is not sent at all: nothing is configured, there is nothing to persist, and
+// 2026-10-14: renamed to omitUnstoredDefaults() and generalised when the web-clock switch hit the
+// same deploy window. The rule also changed -- it now omits only a section the SERVER has never
+// stored, because "omit while it looks inert" made turning a feature back off impossible to save.
+// The fuller cases live in tests/web-clock-switch.test.js; these keep covering the rate table.
 // an old server never meets the key. Once the owner configures anything it is sent as normal.
 function runSaveFilter(appSettings) {
-  const fn = extractFunction(APP_SRC, 'omitInertRoleRates');
+  const fn = extractFunction(APP_SRC, 'omitUnstoredDefaults');
   const ctx = { Object, Array };
   vm.createContext(ctx);
-  vm.runInContext(`${fn}\nthis.out = omitInertRoleRates(${JSON.stringify(appSettings)});`, ctx);
+  vm.runInContext(`${fn}
+this.out = omitUnstoredDefaults(${JSON.stringify(appSettings)}, { allowanceRoleRates: false, webClock: false });`, ctx);
   return ctx.out;
 }
 
@@ -1168,7 +1174,7 @@ test('a missing or malformed section is simply omitted, never sent as garbage', 
 
 test('the save path routes through the filter', () => {
   const fn = extractFunction(APP_SRC, 'savePayrollSettings');
-  assert.ok(/omitInertRoleRates\(/.test(fn),
+  assert.ok(/omitUnstoredDefaults\(/.test(fn),
     'savePayrollSettings must send the filtered object, or the deploy window breaks Settings saves');
 });
 

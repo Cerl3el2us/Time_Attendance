@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 112;
+const APP_BUILD = 113;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -2193,6 +2193,11 @@ let DATA_CHECKOUT_REVIEWS = {};
 // 2026-10-14: check-in corrections made by Accounting/MD, keyed `${userId}_${date}`. The server
 // scopes the GET: a full-access role receives all of them, everyone else only their own days.
 let DATA_CHECKIN_EDITS = {};
+// 2026-10-14: which optional appSettings sections the SERVER actually holds. A section it has
+// never stored is left out of the PUT while it still matches the default, so a backend that
+// predates the feature does not 400 the whole save during the window between publishing app.js
+// and restarting the server. See omitUnstoredDefaults().
+let _settingsSectionsOnServer = { allowanceRoleRates: false, webClock: false };
 // 2026-10-02 (owner): the morning twin -- Accounting's allow/deny on an early scan that was
 // followed by another door pass. Same shape, same scoping rules, same key (`<userId>_<date>`).
 let DATA_MORNING_REVIEWS = {};
@@ -3509,6 +3514,8 @@ async function loadSettingsFromBackend() {
       // 2026-10-14: replaced, not merged -- the server stores this section wholesale, and a merge
       // would resurrect an exemption the owner removed. Same lesson as allowanceRoleRates below:
       // a section the page never reads back is a section the next save erases.
+      _settingsSectionsOnServer.webClock = !!(s.webClock && typeof s.webClock === 'object' && !Array.isArray(s.webClock));
+      _settingsSectionsOnServer.allowanceRoleRates = !!(s.allowanceRoleRates && typeof s.allowanceRoleRates === 'object' && !Array.isArray(s.allowanceRoleRates));
       if (s.webClock && typeof s.webClock === 'object' && !Array.isArray(s.webClock)) {
         APP_SETTINGS.webClock = {
           enabled: s.webClock.enabled !== false,
@@ -3572,13 +3579,36 @@ async function loadSettingsFromBackend() {
 // an old backend never meets a key it does not know. The moment the owner configures anything,
 // it is sent normally -- by which time the backend has to have been restarted anyway, because
 // nothing else can store it.
-function omitInertRoleRates(appSettings) {
-  const rr = appSettings && appSettings.allowanceRoleRates;
-  const isObj = rr && typeof rr === 'object' && !Array.isArray(rr);
-  const configured = isObj && (rr.enabled === true || (rr.byRole && typeof rr.byRole === 'object' && !Array.isArray(rr.byRole) && Object.keys(rr.byRole).length > 0));
-  if (configured) return appSettings;
-  const { allowanceRoleRates, ...rest } = appSettings || {};
-  return rest;
+// `stored` says which of these sections the server has actually sent us, i.e. which ones exist in
+// settings.json today. Taking it as an argument rather than reading the globals keeps the rule
+// testable on its own.
+//
+// 2026-10-14 (review): the first version of this omitted a section whenever it merely LOOKED
+// inert, which was wrong in both directions. It only covered allowanceRoleRates, so webClock was
+// sent unconditionally and would 400 an old backend -- and "omit while inert" also makes it
+// impossible to turn a feature back OFF once the server has stored it, because a key you stop
+// sending keeps whatever value the server already holds. Hence: omit only a section the server has
+// never stored, and only while it still equals what that server would default to anyway.
+function omitUnstoredDefaults(appSettings, stored) {
+  const s = appSettings || {};
+  const st = stored || {};
+  const out = {};
+  for (const k of Object.keys(s)) out[k] = s[k];
+
+  const rr = out.allowanceRoleRates;
+  const rrObj = rr && typeof rr === 'object' && !Array.isArray(rr);
+  const rrConfigured = rrObj && (rr.enabled === true
+    || (rr.byRole && typeof rr.byRole === 'object' && !Array.isArray(rr.byRole) && Object.keys(rr.byRole).length > 0));
+  if (!st.allowanceRoleRates && !rrConfigured) delete out.allowanceRoleRates;
+
+  const wc = out.webClock;
+  const wcObj = wc && typeof wc === 'object' && !Array.isArray(wc);
+  // Only `enabled: false` is a real use of the feature; anything else behaves exactly as a server
+  // with no section at all, so it is safe to leave out while the server has never stored one.
+  const wcConfigured = wcObj && wc.enabled === false;
+  if (!st.webClock && !wcConfigured) delete out.webClock;
+
+  return out;
 }
 async function savePayrollSettings() {
   if (blockIfObserver()) return { success: false };
@@ -3590,7 +3620,7 @@ async function savePayrollSettings() {
     // secret-duplication surface a CRITICAL fix earlier today closed on the READ side. Those 3
     // keys are already saved separately by saveSettingsPage(); only send the genuine appSettings
     // (payroll-config) sub-keys here.
-    const { emailConfig, emailNotification, payslipEmailEnabled, ...payrollOnlyAppSettings } = omitInertRoleRates(APP_SETTINGS);
+    const { emailConfig, emailNotification, payslipEmailEnabled, ...payrollOnlyAppSettings } = omitUnstoredDefaults(APP_SETTINGS, _settingsSectionsOnServer);
     const res = await apiFetch(`/api/settings`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -7217,6 +7247,23 @@ function generatePeriodDays(start, end, isCurrent, userId) {
     // 2026-09-23: the scanned check-out before any time-correction overlay -- shown to reviewers
     // as "21:00 (corrected from 17:40)". Dual-sync twin in server.js.
     const rawCheckOut = checkOut;
+    // 2026-10-14: the door-pass time before an Accounting/MD check-in correction, and whether one
+    // was applied. Carried onto the day the way rawCheckOut already is -- without them the pencil
+    // that opens the correction (and its mandatory history) disappears after the first edit,
+    // because its eligibility test falls back to the CORRECTED time, and nothing anywhere shows
+    // that the time was corrected at all. Dual-sync twin in the other engine.
+    const _ceRec = uid ? (attendanceLog[attKey(uid, dateStr)] || null) : null;
+    const rawCheckIn = (_ceRec && _ceRec.rawCheckIn) || null;
+    const checkInEdited = !!(_ceRec && _ceRec.checkInEdited);
+    // 2026-10-14 (review): dual-sync twin of server.js -- a correction changes whether the day was
+    // late, and the status above came from the UNCORRECTED scan, so the page reported zero late
+    // arrivals for a day payroll was deducting late minutes on.
+    if (checkInEdited && checkIn && (status === 'present' || status === 'late' || status === 'not-clocked-in')) {
+      const _ceUser = DATA_USERS.find(u => u.id == uid);
+      const _ceWs = APP_SETTINGS.workSchedule;
+      const _ceStd = `${String(_ceWs?.standardStartHour ?? 8).padStart(2, '0')}:${String(_ceWs?.standardStartMinute ?? 30).padStart(2, '0')}`;
+      status = (_ceUser?.role !== 'driver' && checkIn > _ceStd) ? 'late' : 'present';
+    }
 
     // Overlay approved DATA_LEAVES so approvals always appear regardless of attendanceLog state.
     // Skip on company-trip days — status stays company-trip (paid day off); allowance flags
@@ -7373,7 +7420,7 @@ function generatePeriodDays(start, end, isCurrent, userId) {
     // 2026-09-24 (owner): scan instants + GPS zone, for the display-only local time on Abroad days.
     const _abroadRec = (status === 'abroad' && uid) ? attendanceLog[attKey(uid, dateStr)] : null;
     const abroadScan = _abroadRec ? { inAt: _abroadRec.checkInAt || null, inTz: _abroadRec.checkInGpsTz || null, outAt: _abroadRec.checkOutAt || null, outTz: _abroadRec.checkOutGpsTz || null } : null;
-    days.push({ date: dateStr, dayName: dayNamesEn[d.getDay()], isWeekend, isPubHoliday, isFuture, isToday, status, checkIn, checkOut, earlyIn, lateOut, upcountry, longDistance, longDistanceKm, longDistanceAllowance, checkInSource, checkOutSource, earlyApproved, lateApproved, checkInGPS, checkOutGPS, checkInGpsAcc, checkOutGpsAcc, holidayName, firstScanAfterCutoff, partialLeave, checkOutReview, morningReviewNeeded, morningReview, rawCheckOut, abroadScan, excused, excusedReason });
+    days.push({ date: dateStr, dayName: dayNamesEn[d.getDay()], isWeekend, isPubHoliday, isFuture, isToday, status, checkIn, checkOut, earlyIn, lateOut, upcountry, longDistance, longDistanceKm, longDistanceAllowance, checkInSource, checkOutSource, earlyApproved, lateApproved, checkInGPS, checkOutGPS, checkInGpsAcc, checkOutGpsAcc, holidayName, firstScanAfterCutoff, partialLeave, checkOutReview, morningReviewNeeded, morningReview, rawCheckOut, rawCheckIn, checkInEdited, abroadScan, excused, excusedReason });
     d.setDate(d.getDate() + 1);
   }
   return days;
@@ -23016,6 +23063,15 @@ function initHikvisionLive() {
         // never carries anyone else's review.
         loadCheckoutReviewsFromBackend().then(ok => { if (ok) rerenderAfterCheckoutReviews(); });
         loadMorningReviewsFromBackend().then(ok => { if (ok) rerenderAfterCheckoutReviews(); });
+      }
+      if (data.type === 'CHECKIN_EDITS_UPDATED') {
+        // 2026-10-14: payload-less, like the two above -- re-fetch through the role-scoped GET so
+        // an employee's socket never carries another employee's correction or its reason. The
+        // attendance log is rebuilt too, because a correction changes the times every open page
+        // and every pay preview is computing from (a stale open page is a known hazard here).
+        loadCheckinEditsFromBackend().then(ok => {
+          if (ok) loadAttendanceFromBackend().then(() => rerenderAfterCheckoutReviews());
+        });
       }
       if (data.type === 'USER_CREATED') {
         // SECURITY FIX 2026-08-04: the backend now broadcasts a stripped public projection (no

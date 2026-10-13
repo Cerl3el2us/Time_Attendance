@@ -34,6 +34,15 @@ function extractFunction(src, name) {
   }
   throw new Error(`unbalanced ${name}`);
 }
+// generatePeriodDays has a default parameter, so the shared extractFunction() -- which finds the
+// first { after the name -- stops inside the parameter list. Slice it by anchors instead.
+function periodDaysBody(src) {
+  const i = src.indexOf('function generatePeriodDays(');
+  if (i < 0) throw new Error('generatePeriodDays not found');
+  const j = src.indexOf('days.push({', i);
+  if (j < 0) throw new Error('generatePeriodDays day push not found');
+  return src.slice(i, j + 600);
+}
 function load(src, names, extra) {
   const ctx = Object.assign({ Number, Object, Array, String, Math, JSON }, extra || {});
   vm.createContext(ctx);
@@ -160,6 +169,153 @@ test('every edit appends to a history that records who, from, to and why', () =>
     assert.ok(new RegExp(`\\b${field}\\b`).test(put), `the stored edit must record ${field}`);
   }
   assert.ok(/\.push\(|\.concat\(/.test(put), 'history must be appended to, never replaced');
+});
+
+// --- the point of the whole feature: the money moves ----------------------------------
+// 2026-10-14 (review): nothing proved a corrected check-in changes what is paid. The owner's own
+// example is 07:00 corrected to 08:30 precisely so the early-morning allowance stops being paid,
+// and that was the one thing untested. Runs the REAL tier decision on BOTH engines, with invented
+// thresholds and amounts so the owner editing a rate can never turn this red.
+function earlyMorningPayFor(src, day) {
+  const S = {
+    allowances: { earlyThreshold1Min: 450, earlyThreshold2Min: 390, earlyMorning1: 11, earlyMorning2: 22 },
+  };
+  const ctx = Object.assign({
+    HHMM_RE: /^([01]\d|2[0-3]):[0-5]\d$/,
+    isDeviceScanSource: (s) => s === 'device',
+    isRestAttendanceDay: () => false,
+    isEarlyMorningDayStatus: () => true,
+    hasHolidayWorkClaimOnDate: () => false,
+  }, DEPS);
+  vm.createContext(ctx);
+  vm.runInContext(
+    ['earlyMorningCheckInOk', 'deviceScanQualifiesForEarlyMorning', 'applyCheckinEdits']
+      .map(n => extractFunction(src, n)).join('\n') +
+    '\nthis.qualifies = deviceScanQualifiesForEarlyMorning; this.apply = applyCheckinEdits;', ctx);
+  if (!ctx.qualifies(day, new Set())) return 0;
+  const mins = DEPS.parseHHMMToMins(day.checkIn);
+  if (mins <= S.allowances.earlyThreshold2Min) return S.allowances.earlyMorning2;
+  if (mins <= S.allowances.earlyThreshold1Min) return S.allowances.earlyMorning1;
+  return 0;
+}
+
+test('correcting a 07:00 door pass to 08:30 stops the early-morning allowance, on both engines', () => {
+  for (const [label, src] of [['server', SERVER_SRC], ['app', APP_SRC]]) {
+    const log = { '2026-10-14': { date: '2026-10-14', checkIn: '07:00', checkInSource: 'device' } };
+    assert.strictEqual(earlyMorningPayFor(src, log['2026-10-14']), 11, `${label}: 07:00 should earn the x1 rate before any correction`);
+    const edits = { '9_2026-10-14': { checkIn: '08:30', rawCheckIn: '07:00' } };
+    const out = SRV().applyCheckinEdits(log, 9, edits);
+    assert.strictEqual(earlyMorningPayFor(src, out['2026-10-14']), 0,
+      `${label}: after correcting to 08:30 the day must earn nothing -- this is the whole point of the feature`);
+  }
+});
+
+test('a correction to an EARLIER time moves the day up a tier -- the owner allowed it, so it is pinned', () => {
+  // The owner said any time may be entered. That cuts both ways: 07:00 -> 06:00 crosses the x2
+  // threshold and PAYS MORE. Pinned deliberately so the behaviour cannot change unnoticed, and
+  // flagged to the owner rather than quietly prevented.
+  const log = { '2026-10-14': { date: '2026-10-14', checkIn: '07:00', checkInSource: 'device' } };
+  const out = SRV().applyCheckinEdits(log, 9, { '9_2026-10-14': { checkIn: '06:00', rawCheckIn: '07:00' } });
+  assert.strictEqual(earlyMorningPayFor(SERVER_SRC, out['2026-10-14']), 22, 'an earlier correction reaches the x2 rate');
+  assert.strictEqual(earlyMorningPayFor(APP_SRC, out['2026-10-14']), 22, 'and both engines agree about it');
+});
+
+test('a correction never turns a web check-in into a device one, so it cannot unlock the allowance', () => {
+  const log = { '2026-10-14': { date: '2026-10-14', checkIn: '07:00', checkInSource: 'web' } };
+  assert.strictEqual(earlyMorningPayFor(SERVER_SRC, log['2026-10-14']), 0, 'a web check-in earns nothing to begin with');
+  const out = SRV().applyCheckinEdits(log, 9, { '9_2026-10-14': { checkIn: '06:00', rawCheckIn: '07:00' } });
+  assert.strictEqual(out['2026-10-14'].checkInSource, 'web', 'the source must survive the correction');
+  assert.strictEqual(earlyMorningPayFor(SERVER_SRC, out['2026-10-14']), 0, 'and it still earns nothing');
+});
+
+// --- findings from the 2026-10-14 review ----------------------------------------------
+test('a successful save is not reported as a failure', () => {
+  // writeJSON() has no return statement, so `if (!writeJSON(...))` was true on EVERY call: the
+  // correction was written to disk and the admin was told "Service temporarily unavailable".
+  // Retrying then appended history entries reading 08:30 -> 08:30. Every sibling handler relies on
+  // atomicWrite throwing into the surrounding catch instead.
+  // The production comments deliberately describe the old shape without quoting it, so this
+  // pattern can only match real code.
+  assert.ok(!/if \(!writeJSON\(/.test(SERVER_SRC),
+    'no handler may branch on writeJSON()\'s return value -- it does not return one');
+  const put = extractFunction(SERVER_SRC, 'handlePutCheckinTimeEdit');
+  assert.ok(/writeJSON\(CHECKIN_EDITS_FILE, all\);/.test(put), 'the write must still happen');
+  assert.ok(/catch \(e\)/.test(put), 'and a write failure must surface through the catch');
+});
+
+test('a corrupt corrections file fails CLOSED, it does not quietly restore removed allowances', () => {
+  // `readCheckinEdits() || {}` read "unreadable" as "no corrections exist", so a truncated file
+  // would pay back every early-morning allowance a correction had removed, company-wide, with
+  // nothing failing. Every sibling guard in this file fails closed.
+  const fn = extractFunction(SERVER_SRC, 'buildAttendanceLogForUser');
+  assert.ok(!/readCheckinEdits\(\) \|\| \{\}/.test(fn), 'a null read must not be treated as "no corrections"');
+  assert.ok(/readCheckinEdits\(\)/.test(fn) && /throw new Error/.test(fn),
+    'an unreadable corrections file must refuse, the way an unreadable events file already does');
+});
+
+test('an accounting record is MD-only, as the owner asked, not merely "not your own"', () => {
+  // With one accounting employee these coincide; with two they do not, and accounting A could
+  // move accounting B's early-morning allowance -- which the owner reserved to MD.
+  const refuseA = (editorRole, targetRole) => SRV().checkinEditRefusalReason(Object.assign({}, base, {
+    editor: { id: 4, role: editorRole }, target: { id: 7, role: targetRole },
+  }));
+  assert.strictEqual(refuseA('accounting', 'accounting'), 'accounting-is-md-only');
+  assert.strictEqual(refuseA('md', 'accounting'), '');
+  assert.strictEqual(refuseA('accounting', 'user'), '');
+});
+
+test('the corrected day carries its original time and an edited flag to the UI', () => {
+  // Without these on the row, the pencil disappears after the first correction (its eligibility
+  // test falls back to the CORRECTED time), the mandatory history becomes unreachable, and
+  // nothing anywhere shows that a check-in was corrected at all.
+  for (const [label, src] of [['server', SERVER_SRC], ['app', APP_SRC]]) {
+    const gen = periodDaysBody(src);
+    for (const f of ['rawCheckIn', 'checkInEdited']) {
+      assert.ok(new RegExp(`\\b${f}\\b`).test(gen), `${label} generatePeriodDays must carry ${f} onto the day`);
+    }
+  }
+});
+
+test('a corrected check-in re-derives whether the day is late', () => {
+  // The overlay changed checkIn but left `status` as derived from the uncorrected scan, so a day
+  // corrected to 09:30 deducted late minutes while reporting zero late arrivals on the same
+  // payslip. The approved time-correction path already re-derives it; this now does too.
+  for (const [label, src] of [['server', SERVER_SRC], ['app', APP_SRC]]) {
+    const gen = periodDaysBody(src);
+    assert.ok(/checkInEdited[\s\S]{0,400}?(late|stdStr)/.test(gen),
+      `${label} generatePeriodDays must re-derive the status after a correction`);
+  }
+});
+
+test('correcting a time tells every other open session', () => {
+  const put = extractFunction(SERVER_SRC, 'handlePutCheckinTimeEdit');
+  assert.ok(/broadcast\(/.test(put), 'siblings broadcast; a stale open page is a known hazard here');
+  assert.ok(/CHECKIN_EDITS_UPDATED/.test(SERVER_SRC) && /CHECKIN_EDITS_UPDATED/.test(APP_SRC),
+    'the browser must handle the broadcast it is sent');
+});
+
+// --- i18n -----------------------------------------------------------------------------
+// 2026-10-14 (review): this feature shipped with every one of its strings untranslated and no
+// test noticed. The project rule is that TH/EN/JA go together in the same edit, and on this page
+// Japanese is resolved by looking the ENGLISH string up in window.LANG_JA -- so a missing entry
+// is a silent English leak in JA mode, not an error anyone would see in testing.
+test('every string this feature adds exists in all three languages', () => {
+  const JA = fs.readFileSync(path.join(ROOT, 'attendance/lang/ja.js'), 'utf8');
+  const entries = {};
+  for (const m of JA.matchAll(/^\s*"((?:[^"\\]|\\.)*)":\s*"((?:[^"\\]|\\.)*)"/gm)) {
+    entries[JSON.parse(`"${m[1]}"`)] = JSON.parse(`"${m[2]}"`);
+  }
+  // Every L('en', 'th') the feature's own functions use.
+  const region = ['checkinEditBtnHtml', 'openCheckinEditModal', 'submitCheckinEdit']
+    .map(n => extractFunction(APP_SRC, n)).join('\n');
+  const english = [...region.matchAll(/\bL\(\s*'((?:[^'\\]|\\.)+)'\s*,/g)].map(m => m[1].replace(/\\'/g, "'"));
+  assert.ok(english.length >= 9, `expected the feature's strings to be found, got ${english.length}`);
+  const missing = english.filter(en => !Object.prototype.hasOwnProperty.call(entries, en));
+  assert.deepStrictEqual(missing, [], `attendance/lang/ja.js has no entry for: ${missing.join(' | ')}`);
+  const notJapanese = english.filter(en => !/[぀-ヿ一-龯]/.test(entries[en]));
+  assert.deepStrictEqual(notJapanese, [], `these entries contain no Japanese: ${notJapanese.join(' | ')}`);
+  // and Thai is present alongside each English string
+  assert.ok(/[฀-๿]/.test(region), 'the feature has no Thai at all');
 });
 
 console.log(`\n${passed} assertions passed`);

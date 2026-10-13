@@ -3752,13 +3752,14 @@ function handlePutCheckinTimeEdit(req, res) {
       const messages = {
         'role': 'Only Accounting and MD may correct a check-in time',
         'own-record': 'You cannot correct your own attendance',
+        'accounting-is-md-only': 'Only the Managing Director may correct an Accounting record',
         'period-locked': 'This pay period is locked',
         'not-editable': 'This day has no door pass between 05:30 and 07:30, so its check-in cannot be corrected',
         'bad-time': 'The new time must be a valid HH:MM time',
         'reason-required': 'A reason is required',
         'reason-too-long': 'The reason is too long (500 characters maximum)',
       };
-      return res.status(refusal === 'role' || refusal === 'own-record' ? 403 : 400)
+      return res.status(['role', 'own-record', 'accounting-is-md-only'].includes(refusal) ? 403 : 400)
         .json({ success: false, reason: refusal, message: messages[refusal] || 'Refused' });
     }
     const all = readCheckinEdits();
@@ -3774,9 +3775,13 @@ function handlePutCheckinTimeEdit(req, res) {
     };
     history.push(entry);
     all[key] = { checkIn: newTime, rawCheckIn, reason: entry.reason, by: live.name, byId: live.id, at: entry.at, history };
-    if (!writeJSON(CHECKIN_EDITS_FILE, all)) {
-      return res.status(503).json({ success: false, message: CHECKIN_EDITS_UNAVAILABLE });
-    }
+    // 2026-10-14 (review, CRITICAL): this used to test writeJSON()'s return value. That function
+    // has no return statement, so the failure branch was taken on EVERY call -- the correction was
+    // written to disk and the admin was told it had failed, which invited a retry whose history
+    // entry then read "08:30 -> 08:30". Every sibling handler lets atomicWrite throw into the
+    // catch instead, and so does this one now.
+    writeJSON(CHECKIN_EDITS_FILE, all);
+    broadcast({ type: 'CHECKIN_EDITS_UPDATED' });
     // The audit trail the owner asked for lives in `history` above -- who corrected it, from what
     // time to what time, and why -- stored with the record itself rather than in a separate log
     // that could drift from it.
@@ -10131,7 +10136,13 @@ function buildAttendanceLogForUser(user, start, end) {
   // 2026-10-14: the single choke point every server-side consumer goes through -- payroll, the
   // web-scan gates, the attendance API. Applying the correction here means nothing downstream has
   // to know the feature exists, and no call site can be forgotten.
-  return applyCheckinEdits(log, user.id, readCheckinEdits() || {});
+  // 2026-10-14 (review): defaulting an unreadable corrections file to an empty map read as "no
+  // corrections exist", which would silently pay back every allowance a correction had removed,
+  // company-wide, with nothing failing. Every sibling guard in this file fails closed, and the
+  // line above already throws when events.json cannot be read -- so this does too.
+  const _edits = readCheckinEdits();
+  if (_edits === null) throw new Error('Service temporarily unavailable');
+  return applyCheckinEdits(log, user.id, _edits);
 }
 
 // 2026-09-25: would this WebScan become the day's CHECK-IN? Mirrors buildAttendanceLogForUser()'s
@@ -10170,6 +10181,10 @@ function checkinEditRefusalReason(opts) {
   // Nobody corrects their own attendance. The owner's rule that an accounting record is MD-only
   // falls straight out of this: accounting may correct others but never itself.
   if (!target || Number(editor.id) === Number(target.id)) return 'own-record';
+  // 2026-10-14 (review): the owner's rule is "ของ accounting เอง มีแต่ MD ที่แก้ได้". With one
+  // accounting employee that is the same as "nobody edits their own"; with two it is not, and one
+  // could move the other's early-morning allowance. Stated literally so it keeps holding.
+  if (target.role === 'accounting' && editor.role !== 'md') return 'accounting-is-md-only';
   if (periodLocked) return 'period-locked';
   if (!checkinEditWindowOk(rawCheckIn)) return 'not-editable';
   if (!HHMM_RE.test(String(newTime || ''))) return 'bad-time';
@@ -10201,9 +10216,22 @@ function applyCheckinEdits(log, userId, edits) {
 // switch off at lunchtime strands everyone who clocked in from the web that morning -- they could
 // not record a check-out at all, and a day with no check-out loses every claim that needs one.
 function webScanHasWebCheckInToday(user, eventTimeIso) {
-  const datePart = String(eventTimeIso || '').substring(0, 10);
+  const raw = String(eventTimeIso || '');
+  const datePart = raw.substring(0, 10);
   if (!datePart) return false;
-  const day = buildAttendanceLogForUser(user)[datePart];
+  // 2026-10-14 (review): buildAttendanceLogForUser keys by BUSINESS date -- a scan before
+  // BUSINESS_DAY_START_MINS belongs to the previous day -- so looking the day up by calendar date
+  // missed exactly the case this carve-out exists for: a web check-OUT after midnight on a day
+  // that was checked in from the web the morning before. That stranded the check-out, and a day
+  // with no check-out loses every claim that needs one. Derived the same way the log derives it.
+  const mins = parseHHMMToMins(raw.substring(11, 16));
+  let businessDate = datePart;
+  if (Number.isFinite(mins) && mins < BUSINESS_DAY_START_MINS) {
+    const d = new Date(datePart + 'T00:00:00');
+    d.setDate(d.getDate() - 1);
+    businessDate = ta_localDateStr(d);
+  }
+  const day = buildAttendanceLogForUser(user)[businessDate];
   return !!(day && day.checkIn && day.checkInSource === 'web');
 }
 
@@ -10386,6 +10414,23 @@ function generatePeriodDays(start, end, isCurrent, user, attLog, leaves, appSett
     // 2026-09-23: the scanned check-out before any time-correction overlay -- shown to reviewers
     // as "21:00 (corrected from 17:40)". Dual-sync twin in app.js.
     const rawCheckOut = checkOut;
+    // 2026-10-14: the door-pass time before an Accounting/MD check-in correction, and whether one
+    // was applied. Carried onto the day the way rawCheckOut already is -- without them the pencil
+    // that opens the correction (and its mandatory history) disappears after the first edit,
+    // because its eligibility test falls back to the CORRECTED time, and nothing anywhere shows
+    // that the time was corrected at all. Dual-sync twin in the other engine.
+    const _ceRec = attLog[dateStr] || null;
+    const rawCheckIn = (_ceRec && _ceRec.rawCheckIn) || null;
+    const checkInEdited = !!(_ceRec && _ceRec.checkInEdited);
+    // 2026-10-14 (review): a correction changes whether the day was late, and the status above was
+    // derived from the UNCORRECTED scan -- so a day corrected to 09:30 deducted late minutes while
+    // the same payslip reported zero late arrivals. Re-derived exactly the way the approved
+    // time-correction path below already does it.
+    if (checkInEdited && checkIn && (status === 'present' || status === 'late' || status === 'not-clocked-in')) {
+      const _ws = appSettings.workSchedule;
+      const _stdStr = `${String(_ws?.standardStartHour ?? 8).padStart(2, '0')}:${String(_ws?.standardStartMinute ?? 30).padStart(2, '0')}`;
+      status = (user.role !== 'driver' && checkIn > _stdStr) ? 'late' : 'present';
+    }
 
     // Overlay approved leaves so approvals always appear regardless of attLog state
     // (mirrors app.js's `DATA_LEAVES.filter(l => l.userId == uid && l.status === 'approved')`).
@@ -10511,7 +10556,7 @@ function generatePeriodDays(start, end, isCurrent, user, attLog, leaves, appSett
         status = status === 'late' ? 'present' : 'excused';
       }
     }
-    days.push({ date: dateStr, isWeekend, isPubHoliday, isFuture, status, checkIn, checkOut, lateOut, upcountry, longDistance, longDistanceKm, longDistanceAllowance, lateApproved, firstScanAfterCutoff, partialLeave, checkInSource, checkOutSource, checkOutReview, morningReviewNeeded, morningReview, rawCheckOut, excused, excusedReason });
+    days.push({ date: dateStr, isWeekend, isPubHoliday, isFuture, status, checkIn, checkOut, lateOut, upcountry, longDistance, longDistanceKm, longDistanceAllowance, lateApproved, firstScanAfterCutoff, partialLeave, checkInSource, checkOutSource, checkOutReview, morningReviewNeeded, morningReview, rawCheckOut, rawCheckIn, checkInEdited, excused, excusedReason });
     d.setDate(d.getDate() + 1);
   }
   return days;
