@@ -198,14 +198,19 @@ test('server payroll takes the rate for the employee being paid, not a global', 
 // lines by the `set-*-amt` field id they carry, not by a line range -- this task and Task 7 both
 // insert lines into app.js, and a range would drift off the code it means to exempt.
 const SETTINGS_FIELD_RE = /set-(early|late)[12]-amt/;
+// 2026-10-13: matches a PROPERTY READ of any of the four rate keys through any object, not just
+// `S.allowances.x` -- the first version of this sweep looked for the two spellings it happened to
+// know and walked straight past the legend's `_legA.earlyMorning2` and the modal's `_dA.lateNight1`
+// aliases. Pinning the key name instead of the holder is what makes it complete.
+// `\b` after the digit keeps the local counters (lateNight2Count, early2Amount) out of it, and the
+// reader's own `S.allowances[key]` is bracket form, so it is not a property read of a literal key.
+const DIRECT_RATE_READ_RE = /\.(earlyMorning1|earlyMorning2|lateNight1|lateNight2)\b/;
 function directRateReads(src) {
   const offenders = [];
   src.split('\n').forEach((line, i) => {
     if (line.trim().startsWith('//')) return;
     if (SETTINGS_FIELD_RE.test(line)) return;
-    if (/(S|APP_SETTINGS)\.allowances\.(earlyMorning1|earlyMorning2|lateNight1|lateNight2)\b/.test(line)) {
-      offenders.push(`${i + 1}: ${line.trim()}`);
-    }
+    if (DIRECT_RATE_READ_RE.test(line)) offenders.push(`${i + 1}: ${line.trim()}`);
   });
   return offenders;
 }
@@ -359,6 +364,46 @@ test('the in-form pay preview quotes the form employee\'s rate, not the viewer\'
   const got = previewPassesRole(APP_SRC);
   assert.ok(got.early, 'the early-morning preview line must pass the form employee\'s role');
   assert.ok(got.late, 'the late-night preview line must pass the form employee\'s role');
+});
+
+// ---- the legend and the FAQ ----
+test('the legend is built after targetUser exists', () => {
+  const fn = extractFunction(APP_SRC, 'renderAttendanceTable');
+  const tgt = fn.indexOf('const targetUser ');
+  const legend = fn.indexOf('att-legend-early');
+  assert.ok(tgt > -1 && legend > -1, 'renderAttendanceTable changed shape -- re-point this test');
+  assert.ok(tgt < legend, 'targetUser must be declared BEFORE the legend reads its role (TDZ: the legend used to run first, and ESLint does not catch this)');
+});
+
+test('the legend labels the table it sits above, so it uses the viewed employee\'s rate', () => {
+  const fn = extractFunction(APP_SRC, 'renderAttendanceTable');
+  const legend = fn.slice(fn.indexOf('att-legend-early') - 500, fn.indexOf('att-legend-late') + 700);
+  assert.ok(/_elRateLegend\(|earlyLateRateFor\(\s*targetUser\.role/.test(legend),
+    'the legend must use the viewed employee\'s rate');
+  assert.ok(!/_legA\.(earlyMorning1|earlyMorning2|lateNight1|lateNight2)\b/.test(legend),
+    'the legend still reads the company-wide amount directly');
+});
+
+test('the legend still reads thresholds (times) centrally -- only money is per role', () => {
+  const fn = extractFunction(APP_SRC, 'renderAttendanceTable');
+  const legend = fn.slice(fn.indexOf('att-legend-early') - 500, fn.indexOf('att-legend-late') + 700);
+  assert.ok(/_legA\.earlyThreshold2Min/.test(legend), 'thresholds are company-wide and must stay so');
+});
+
+test('the FAQ answer carries the rate in all three languages', () => {
+  const faq = between(APP_SRC, 'Check in at the face scanner before', '_faqNotEligibleText(\'earlyLate\')', 600);
+  for (const marker of ['Check in at the face scanner', 'สแกนเข้าที่เครื่องก่อน', '顔認証端末で']) {
+    assert.ok(faq.includes(marker), `the ${marker} language variant went missing -- all three ship together`);
+  }
+  assert.ok(!/S\.allowances\.(earlyMorning1|earlyMorning2)\b/.test(faq),
+    'the FAQ still quotes the company-wide amount directly');
+});
+
+// The file-wide sweep, deferred here by the Task 3 ruling: with the legend and the FAQ routed,
+// NOTHING outside the Settings page may read the four amounts directly any more.
+test('nothing in app.js outside the Settings page reads an early/late amount directly', () => {
+  const offenders = directRateReads(APP_SRC);
+  assert.deepStrictEqual(offenders, [], `these app.js lines still read the amount directly:\n  ${offenders.join('\n  ')}`);
 });
 
 console.log(`\n${passed} assertions passed`);

@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 104;
+const APP_BUILD = 105;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -10233,32 +10233,38 @@ function renderAttendanceTable() {
   const mobileCards = document.getElementById('att-cards-mobile');
   if (mobileCards) mobileCards.innerHTML = '';
 
-  // 2026-07-31: legend used to hardcode the rates/thresholds directly in index.html.
-  // Reads live from Settings so it cannot silently contradict the actual rates.
-  const _legA = APP_SETTINGS.allowances;
-  const elEarly = document.getElementById('att-legend-early');
-  if (elEarly) elEarly.textContent = currentLang === 'ja'
-    ? `🌅 早朝手当 ${_legA.earlyThreshold2Min}分前=฿${_legA.earlyMorning2} | ${_legA.earlyThreshold1Min}分前=฿${_legA.earlyMorning1}`
-    : L(`🌅 Early Morning before ${minsToTime(_legA.earlyThreshold2Min)} = ฿${_legA.earlyMorning2} | before ${minsToTime(_legA.earlyThreshold1Min)} = ฿${_legA.earlyMorning1}`,
-        `🌅 Early Morning ก่อน ${minsToTime(_legA.earlyThreshold2Min)} = ฿${_legA.earlyMorning2} | ก่อน ${minsToTime(_legA.earlyThreshold1Min)} = ฿${_legA.earlyMorning1}`);
-  const elLate = document.getElementById('att-legend-late');
-  const _ln1 = String(_legA.lateNightThreshold1Hour ?? 19).padStart(2,'0') + ':00';
-  const _ln2 = String(_legA.lateNightThreshold2Hour ?? 20).padStart(2,'0') + ':00';
-  if (elLate) elLate.textContent = currentLang === 'ja'
-    ? `🌙 深夜手当 ${_ln2}以降=฿${_legA.lateNight2} | ${_ln1}以降=฿${_legA.lateNight1}`
-    : L(`🌙 Late Night after ${_ln2} = ฿${_legA.lateNight2} | after ${_ln1} = ฿${_legA.lateNight1}`,
-        `🌙 Late Night หลัง ${_ln2} = ฿${_legA.lateNight2} | หลัง ${_ln1} = ฿${_legA.lateNight1}`);
-  const elPc = document.getElementById('att-legend-personalcar');
-  if (elPc) elPc.textContent = currentLang === 'ja'
-    ? `🚙 自家用車使用 (฿${(_legA.personalCar||0).toLocaleString()}/回)`
-    : L(`🚙 Personal car used (฿${(_legA.personalCar||0).toLocaleString()}/time)`, `🚙 ใช้รถส่วนตัว (฿${(_legA.personalCar||0).toLocaleString()}/ครั้ง)`);
-
   renderAttEmployeeSelector();
 
   const canViewOthers = canViewOtherEmployees();
   const targetUserId = canViewOthers ? (selectedAttUserId || currentUser.id) : currentUser.id;
   const targetUser = canViewOthers ? (DATA_USERS.find(u => u.id === targetUserId) || currentUser) : currentUser;
   const isViewingSelf = targetUserId === currentUser.id;
+
+  // 2026-07-31: legend used to hardcode the rates/thresholds directly in index.html.
+  // Reads live from Settings so it cannot silently contradict the actual rates.
+  // 2026-10-13: MOVED DOWN to here (it used to sit at the top of this function) because it now
+  // names the VIEWED employee's rate and so needs targetUser. The other direction -- hoisting
+  // targetUser to the top -- would have been a behaviour change: renderAttEmployeeSelector()
+  // ASSIGNS selectedAttUserId when it is still null, so reading it before that call makes an
+  // admin's first render default to themselves instead of the first employee.
+  const _legA = APP_SETTINGS.allowances;
+  const _elRateLegend = (key) => earlyLateRateFor(targetUser.role, key, APP_SETTINGS);
+  const elEarly = document.getElementById('att-legend-early');
+  if (elEarly) elEarly.textContent = currentLang === 'ja'
+    ? `🌅 早朝手当 ${_legA.earlyThreshold2Min}分前=฿${_elRateLegend('earlyMorning2')} | ${_legA.earlyThreshold1Min}分前=฿${_elRateLegend('earlyMorning1')}`
+    : L(`🌅 Early Morning before ${minsToTime(_legA.earlyThreshold2Min)} = ฿${_elRateLegend('earlyMorning2')} | before ${minsToTime(_legA.earlyThreshold1Min)} = ฿${_elRateLegend('earlyMorning1')}`,
+        `🌅 Early Morning ก่อน ${minsToTime(_legA.earlyThreshold2Min)} = ฿${_elRateLegend('earlyMorning2')} | ก่อน ${minsToTime(_legA.earlyThreshold1Min)} = ฿${_elRateLegend('earlyMorning1')}`);
+  const elLate = document.getElementById('att-legend-late');
+  const _ln1 = String(_legA.lateNightThreshold1Hour ?? 19).padStart(2,'0') + ':00';
+  const _ln2 = String(_legA.lateNightThreshold2Hour ?? 20).padStart(2,'0') + ':00';
+  if (elLate) elLate.textContent = currentLang === 'ja'
+    ? `🌙 深夜手当 ${_ln2}以降=฿${_elRateLegend('lateNight2')} | ${_ln1}以降=฿${_elRateLegend('lateNight1')}`
+    : L(`🌙 Late Night after ${_ln2} = ฿${_elRateLegend('lateNight2')} | after ${_ln1} = ฿${_elRateLegend('lateNight1')}`,
+        `🌙 Late Night หลัง ${_ln2} = ฿${_elRateLegend('lateNight2')} | หลัง ${_ln1} = ฿${_elRateLegend('lateNight1')}`);
+  const elPc = document.getElementById('att-legend-personalcar');
+  if (elPc) elPc.textContent = currentLang === 'ja'
+    ? `🚙 自家用車使用 (฿${(_legA.personalCar||0).toLocaleString()}/回)`
+    : L(`🚙 Personal car used (฿${(_legA.personalCar||0).toLocaleString()}/time)`, `🚙 ใช้รถส่วนตัว (฿${(_legA.personalCar||0).toLocaleString()}/ครั้ง)`);
 
   // อัพเดท header column ให้ตรงกับ role ของพนักงานที่กำลังแสดง (ไม่ใช่ผู้ login)
   // 2026-07-31: replaced the isDriverView/isTargetAcctMkt exclusive fork -- same bug already
@@ -13974,7 +13980,11 @@ function computePayroll(user, start, end, periodIndex) {
   // server's computePayroll uses, so the web preview and the payslip cannot diverge from what
   // payroll pays (project rule: the money formula lives in two files and must agree).
   const _elRate = (key) => earlyLateRateFor(user.role, key, S);
-  const _r = { early1: _elRate('earlyMorning1'), early2: _elRate('earlyMorning2'), lateNight1: _elRate('lateNight1'), lateNight2: _elRate('lateNight2') };
+  // Short key names on purpose: `_r.lateNight2` would read exactly like the settings key it
+  // replaced, and the test that sweeps for leftover direct reads of those four names could not
+  // tell the two apart. em/ln are unambiguous, so the sweep needs no exceptions -- an exception
+  // is how the first version of that sweep ended up blind to the legend's own alias.
+  const _r = { em1: _elRate('earlyMorning1'), em2: _elRate('earlyMorning2'), ln1: _elRate('lateNight1'), ln2: _elRate('lateNight2') };
   const earlyScanPaidDates = new Set();
   if (canEarlyLate) {
     const _ln1Thr = lateNightThresholdHourOf(S.allowances, 1);
@@ -13984,8 +13994,8 @@ function computePayroll(user, start, end, periodIndex) {
       if (deviceScanQualifiesForEarlyMorning(d, holidayWorkDates)) {
         const [h, m] = d.checkIn.split(':').map(Number);
         const mins = h * 60 + m;
-        if (mins <= S.allowances.earlyThreshold2Min) { earlyCount += 2; earlyLateBonus += _r.early2; early2Count++; early2Amount += _r.early2; earlyScanPaidDates.add(d.date); }
-        else if (mins <= S.allowances.earlyThreshold1Min) { earlyCount += 1; earlyLateBonus += _r.early1; early1Count++; early1Amount += _r.early1; earlyScanPaidDates.add(d.date); }
+        if (mins <= S.allowances.earlyThreshold2Min) { earlyCount += 2; earlyLateBonus += _r.em2; early2Count++; early2Amount += _r.em2; earlyScanPaidDates.add(d.date); }
+        else if (mins <= S.allowances.earlyThreshold1Min) { earlyCount += 1; earlyLateBonus += _r.em1; early1Count++; early1Amount += _r.em1; earlyScanPaidDates.add(d.date); }
       }
       if (deviceScanQualifiesForLateNight(d, holidayWorkDates)) {
         const lnPts = lateNightPoints(d.lateOut, _ln2Thr);
@@ -13993,8 +14003,8 @@ function computePayroll(user, start, end, periodIndex) {
         // definition (crossed the ×2 threshold counts as 2, since it also crossed the ×1
         // threshold on the way) rather than a flat +1 per day -- display-only, does not affect
         // earlyLateBonus/any paid amount either way.
-        if (lnPts === 2) { lateNightCount += 2; earlyLateBonus += _r.lateNight2; lateNight2Count++; lateNight2Amount += _r.lateNight2; }
-        else { lateNightCount += 1; earlyLateBonus += _r.lateNight1; lateNight1Count++; lateNight1Amount += _r.lateNight1; }
+        if (lnPts === 2) { lateNightCount += 2; earlyLateBonus += _r.ln2; lateNight2Count++; lateNight2Amount += _r.ln2; }
+        else { lateNightCount += 1; earlyLateBonus += _r.ln1; lateNight1Count++; lateNight1Amount += _r.ln1; }
       }
     });
     approvedEarlyMorning.forEach(l => {
@@ -14005,8 +14015,8 @@ function computePayroll(user, start, end, periodIndex) {
       // Rest-day web request pays only with approved holiday-work (user 2026-09-01).
       if (isHolidayWorkDay(l.dateFrom) && !holidayWorkDates.has(l.dateFrom)) return;
       const tier = Number(l.earlyMorningTier) || 0;
-      if (tier === 2) { earlyCount += 2; earlyLateBonus += _r.early2; early2Count++; early2Amount += _r.early2; }
-      else if (tier === 1) { earlyCount += 1; earlyLateBonus += _r.early1; early1Count++; early1Amount += _r.early1; }
+      if (tier === 2) { earlyCount += 2; earlyLateBonus += _r.em2; early2Count++; early2Amount += _r.em2; }
+      else if (tier === 1) { earlyCount += 1; earlyLateBonus += _r.em1; early1Count++; early1Amount += _r.em1; }
     });
   }
 
@@ -14136,7 +14146,7 @@ function computePayroll(user, start, end, periodIndex) {
     // 2026-10-13: the rate actually used for this employee, so anything printing "rate x days"
     // prints what was paid instead of looking the company-wide amount up a second time -- with a
     // per-role rate those two answers differ, and the payslip must not contradict itself.
-    early1Rate: _r.early1, early2Rate: _r.early2, lateNight1Rate: _r.lateNight1, lateNight2Rate: _r.lateNight2,
+    early1Rate: _r.em1, early2Rate: _r.em2, lateNight1Rate: _r.ln1, lateNight2Rate: _r.ln2,
     ot15Amount, ot15Hours, ot20Amount, ot20Hours, ot30Amount, ot30Hours, otTotalHours,
     longDistanceCount, personalCarCount, holidayWorkOtCount,
     approvedOTs, approvedLD, approvedPC,
@@ -23548,6 +23558,10 @@ function _faqRulesItems() {
   const thr1 = lateOutThresholdHour(1), thr2 = lateOutThresholdHour(2);
   const amt1 = lateOutAllowanceForHour(thr1), amt2 = lateOutAllowanceForHour(thr2);
   const earlyThr1 = minsToTime(S.allowances.earlyThreshold1Min), earlyThr2 = minsToTime(S.allowances.earlyThreshold2Min);
+  // 2026-10-13: the FAQ answers "what do I get", so it quotes the READER's own rate. amt1/amt2
+  // above already do, via lateOutAllowanceForHour's effectiveRole() default. All three languages
+  // below change together (project rule: TH/EN/JA ship in one edit).
+  const _faqEm1 = earlyMorningAllowanceForTier(1), _faqEm2 = earlyMorningAllowanceForTier(2);
   const stdStart = officeOtStdStartHHMM(S);
   return [
     { icon: '⏱️', roles: _faqEligibleRoles('ot'), q: _faq('How is OT calculated?', 'OT คำนวณยังไง?', 'OTはどう計算されますか？'),
@@ -23558,9 +23572,9 @@ function _faqRulesItems() {
       ) },
     { icon: '🌅', roles: _faqEligibleRoles('earlyLate'), q: _faq('How does the Early Morning Allowance work?', 'Early Morning Allowance คำนวณยังไง?', '早出手当はどう計算されますか？'),
       a: _faq(
-        `Check in at the face scanner before ${earlyThr1} → +฿${S.allowances.earlyMorning1}. Check in at the face scanner before ${earlyThr2} (even earlier) → +฿${S.allowances.earlyMorning2} instead — automatic, no request needed. On a weekend or public holiday this pays only after Holiday Work is approved. If you used the web Check In button instead, submit an Early Morning request (🌅); holidays still need Holiday Work first. ${_faqNotEligibleText('earlyLate')}`,
-        `สแกนเข้าที่เครื่องก่อน ${earlyThr1} → ได้ +฿${S.allowances.earlyMorning1} ถ้าสแกนเข้าที่เครื่องก่อน ${earlyThr2} (เช้ากว่านั้นอีก) → ได้ +฿${S.allowances.earlyMorning2} แทน — ได้อัตโนมัติ ไม่ต้องยื่นคำขอ วันหยุดจ่ายเมื่อ Holiday Work อนุมัติแล้วเท่านั้น ถ้าเช็กอินผ่านปุ่มบนเว็บ ให้ยื่น 🌅 — วันหยุดยังต้องยื่น Holiday Work ก่อน ${_faqNotEligibleText('earlyLate')}`,
-        `顔認証端末で${earlyThr1}より前に出勤 → +฿${S.allowances.earlyMorning1}。端末で${earlyThr2}より前 → +฿${S.allowances.earlyMorning2} — 自動付与。休日は休日出勤の承認後のみ支給。Web出勤の場合は🌅を申請（休日は先に休日出勤が必要）。${_faqNotEligibleText('earlyLate')}`
+        `Check in at the face scanner before ${earlyThr1} → +฿${_faqEm1}. Check in at the face scanner before ${earlyThr2} (even earlier) → +฿${_faqEm2} instead — automatic, no request needed. On a weekend or public holiday this pays only after Holiday Work is approved. If you used the web Check In button instead, submit an Early Morning request (🌅); holidays still need Holiday Work first. ${_faqNotEligibleText('earlyLate')}`,
+        `สแกนเข้าที่เครื่องก่อน ${earlyThr1} → ได้ +฿${_faqEm1} ถ้าสแกนเข้าที่เครื่องก่อน ${earlyThr2} (เช้ากว่านั้นอีก) → ได้ +฿${_faqEm2} แทน — ได้อัตโนมัติ ไม่ต้องยื่นคำขอ วันหยุดจ่ายเมื่อ Holiday Work อนุมัติแล้วเท่านั้น ถ้าเช็กอินผ่านปุ่มบนเว็บ ให้ยื่น 🌅 — วันหยุดยังต้องยื่น Holiday Work ก่อน ${_faqNotEligibleText('earlyLate')}`,
+        `顔認証端末で${earlyThr1}より前に出勤 → +฿${_faqEm1}。端末で${earlyThr2}より前 → +฿${_faqEm2} — 自動付与。休日は休日出勤の承認後のみ支給。Web出勤の場合は🌅を申請（休日は先に休日出勤が必要）。${_faqNotEligibleText('earlyLate')}`
       ) },
     { icon: '🌙', roles: _faqEligibleRoles('earlyLate'), q: _faq('How does the Late Night Allowance / "report late-out" work?', 'Late Night Allowance / แจ้งกลับดึก คำนวณยังไง?', '深夜手当・「深夜退勤報告」はどう機能しますか？'),
       a: _faq(
