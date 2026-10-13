@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 110;
+const APP_BUILD = 111;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -1703,6 +1703,8 @@ let APP_SETTINGS = {
   },
   // 2026-10-13: see server.js DEFAULT_APP_SETTINGS -- ships OFF with no role configured.
   allowanceRoleRates: { enabled: false, byRole: {} },
+  // 2026-10-14: see server.js DEFAULT_APP_SETTINGS -- ships ON, driver exempt.
+  webClock: { enabled: true, exemptRoles: ['driver'] },
   workSchedule: { standardStartHour: 8, standardStartMinute: 30 },
   // 2026-09-25: web check-in geofence (Paso Tower). Editable in Settings; `enabled:false` restores
   // the pre-geofence behaviour exactly.
@@ -3501,6 +3503,15 @@ async function loadSettingsFromBackend() {
       // saw the saved table at all: the Settings form rendered blank, every badge showed the
       // company-wide amount while payroll paid the override, and the next save of ANY unrelated
       // field PUT an empty table back and erased the owner's amounts from disk.
+      // 2026-10-14: replaced, not merged -- the server stores this section wholesale, and a merge
+      // would resurrect an exemption the owner removed. Same lesson as allowanceRoleRates below:
+      // a section the page never reads back is a section the next save erases.
+      if (s.webClock && typeof s.webClock === 'object' && !Array.isArray(s.webClock)) {
+        APP_SETTINGS.webClock = {
+          enabled: s.webClock.enabled !== false,
+          exemptRoles: Array.isArray(s.webClock.exemptRoles) ? s.webClock.exemptRoles.slice() : [],
+        };
+      }
       if (s.allowanceRoleRates && typeof s.allowanceRoleRates === 'object' && !Array.isArray(s.allowanceRoleRates)) {
         APP_SETTINGS.allowanceRoleRates = {
           enabled: s.allowanceRoleRates.enabled === true,
@@ -5487,6 +5498,24 @@ function onRoleRateRemove(role) {
 // ("the four key names appear nowhere outside their own declaration and the defaults"), which
 // means the Settings page's legitimate reads must not name them either. Hence the bracket form.
 const SETTINGS_EARLY_LATE_FIELDS = { 'set-early1-amt': 0, 'set-early2-amt': 1, 'set-late1-amt': 2, 'set-late2-amt': 3 };
+// 2026-10-14: the web-clock section, normalised for rendering. A settings file written before
+// this feature has no section at all, and must read as "web clocking allowed" -- the state the
+// company has always been in -- rather than as "off".
+function webClockOf(s) {
+  const w = (s && s.webClock && typeof s.webClock === 'object' && !Array.isArray(s.webClock)) ? s.webClock : {};
+  return { enabled: w.enabled !== false, exemptRoles: Array.isArray(w.exemptRoles) ? w.exemptRoles : [] };
+}
+function readWebClockFromForm() {
+  // As with the rate table: if the block was never rendered, leave the stored section alone rather
+  // than rebuilding it from an empty DOM and silently switching the feature back on.
+  const box = document.getElementById('set-webclock-off');
+  if (!box) return APP_SETTINGS.webClock || { enabled: true, exemptRoles: [] };
+  const exemptRoles = ROLE_KEYS.filter(r => {
+    const el = document.getElementById(`set-webclock-exempt-${r}`);
+    return !!(el && el.checked);
+  });
+  return { enabled: !box.checked, exemptRoles };
+}
 function centralEarlyLateRate(s, i) {
   return (s.allowances || {})[EARLY_LATE_RATE_KEYS[i]];
 }
@@ -5785,6 +5814,24 @@ function renderSettingsPage(_skipRefresh) {
         field(L('Ignore a pass sooner than (minutes)','ไม่นับ ถ้าห่างจากเวลาเข้างานไม่ถึง (นาที)'), inp('set-mr-gap', morningReviewWindowOf(s.allowances).minGap, 'number', 'min="0" max="480" step="5"'), L('grace period — a pass this soon after check-in is not counted','ช่วงผ่อนผัน — ผ่านประตูภายในเวลานี้หลังเข้างาน จะไม่ถูกนับ')),
         ''
       )}
+    `)}
+
+    ${adminSection('time', '🚫', L('Clocking in and out from the web','การลงเวลาเข้า–ออกผ่านเว็บ'), `
+      <label style="display:flex;align-items:center;gap:8px;margin:0 0 8px;font-size:13px;font-weight:600;color:#374151;cursor:pointer">
+        <input id="set-webclock-off" type="checkbox" ${webClockOf(s).enabled === false ? 'checked' : ''} style="width:18px;height:18px;cursor:pointer">
+        ${L('Turn off clocking in and out from the web','ปิดการลงเวลาเข้า–ออกผ่านเว็บ')}
+      </label>
+      <div style="font-size:12px;color:#64748b;margin:0 0 10px">${
+        L('When off, attendance is recorded at the face scanner only. Roles ticked below keep the web buttons.',
+          'เมื่อปิด การลงเวลาจะบันทึกจากเครื่องสแกนใบหน้าเท่านั้น · ตำแหน่งที่ติ๊กไว้ด้านล่างยังใช้ปุ่มบนเว็บได้')}</div>
+      <div style="font-size:12px;font-weight:600;color:#374151;margin-bottom:6px">${
+        L('Roles that keep the web buttons','ตำแหน่งที่ยังใช้ปุ่มบนเว็บได้')}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:10px 16px;font-size:13px">
+        ${ROLE_KEYS.map(r => `<label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" class="webclock-exempt" id="set-webclock-exempt-${escapeHtml(r)}" ${webClockOf(s).exemptRoles.includes(r) ? 'checked' : ''}>${escapeHtml(r)}</label>`).join('')}
+      </div>
+      <div style="font-size:11px;color:#94a3b8;margin-top:8px">${
+        L('Drivers are ticked by default because they are not at the office — untick at your own risk.',
+          'ตั้งต้นติ๊ก driver ไว้เพราะไม่ได้อยู่ออฟฟิศ — ถ้าเอาออก คนขับจะลงเวลาไม่ได้เลย')}</div>
     `)}
 
     ${adminSection('time', '📍', L('Area where web check-in is blocked','พื้นที่ห้ามเช็คอินผ่านเว็บ'), `
@@ -6537,6 +6584,8 @@ async function saveSettingsPage() {
   const _rrRead = readRoleRateTableFromForm();
   if (!_rrRead.ok) { settingsFieldError(_rrRead.fieldId, _rrRead.message); return; }
   APP_SETTINGS.allowanceRoleRates = _rrRead.value;
+  // 2026-10-14: the web-clock switch and its role exemptions.
+  APP_SETTINGS.webClock = readWebClockFromForm();
   // 2026-09-24 (owner): `parseInt(...) || 19` discarded a midnight (0) threshold at the moment of
   // saving, which is what made 00:00 look unsavable. Only a non-numeric field falls back now.
   const _thr1Raw = parseInt((document.getElementById('set-late-thr1')?.value || '19:00').split(':')[0], 10);
@@ -8771,6 +8820,14 @@ function webCheckinWouldBeCheckIn() {
   const isPreDawn = bk.h * 60 + bk.min < BUSINESS_DAY_START_MINS;
   return !isPreDawn && !attendanceLog[key]?.checkIn && timeStr < CHECKIN_CUTOFF;
 }
+// 2026-10-14 (web-clock switch): did today's check-in come from the web? Twin of the server's
+// webScanHasWebCheckInToday(). The owner's rule is that web check-ins already recorded stay
+// usable, so a day started on the web can still be closed on the web after the switch goes off.
+function webCheckinHasWebCheckInToday() {
+  if (!currentUser || !currentUser.id) return false;
+  const day = attendanceLog[attKey(currentUser.id, businessDateFromYmd(scanYmd()))];
+  return !!(day && day.checkIn && day.checkInSource === 'web');
+}
 // 2026-09-25: web check-in geofence -- localized copy of the server's 403 reason codes (the
 // server's own `message` is English-only by design, see server.js's WebScan gate). Called both
 // as a live preview before posting (doScan()) and to render the reason's text in #geofence-modal
@@ -8783,6 +8840,13 @@ function geofenceMessage(reason) {
     // the modal must say how to recover, not just state the rule.
     return L('Company policy: check-in must be made with the face scanner at the office. Please scan at the device, or submit a time-correction request if you cannot.',
              'นโยบายบริษัท: การลงเวลาเข้างานต้องสแกนใบหน้าที่เครื่องในออฟฟิศเท่านั้น กรุณาสแกนใบหน้าที่เครื่อง หรือยื่นคำขอแก้ไขเวลาย้อนหลังหากสแกนไม่ได้');
+  }
+  if (reason === 'web-clock-off') {
+    // 2026-10-14 (owner): clocking in from the web is switched off; attendance is recorded at the
+    // face scanner. Same shape as the two below: say the rule AND how to recover, because a day
+    // with no recorded check-in loses every claim that needs one.
+    return L('Company policy: clocking in and out from the web is turned off — please use the face scanner at the office. If you cannot scan, submit a time-correction request.',
+             'นโยบายบริษัท: ปิดการลงเวลาเข้า–ออกผ่านเว็บแล้ว กรุณาสแกนใบหน้าที่เครื่องในออฟฟิศ หากสแกนไม่ได้ ให้ยื่นคำขอแก้ไขเวลาย้อนหลัง');
   }
   if (reason === 'geofence-no-position') {
     // Also covers a fix that went stale (GPS went quiet -- see gpsIsFresh()): the remedy reads
@@ -8812,6 +8876,19 @@ function geofenceUiState() {
   // the server never applies the distance rule to a check-out, so an on-site employee checking out
   // in the evening (or a late-night return, or a first press after CHECKIN_CUTOFF) must never be
   // refused for being at the office.
+  // 2026-10-14 (owner): the web-clock switch, judged BEFORE the check-in/check-out split because
+  // when it is off it refuses both directions. Mirrors webScanGateReason() on the server, which
+  // refuses independently -- this block only saves a round trip and explains it on the page.
+  // Behind _geofenceSettingsFresh for the same reason the distance rule is: never refuse locally
+  // on settings this session has not actually loaded. Both carve-outs match the server exactly:
+  // an exempt role, and a day whose own check-in was a web scan.
+  const _wc = APP_SETTINGS.webClock;
+  if (_geofenceSettingsFresh && _wc && typeof _wc === 'object' && !Array.isArray(_wc) && _wc.enabled === false) {
+    const _wcExempt = Array.isArray(_wc.exemptRoles) && _wc.exemptRoles.includes(effectiveRole());
+    if (!_wcExempt && !(!webCheckinWouldBeCheckIn() && webCheckinHasWebCheckInToday())) {
+      return { blocked: true, reason: 'web-clock-off', text: geofenceMessage('web-clock-off') };
+    }
+  }
   if (!webCheckinWouldBeCheckIn()) return { blocked: false, reason: '', text: '' };
   // Important #2a/#2b (fail OPEN): until this session has genuinely fresh settings AND fresh
   // attendance, never refuse locally -- let the server's own 403 decide instead. See

@@ -1297,6 +1297,11 @@ window.LANG_JA = {
   "Only roles that differ are listed. A role not in this table uses the company-wide amount above, and follows it when you change it.": "金額が異なる役職のみを登録します。この表にない役職は上記の全社共通額を使用し、その額を変更すると自動的に追従します。",
   "No exceptions — every role uses the company-wide amount above.": "例外なし — すべての役職が上記の全社共通額を使用します。",
   "+ Add a role that differs": "＋ 金額が異なる役職を追加",
+  // 2026-10-14: the web-clock switch.
+  "Company policy: clocking in and out from the web is turned off — please use the face scanner at the office. If you cannot scan, submit a time-correction request.": "会社規定により、Webからの出退勤打刻は停止されています。オフィスの顔認証端末をご利用ください。打刻できない場合は時刻修正を申請してください。",
+  "Turn off clocking in and out from the web": "Webからの出退勤打刻を停止する",
+  "When off, attendance is recorded at the face scanner only. Roles ticked below keep the web buttons.": "停止すると出退勤は顔認証端末のみで記録されます。下でチェックした役職はWebの打刻ボタンを引き続き使用できます。",
+  "Roles that keep the web buttons": "Webの打刻ボタンを使い続ける役職",
   "Put this role back on the company-wide amount": "この役職を全社共通額に戻す",
   "No role is eligible for this allowance": "この手当の対象となる役職がありません",
   "Role": "役職",

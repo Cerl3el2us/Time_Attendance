@@ -800,7 +800,11 @@ test('every new message exists in all three languages, with ja.js keyed on the e
   // 2026-09-26: unchanged at 9 -- geofenceMessage() still has exactly 2 L() calls (the
   // 'geofence-inside' text just got longer, with the remedy sentence added; no call was added or
   // removed) and the Settings card is untouched by this round of fixes.
-  assert.strictEqual(pairs.length, 9, `expected 9 L(en, th) calls across geofenceMessage + the Settings card, found ${pairs.length}`);
+  // 2026-10-14: 10 -- geofenceMessage() gained the 'web-clock-off' refusal when the web-clock
+  // switch was added. The count is deliberately exact: that is what makes a new message announce
+  // itself here instead of shipping untranslated. The switch's own Settings card sits above this
+  // one's anchor, so its strings are checked by tests/web-clock-switch.test.js.
+  assert.strictEqual(pairs.length, 10, `expected 10 L(en, th) calls across geofenceMessage + the Settings card, found ${pairs.length}`);
 
   // The #geofence-modal header is translated by fixStaticText()/applyStaticI18n() via data-en
   // (which also keys into window.LANG_JA, see applyStaticI18n()), not via L() -- it is the 10th
@@ -817,7 +821,8 @@ test('every new message exists in all three languages, with ja.js keyed on the e
   assert.ok(headerMatch, 'geofence-modal header data-en attribute not found');
   pairs.push({ en: headerMatch[1], th: null });
 
-  assert.strictEqual(pairs.length, 10, `expected 10 total strings (9 L() + the modal's static header), found ${pairs.length}`);
+  // 2026-10-14: 11 = the 10 L() calls above plus the modal's static header.
+  assert.strictEqual(pairs.length, 11, `expected 11 total strings (10 L() + the modal's static header), found ${pairs.length}`);
 
   for (const { en, th } of pairs) {
     assert.ok(en.length > 0, 'an L() English argument must not be empty');
