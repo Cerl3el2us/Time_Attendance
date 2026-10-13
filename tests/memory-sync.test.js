@@ -140,6 +140,45 @@ test('sync_if_dirty: -WhatIf never writes the marker', () => {
   if (fs.existsSync(marker)) throw new Error('-WhatIf wrote the marker; a dry run must not change state');
 });
 
+// 2026-10-13: this case exists because the hook on the home machine printed UNREACHABLE on every
+// turn and pushed nothing for a whole day, silently (the script exits 0 on that path on purpose).
+// settings.json passes -ProjectDir "Z:\\" -- two backslashes, chosen on 2026-10-12 because
+// cmd.exe eats the one before the closing quote. The home machine launches the hook through
+// PowerShell instead, which eats nothing, so the script received 'Z:\\' and derived
+// ...\projects\Z---\memory (three dashes). That folder does not exist, so there was nothing to
+// decide and nothing was ever copied. Measured both ways on 2026-10-13: through cmd.exe the script
+// receives Z:\ and derives Z--, through PowerShell it receives Z:\\ and derives Z---.
+//
+// The folder name must therefore not depend on which shell started the hook. Q: is used on purpose
+// (not mapped): the derived NAME is what is under test, so every run must end in UNREACHABLE and
+// log the path it derived, with the real memory folder taking no part in the case.
+test('sync_if_dirty: every way a shell can deliver the drive root names the same memory folder', () => {
+  if (!SLOW) skip('--slow only');
+  requireScript(DIRTY_SCRIPT);
+  const dir = tmp('projectdir');
+  const forms = ['Q:', 'Q:\\', 'Q:\\\\', 'Q:"'];
+  for (const form of forms) {
+    const log = path.join(dir, 'derive.log');
+    if (fs.existsSync(log)) fs.unlinkSync(log);
+    const r = ps(DIRTY_SCRIPT, ['-ProjectDir', form, '-LogFile', log]);
+    if (r.code !== 0) {
+      throw new Error(`-ProjectDir ${JSON.stringify(form)}: a hook must never fail the session: exit ${r.code} ${r.err}`);
+    }
+    if (r.out !== 'UNREACHABLE') {
+      throw new Error(`-ProjectDir ${JSON.stringify(form)}: expected UNREACHABLE, got: ${JSON.stringify(r.out)}`);
+    }
+    const body = fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '';
+    const m = /memorydir=(.+)$/m.exec(body);
+    if (!m) {
+      throw new Error(`-ProjectDir ${JSON.stringify(form)}: no memorydir line logged; log was ${JSON.stringify(body)}`);
+    }
+    const got = m[1].trim();
+    if (!got.endsWith('\\projects\\Q--\\memory')) {
+      throw new Error(`-ProjectDir ${JSON.stringify(form)}: derived ${got} -- it must end in \\projects\\Q--\\memory, `
+        + 'or the hook looks for a folder that does not exist and pushes nothing');
+    }
+  }
+});
 test('sync_memory.ps1: $Patterns covers the pending-task-format note', () => {
   requireScript(SYNC_SCRIPT);
   const src = fs.readFileSync(SYNC_SCRIPT, 'utf8');
