@@ -1026,5 +1026,56 @@ test('the save path aborts on a refused cell instead of reporting success', () =
   assert.ok(/return;/.test(save), 'the save must abort, not continue and report success');
 });
 
+// ---- deploy ordering: the frontend goes live before the backend restarts ----
+// 2026-10-14: Z:\Time_Attendance IS the live site, so merging publishes app.js immediately while
+// the running Node process keeps the OLD server.js until someone restarts it over SSH. An old
+// server rejects an unknown appSettings field with a 400 for the WHOLE request, so a new client
+// that always sent allowanceRoleRates would break every Settings save during that window -- the
+// same whole-page-refusal the spec warns about from the morningReviewEnabled incident.
+// So the inert default is not sent at all: nothing is configured, there is nothing to persist, and
+// an old server never meets the key. Once the owner configures anything it is sent as normal.
+function runSaveFilter(appSettings) {
+  const fn = extractFunction(APP_SRC, 'omitInertRoleRates');
+  const ctx = { Object, Array };
+  vm.createContext(ctx);
+  vm.runInContext(`${fn}\nthis.out = omitInertRoleRates(${JSON.stringify(appSettings)});`, ctx);
+  return ctx.out;
+}
+
+test('an unconfigured rate table is not sent to the server at all', () => {
+  const out = runSaveFilter({ allowances: { upcountry: 240 }, allowanceRoleRates: { enabled: false, byRole: {} } });
+  assert.ok(!Object.prototype.hasOwnProperty.call(out, 'allowanceRoleRates'),
+    'the inert default must be omitted, so a server that predates this feature still accepts the save');
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(out.allowances)), { upcountry: 240 },
+    'nothing else may be dropped');
+});
+
+test('anything the owner has actually configured IS sent', () => {
+  const cases = [
+    { enabled: true, byRole: {} },
+    { enabled: false, byRole: { manager: { earlyMorning1: 7 } } },
+    { enabled: true, byRole: { manager: { earlyMorning1: 7 } } },
+  ];
+  for (const rr of cases) {
+    const out = runSaveFilter({ allowanceRoleRates: rr });
+    assert.ok(Object.prototype.hasOwnProperty.call(out, 'allowanceRoleRates'),
+      `${JSON.stringify(rr)} is a real setting and must be sent`);
+  }
+});
+
+test('a missing or malformed section is simply omitted, never sent as garbage', () => {
+  for (const rr of [undefined, null, 'x', []]) {
+    const out = runSaveFilter(rr === undefined ? {} : { allowanceRoleRates: rr });
+    assert.ok(!Object.prototype.hasOwnProperty.call(out, 'allowanceRoleRates'),
+      `${JSON.stringify(rr)} must not be sent`);
+  }
+});
+
+test('the save path routes through the filter', () => {
+  const fn = extractFunction(APP_SRC, 'savePayrollSettings');
+  assert.ok(/omitInertRoleRates\(/.test(fn),
+    'savePayrollSettings must send the filtered object, or the deploy window breaks Settings saves');
+});
+
 console.log(`\n${passed} assertions passed`);
 module.exports = { between, previewPassesRole };

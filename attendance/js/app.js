@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 108;
+const APP_BUILD = 109;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -3549,6 +3549,23 @@ async function loadSettingsFromBackend() {
 // {success, conflict} so callers COULD branch on it, but every current call site is a
 // fire-and-forget save -- the toast + auto-refresh below is enough on its own, so none of them
 // need to change.
+// 2026-10-14: deploy ordering. Z:\Time_Attendance is the live site, so a merge publishes this
+// file the instant it lands while the running backend keeps the OLD server.js until it is
+// restarted over SSH. A server that predates allowanceRoleRates rejects it as an unknown
+// appSettings field -- and that rejection fails the WHOLE save, which is the
+// morningReviewEnabled whole-page-refusal all over again. So while the section is still at its
+// inert default (off, with nothing configured) it is not sent: there is nothing to persist, and
+// an old backend never meets a key it does not know. The moment the owner configures anything,
+// it is sent normally -- by which time the backend has to have been restarted anyway, because
+// nothing else can store it.
+function omitInertRoleRates(appSettings) {
+  const rr = appSettings && appSettings.allowanceRoleRates;
+  const isObj = rr && typeof rr === 'object' && !Array.isArray(rr);
+  const configured = isObj && (rr.enabled === true || (rr.byRole && typeof rr.byRole === 'object' && !Array.isArray(rr.byRole) && Object.keys(rr.byRole).length > 0));
+  if (configured) return appSettings;
+  const { allowanceRoleRates, ...rest } = appSettings || {};
+  return rest;
+}
 async function savePayrollSettings() {
   if (blockIfObserver()) return { success: false };
   try {
@@ -3559,7 +3576,7 @@ async function savePayrollSettings() {
     // secret-duplication surface a CRITICAL fix earlier today closed on the READ side. Those 3
     // keys are already saved separately by saveSettingsPage(); only send the genuine appSettings
     // (payroll-config) sub-keys here.
-    const { emailConfig, emailNotification, payslipEmailEnabled, ...payrollOnlyAppSettings } = APP_SETTINGS;
+    const { emailConfig, emailNotification, payslipEmailEnabled, ...payrollOnlyAppSettings } = omitInertRoleRates(APP_SETTINGS);
     const res = await apiFetch(`/api/settings`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
