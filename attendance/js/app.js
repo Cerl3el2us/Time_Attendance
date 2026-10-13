@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 109;
+const APP_BUILD = 110;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -5393,37 +5393,91 @@ function roleRateRolesFrom(s) {
   const elig = (s && s.allowanceEligibility && s.allowanceEligibility.earlyLate) || [];
   return Array.isArray(elig) ? elig.slice().sort() : [];
 }
+// 2026-10-14 (owner, after using it for real): this table holds EXCEPTIONS, not a row per eligible
+// role. The first version listed every role that could receive the allowance, which reads as "fill
+// these in" -- so every cell was typed over, and staff's x2 tier was cut from 480 to 240 until it
+// was caught before payroll closed. The owner's own words: the company-wide boxes above already
+// cover everyone, so a row per role is redundant. A role with no row uses the amount above, and
+// the help line now says exactly that.
+//
+// `_roleRateRows()` is the live list of roles shown. It starts from the roles that actually have a
+// stored override -- INCLUDING any that have since lost eligibility, or their leftover amounts
+// would be invisible and impossible to remove -- and grows when the owner adds one.
+let _roleRateAdded = [];
+function roleRateShownRoles(s) {
+  const rr = (s.allowanceRoleRates && typeof s.allowanceRoleRates === 'object' && !Array.isArray(s.allowanceRoleRates))
+    ? s.allowanceRoleRates : {};
+  const byRole = (rr.byRole && typeof rr.byRole === 'object' && !Array.isArray(rr.byRole)) ? rr.byRole : {};
+  const configured = Object.keys(byRole).filter(r => byRole[r] && typeof byRole[r] === 'object' && !Array.isArray(byRole[r]));
+  return [...new Set([...configured, ..._roleRateAdded])].sort();
+}
 function renderRoleRateTable(s) {
   const _rr = (s.allowanceRoleRates && typeof s.allowanceRoleRates === 'object' && !Array.isArray(s.allowanceRoleRates))
     ? s.allowanceRoleRates : { enabled: false, byRole: {} };
   const _rrOn = _rr.enabled === true;
-  const _roleRateRoles = roleRateRolesFrom(s);
+  const _roleRateRoles = roleRateShownRoles(s);
+  const _addable = roleRateRolesFrom(s).filter(r => !_roleRateRoles.includes(r));
   const _byRole = (_rr.byRole && typeof _rr.byRole === 'object' && !Array.isArray(_rr.byRole)) ? _rr.byRole : {};
   // Column headings by POSITION in EARLY_LATE_RATE_KEYS, not keyed by the key names -- see
   // centralEarlyLateRate() for why those names appear nowhere outside their declaration.
   const EN = ['Early ×1', 'Early ×2', 'Late ×1', 'Late ×2'];
   const TH = ['มาเช้า ×1', 'มาเช้า ×2', 'กลับดึก ×1', 'กลับดึก ×2'];
   const head = `<tr><th style="text-align:left;padding:4px 8px">${L('Role','ตำแหน่ง')}</th>${
-    EARLY_LATE_RATE_KEYS.map((k, i) => `<th style="padding:4px 8px">${L(EN[i], TH[i])}</th>`).join('')}</tr>`;
-  const body = _roleRateRoles.length
-    ? _roleRateRoles.map(r => {
-      const row = (_byRole[r] && typeof _byRole[r] === 'object') ? _byRole[r] : {};
-      return `<tr><td style="padding:4px 8px">${escapeHtml(r)}</td>${EARLY_LATE_RATE_KEYS.map(k =>
-        // placeholder = the company-wide amount, so a blank cell SHOWS what it will fall back to.
-        `<td style="padding:4px 8px"><input id="set-rolerate-${escapeHtml(r)}-${k}" class="rolerate-cell" type="number" min="0" max="100000" step="1" value="${row[k] != null ? Number(row[k]) : ''}" placeholder="${Number(s.allowances[k])}" ${_rrOn ? '' : 'disabled'} style="width:5.5rem;padding:6px 8px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px"></td>`
-      ).join('')}</tr>`;
-    }).join('')
-    : `<tr><td colspan="${EARLY_LATE_RATE_KEYS.length + 1}" style="padding:4px 8px">${
-      L('No role is eligible for this allowance','ไม่มีตำแหน่งที่มีสิทธิ์รับเบี้ยเลี้ยงนี้')}</td></tr>`;
+    EARLY_LATE_RATE_KEYS.map((k, i) => `<th style="padding:4px 8px">${L(EN[i], TH[i])}</th>`).join('')}<th></th></tr>`;
+  const body = _roleRateRoles.map(r => {
+    const row = (_byRole[r] && typeof _byRole[r] === 'object') ? _byRole[r] : {};
+    return `<tr><td style="padding:4px 8px">${escapeHtml(r)}</td>${EARLY_LATE_RATE_KEYS.map(k =>
+      // placeholder = the company-wide amount this cell falls back to while it is left blank.
+      `<td style="padding:4px 8px"><input id="set-rolerate-${escapeHtml(r)}-${k}" class="rolerate-cell" type="number" min="0" max="100000" step="1" value="${row[k] != null ? Number(row[k]) : ''}" placeholder="${Number(s.allowances[k])}" ${_rrOn ? '' : 'disabled'} style="width:5.5rem;padding:6px 8px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px"></td>`
+    ).join('')}<td style="padding:4px 8px"><button type="button" class="rolerate-cell" onclick="onRoleRateRemove('${escapeJsAttr(r)}')" ${_rrOn ? '' : 'disabled'} title="${L('Put this role back on the company-wide amount','ให้ตำแหน่งนี้กลับไปใช้ยอดกลาง')}" style="border:none;background:none;cursor:pointer;color:#dc2626;font-size:15px;line-height:1">✕</button></td></tr>`;
+  }).join('');
+  const emptyRow = `<tr><td colspan="${EARLY_LATE_RATE_KEYS.length + 2}" style="padding:6px 8px;color:#64748b">${
+    L('No exceptions — every role uses the company-wide amount above.','ยังไม่มีข้อยกเว้น — ทุกตำแหน่งใช้ยอดกลางด้านบน')}</td></tr>`;
+  const adder = _addable.length
+    ? `<div style="margin-top:8px;display:flex;align-items:center;gap:6px;font-size:13px">
+        <select id="set-rolerate-add" class="rolerate-cell" ${_rrOn ? '' : 'disabled'} style="padding:6px 8px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px">
+          ${_addable.map(r => `<option value="${escapeHtml(r)}">${escapeHtml(r)}</option>`).join('')}
+        </select>
+        <button type="button" class="rolerate-cell" onclick="onRoleRateAdd()" ${_rrOn ? '' : 'disabled'} style="padding:6px 10px;border:1px solid #e2e8f0;border-radius:6px;background:#f8fafc;cursor:pointer;font-size:13px">${
+          L('+ Add a role that differs','+ เพิ่มตำแหน่งที่ได้ไม่เท่ายอดกลาง')}</button>
+      </div>`
+    : '';
   return `<div id="rolerate-block" style="margin-top:14px;${_rrOn ? '' : 'opacity:.55'}">
       <label style="display:flex;align-items:center;gap:8px;font-size:13px">
         <input type="checkbox" id="set-rolerate-enabled" ${_rrOn ? 'checked' : ''} onchange="onRoleRateToggle()">
         ${L('Use a different early-morning / late-night rate per role','ใช้ยอดเบี้ยเลี้ยงมาเช้า/กลับดึก ต่างกันตามตำแหน่ง')}
       </label>
       <div style="font-size:12px;color:#64748b;margin:4px 0 8px">${
-        L('A blank cell uses the company-wide amount above.','ช่องที่เว้นว่างจะใช้ยอดกลางด้านบน')}</div>
-      <table style="border-collapse:collapse;font-size:13px">${head}${body}</table>
+        L('Only roles that differ are listed. A role not in this table uses the company-wide amount above, and follows it when you change it.','ตารางนี้ใส่เฉพาะตำแหน่งที่ได้ไม่เท่ากัน · ตำแหน่งที่ไม่อยู่ในตาราง ใช้ยอดกลางด้านบน และจะขยับตามเมื่อแก้ยอดกลาง')}</div>
+      <table style="border-collapse:collapse;font-size:13px">${head}${_roleRateRoles.length ? body : emptyRow}</table>
+      ${adder}
     </div>`;
+}
+// Re-renders ONLY this block, never the whole Settings page: other fields may hold unsaved edits.
+function refreshRoleRateTable() {
+  const block = document.getElementById('rolerate-block');
+  if (!block) return;
+  // Keep what is typed but not yet saved, so adding or removing a row does not discard it.
+  const read = readRoleRateTableFromForm();
+  const live = read.ok
+    ? { ...APP_SETTINGS, allowanceRoleRates: { enabled: read.value.enabled, byRole: read.value.byRole } }
+    : APP_SETTINGS;
+  block.outerHTML = renderRoleRateTable(live);
+}
+function onRoleRateAdd() {
+  const sel = document.getElementById('set-rolerate-add');
+  if (!sel || !sel.value) return;
+  if (!_roleRateAdded.includes(sel.value)) _roleRateAdded.push(sel.value);
+  refreshRoleRateTable();
+}
+function onRoleRateRemove(role) {
+  // Dropping the row IS the way to put a role back on the company-wide amount: the save reads the
+  // rendered rows, so a role with no row is simply absent from byRole on the next save.
+  _roleRateAdded = _roleRateAdded.filter(r => r !== role);
+  const el = document.getElementById(`set-rolerate-${role}-${EARLY_LATE_RATE_KEYS[0]}`);
+  const row = el && el.closest('tr');
+  if (row) row.remove();
+  refreshRoleRateTable();
 }
 // The company-wide amount for one of the four early/late keys, and the ONLY place the Settings
 // page is allowed to reach for it. 2026-10-13 (test-quality review): the guard that proves no
@@ -5447,30 +5501,28 @@ function centralEarlyLateRate(s, i) {
 // is 0, and a stored 0 is a real rate meaning "do not pay this tier". The two must stay tellable
 // apart, so blank is never coerced.
 function readRoleRateTableFromForm() {
-  const enabled = !!(document.getElementById('set-rolerate-enabled') || {}).checked;
-  const roles = roleRateRolesFrom(APP_SETTINGS);
-  // A role that has since lost the allowance has no row on screen, so there is no input to read
-  // and the loop below would drop what the owner once typed. Carry those rows forward: they are
-  // the owner's data, the server replaces this section wholesale on save, and losing them on an
-  // unrelated Settings save is silent data loss. Granting the role again brings its amounts back.
-  const prev = (APP_SETTINGS.allowanceRoleRates && APP_SETTINGS.allowanceRoleRates.byRole) || {};
-  const byRole = {};
-  for (const [r, row] of Object.entries(prev)) {
-    if (!roles.includes(r) && row && typeof row === 'object' && !Array.isArray(row)) byRole[r] = row;
+  // 2026-10-14: if the block was never rendered there is nothing to read, and rebuilding the
+  // section from an empty DOM would ERASE every stored rate. Leave it exactly as it is.
+  if (!document.getElementById('rolerate-block')) {
+    return { ok: true, value: (APP_SETTINGS.allowanceRoleRates || { enabled: false, byRole: {} }) };
   }
-  for (const r of roles) {
-    const row = {};
-    for (const k of EARLY_LATE_RATE_KEYS) {
-      const fieldId = `set-rolerate-${r}-${k}`;
-      const el = document.getElementById(fieldId);
-      if (!el || el.value === '') continue;
-      const n = Number(el.value);
-      if (!Number.isFinite(n) || n < 0 || n > 100000) {
-        return { ok: false, fieldId, message: L('⚠️ A per-role allowance rate must be a number between 0 and 100000', '⚠️ ยอดเบี้ยเลี้ยงตามตำแหน่งต้องเป็นตัวเลข 0 ถึง 100000') };
-      }
-      row[k] = n;
+  const enabled = !!(document.getElementById('set-rolerate-enabled') || {}).checked;
+  // The RENDERED ROWS are the set of exceptions. A role whose row was removed is simply not here,
+  // and that absence is exactly how "put this role back on the company-wide amount" is expressed.
+  // Role ids and rate keys contain no '-', so the id splits unambiguously; `set-rolerate-enabled`
+  // and `set-rolerate-add` have no second segment and fall out on their own.
+  const byRole = {};
+  for (const el of document.querySelectorAll('input[id^="set-rolerate-"]')) {
+    const m = /^set-rolerate-([^-]+)-([^-]+)$/.exec(el.id);
+    if (!m) continue;
+    const [, role, key] = m;
+    if (!EARLY_LATE_RATE_KEYS.includes(key)) continue;
+    if (el.value === '') continue;
+    const n = Number(el.value);
+    if (!Number.isFinite(n) || n < 0 || n > 100000) {
+      return { ok: false, fieldId: el.id, message: L('⚠️ A per-role allowance rate must be a number between 0 and 100000', '⚠️ ยอดเบี้ยเลี้ยงตามตำแหน่งต้องเป็นตัวเลข 0 ถึง 100000') };
     }
-    if (Object.keys(row).length) byRole[r] = row;
+    (byRole[role] || (byRole[role] = {}))[key] = n;
   }
   return { ok: true, value: { enabled, byRole } };
 }

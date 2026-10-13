@@ -713,11 +713,14 @@ test('the validator refuses what would corrupt the table', () => {
 // ---- the Settings page ----
 const JA_SRC = fs.readFileSync(path.join(ROOT, 'attendance/lang/ja.js'), 'utf8');
 
-test('the rate table rows come from live eligibility, never a hardcoded role list', () => {
+// 2026-10-14: the ROWS now come from what is actually overridden (the table is exceptions only).
+// It is the ADD PICKER that must follow live eligibility, so granting a role the allowance later
+// makes it offerable without anyone editing this file.
+test('the add picker comes from live eligibility, never a hardcoded role list', () => {
   assert.ok(/_roleRateRoles/.test(APP_SRC), 'no per-role rate table in the Settings page');
-  const seg = between(APP_SRC, '_roleRateRoles', 'set-rolerate-', 600);
+  const seg = extractFunction(APP_SRC, 'roleRateRolesFrom');
   assert.ok(/allowanceEligibility/.test(seg),
-    'the rows must be derived from allowanceEligibility.earlyLate, so granting a role the allowance later adds its row on its own');
+    'the addable roles must be derived from allowanceEligibility.earlyLate');
   // Scoped to the rate table and its row source. A file-wide scan catches unrelated legitimate
   // defaults such as DEFAULT_ALLOWANCE_ELIGIBILITY.abroad, which are not this feature's business.
   const rowSource = extractFunction(APP_SRC, 'roleRateRolesFrom') + extractFunction(APP_SRC, 'renderRoleRateTable');
@@ -762,16 +765,74 @@ function renderTable(settings) {
   const ctx = {
     L: (en) => en, currentLang: 'en',
     escapeHtml: (s) => String(s == null ? '' : s),
-    Number, Object, Array, String,
+    escapeJsAttr: (s) => String(s == null ? '' : s),
+    Number, Object, Array, String, Set,
   };
   vm.createContext(ctx);
   vm.runInContext(
     `const EARLY_LATE_RATE_KEYS = ${extractKeys(APP_SRC)};\n` +
-    extractFunction(APP_SRC, 'roleRateRolesFrom') + '\n' +
-    extractFunction(APP_SRC, 'renderRoleRateTable') + '\n' +
+    // `_roleRateAdded` holds rows the owner added but has not saved yet; a fresh render starts empty.
+    'let _roleRateAdded = [];\n' +
+    ['roleRateRolesFrom', 'roleRateShownRoles', 'renderRoleRateTable']
+      .map(n => extractFunction(APP_SRC, n)).join('\n') + '\n' +
     `this.html = renderRoleRateTable(${JSON.stringify(settings)});`, ctx);
   return ctx.html;
 }
+
+// ---- 2026-10-14: the table lists EXCEPTIONS, not every eligible role ----
+// The owner enabled this for the first time and typed a value into every cell, because a table
+// listing every eligible role reads as "fill these in". That cut staff's x2 tier in half until it
+// was caught. Their own words: the central boxes above already cover everyone, so a row per role
+// is redundant. The table now holds only the roles that actually differ from the company-wide
+// amount; a role with no row simply uses the amount above, and says so in the help line.
+test('the table lists only roles that actually override, not every eligible role', () => {
+  const html = renderTable({
+    allowances: { earlyMorning1: 11, earlyMorning2: 22, lateNight1: 33, lateNight2: 44 },
+    allowanceEligibility: { earlyLate: ['manager', 'user'] },
+    allowanceRoleRates: { enabled: true, byRole: { manager: { earlyMorning1: 7 } } },
+  });
+  assert.ok(/set-rolerate-manager-/.test(html), 'the overriding role must have a row');
+  assert.ok(!/set-rolerate-user-/.test(html),
+    'a role with no override must NOT get an empty row to type into -- that is what caused the pay cut');
+  assert.ok(/ยอดกลาง|company-wide/.test(html),
+    'the table must say that roles not listed use the company-wide amount');
+});
+
+test('a role can be added to, and removed from, the exceptions', () => {
+  const html = renderTable({
+    allowances: { earlyMorning1: 11, earlyMorning2: 22, lateNight1: 33, lateNight2: 44 },
+    allowanceEligibility: { earlyLate: ['manager', 'user'] },
+    allowanceRoleRates: { enabled: true, byRole: { manager: { earlyMorning1: 7 } } },
+  });
+  assert.ok(/id="set-rolerate-add"/.test(html), 'there must be a picker for adding a role');
+  assert.ok(/<option value="user"/.test(html), 'an eligible role with no row must be offered in the picker');
+  assert.ok(!/<option value="manager"/.test(html), 'a role already listed must not be offered again');
+  assert.ok(/onRoleRateAdd\(\)/.test(html) && /onRoleRateRemove\('manager'\)/.test(html),
+    'add and remove must be wired per row');
+});
+
+test('a role that has lost eligibility still shows, so its leftover amounts can be removed', () => {
+  const html = renderTable({
+    allowances: { earlyMorning1: 11, earlyMorning2: 22, lateNight1: 33, lateNight2: 44 },
+    allowanceEligibility: { earlyLate: ['manager'] },
+    allowanceRoleRates: { enabled: true, byRole: { driver: { earlyMorning1: 5 } } },
+  });
+  assert.ok(/set-rolerate-driver-/.test(html),
+    'a configured role outside the eligibility list must stay visible, or its row is invisible and unremovable');
+  assert.ok(!/<option value="driver"/.test(html), 'it must not also be offered for adding');
+});
+
+test('with no exceptions at all the table says so instead of showing an empty grid', () => {
+  const html = renderTable({
+    allowances: { earlyMorning1: 11, earlyMorning2: 22, lateNight1: 33, lateNight2: 44 },
+    allowanceEligibility: { earlyLate: ['manager', 'user'] },
+    allowanceRoleRates: { enabled: true, byRole: {} },
+  });
+  assert.ok(!/set-rolerate-\w+-earlyMorning1/.test(html), 'no rate cells when nothing is overridden');
+  assert.ok(/ทุกตำแหน่งใช้ยอดกลาง|every role uses the company-wide/i.test(html),
+    'the empty state must say every role is on the company-wide amount');
+  assert.ok(/id="set-rolerate-add"/.test(html), 'it must still be possible to add the first exception');
+});
 
 test('the rendered table shows each role its own stored amount, and the central one as placeholder', () => {
   const html = renderTable({
@@ -782,7 +843,7 @@ test('the rendered table shows each role its own stored amount, and the central 
   assert.ok(/id="set-rolerate-manager-earlyMorning1"[^>]*value="7"/.test(html), 'the manager cell must show its stored 7');
   assert.ok(/id="set-rolerate-manager-lateNight2"[^>]*value="0"/.test(html), 'a stored 0 must render as 0, not as blank');
   assert.ok(/id="set-rolerate-manager-earlyMorning2"[^>]*value=""/.test(html), 'an unset cell must render blank');
-  assert.ok(/id="set-rolerate-user-earlyMorning1"[^>]*value=""/.test(html), 'an unconfigured role must render blank');
+  assert.ok(!/set-rolerate-user-/.test(html), 'a role with no override gets no row at all');
   assert.ok(/id="set-rolerate-manager-earlyMorning2"[^>]*placeholder="22"/.test(html),
     'a blank cell must show the company-wide amount it falls back to');
   assert.ok(!/disabled/.test(html), 'with the switch on, no cell is disabled');
@@ -796,20 +857,26 @@ test('the rendered table is disabled and dimmed while the switch is off, without
     allowanceRoleRates: { enabled: false, byRole: { manager: { earlyMorning1: 7 } } },
   });
   assert.ok(/value="7"/.test(html), 'switching off must not erase what the owner typed');
-  assert.strictEqual((html.match(/disabled/g) || []).length, 4, 'all four cells must be disabled');
+  for (const k of ['earlyMorning1', 'earlyMorning2', 'lateNight1', 'lateNight2']) {
+    assert.ok(new RegExp(`id="set-rolerate-manager-${k}"[^>]*disabled`).test(html), `${k} must be disabled`);
+  }
+  assert.ok(!/class="rolerate-cell"(?![^>]*disabled)/.test(html),
+    'every control in the block (cells, remove buttons, the add picker) must be disabled while the switch is off');
   assert.ok(!/checked/.test(html), 'the switch must render unticked');
   assert.ok(/opacity:\.55/.test(html), 'the block must read as inactive');
 });
 
-test('the rendered table says so when no role is eligible, instead of showing an empty grid', () => {
+test('a broken or empty eligibility list leaves nothing to add, and does not crash', () => {
+  // The empty state itself is covered by "with no exceptions at all..." above. This pins the
+  // shapes allowanceEligibility.earlyLate can arrive in from a hand-edited settings file.
   for (const elig of [[], undefined, 'nonsense']) {
     const html = renderTable({
       allowances: { earlyMorning1: 11, earlyMorning2: 22, lateNight1: 33, lateNight2: 44 },
       allowanceEligibility: { earlyLate: elig },
       allowanceRoleRates: { enabled: true, byRole: {} },
     });
-    assert.ok(/No role is eligible/.test(html), `eligibility ${JSON.stringify(elig)} should render the empty-state row`);
     assert.ok(!/set-rolerate-\w+-earlyMorning1/.test(html), 'no rate cells should be rendered');
+    assert.ok(!/id="set-rolerate-add"/.test(html), `eligibility ${JSON.stringify(elig)} offers no role to add`);
   }
 });
 
@@ -818,8 +885,10 @@ test('the new Settings labels have Japanese entries', () => {
   // English string up in window.LANG_JA, so a missing entry is a silent English leak in JA mode.
   const needed = [
     'Use a different early-morning / late-night rate per role',
-    'A blank cell uses the company-wide amount above.',
-    'No role is eligible for this allowance',
+    'Only roles that differ are listed. A role not in this table uses the company-wide amount above, and follows it when you change it.',
+    'No exceptions — every role uses the company-wide amount above.',
+    '+ Add a role that differs',
+    'Put this role back on the company-wide amount',
     'Role',
     'Early ×1', 'Early ×2', 'Late ×1', 'Late ×2',
     '⚠️ A per-role allowance rate must be a number between 0 and 100000',
@@ -975,11 +1044,19 @@ test('a late-out record shows the requester\'s rate, not the approver\'s', () =>
 // Review finding I4: an out-of-range cell was dropped silently and the save still said "saved",
 // so the owner's typo left that role quietly on the company-wide rate. Every other money field on
 // this page comes back with a specific refusal. Runs the real form reader against a fake DOM.
-function runFormReader(cells, enabled, prevByRole) {
-  const el = (id) => (Object.prototype.hasOwnProperty.call(cells, id) ? { value: String(cells[id]) } : null);
+function runFormReader(cells, enabled, prevByRole, opts) {
+  const el = (id) => (Object.prototype.hasOwnProperty.call(cells, id) ? { id, value: String(cells[id]) } : null);
+  // The reader walks the RENDERED cells, so the fake DOM has to answer querySelectorAll too, and
+  // has to be able to pretend the block was never rendered at all.
+  const blockRendered = !(opts && opts.noBlock);
   const ctx = {
     document: {
-      getElementById: (id) => (id === 'set-rolerate-enabled' ? { checked: !!enabled } : el(id)),
+      getElementById: (id) => {
+        if (id === 'rolerate-block') return blockRendered ? { id } : null;
+        if (id === 'set-rolerate-enabled') return blockRendered ? { checked: !!enabled } : null;
+        return blockRendered ? el(id) : null;
+      },
+      querySelectorAll: () => (blockRendered ? Object.keys(cells).map(id => ({ id, value: String(cells[id]) })) : []),
     },
     APP_SETTINGS: { allowanceEligibility: { earlyLate: ['manager', 'user'] }, allowanceRoleRates: { enabled: false, byRole: prevByRole || {} } },
     L: (en) => en,
@@ -1004,20 +1081,38 @@ test('an out-of-range or non-numeric cell is refused, naming the field', () => {
   }
 });
 
-test('the form reader keeps blanks out, keeps 0 in, and carries forward hidden rows', () => {
+test('the form reader keeps blanks out and keeps 0 in', () => {
   const got = runFormReader({
     'set-rolerate-manager-earlyMorning1': '0',
     'set-rolerate-manager-earlyMorning2': '',
     'set-rolerate-user-lateNight1': '123',
-  }, true, { driver: { earlyMorning1: 55 } });
+  }, true);
   assert.strictEqual(got.ok, true, got.message);
   const v = JSON.parse(JSON.stringify(got.value));
   assert.strictEqual(v.enabled, true);
   assert.strictEqual(v.byRole.manager.earlyMorning1, 0, '0 is a real rate and must be stored');
   assert.ok(!('earlyMorning2' in v.byRole.manager), 'a blank cell must be omitted, not stored as 0');
   assert.strictEqual(v.byRole.user.lateNight1, 123);
-  assert.deepStrictEqual(v.byRole.driver, { earlyMorning1: 55 },
-    'a row for a role no longer eligible must be carried forward, not erased');
+});
+
+// 2026-10-14: with the table holding only exceptions, REMOVING a row is how a role goes back to
+// the company-wide amount -- so an absent row must be absent from the payload, not carried
+// forward. Every configured role is rendered, so nothing can go missing by accident.
+test('a role whose row was removed is dropped, which is how it returns to the central amount', () => {
+  const got = runFormReader({ 'set-rolerate-manager-earlyMorning1': '7' }, true);
+  assert.strictEqual(got.ok, true, got.message);
+  const v = JSON.parse(JSON.stringify(got.value));
+  assert.deepStrictEqual(Object.keys(v.byRole), ['manager'], 'only the rendered row survives');
+});
+
+// The one way rows could vanish by accident: the block not being rendered at all. Then the save
+// must leave the stored section untouched rather than rebuild it from an empty DOM.
+test('if the block was never rendered the stored rates are left exactly as they are', () => {
+  const got = runFormReader({}, false, null, { noBlock: true });
+  assert.strictEqual(got.ok, true);
+  const v = JSON.parse(JSON.stringify(got.value));
+  assert.deepStrictEqual(v, { enabled: false, byRole: {} },
+    'it must hand back APP_SETTINGS.allowanceRoleRates untouched, not an empty rebuild');
 });
 
 test('the save path aborts on a refused cell instead of reporting success', () => {

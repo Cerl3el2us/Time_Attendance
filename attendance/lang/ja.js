@@ -1292,6 +1292,12 @@ window.LANG_JA = {
   "Use a different early-morning / late-night rate per role": "早朝・深夜手当の金額を役職ごとに変える",
   "⚠️ A per-role allowance rate must be a number between 0 and 100000": "⚠️ 役職ごとの手当額は0〜100000の数値で入力してください",
   "A blank cell uses the company-wide amount above.": "空欄の場合は上記の全社共通額を使用します。",
+  // 2026-10-14: the table became exceptions-only after the first real use showed that a row per
+  // eligible role reads as "fill these in".
+  "Only roles that differ are listed. A role not in this table uses the company-wide amount above, and follows it when you change it.": "金額が異なる役職のみを登録します。この表にない役職は上記の全社共通額を使用し、その額を変更すると自動的に追従します。",
+  "No exceptions — every role uses the company-wide amount above.": "例外なし — すべての役職が上記の全社共通額を使用します。",
+  "+ Add a role that differs": "＋ 金額が異なる役職を追加",
+  "Put this role back on the company-wide amount": "この役職を全社共通額に戻す",
   "No role is eligible for this allowance": "この手当の対象となる役職がありません",
   "Role": "役職",
   "Early ×1": "早朝 ×1",
