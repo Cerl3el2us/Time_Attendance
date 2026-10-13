@@ -515,5 +515,66 @@ test('the validator refuses what would corrupt the table', () => {
   }
 });
 
+// ---- the Settings page ----
+const JA_SRC = fs.readFileSync(path.join(ROOT, 'attendance/lang/ja.js'), 'utf8');
+
+test('the rate table rows come from live eligibility, never a hardcoded role list', () => {
+  assert.ok(/_roleRateRoles/.test(APP_SRC), 'no per-role rate table in the Settings page');
+  const seg = between(APP_SRC, '_roleRateRoles', 'set-rolerate-', 600);
+  assert.ok(/allowanceEligibility/.test(seg),
+    'the rows must be derived from allowanceEligibility.earlyLate, so granting a role the allowance later adds its row on its own');
+  // Scoped to the rate table and its row source. A file-wide scan catches unrelated legitimate
+  // defaults such as DEFAULT_ALLOWANCE_ELIGIBILITY.abroad, which are not this feature's business.
+  const rowSource = extractFunction(APP_SRC, 'roleRateRolesFrom') + extractFunction(APP_SRC, 'renderRoleRateTable');
+  assert.ok(!/\[\s*'(md|manager|accounting|user|marketing|driver)'/.test(rowSource),
+    'the rate table must not hardcode a role list -- it follows allowanceEligibility.earlyLate');
+});
+
+test('the switch and every cell round-trip through the save path', () => {
+  assert.ok(/APP_SETTINGS\.allowanceRoleRates\s*=/.test(APP_SRC), 'the save path must write the section');
+  assert.ok(/set-rolerate-enabled/.test(APP_SRC), 'the on/off switch field is missing');
+  const save = between(APP_SRC, 'set-rolerate-enabled', 'APP_SETTINGS.allowanceRoleRates =', 2500);
+  assert.ok(/EARLY_LATE_RATE_KEYS/.test(save), 'the save loop must cover all four keys');
+});
+
+test('a blank cell is omitted on save, so it stays different from a deliberate 0', () => {
+  const save = between(APP_SRC, 'const _byRole = {};', 'APP_SETTINGS.allowanceRoleRates =', 0);
+  assert.ok(/value === ''/.test(save) || /\.value\s*===\s*''/.test(save),
+    'a blank input must be skipped, not coerced -- Number("") is 0, which means "do not pay"');
+});
+
+test('a row for a role that has since lost the allowance is carried forward, not dropped', () => {
+  const save = between(APP_SRC, 'const _byRole = {};', 'APP_SETTINGS.allowanceRoleRates =', 400);
+  assert.ok(/_prevByRole/.test(save),
+    'the page must carry forward rows it does not render, or an unrelated save erases the owner\'s data');
+});
+
+test('toggling the switch does not re-render the page and discard unsaved edits', () => {
+  assert.ok(!/onchange="renderSettingsPage\(\)"[^>]*set-rolerate-enabled|set-rolerate-enabled[^>]*onchange="renderSettingsPage\(\)"/.test(APP_SRC),
+    'the switch must not re-render the whole Settings page -- other fields may hold unsaved edits');
+  assert.ok(/function onRoleRateToggle\(/.test(APP_SRC), 'the switch needs its own handler');
+});
+
+test('the table ships with no amount for any role in the source', () => {
+  assert.ok(!/byRole:\s*\{\s*[^}\s]/.test(APP_SRC));
+  const seg = between(APP_SRC, '_roleRateRoles', 'set-rolerate-enabled', 3000);
+  assert.ok(!/\b(360|240|480)\b/.test(seg.replace(/100000/g, '')),
+    'no rate may be baked into the role-rate table markup');
+});
+
+test('the new Settings labels have Japanese entries', () => {
+  // This page has no currentLang === 'ja' branches at all: L(en, th) resolves JA by looking the
+  // English string up in window.LANG_JA, so a missing entry is a silent English leak in JA mode.
+  const needed = [
+    'Use a different early-morning / late-night rate per role',
+    'A blank cell uses the company-wide amount above.',
+    'Role',
+  ];
+  for (const en of needed) {
+    assert.ok(JA_SRC.includes(JSON.stringify(en).slice(1, -1)) || JA_SRC.includes(en),
+      `attendance/lang/ja.js has no entry for "${en}" -- JA mode would show English`);
+  }
+});
+
 console.log(`\n${passed} assertions passed`);
 module.exports = { between, previewPassesRole };

@@ -1286,6 +1286,17 @@ window.LANG_JA = {
   "📌 Pick the tier at or below your actual return time (e.g. left at 19:30 → choose the earlier tier) — the allowance follows the tier you pick.": "📌 実際の退勤時刻以下の区分を選んでください（例：19:30に退勤した場合は早い方の区分を選択）— 手当は選択した区分に応じて支給されます。",
   "allowance units (higher tier = 2)": "手当単位（上位区分は2とカウント）",
   "No special items — only allowances your role is eligible for are shown here.": "特記事項なし — ここにはあなたの役職が対象となる手当のみが表示されます。",
+  // 2026-10-13: per-role early-morning / late-night rate table on the Settings page. The Settings
+  // page has no currentLang === 'ja' branches -- L(en, th) resolves JA through this dictionary --
+  // so a missing entry here is a silent English leak in Japanese mode.
+  "Use a different early-morning / late-night rate per role": "早朝・深夜手当の金額を役職ごとに変える",
+  "A blank cell uses the company-wide amount above.": "空欄の場合は上記の全社共通額を使用します。",
+  "No role is eligible for this allowance": "この手当の対象となる役職がありません",
+  "Role": "役職",
+  "Early ×1": "早朝 ×1",
+  "Early ×2": "早朝 ×2",
+  "Late ×1": "深夜 ×1",
+  "Late ×2": "深夜 ×2",
   "Early Morning Bonus": "早朝手当",
   "Late Night Bonus": "深夜手当",
   "⛔ This page is not available for your role": "⛔ このページはあなたの権限では開けません",

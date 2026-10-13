@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 105;
+const APP_BUILD = 106;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -5351,6 +5351,59 @@ function settingsFieldError(id, message) {
   el.addEventListener('input', clear);
 }
 
+// ===== SETTINGS: per-role early-morning / late-night rates (2026-10-13, owner's decision) =====
+// The four amounts above are the company-wide default. This table overrides them for a role, and
+// only while the switch is on. NOTHING is pre-filled: the owner decides every amount, because a
+// rate shipped in code would arrive on a fresh install with nobody having chosen it, and would
+// then disagree with whatever the Settings page says the day it is changed.
+//
+// The rows are DERIVED from allowanceEligibility.earlyLate, not a list written here: the day the
+// owner grants md or driver this allowance, their rows appear without anyone editing this file,
+// and a role that cannot be paid the allowance never gets a tempting empty box.
+function roleRateRolesFrom(s) {
+  const elig = (s && s.allowanceEligibility && s.allowanceEligibility.earlyLate) || [];
+  return Array.isArray(elig) ? elig.slice().sort() : [];
+}
+function renderRoleRateTable(s) {
+  const _rr = (s.allowanceRoleRates && typeof s.allowanceRoleRates === 'object' && !Array.isArray(s.allowanceRoleRates))
+    ? s.allowanceRoleRates : { enabled: false, byRole: {} };
+  const _rrOn = _rr.enabled === true;
+  const _roleRateRoles = roleRateRolesFrom(s);
+  const _byRole = (_rr.byRole && typeof _rr.byRole === 'object' && !Array.isArray(_rr.byRole)) ? _rr.byRole : {};
+  const label = (key) => L(
+    ({ earlyMorning1: 'Early ×1', earlyMorning2: 'Early ×2', lateNight1: 'Late ×1', lateNight2: 'Late ×2' })[key],
+    ({ earlyMorning1: 'มาเช้า ×1', earlyMorning2: 'มาเช้า ×2', lateNight1: 'กลับดึก ×1', lateNight2: 'กลับดึก ×2' })[key]);
+  const head = `<tr><th style="text-align:left;padding:4px 8px">${L('Role','ตำแหน่ง')}</th>${
+    EARLY_LATE_RATE_KEYS.map(k => `<th style="padding:4px 8px">${label(k)}</th>`).join('')}</tr>`;
+  const body = _roleRateRoles.length
+    ? _roleRateRoles.map(r => {
+      const row = (_byRole[r] && typeof _byRole[r] === 'object') ? _byRole[r] : {};
+      return `<tr><td style="padding:4px 8px">${escapeHtml(r)}</td>${EARLY_LATE_RATE_KEYS.map(k =>
+        // placeholder = the company-wide amount, so a blank cell SHOWS what it will fall back to.
+        `<td style="padding:4px 8px"><input id="set-rolerate-${escapeHtml(r)}-${k}" class="rolerate-cell" type="number" min="0" max="100000" step="1" value="${row[k] != null ? Number(row[k]) : ''}" placeholder="${Number(s.allowances[k])}" ${_rrOn ? '' : 'disabled'} style="width:5.5rem;padding:6px 8px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px"></td>`
+      ).join('')}</tr>`;
+    }).join('')
+    : `<tr><td colspan="${EARLY_LATE_RATE_KEYS.length + 1}" style="padding:4px 8px">${
+      L('No role is eligible for this allowance','ไม่มีตำแหน่งที่มีสิทธิ์รับเบี้ยเลี้ยงนี้')}</td></tr>`;
+  return `<div id="rolerate-block" style="margin-top:14px;${_rrOn ? '' : 'opacity:.55'}">
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px">
+        <input type="checkbox" id="set-rolerate-enabled" ${_rrOn ? 'checked' : ''} onchange="onRoleRateToggle()">
+        ${L('Use a different early-morning / late-night rate per role','ใช้ยอดเบี้ยเลี้ยงมาเช้า/กลับดึก ต่างกันตามตำแหน่ง')}
+      </label>
+      <div style="font-size:12px;color:#64748b;margin:4px 0 8px">${
+        L('A blank cell uses the company-wide amount above.','ช่องที่เว้นว่างจะใช้ยอดกลางด้านบน')}</div>
+      <table style="border-collapse:collapse;font-size:13px">${head}${body}</table>
+    </div>`;
+}
+// Toggles the cells in place instead of re-rendering the Settings page: a re-render would throw
+// away every other unsaved edit on the form, which is not what ticking one checkbox should do.
+function onRoleRateToggle() {
+  const on = !!(document.getElementById('set-rolerate-enabled') || {}).checked;
+  const block = document.getElementById('rolerate-block');
+  if (block) block.style.opacity = on ? '' : '.55';
+  document.querySelectorAll('.rolerate-cell').forEach(el => { el.disabled = !on; });
+}
+
 function renderSettingsPage(_skipRefresh) {
   const container = document.getElementById('settings-container');
   if (!container) return;
@@ -5476,6 +5529,7 @@ function renderSettingsPage(_skipRefresh) {
         field(L('×1 (late night) ฿','×1 (แจ้งกลับดึก) ฿'), inp('set-late1-amt', s.allowances.lateNight1, 'number')),
         field(L('×2 (very late night) ฿','×2 (แจ้งกลับดึกมาก) ฿'), inp('set-late2-amt', s.allowances.lateNight2, 'number'))
       )}
+      ${renderRoleRateTable(s)}
       ${row2(
         field(L('Holiday transport (฿/day)','ค่าเดินทางวันหยุด (฿/วัน)'), inp('set-holiday-transport', s.allowances.holidayTransport != null ? s.allowances.holidayTransport : 500, 'number'), L('Paid holiday-work compensation mode only','เฉพาะโหมดชดเชยเป็นเงินเท่านั้น')),
         field('', '')
@@ -6344,6 +6398,33 @@ async function saveSettingsPage() {
   if (Number.isFinite(mrGap) && mrGap >= 0) APP_SETTINGS.allowances.morningReviewMinGapMin = Math.round(mrGap);
   APP_SETTINGS.allowances.lateNight1            = fi('set-late1-amt');
   APP_SETTINGS.allowances.lateNight2            = fi('set-late2-amt');
+  // 2026-10-13: per-role early/late rates. A blank cell means "use the company-wide amount", so it
+  // is OMITTED rather than saved -- Number('') is 0, and 0 is a real rate meaning "do not pay this
+  // tier". The two must stay tellable apart.
+  {
+    const _rrOn = !!(document.getElementById('set-rolerate-enabled') || {}).checked;
+    const _rrRoles = roleRateRolesFrom(APP_SETTINGS);
+    // A role that has since lost the allowance has no row on screen, so there is no input to read
+    // and the loop below would drop what the owner once typed. Carry those rows forward: they are
+    // the owner's data, the server replaces this section wholesale on save, and losing them on an
+    // unrelated Settings save is silent data loss. Granting the role again brings its amounts back.
+    const _prevByRole = (APP_SETTINGS.allowanceRoleRates && APP_SETTINGS.allowanceRoleRates.byRole) || {};
+    const _byRole = {};
+    for (const [r, row] of Object.entries(_prevByRole)) {
+      if (!_rrRoles.includes(r) && row && typeof row === 'object' && !Array.isArray(row)) _byRole[r] = row;
+    }
+    for (const r of _rrRoles) {
+      const row = {};
+      for (const k of EARLY_LATE_RATE_KEYS) {
+        const el = document.getElementById(`set-rolerate-${r}-${k}`);
+        if (!el || el.value === '') continue;
+        const n = Number(el.value);
+        if (Number.isFinite(n) && n >= 0 && n <= 100000) row[k] = n;
+      }
+      if (Object.keys(row).length) _byRole[r] = row;
+    }
+    APP_SETTINGS.allowanceRoleRates = { enabled: _rrOn, byRole: _byRole };
+  }
   // 2026-09-24 (owner): `parseInt(...) || 19` discarded a midnight (0) threshold at the moment of
   // saving, which is what made 00:00 look unsavable. Only a non-numeric field falls back now.
   const _thr1Raw = parseInt((document.getElementById('set-late-thr1')?.value || '19:00').split(':')[0], 10);
