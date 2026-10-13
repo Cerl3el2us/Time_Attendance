@@ -478,15 +478,52 @@ const withGit = (name, git) => {
   return { r, calls };
 };
 
-test('git: exactly one status call and one rev-list call, with the arguments that were asked for', () => {
+test('git: exactly one status call and two rev-list calls, with the arguments that were asked for', () => {
   const { r, calls } = withGit('git-calls', CLEAN_GIT);
   // --no-optional-locks keeps the read-only `status` from taking index.lock (a killed holder leaves a stale one).
-  assert.deepStrictEqual(calls, ['--no-optional-locks status --porcelain -- STATUS.md', 'rev-list --count @{u}..HEAD']);
+  // The second rev-list (2026-10-13) asks a different question from the first: not "are my commits
+  // pushed" but "is the STATUS.md this block just summarised older than the one on main".
+  assert.deepStrictEqual(calls, [
+    '--no-optional-locks status --porcelain -- STATUS.md',
+    'rev-list --count @{u}..HEAD',
+    'rev-list --count HEAD..origin/main',
+  ]);
   assert.ok(has(r, 'STATUS.md has no uncommitted changes'), r.lines.join('\n'));
   assert.ok(has(r, '0 commits ahead of the upstream as of the last fetch'), r.lines.join('\n'));
   assert.deepStrictEqual(warnings(r), []);
 });
 
+// 2026-10-13: `npm run backlog` reads the STATUS.md of the checkout it runs in. A worktree that is
+// behind main therefore reports items that were closed days ago, with no hint that it is reading an
+// old file -- which is the "another machine redid finished work" failure this whole project guards
+// against, arriving through the tool built to prevent it. Being behind MAIN is the direction that
+// matters here, not being behind this branch's own upstream: a stale branch can be perfectly in step
+// with its own remote and still read a months-old STATUS.md.
+test('git: a checkout behind main warns, and says what it means for what was just read', () => {
+  const { r } = withGit('git-behind', args => {
+    if (args.includes('status')) return '';
+    return args.join(' ').includes('@{u}..HEAD') ? '0\n' : '7\n';
+  });
+  const w = warnings(r).join('\n');
+  assert.ok(/7 commit\(s\)/.test(w) && /behind/.test(w), `no behind-main warning: ${w}`);
+  assert.ok(/STATUS\.md/.test(w), `the warning must say what it means for the reader: ${w}`);
+});
+
+test('git: level with main says so and does not warn', () => {
+  const { r } = withGit('git-level', CLEAN_GIT);
+  assert.ok(has(r, 'level with origin/main'), r.lines.join('\n'));
+  assert.deepStrictEqual(warnings(r), []);
+});
+
+test('git: no origin/main to compare with is unmeasured, not reported as level', () => {
+  const { r } = withGit('git-no-main', args => {
+    if (args.includes('status')) return '';
+    if (args.join(' ').includes('@{u}..HEAD')) return '0\n';
+    throw new Error("fatal: ambiguous argument 'origin/main': unknown revision");
+  });
+  assert.ok(r.unmeasured.some(u => u.includes('behind main NOT counted')), JSON.stringify(r.unmeasured));
+  assert.ok(!has(r, 'level with origin/main'), r.lines.join('\n'));
+});
 test('git: no upstream is unmeasured and is not reported as zero', () => {
   const { r } = withGit('git-no-upstream', args => {
     if (args[0] === 'rev-list') throw new Error('fatal: no upstream configured for branch \'feat/x\'');
@@ -504,7 +541,7 @@ test('git: unpushed commits and an uncommitted STATUS.md warn; an unreadable ans
   const odd = withGit('git-odd', args => (args.includes('status') ? '' : 'banana\n')).r;
   assert.ok(odd.unmeasured.some(u => u.includes('unpushed commits NOT counted') && u.includes('banana')), JSON.stringify(odd.unmeasured));
   const broken = withGit('git-broken', () => { throw new Error('git is not installed'); }).r;
-  assert.strictEqual(broken.unmeasured.length, 2, JSON.stringify(broken.unmeasured));
+  assert.strictEqual(broken.unmeasured.length, 3, JSON.stringify(broken.unmeasured));
   assert.ok(broken.unmeasured.every(u => u.includes('git is not installed')), JSON.stringify(broken.unmeasured));
 });
 
@@ -515,18 +552,18 @@ test('git: the real runner is pinned -- command, 1500 ms timeout, cwd at the rep
   const calls = [];
   const dirs = fixture('git-runner', { nas: { 'note_a.md': 1 }, local: { 'note_a.md': 1 } });
   const ok = run({ ...dirs, git: undefined, execFile: (cmd, args, opts) => { calls.push({ cmd, args, opts }); return args.includes('status') ? '' : '0\n'; } });
-  assert.strictEqual(calls.length, 2);
+  assert.strictEqual(calls.length, 3);
   for (const c of calls) {
     assert.strictEqual(c.cmd, 'git');
     assert.strictEqual(c.opts.timeout, 1500, 'the git timeout is not the ruled 1.5 s');
     assert.strictEqual(path.resolve(c.opts.cwd), path.resolve(__dirname, '..'), 'git does not run from the repository root');
     assert.strictEqual(c.opts.encoding, 'utf8');
   }
-  assert.deepStrictEqual(calls.map(c => c.args[c.args.length - 1]), ['STATUS.md', '@{u}..HEAD']);
+  assert.deepStrictEqual(calls.map(c => c.args[c.args.length - 1]), ['STATUS.md', '@{u}..HEAD', 'HEAD..origin/main']);
   assert.ok(has(ok, '0 commits ahead'), ok.lines.join('\n'));
   // A timeout lands in unmeasured; git's stderr, not Node's generic text, is the reason when there is one.
   const slow = run({ ...dirs, git: undefined, execFile: () => { throw Object.assign(new Error('spawnSync git ETIMEDOUT'), { code: 'ETIMEDOUT' }); } });
-  assert.strictEqual(slow.unmeasured.filter(u => u.includes('ETIMEDOUT')).length, 2, JSON.stringify(slow.unmeasured));
+  assert.strictEqual(slow.unmeasured.filter(u => u.includes('ETIMEDOUT')).length, 3, JSON.stringify(slow.unmeasured));
   assert.ok(!slow.lines.some(l => l.startsWith('git:') || /^WARNING: git:/.test(l)), slow.lines.join('\n'));
   const noUp = run({ ...dirs, git: undefined, execFile: (c, args) => {
     if (args[0] === 'rev-list') throw Object.assign(new Error('Command failed: git rev-list'), { stderr: 'fatal: no upstream configured for branch \'x\'\n' });

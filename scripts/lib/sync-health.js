@@ -305,7 +305,9 @@ function logSection(nasDir, deps, out) {
   }
 }
 
-// At most one `git status` and one `git rev-list` (a git process costs ~0.3 s on Windows).
+// At most one `git status` and two `git rev-list` (a git process costs ~0.3 s on Windows). The
+// second rev-list was added 2026-10-13 and is worth its ~0.3 s: without it the block could not tell
+// a reader that the STATUS.md it just summarised belongs to a checkout that is behind main.
 function gitSection(deps, out) {
   const git = deps.git || (args => runGit(args, deps.execFile));
   try {
@@ -334,6 +336,23 @@ function gitSection(deps, out) {
     out.unmeasured.push(/upstream|@\{u\}|no such branch|unknown revision/i.test(msg)
       ? `unpushed commits NOT counted: this branch has no upstream to compare with (${msg}); that is not the same as zero`
       : `unpushed commits NOT counted: ${msg}`);
+  }
+  // 2026-10-13: `npm run backlog` reads the STATUS.md of the checkout it runs in, so a worktree
+  // behind main reports items that were closed days ago and says nothing about reading an old file
+  // -- the "another machine redid finished work" failure arriving through the tool built to stop it.
+  // Behind MAIN is the direction that matters: a stale branch can be level with its own upstream and
+  // still carry a months-old STATUS.md, which is why this is a second question, not the one above.
+  try {
+    const raw = String(git(['rev-list', '--count', 'HEAD..origin/main'])).trim();
+    if (!/^\d+$/.test(raw)) {
+      out.unmeasured.push(`commits behind main NOT counted: git rev-list answered ${JSON.stringify(ascii(raw).slice(0, 80))}, not a number`);
+    } else if (Number(raw) > 0) {
+      out.lines.push(`WARNING: git: this checkout is ${raw} commit(s) behind origin/main as of the last fetch, so the STATUS.md read above may be older than the one on main; bring this worktree up to date before trusting what it says is open`);
+    } else {
+      out.lines.push('git: level with origin/main as of the last fetch (the remote itself was not contacted, so it may have moved)');
+    }
+  } catch (e) {
+    out.unmeasured.push(`commits behind main NOT counted: ${ascii(errText(e)).split('\n')[0]}`);
   }
 }
 
