@@ -23,10 +23,20 @@ const { parseStatus } = require('../scripts/lib/backlog-status');
 const ROOT = path.join(__dirname, '..');
 
 let passed = 0;
+let skipped = 0;
 function test(name, fn) {
   try { fn(); passed++; console.log('  ok ', name); }
-  catch (e) { process.exitCode = 1; console.log('  FAIL', name, '\n      ', e.message); }
+  catch (e) {
+    if (e && e.skip) { skipped++; console.log('  SKIP', name, '-', e.message); return; }
+    process.exitCode = 1; console.log('  FAIL', name, '\n      ', e.message);
+  }
 }
+// 2026-10-13: the two cases below compare the printer against what a REAL registered check returns,
+// and the registry is empty since sync-push-false-success was retired with the item it tracked.
+// They must not pass with nothing compared -- that is the "coverage without proof" this suite
+// refuses -- and they must not go red either, because there is no defect: there is no check. So
+// they say SKIP with the reason, and come back to life the day a check is registered again.
+function skip(msg) { const e = new Error(msg); e.skip = true; throw e; }
 
 console.log('backlog printer: layout of `npm run backlog`');
 
@@ -383,7 +393,7 @@ test('resolveItem keeps a long evidence line exactly (a clipping resolveItem is 
 
 test('for every REAL registry check, the printed evidence equals what the check returns, line for line', () => {
   const ids = Object.keys(REAL_CHECKS);
-  assert.ok(ids.length > 0, 'the registry is empty');
+  if (ids.length === 0) skip('no checks are registered, so there is no real check output to compare against');
   for (const id of ids) {
     const want = REAL_CHECKS[id].run();
     const got = B.resolveItem({ subject: 's', line: 9, checkId: id, waitingOwner: null }, REAL_CHECKS);
@@ -413,7 +423,7 @@ test('the real run prints every evidence line of every registered check on the r
       checked++;
     }
   }
-  assert.ok(checked > 0, 'no registered check ran, so nothing was compared');
+  if (checked === 0) skip('no item in STATUS.md names a registered check, so nothing could be compared');
 });
 
 // -- the printed total is the measured one -------------------------------------------------------
@@ -582,4 +592,4 @@ test('the slash command closes the five ways a reassuring table could be built',
   need(/prints the HANDOFF items from `STATUS.md` without checking them/.test(md.replace(/\s+/g, ' ')), 'say HANDOFF items are not checked');
 });
 
-console.log(`\n${passed} passed`);
+console.log(`\n${passed} passed${skipped ? `, ${skipped} skipped` : ''}`);

@@ -20,7 +20,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const {
-  CHECKS, checkSyncPushFalseSuccess, applyOwnerGate, guarded, readSyncPatterns,
+  CHECKS, applyOwnerGate, guarded, readSyncPatterns,
 } = require('../scripts/lib/backlog-checks');
 
 let passed = 0;
@@ -112,12 +112,14 @@ test('rule 3: a bad verdict, no result, or a PASS without evidence is NOT-VERIFI
   assert.strictEqual(run({ verdict: 'PASS' }).verdict, 'NOT-VERIFIED');
 });
 
-test('rule 3: an unreadable path never throws out of the gate or the sync check', () => {
+test('rule 3: an unreadable path never throws out of the owner gate', () => {
   const dir = dirFor('gate'); // a directory where a file is expected: readFileSync throws EISDIR
   assert.doesNotThrow(() => applyOwnerGate('owner-item', { verdict: 'PASS', evidence: 'e' }, dir));
-  assert.doesNotThrow(() => checkSyncPushFalseSuccess(statusFile));
 });
 
+// 2026-10-13: the registry is empty, so this loop runs zero times -- and that is the real state,
+// not a hole in the suite. It stays because it is the contract every future entry must meet, and
+// tests/backlog-registry.test.js is what proves the empty registry and STATUS.md agree.
 test('the real registry: every check runs, answers with one of the four verdicts and has evidence', () => {
   for (const id of Object.keys(CHECKS)) {
     const r = CHECKS[id].run(); // reads the real STATUS.md; reads Z: if it is mapped, else NOT-VERIFIED
@@ -127,238 +129,19 @@ test('the real registry: every check runs, answers with one of the four verdicts
 });
 
 // ---------------------------------------------------------------------------------------------
-// sync-push-false-success
+// readSyncPatterns: the one piece of the retired sync check that is still in use
 // ---------------------------------------------------------------------------------------------
+// 2026-10-13: the sync-push-false-success check and its ~20 shape cases were deleted together with
+// the item they tracked. The defect is fixed -- `push=ok` now requires that every dirty file a
+// pattern can carry is in step on the NAS -- and the guard moved to tests/memory-sync.test.js,
+// which runs the real script instead of matching its text. What stays here is the pattern reader,
+// because scripts/lib/sync-health.js reads the same list to say which files the sync can carry.
 const PATTERNS_PS1 = "$Patterns = @(\n  'feedback_attendance*.md',\n  # 'old.md',\n  'MEMORY.md'\n)\n";
-const DIRTY_LINE = (extra = {}) => {
-  const f = Object.assign({ dirty: 3, push: 'ok', rc: 0, copied: 0, same: 9, conflict: 0, failed: 0, marker: 'written', files: 'MEMORY.md' }, extra);
-  return `2026-10-12T20:00:00+07:00  DIRTY ${f.dirty}  push=${f.push}  rc=${f.rc}  copied=${f.copied} same=${f.same} conflict=${f.conflict} failed=${f.failed}  needs-eyes=none  snapshot=x  marker=${f.marker}  files=${f.files}\n`;
-};
-// A tiny stand-in for sync_if_dirty.ps1 around the part the check reads. `decide` replaces the
-// success decision, `guard` the guard line.
-function syncDir(name, { decide = '$pushOk = ($rc -eq 0) -and ($null -ne $failed) -and ($failed -eq 0)', guard = 'if ($pushOk) {', log = DIRTY_LINE(), patterns = PATTERNS_PS1 } = {}) {
+function syncDir(name, { patterns = PATTERNS_PS1 } = {}) {
   const d = dirFor(name);
-  put(d, 'sync_if_dirty.ps1', ['$rc = 0', decide, "$markerState = 'kept-old'", guard, '  Set-Content -LiteralPath $markerFull -Value "pushed $stamp" -Encoding UTF8', '}', ''].join('\n'));
   put(d, 'sync_memory.ps1', patterns);
-  put(d, 'sync.log', log);
   return d;
 }
-const NEVER_PASS = r => assert.notStrictEqual(r.verdict, 'PASS', `PASS without proof: ${r.evidence}`);
-
-// Declared above every case that calls it: each test() runs as the file is read, so a helper
-// defined further down would be in its temporal dead zone -- which eslint does not report.
-const HAND = 'read sync_if_dirty.ps1 by hand';
-const CLOSE = 'close the STATUS.md item (sync-push-false-success) and delete this check in the same commit';
-function assertShapeChanged(r, why) {
-  NEVER_PASS(r);
-  assert.strictEqual(r.verdict, 'NOT-VERIFIED', `${why}: expected NOT-VERIFIED, got ${r.verdict}\n${r.evidence}`);
-  assert.ok(r.evidence.includes('not the one this check knows'), `${why}: no shape-changed statement: ${r.evidence}`);
-  assert.ok(r.evidence.includes(HAND) && r.evidence.includes(CLOSE), `${why}: no hand-read instruction: ${r.evidence}`);
-  assert.ok(!r.evidence.includes('push counts as ok on the exit code'), `${why}: the old defect text survived: ${r.evidence}`);
-}
-
-test('sync: the known old shape is FAIL, citing the decision line, the marker line and the guard', () => {
-  const r = checkSyncPushFalseSuccess(syncDir('old-shape'));
-  assert.strictEqual(r.verdict, 'FAIL', r.evidence);
-  assert.ok(r.evidence.includes('sync_if_dirty.ps1:2: $pushOk = '), r.evidence);
-  assert.ok(r.evidence.includes('sync_if_dirty.ps1:5:'), `marker line not cited: ${r.evidence}`);
-  assert.ok(r.evidence.includes('inside the block opened by the exact "if ($pushOk) {" at :4'), `guard line not cited: ${r.evidence}`);
-});
-
-// 2026-10-12 (re-review): a FAIL claims the defect is live, and this check reads three places only.
-// An upstream fix (`if ($copied -eq 0) { $failed = 1 }` before the decision) cannot be seen by
-// shape, so the FAIL has to say so where it will be read rather than imply full coverage.
-test('sync: the FAIL states the limit of what it read, so an upstream fix is not implied away', () => {
-  const r = checkSyncPushFalseSuccess(syncDir('limit-stated'));
-  assert.strictEqual(r.verdict, 'FAIL', r.evidence);
-  assert.ok(r.evidence.includes('LIMIT of this check'), r.evidence);
-  assert.ok(/reads only the \$pushOk decision, its guard and the marker write/.test(r.evidence), r.evidence);
-  assert.ok(/a fix made elsewhere in the script/.test(r.evidence), r.evidence);
-  assert.ok(/read sync_if_dirty\.ps1 by hand before trusting this FAIL/.test(r.evidence), r.evidence);
-  // A fix nested INSIDE the guard block (`if ($copied -gt 0) { Set-Content ... }`) also reads FAIL,
-  // and "inside the block opened by the exact guard" stays literally true while the defect is gone.
-  // The limit sentence has to name that case, since nothing detects it.
-  assert.ok(/nested inside the guard block/.test(r.evidence), `the nested-fix limit is not stated: ${r.evidence}`);
-  assert.ok(/nested inside the guard block/.test(CHECKS['sync-push-false-success'].describe),
-    CHECKS['sync-push-false-success'].describe);
-  // and the same limit is on the registry entry, which is what a reader of the backlog sees first
-  assert.ok(/reads nothing but those three places/.test(CHECKS['sync-push-false-success'].describe),
-    CHECKS['sync-push-false-success'].describe);
-});
-
-// The marker write has to be INSIDE the guard's block, not merely below its line. Keeping the guard
-// line, closing its block and writing the marker under another `if` left this FAIL while the
-// evidence said "guarded only by the exact if ($pushOk)" -- a sentence that was then false.
-test('sync: the marker write moved out of the if ($pushOk) block is NOT-VERIFIED, with no "guarded by" claim', () => {
-  const d = dirFor('marker-outside');
-  put(d, 'sync_if_dirty.ps1', [
-    '$rc = 0',
-    '$pushOk = ($rc -eq 0) -and ($null -ne $failed) -and ($failed -eq 0)',
-    'if ($pushOk) {',
-    "  $markerState = 'would-write'",
-    '}',
-    'if ($rc -eq 0) {',
-    '  Set-Content -LiteralPath $markerFull -Value "pushed $stamp" -Encoding UTF8',
-    '}',
-    '',
-  ].join('\n'));
-  put(d, 'sync_memory.ps1', PATTERNS_PS1);
-  put(d, 'sync.log', DIRTY_LINE());
-  const r = checkSyncPushFalseSuccess(d);
-  assertShapeChanged(r, 'marker outside the guard block');
-  assert.ok(!/guarded only by|inside the block opened/.test(r.evidence), `a guard claim survived: ${r.evidence}`);
-  assert.ok(r.evidence.includes('is not inside the "if ($pushOk) {" block'), r.evidence);
-});
-
-test('sync: one more condition on the known expression is NOT-VERIFIED, however it is worded', () => {
-  for (const [name, decide] of [
-    ['extended-unknown-var', '$pushOk = ($rc -eq 0) -and ($null -ne $failed) -and ($failed -eq 0) -and ($pushedN -gt 0)'],
-    ['extended-front', '$pushOk = ($copiedAny) -and ($rc -eq 0) -and ($null -ne $failed) -and ($failed -eq 0)'],
-    ['narrowed', '$pushOk = ($rc -eq 0) -and ($failed -eq 0)'],
-  ]) {
-    assertShapeChanged(checkSyncPushFalseSuccess(syncDir(name, { decide })), name);
-  }
-});
-
-// The brace has to be ON the guard line, because that is where the depth walk starts. A
-// brace-on-the-next-line script is a shape this check has never read, so it must not be called
-// FAIL. Without this case, making the brace optional again left the suite green (mutation testing).
-test('sync: a guard whose brace is on the next line is NOT-VERIFIED, not FAIL', () => {
-  const d = dirFor('brace-next-line');
-  put(d, 'sync_if_dirty.ps1', [
-    '$rc = 0',
-    '$pushOk = ($rc -eq 0) -and ($null -ne $failed) -and ($failed -eq 0)',
-    'if ($pushOk)',
-    '{',
-    '  Set-Content -LiteralPath $markerFull -Value "pushed $stamp" -Encoding UTF8',
-    '}',
-    '',
-  ].join('\n'));
-  put(d, 'sync_memory.ps1', PATTERNS_PS1);
-  put(d, 'sync.log', DIRTY_LINE());
-  const r = checkSyncPushFalseSuccess(d);
-  assertShapeChanged(r, 'brace on the line after the guard');
-  assert.ok(r.evidence.includes('0 exact "if ($pushOk) {" guard line(s)'), r.evidence);
-});
-
-// PowerShell is case-insensitive, so `$PushOk = ...` is the same variable. Before this, such a
-// second assignment was invisible and the check printed the old defect text for a fixed script --
-// the failure class round 2 closed.
-test('sync: case does not hide a second assignment or the guard', () => {
-  const d = syncDir('case-second-assignment', {
-    decide: '$pushOk = ($rc -eq 0) -and ($null -ne $failed) -and ($failed -eq 0)\n$PushOk = $pushOk -and ($copied -gt 0)',
-  });
-  const r = checkSyncPushFalseSuccess(d);
-  assertShapeChanged(r, '$PushOk second assignment');
-  assert.ok(r.evidence.includes('2 assignments to $pushOk'), `the differently-cased assignment was not counted: ${r.evidence}`);
-  // and the mirror: a known shape written in other cases -- assignment, guard AND marker write --
-  // is still recognised, so the insensitivity cuts both ways rather than only adding problems.
-  const other = dirFor('case-known-shape');
-  put(other, 'sync_if_dirty.ps1', [
-    '$rc = 0',
-    '$PUSHOK = ($rc -eq 0) -and ($null -ne $failed) -and ($failed -eq 0)',
-    'IF ($PushOk) {',
-    '  set-content -literalpath $markerFull -value "pushed $stamp"',
-    '}',
-    '',
-  ].join('\n'));
-  put(other, 'sync_memory.ps1', PATTERNS_PS1);
-  put(other, 'sync.log', DIRTY_LINE());
-  const same = checkSyncPushFalseSuccess(other);
-  assert.strictEqual(same.verdict, 'FAIL', `a differently-cased known shape was not recognised: ${same.evidence}`);
-  assert.ok(same.evidence.includes('sync_if_dirty.ps1:4:'), `the lower-case marker write was not cited: ${same.evidence}`);
-});
-
-test('sync: a second assignment carrying a scope prefix is NOT-VERIFIED, not invisible', () => {
-  for (const prefix of ['$script:', '$global:', '$private:']) {
-    const d = syncDir(`scoped-${prefix.replace(/[$:]/g, '')}`, {
-      decide: `$pushOk = ($rc -eq 0) -and ($null -ne $failed) -and ($failed -eq 0)\n${prefix}pushOk = $pushOk -and ($copied -gt 0)`,
-    });
-    const r = checkSyncPushFalseSuccess(d);
-    assertShapeChanged(r, `${prefix}pushOk second assignment`);
-    assert.ok(r.evidence.includes('2 assignments to $pushOk'), `the scoped assignment was not counted: ${r.evidence}`);
-  }
-});
-
-test('sync: a second $pushOk assignment (a plausible real fix) is NOT-VERIFIED, not FAIL', () => {
-  const d = syncDir('two-assignments', { decide: '$pushOk = ($rc -eq 0) -and ($failed -eq 0)\n$pushOk = $pushOk -and ($copied -gt 0)' });
-  assertShapeChanged(checkSyncPushFalseSuccess(d), 'second assignment');
-});
-
-test('sync: a changed marker guard is NOT-VERIFIED, not FAIL', () => {
-  const d = syncDir('changed-guard', { guard: 'if ($pushOk -and $copied -gt 0) {' });
-  assertShapeChanged(checkSyncPushFalseSuccess(d), 'changed guard');
-});
-
-test('sync: a $pushOk split across lines with a backtick is NOT-VERIFIED, not FAIL', () => {
-  const d = syncDir('backtick', { decide: '$pushOk = ($rc -eq 0) -and `\n  ($failed -eq 0)' });
-  assertShapeChanged(checkSyncPushFalseSuccess(d), 'backtick continuation');
-});
-
-test('sync: a decision that now mentions copied/dirty is NOT-VERIFIED, not PASS and not FAIL', () => {
-  const d = syncDir('mentions-copied', { decide: '$pushOk = ($rc -eq 0) -and ($failed -eq 0) -and ($copied + $same -ge $dirtyCount)' });
-  assertShapeChanged(checkSyncPushFalseSuccess(d), 'accounting mentioned');
-});
-
-test('sync: no $pushOk assignment at all is NOT-VERIFIED', () => {
-  assertShapeChanged(checkSyncPushFalseSuccess(syncDir('no-assignment', { decide: '# decision moved elsewhere' })), 'no assignment');
-});
-
-test('sync: an unreachable memory folder is NOT-VERIFIED, naming the path tried, never PASS', () => {
-  const nowhere = path.join(BASE, 'no-such-folder');
-  const r = checkSyncPushFalseSuccess(nowhere);
-  assert.strictEqual(r.verdict, 'NOT-VERIFIED');
-  assert.ok(r.evidence.includes(path.join(nowhere, 'sync_if_dirty.ps1')), `path not named: ${r.evidence}`);
-});
-
-// Evidence honesty (I1): each sentence needs the log fields that make it true.
-test('sync evidence: a FAILED push with copied=0 does not claim the folder was marked clean or the NAS identical', () => {
-  const log = DIRTY_LINE({ push: 'FAILED', rc: 1, marker: 'kept-old' });
-  const r = checkSyncPushFalseSuccess(syncDir('failed-push', { log }));
-  assert.ok(!/marked clean|identical|already held/.test(r.evidence), r.evidence);
-  assert.ok(r.evidence.includes('did not mark the folder clean'), r.evidence);
-  const w = checkSyncPushFalseSuccess(syncDir('write-failed', { log: DIRTY_LINE({ marker: 'WRITE-FAILED' }) }));
-  assert.ok(!/marked clean|identical|already held/.test(w.evidence), w.evidence);
-});
-
-test('sync evidence: push=ok marker=written with copied=0 says so, and calls same a size-and-mtime count, not identical copies', () => {
-  const r = checkSyncPushFalseSuccess(syncDir('cleared'));
-  assert.ok(r.evidence.includes('yet the folder was marked clean'), r.evidence);
-  assert.ok(r.evidence.includes('size and mtime, not a hash'), r.evidence);
-  assert.ok(!/identical|already held/.test(r.evidence), r.evidence);
-});
-
-test('sync evidence: a dirty name no pattern matches is reported; matching names are "not excluded by name", with the unlisted tail', () => {
-  const bad = checkSyncPushFalseSuccess(syncDir('unmatched', { log: DIRTY_LINE({ files: 'MEMORY.md, lesson_x.md (+4)' }) }));
-  assert.ok(bad.evidence.includes('match none of the sync patterns') && bad.evidence.includes('lesson_x.md'), bad.evidence);
-  assert.ok(bad.evidence.includes('4 more dirty name(s) are not listed in the log and were not tested'), bad.evidence);
-  const ok = checkSyncPushFalseSuccess(syncDir('matched', { log: DIRTY_LINE({ files: 'MEMORY.md, feedback_attendance_x.md' }) }));
-  assert.ok(ok.evidence.includes('no listed name is excluded by name'), ok.evidence);
-  assert.ok(!ok.evidence.includes('no skipped file'), 'overstated claim came back');
-});
-
-// The caveat is the whole reason the sentence above is allowed to exist: sync_if_dirty.ps1 counts a
-// file in any non-dot SUBFOLDER as dirty, while sync_memory.ps1 copies only the top level and
-// archive\, so a name that passes the pattern test can still never be copied. Without this case,
-// deleting the caveat left the suite green (mutation testing, 2026-10-12).
-test('sync evidence: the name test carries its subfolder caveat, so it is not read as "nothing was skipped"', () => {
-  const r = checkSyncPushFalseSuccess(syncDir('caveat', { log: DIRTY_LINE({ files: 'MEMORY.md' }) }));
-  assert.ok(/subfolder/.test(r.evidence), `no subfolder caveat: ${r.evidence}`);
-  assert.ok(/names alone cannot show/.test(r.evidence), `the caveat lost its point: ${r.evidence}`);
-  assert.ok(/dirty but never copied/.test(r.evidence), `the caveat lost its consequence: ${r.evidence}`);
-});
-
-test('sync evidence: a sync.log with a byte-order mark and a single DIRTY run on line 1 is still read', () => {
-  const r = checkSyncPushFalseSuccess(syncDir('bom', { log: '﻿' + DIRTY_LINE() }));
-  assert.ok(r.evidence.includes('sync.log:1: 2026-10-12T20:00:00'), r.evidence);
-  assert.ok(!r.evidence.includes('has no DIRTY run'), r.evidence);
-});
-
-test('sync evidence: the DIRTY count is never compared with the sum of the four counts', () => {
-  const r = checkSyncPushFalseSuccess(syncDir('sum', { log: DIRTY_LINE({ dirty: 3, same: 129 }) }));
-  assert.ok(r.evidence.includes('cannot show a skipped file'), r.evidence);
-  assert.ok(!r.evidence.includes('LIVE INSTANCE') && !r.evidence.includes('silently'), r.evidence);
-});
 
 test('readSyncPatterns: reads the quoted patterns, skips commented ones, null when absent', () => {
   assert.deepStrictEqual(readSyncPatterns(syncDir('patterns')), ['feedback_attendance*.md', 'MEMORY.md']);

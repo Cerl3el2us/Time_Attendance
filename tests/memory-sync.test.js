@@ -28,6 +28,7 @@ const { spawnSync } = require('child_process');
 const SYNC_DIR = 'Z:\\claude_memory';
 const DIRTY_SCRIPT = path.join(SYNC_DIR, 'sync_if_dirty.ps1');
 const SYNC_SCRIPT = path.join(SYNC_DIR, 'sync_memory.ps1');
+const START_SCRIPT = path.join(SYNC_DIR, 'session_start.ps1');
 const SLOW = process.argv.includes('--slow');
 
 let passed = 0, skipped = 0;
@@ -198,3 +199,192 @@ test('.gitignore whitelists the same file as $Patterns', () => {
 });
 
 console.log(`memory-sync: ${passed} passed, ${skipped} skipped`);
+
+// -----------------------------------------------------------------------------------------------
+// 2026-10-13, owner asked for this after the hook pushed nothing for a whole day without a word:
+// the only trace a broken push leaves is a line in sync.log, and nobody reads sync.log. So
+// session_start.ps1 gained -PushStatus: one line about the LAST run, which the hook path puts into
+// the session's context. It is the heartbeat -- if it is wrong, a silent failure goes unseen again,
+// so it gets its own cases. -PushStatus takes a -LogFile and must not pull, map a drive, or touch
+// the NAS: these cases run against fixture logs in a temp folder.
+// -----------------------------------------------------------------------------------------------
+
+// A fixture log line for a run that pushed cleanly.
+const OK_RUN = '2026-10-13T16:55:41+07:00  DIRTY 2  push=ok  rc=0  copied=2 same=129 conflict=0 '
+  + 'failed=0  needs-eyes=none  snapshot=ok:946cb8f  marker=written  files=a.md, MEMORY.md';
+
+function writeLog(dir, lines) {
+  const p = path.join(dir, 'sync.log');
+  fs.writeFileSync(p, lines.join('\n') + '\n', 'utf8');
+  return p;
+}
+
+test('session_start -PushStatus: a clean push is reported with its time and count, and does not warn', () => {
+  if (!SLOW) skip('--slow only');
+  requireScript(START_SCRIPT);
+  const dir = tmp('pushstatus-ok');
+  const log = writeLog(dir, ['2026-10-13T16:10:03+07:00  UNREACHABLE  memorydir=C:\\x\\Z---\\memory', OK_RUN]);
+  const r = ps(START_SCRIPT, ['-PushStatus', '-LogFile', log]);
+  if (r.code !== 0) throw new Error(`a hook must never fail the session: exit ${r.code} ${r.err}`);
+  if (!r.out.includes('2026-10-13T16:55:41+07:00')) throw new Error(`the last run's time is missing: ${r.out}`);
+  if (!/copied=2/.test(r.out)) throw new Error(`the count of files that moved is missing: ${r.out}`);
+  if (/WARNING/.test(r.out)) throw new Error(`a clean push must not warn: ${r.out}`);
+});
+
+test('session_start -PushStatus: a run that never reached the memory folder warns', () => {
+  if (!SLOW) skip('--slow only');
+  requireScript(START_SCRIPT);
+  const dir = tmp('pushstatus-unreachable');
+  const log = writeLog(dir, [OK_RUN, '2026-10-13T17:02:00+07:00  UNREACHABLE  memorydir=C:\\x\\Z---\\memory']);
+  const r = ps(START_SCRIPT, ['-PushStatus', '-LogFile', log]);
+  if (r.code !== 0) throw new Error(`a hook must never fail the session: exit ${r.code} ${r.err}`);
+  if (!/WARNING/.test(r.out)) throw new Error(`an UNREACHABLE last run must warn: ${r.out}`);
+  if (!r.out.includes('2026-10-13T17:02:00+07:00')) throw new Error(`the warning must name when it happened: ${r.out}`);
+});
+
+test('session_start -PushStatus: a run that left files behind by name warns and names them', () => {
+  if (!SLOW) skip('--slow only');
+  requireScript(START_SCRIPT);
+  const dir = tmp('pushstatus-unsynced');
+  const log = writeLog(dir, [OK_RUN.replace('needs-eyes=none', 'needs-eyes=none  unsynced=notes_scratch.md')]);
+  const r = ps(START_SCRIPT, ['-PushStatus', '-LogFile', log]);
+  if (r.code !== 0) throw new Error(`a hook must never fail the session: exit ${r.code} ${r.err}`);
+  if (!/WARNING/.test(r.out)) throw new Error(`a run with unsynced files must warn: ${r.out}`);
+  if (!r.out.includes('notes_scratch.md')) throw new Error(`the warning must name the file: ${r.out}`);
+});
+
+test('session_start -PushStatus: no log yet says so instead of claiming a push', () => {
+  if (!SLOW) skip('--slow only');
+  requireScript(START_SCRIPT);
+  const dir = tmp('pushstatus-nolog');
+  const r = ps(START_SCRIPT, ['-PushStatus', '-LogFile', path.join(dir, 'absent.log')]);
+  if (r.code !== 0) throw new Error(`a hook must never fail the session: exit ${r.code} ${r.err}`);
+  if (/push=ok/.test(r.out)) throw new Error(`with no log there is no push to report: ${r.out}`);
+  if (r.out.trim() === '') throw new Error('it must say something; silence is what hid the bug');
+});
+
+// -----------------------------------------------------------------------------------------------
+// 2026-10-13, owner asked for this: `push=ok` used to mean only "exit 0 and failed=0". It never
+// asked whether the files that changed are now on the NAS, so a run could report ok, write the
+// marker and move on having copied nothing -- after which the work was forgotten, because the
+// marker says it is done. The new rule: every dirty file that CAN be synced must be in step on the
+// NAS afterwards, or the marker is kept and the next turn tries again.
+//
+// The harness is a temp folder standing in for Z:\claude_memory: a copy of sync_if_dirty.ps1 next
+// to a stub sync_memory.ps1 we control. sync_if_dirty.ps1 finds its sibling through $PSScriptRoot
+// and reads $NasMemoryDir and $Patterns out of it, so the stub decides both what gets reported and
+// what actually moves. The stub's summary is ASCII on purpose: the real script parses the first
+// four numbers of the last line, so the words carry no meaning and Thai text would only add an
+// encoding variable to the case.
+// -----------------------------------------------------------------------------------------------
+
+// copied / same / conflict / failed, plus optional " :: name, name" for files needing eyes.
+function summary(copied, same, conflict, failed, names) {
+  const base = `copied ${copied} / same ${same} / conflict ${conflict} / failed ${failed}`;
+  return names ? `${base} :: ${names}` : base;
+}
+
+// stubOpts: { nasDir: false to omit $NasMemoryDir, copy: true to really copy matching files }
+function fakeNas(name, mem, summaryLine, stubOpts = {}) {
+  const nas = tmp(name);
+  fs.copyFileSync(DIRTY_SCRIPT, path.join(nas, 'sync_if_dirty.ps1'));
+  const decl = stubOpts.nasDir === false ? '' : `$NasMemoryDir = '${nas}'\n`;
+  const copy = stubOpts.copy
+    ? `foreach ($f in @(Get-ChildItem -Path (Join-Path '${mem}' '*') -File -Include $Patterns)) {\n`
+      + `  Copy-Item -LiteralPath $f.FullName -Destination '${nas}' -Force\n}\n`
+    : '';
+  fs.writeFileSync(path.join(nas, 'sync_memory.ps1'),
+    'param([Parameter(Position=0)][string]$Mode, [string]$ProjectDir)\n'
+    + decl
+    + "$Patterns = @(\n  'feedback_attendance*.md',\n  'MEMORY.md'\n)\n"
+    + copy
+    + `Write-Host '${summaryLine}'\n`, 'utf8');
+  return nas;
+}
+
+// Runs the copied script against a temp memory folder; returns { out, code, log }.
+function runDirty(nas, mem, extra = []) {
+  const side = tmp('side');
+  const marker = path.join(side, 'marker');
+  const log = path.join(side, 'sync.log');
+  const r = ps(path.join(nas, 'sync_if_dirty.ps1'),
+    ['-ProjectDir', 'Z:\\', '-MemoryDir', mem, '-MarkerFile', marker, '-LogFile', log, ...extra]);
+  return {
+    out: r.out, code: r.code, err: r.err, marker,
+    markerExists: fs.existsSync(marker),
+    log: fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim() : '',
+  };
+}
+
+test('sync_if_dirty: a push that copied nothing to the NAS is not ok and keeps the old marker', () => {
+  if (!SLOW) skip('--slow only');
+  requireScript(DIRTY_SCRIPT);
+  const mem = tmp('notinstep-mem');
+  write(mem, 'feedback_attendance_x.md', 'written in this session');
+  // The stub claims one file was copied; it copies nothing. This is the 2026-10-13 bug exactly.
+  const nas = fakeNas('notinstep-nas', mem, summary(1, 0, 0, 0));
+  const r = runDirty(nas, mem);
+  if (r.code !== 0) throw new Error(`a hook must never fail the session: exit ${r.code} ${r.err}`);
+  if (!/push=FAILED/.test(r.log)) throw new Error(`a push that moved nothing must not say ok: ${r.log}`);
+  if (!/not-in-step=/.test(r.log)) throw new Error(`the log must name what is not on the NAS: ${r.log}`);
+  if (!r.log.includes('feedback_attendance_x.md')) throw new Error(`the file left behind is not named: ${r.log}`);
+  if (r.markerExists) throw new Error('the marker was written, so this session\'s file is now forgotten');
+});
+
+test('sync_if_dirty: a push whose files really reached the NAS is ok and writes the marker', () => {
+  if (!SLOW) skip('--slow only');
+  requireScript(DIRTY_SCRIPT);
+  const mem = tmp('instep-mem');
+  write(mem, 'feedback_attendance_x.md', 'written in this session');
+  const nas = fakeNas('instep-nas', mem, summary(1, 0, 0, 0), { copy: true });
+  const r = runDirty(nas, mem);
+  if (r.code !== 0) throw new Error(`a hook must never fail the session: exit ${r.code} ${r.err}`);
+  if (!/push=ok/.test(r.log)) throw new Error(`the file is on the NAS, so this is a success: ${r.log}`);
+  if (!/verified=1/.test(r.log)) throw new Error(`the log must say how many files it proved: ${r.log}`);
+  if (!r.markerExists) throw new Error('a proven push must write the marker, or it repeats every turn');
+});
+
+test('sync_if_dirty: a dirty file no pattern can ever copy is named, and does not block the marker', () => {
+  if (!SLOW) skip('--slow only');
+  requireScript(DIRTY_SCRIPT);
+  const mem = tmp('unsynced-mem');
+  write(mem, 'feedback_attendance_x.md', 'this one travels');
+  write(mem, 'notes_scratch.md', 'this one never matches a pattern');
+  const nas = fakeNas('unsynced-nas', mem, summary(1, 0, 0, 0), { copy: true });
+  const r = runDirty(nas, mem);
+  if (r.code !== 0) throw new Error(`a hook must never fail the session: exit ${r.code} ${r.err}`);
+  if (!/unsynced=/.test(r.log)) throw new Error(`a file the patterns never copy must be shouted: ${r.log}`);
+  if (!r.log.includes('notes_scratch.md')) throw new Error(`the unsyncable file is not named: ${r.log}`);
+  if (!r.markerExists) {
+    throw new Error('pushing again can never copy that file, so withholding the marker only pushes every turn forever');
+  }
+});
+
+test('sync_if_dirty: a file the NAS holds a newer copy of does not count as left behind', () => {
+  if (!SLOW) skip('--slow only');
+  requireScript(DIRTY_SCRIPT);
+  const mem = tmp('conflict-mem');
+  write(mem, 'feedback_attendance_x.md', 'mine');
+  // Reported as a conflict: sync_memory.ps1 refused it because the NAS copy is newer. That is the
+  // case a human has to look at, not a failure, and the marker is written on purpose -- pushing
+  // again would reach the same answer every turn.
+  const nas = fakeNas('conflict-nas', mem, summary(0, 0, 1, 0, 'feedback_attendance_x.md'));
+  const r = runDirty(nas, mem);
+  if (r.code !== 0) throw new Error(`a hook must never fail the session: exit ${r.code} ${r.err}`);
+  if (/not-in-step=/.test(r.log)) throw new Error(`a conflict is not a file left behind: ${r.log}`);
+  if (!/push=ok/.test(r.log)) throw new Error(`a conflict was already a success before this change: ${r.log}`);
+  if (!r.markerExists) throw new Error('the marker is written on a conflict; that behaviour predates this change');
+});
+
+test('sync_if_dirty: when it cannot read where the NAS folder is, it says so and keeps the marker', () => {
+  if (!SLOW) skip('--slow only');
+  requireScript(DIRTY_SCRIPT);
+  const mem = tmp('noverify-mem');
+  write(mem, 'feedback_attendance_x.md', 'written in this session');
+  const nas = fakeNas('noverify-nas', mem, summary(1, 0, 0, 0), { nasDir: false, copy: true });
+  const r = runDirty(nas, mem);
+  if (r.code !== 0) throw new Error(`a hook must never fail the session: exit ${r.code} ${r.err}`);
+  if (!/verify=UNREADABLE/.test(r.log)) throw new Error(`not knowing must be said out loud: ${r.log}`);
+  if (/push=ok/.test(r.log)) throw new Error(`it proved nothing, so it must not claim ok: ${r.log}`);
+  if (r.markerExists) throw new Error('"cannot tell" must not be treated as done');
+});
