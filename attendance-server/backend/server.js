@@ -5352,11 +5352,14 @@ function earlyMorningTierAllowed(checkIn, tier, S) {
   const thr = Number(tier) === 2 ? S.allowances.earlyThreshold2Min : S.allowances.earlyThreshold1Min;
   return mins <= thr;
 }
-function earlyMorningBonusFromWorkStartTime(workStartTime, S) {
+// 2026-10-13: takes the employee's role so the per-role rate table applies here too
+// (earlyLateRateFor). Omitting `role` keeps the company-wide amount, which is what every
+// caller got before this parameter existed.
+function earlyMorningBonusFromWorkStartTime(workStartTime, S, role) {
   const mins = parseHHMMToMins(workStartTime);
   if (!Number.isFinite(mins)) return { earlyCount: 0, bonus: 0 };
-  if (mins <= S.allowances.earlyThreshold2Min) return { earlyCount: 2, bonus: S.allowances.earlyMorning2 };
-  if (mins <= S.allowances.earlyThreshold1Min) return { earlyCount: 1, bonus: S.allowances.earlyMorning1 };
+  if (mins <= S.allowances.earlyThreshold2Min) return { earlyCount: 2, bonus: earlyLateRateFor(role, 'earlyMorning2', S) };
+  if (mins <= S.allowances.earlyThreshold1Min) return { earlyCount: 1, bonus: earlyLateRateFor(role, 'earlyMorning1', S) };
   return { earlyCount: 0, bonus: 0 };
 }
 function earlyMorningSubmitBlockReason(user, dateStr) {
@@ -10383,6 +10386,9 @@ function computePayroll(user, start, end, periodIndex) {
 
   const canUpcountry = isAllowanceEligible(S.allowanceEligibility, user.role, 'upcountry');
   const canEarlyLate = isAllowanceEligible(S.allowanceEligibility, user.role, 'earlyLate');
+  // 2026-10-13: the rate for THIS employee's role. `user` is the person being paid, so this is
+  // the owner of the row, never whoever triggered the payroll run.
+  const _elRate = (key) => earlyLateRateFor(user.role, key, S);
   const canOT = isAllowanceEligible(S.allowanceEligibility, user.role, 'ot');
   const canHolidayWork = isAllowanceEligible(S.allowanceEligibility, user.role, 'holidayWork');
 
@@ -10431,15 +10437,15 @@ function computePayroll(user, start, end, periodIndex) {
         const [h, m] = d.checkIn.split(':').map(Number);
         const mins = h * 60 + m;
         if (mins <= S.allowances.earlyThreshold2Min) {
-          earlyCount += 2; earlyLateBonus += S.allowances.earlyMorning2; earlyScanPaidDates.add(d.date);
+          earlyCount += 2; earlyLateBonus += _elRate('earlyMorning2'); earlyScanPaidDates.add(d.date);
         } else if (mins <= S.allowances.earlyThreshold1Min) {
-          earlyCount += 1; earlyLateBonus += S.allowances.earlyMorning1; earlyScanPaidDates.add(d.date);
+          earlyCount += 1; earlyLateBonus += _elRate('earlyMorning1'); earlyScanPaidDates.add(d.date);
         }
       }
       if (deviceScanQualifiesForLateNight(d, holidayWorkDates)) {
         const lnPts = lateNightPoints(d.lateOut, _ln2Thr);
         lateNightCount += lnPts;
-        earlyLateBonus += lnPts === 2 ? S.allowances.lateNight2 : S.allowances.lateNight1;
+        earlyLateBonus += lnPts === 2 ? _elRate('lateNight2') : _elRate('lateNight1');
       }
     });
     approvedEarlyMorning.forEach(l => {
@@ -10450,8 +10456,8 @@ function computePayroll(user, start, end, periodIndex) {
       // Rest-day web request pays only with approved holiday-work (user 2026-09-01).
       if (isHolidayWorkDay(l.dateFrom) && !holidayWorkDates.has(l.dateFrom)) return;
       const tier = Number(l.earlyMorningTier) || 0;
-      if (tier === 2) { earlyCount += 2; earlyLateBonus += S.allowances.earlyMorning2; }
-      else if (tier === 1) { earlyCount += 1; earlyLateBonus += S.allowances.earlyMorning1; }
+      if (tier === 2) { earlyCount += 2; earlyLateBonus += _elRate('earlyMorning2'); }
+      else if (tier === 1) { earlyCount += 1; earlyLateBonus += _elRate('earlyMorning1'); }
     });
   }
 

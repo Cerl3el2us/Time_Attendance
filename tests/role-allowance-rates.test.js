@@ -158,5 +158,39 @@ test('no role rate is hardcoded anywhere in either source', () => {
   }
 });
 
+// ---- the payer: server.js must not read the four amounts directly any more ----
+// A read that bypasses earlyLateRateFor() is the failure the spec calls most likely: it pays the
+// company-wide rate while the web shows the role rate, and no test would otherwise notice.
+// Dot notation only -- earlyLateRateFor's own `S.allowances[key]` is the one legitimate read.
+test('server.js payroll reads no early/late amount directly', () => {
+  const offenders = [];
+  SERVER_SRC.split('\n').forEach((line, i) => {
+    if (line.trim().startsWith('//')) return;
+    if (/S\.allowances\.(earlyMorning1|earlyMorning2|lateNight1|lateNight2)\b/.test(line)) {
+      offenders.push(`${i + 1}: ${line.trim()}`);
+    }
+  });
+  assert.deepStrictEqual(offenders, [], `these server.js lines still read the amount directly instead of calling earlyLateRateFor():\n  ${offenders.join('\n  ')}`);
+});
+
+// Review Focus 3: a rate row must never become permission to be paid.
+test('a rate row for an ineligible role is not a licence to pay', () => {
+  // accounting is absent from allowanceEligibility.earlyLate, so the eligibility gate -- which is
+  // a different function and runs first -- must still refuse. earlyLateRateFor() answers only
+  // "how much", and is allowed to return a number for a role that will never be asked about.
+  const s = S({ enabled: true, byRole: { accounting: { earlyMorning1: 5 } } });
+  assert.strictEqual(both('accounting', 'earlyMorning1', s), 5, 'the reader answers how much, nothing else');
+  const eligSrc = extractFunction(SERVER_SRC, 'isAllowanceEligible');
+  assert.ok(!/allowanceRoleRates/.test(eligSrc), 'eligibility must not consult the rate table');
+});
+
+test('server payroll takes the rate for the employee being paid, not a global', () => {
+  // computePayroll receives `user`; the rate helper it builds must close over user.role, or an
+  // admin running payroll would pay everyone at the admin's rate.
+  const fn = extractFunction(SERVER_SRC, 'computePayroll');
+  assert.ok(/earlyLateRateFor\(\s*user\.role/.test(fn),
+    'server computePayroll must resolve rates against user.role');
+});
+
 console.log(`\n${passed} assertions passed`);
 module.exports = { between };

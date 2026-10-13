@@ -31,6 +31,16 @@ function extractFunction(src, name) {
   throw new Error(`unbalanced ${name}`);
 }
 
+// 2026-10-13: earlyLateRateFor() closes over EARLY_LATE_RATE_KEYS, a module-level const rather
+// than a function, so extractFunction() alone leaves the sandbox with the function and not the
+// list it reads. Same trick COMPANY_TRIP_NO_CLAIM_TYPES already uses below: evaluate the real
+// declaration line out of the real source, so the sandbox can never hold a stale copy of it.
+function constLine(src, name) {
+  const m = src.match(new RegExp(`^const ${name} = .*$`, 'm'));
+  if (!m) throw new Error(`const ${name} not found`);
+  return m[0].replace(/^const /, '');
+}
+
 const TRIPS = ['2026-11-27', '2026-11-28']; // Fri + Sat
 const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 const isWeekend = d => { const x = new Date(d + 'T12:00:00').getDay(); return x === 0 || x === 6; };
@@ -78,7 +88,7 @@ function makeClient(world) {
   };
   ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
-  vm.runInContext(CLIENT_FNS.map(n => extractFunction(APP_SRC, n)).join('\n'), ctx);
+  vm.runInContext(constLine(APP_SRC, 'EARLY_LATE_RATE_KEYS') + '\n' + CLIENT_FNS.map(n => extractFunction(APP_SRC, n)).join('\n'), ctx);
   return ctx;
 }
 function makeServer(world) {
@@ -96,7 +106,7 @@ function makeServer(world) {
   vm.createContext(ctx);
   // The Set constant is not a function -- evaluate its real declaration line from server.js.
   const setLine = SERVER_SRC.match(/^const COMPANY_TRIP_NO_CLAIM_TYPES = .*$/m)[0].replace(/^const /, '');
-  vm.runInContext(setLine + '\n' + SERVER_FNS.map(n => extractFunction(SERVER_SRC, n)).join('\n'), ctx);
+  vm.runInContext(setLine + '\n' + constLine(SERVER_SRC, 'EARLY_LATE_RATE_KEYS') + '\n' + SERVER_FNS.map(n => extractFunction(SERVER_SRC, n)).join('\n'), ctx);
   return ctx;
 }
 
