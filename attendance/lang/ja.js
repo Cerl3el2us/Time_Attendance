@@ -1297,6 +1297,11 @@ window.LANG_JA = {
   "Only roles that differ are listed. A role not in this table uses the company-wide amount above, and follows it when you change it.": "金額が異なる役職のみを登録します。この表にない役職は上記の全社共通額を使用し、その額を変更すると自動的に追従します。",
   "No exceptions — every role uses the company-wide amount above.": "例外なし — すべての役職が上記の全社共通額を使用します。",
   "+ Add a role that differs": "＋ 金額が異なる役職を追加",
+  // 2026-10-14: the blank cell's placeholder. The trailing space is load-bearing -- the amount is
+  // appended to it, so the key must keep it (same prefix convention as "⏱️ Total OT " above).
+  "company-wide ": "全社共通 ",
+  // 2026-10-14: says where the "+ add a role" dropdown's list comes from.
+  "Only roles eligible for the early-morning / late-night allowance can be added here — grant it in the allowance-eligibility table above.": "ここに追加できるのは早朝・深夜手当の対象役職のみです — 対象の変更は上記の手当対象表で行います。",
   // 2026-10-14: the web-clock switch.
   "Company policy: clocking in and out from the web is turned off — please use the face scanner at the office. If you cannot scan, submit a time-correction request.": "会社規定により、Webからの出退勤打刻は停止されています。オフィスの顔認証端末をご利用ください。打刻できない場合は時刻修正を申請してください。",
   "Turn off clocking in and out from the web": "Webからの出退勤打刻を停止する",

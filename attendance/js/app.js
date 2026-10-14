@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 115;
+const APP_BUILD = 117;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -5480,8 +5480,13 @@ function renderRoleRateTable(s) {
   const body = _roleRateRoles.map(r => {
     const row = (_byRole[r] && typeof _byRole[r] === 'object') ? _byRole[r] : {};
     return `<tr><td style="padding:4px 8px">${escapeHtml(r)}</td>${EARLY_LATE_RATE_KEYS.map(k =>
-      // placeholder = the company-wide amount this cell falls back to while it is left blank.
-      `<td style="padding:4px 8px"><input id="set-rolerate-${escapeHtml(r)}-${k}" class="rolerate-cell" type="number" min="0" max="100000" step="1" value="${row[k] != null ? Number(row[k]) : ''}" placeholder="${Number(s.allowances[k])}" ${_rrOn ? '' : 'disabled'} style="width:5.5rem;padding:6px 8px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px"></td>`
+      // placeholder = the company-wide amount this cell falls back to while it is left blank. It
+      // NAMES that source instead of showing the number alone: 2026-10-14 the owner read a bare
+      // grey "480" as a value already typed in, overwrote every cell to "fill the form", and
+      // halved a staff member's x2 early-morning step -- caught by luck before the period closed.
+      // Owner chose this wording the same day. The cell is wide enough to show it in full; a
+      // narrower box clipped it to "ตามยอดก", which teaches nothing.
+      `<td style="padding:4px 8px"><input id="set-rolerate-${escapeHtml(r)}-${k}" class="rolerate-cell" type="number" min="0" max="100000" step="1" value="${row[k] != null ? Number(row[k]) : ''}" placeholder="${L('company-wide ','ตามยอดกลาง ')}${Number(s.allowances[k])}" ${_rrOn ? '' : 'disabled'} style="width:9rem;padding:6px 8px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px"></td>`
     ).join('')}<td style="padding:4px 8px"><button type="button" class="rolerate-cell" onclick="onRoleRateRemove('${escapeJsAttr(r)}')" ${_rrOn ? '' : 'disabled'} title="${L('Put this role back on the company-wide amount','ให้ตำแหน่งนี้กลับไปใช้ยอดกลาง')}" style="border:none;background:none;cursor:pointer;color:#dc2626;font-size:15px;line-height:1">✕</button></td></tr>`;
   }).join('');
   const emptyRow = `<tr><td colspan="${EARLY_LATE_RATE_KEYS.length + 2}" style="padding:6px 8px;color:#64748b">${
@@ -5495,6 +5500,13 @@ function renderRoleRateTable(s) {
           L('+ Add a role that differs','+ เพิ่มตำแหน่งที่ได้ไม่เท่ายอดกลาง')}</button>
       </div>`
     : '';
+  // 2026-10-14 (owner): the dropdown offered only `user` and the owner read that as the system
+  // allowing one role, not as "these are the eligible ones". Nothing on screen said where the
+  // list comes from. It renders even when `adder` is empty -- that is precisely when the dropdown
+  // vanishes and the question gets louder, not quieter.
+  const addHint = `<div style="margin-top:6px;font-size:12px;color:#64748b">${
+    L('Only roles eligible for the early-morning / late-night allowance can be added here — grant it in the allowance-eligibility table above.',
+      'เลือกได้เฉพาะตำแหน่งที่มีสิทธิ์รับเบี้ยมาเช้า/กลับดึก — เปิดสิทธิ์เพิ่มได้ที่ตารางสิทธิ์เบี้ยเลี้ยงด้านบน')}</div>`;
   return `<div id="rolerate-block" style="margin-top:14px;${_rrOn ? '' : 'opacity:.55'}">
       <label style="display:flex;align-items:center;gap:8px;font-size:13px">
         <input type="checkbox" id="set-rolerate-enabled" ${_rrOn ? 'checked' : ''} onchange="onRoleRateToggle()">
@@ -5503,8 +5515,23 @@ function renderRoleRateTable(s) {
       <div style="font-size:12px;color:#64748b;margin:4px 0 8px">${
         L('Only roles that differ are listed. A role not in this table uses the company-wide amount above, and follows it when you change it.','ตารางนี้ใส่เฉพาะตำแหน่งที่ได้ไม่เท่ากัน · ตำแหน่งที่ไม่อยู่ในตาราง ใช้ยอดกลางด้านบน และจะขยับตามเมื่อแก้ยอดกลาง')}</div>
       <table style="border-collapse:collapse;font-size:13px">${head}${_roleRateRoles.length ? body : emptyRow}</table>
-      ${adder}
+      ${adder}${addHint}
     </div>`;
+}
+// 2026-10-14 (owner): which roles the "+ add a role" dropdown offers comes from the early/late
+// eligibility list -- correctly, since a rate for a role that never receives the allowance would
+// be a setting that looks set and does nothing. But it read the SAVED list, so ticking a role
+// eligible in the table above this one left the dropdown unchanged until the owner saved and came
+// back. That is indistinguishable from "this list is fixed", which is what the owner concluded
+// when he saw only `user` in it. Read the ticks that are on screen instead.
+//
+// Returns null -- NOT [] -- when the eligibility table is not rendered, because an empty array
+// here would mean "nobody is eligible" and would empty the dropdown on a page that simply does
+// not show those checkboxes.
+function readEarlyLateEligFromForm() {
+  const boxes = ROLE_KEYS.map(r => document.getElementById(`set-elig-earlyLate-${r}`));
+  if (!boxes.some(Boolean)) return null;
+  return ROLE_KEYS.filter((r, i) => boxes[i] && boxes[i].checked);
 }
 // Re-renders ONLY this block, never the whole Settings page: other fields may hold unsaved edits.
 function refreshRoleRateTable() {
@@ -5512,10 +5539,39 @@ function refreshRoleRateTable() {
   if (!block) return;
   // Keep what is typed but not yet saved, so adding or removing a row does not discard it.
   const read = readRoleRateTableFromForm();
-  const live = read.ok
-    ? { ...APP_SETTINGS, allowanceRoleRates: { enabled: read.value.enabled, byRole: read.value.byRole } }
+  const elig = readEarlyLateEligFromForm();
+  const base = elig
+    ? { ...APP_SETTINGS, allowanceEligibility: { ...APP_SETTINGS.allowanceEligibility, earlyLate: elig } }
     : APP_SETTINGS;
+  // 2026-10-14 (review): `!read.ok` means one cell is out of range -- which is a reason for the
+  // SAVE to refuse and name that field, not a reason for a cosmetic re-render to throw away every
+  // OTHER cell the owner typed. Falling back to APP_SETTINGS here reverted the whole table to the
+  // last saved amounts with nothing said, and the new eligibility-tick trigger made that fire
+  // during ordinary editing rather than only on a deliberate add/remove click.
+  const live = {
+    ...base,
+    allowanceRoleRates: read.ok
+      ? { enabled: read.value.enabled, byRole: read.value.byRole }
+      : { enabled: !!(document.getElementById('set-rolerate-enabled') || {}).checked, byRole: readRoleRateCellsRaw() },
+  };
   block.outerHTML = renderRoleRateTable(live);
+}
+// Deliberately NOT readRoleRateTableFromForm(): that one is the save path's reader and must keep
+// refusing bad input. This one only has to put back on screen what is already on screen, so it
+// takes each cell at face value and skips what it cannot read at all.
+function readRoleRateCellsRaw() {
+  const byRole = {};
+  for (const el of document.querySelectorAll('input[id^="set-rolerate-"]')) {
+    const m = /^set-rolerate-([^-]+)-([^-]+)$/.exec(el.id);
+    if (!m) continue;
+    const [, role, key] = m;
+    if (!EARLY_LATE_RATE_KEYS.includes(key)) continue;
+    if (el.value === '') continue;
+    const n = Number(el.value);
+    if (!Number.isFinite(n)) continue;
+    (byRole[role] || (byRole[role] = {}))[key] = n;
+  }
+  return byRole;
 }
 function onRoleRateAdd() {
   const sel = document.getElementById('set-rolerate-add');
@@ -5801,7 +5857,7 @@ function renderSettingsPage(_skipRefresh) {
                   <div style="font-size:10.5px;color:#94a3b8">${hint}</div>
                 </td>
                 ${ROLE_KEYS.map(role => `<td style="text-align:center;padding:8px 6px">
-                  <input type="checkbox" id="set-elig-${key}-${role}" ${hwEligRowChecked(s.allowanceEligibility, role, key) ? 'checked' : ''} ${HW_MODE_ROWS.includes(key) ? `onchange="onHolidayWorkModeToggle('${role}','${key}')"` : key === 'holidayWork' ? `onchange="onHolidayWorkParentToggle('${role}')"` : ''} style="width:16px;height:16px;cursor:pointer">
+                  <input type="checkbox" id="set-elig-${key}-${role}" ${hwEligRowChecked(s.allowanceEligibility, role, key) ? 'checked' : ''} ${HW_MODE_ROWS.includes(key) ? `onchange="onHolidayWorkModeToggle('${role}','${key}')"` : key === 'holidayWork' ? `onchange="onHolidayWorkParentToggle('${role}')"` : key === 'earlyLate' ? 'onchange="refreshRoleRateTable()"' : ''} style="width:16px;height:16px;cursor:pointer">
                 </td>`).join('')}
               </tr>`).join('')}
           </tbody>

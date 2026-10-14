@@ -844,10 +844,46 @@ test('the rendered table shows each role its own stored amount, and the central 
   assert.ok(/id="set-rolerate-manager-lateNight2"[^>]*value="0"/.test(html), 'a stored 0 must render as 0, not as blank');
   assert.ok(/id="set-rolerate-manager-earlyMorning2"[^>]*value=""/.test(html), 'an unset cell must render blank');
   assert.ok(!/set-rolerate-user-/.test(html), 'a role with no override gets no row at all');
-  assert.ok(/id="set-rolerate-manager-earlyMorning2"[^>]*placeholder="22"/.test(html),
-    'a blank cell must show the company-wide amount it falls back to');
+  // 2026-10-14: the placeholder must say WHERE the number comes from, not just the number. A bare
+  // grey "22" reads as a value already typed in: the owner overwrote every cell believing he had
+  // to fill them, which halved a staff member's x2 early-morning step and was caught by luck
+  // before the period closed. Owner decided the wording "ตามยอดกลาง <amount>" on 2026-10-14.
+  assert.ok(/id="set-rolerate-manager-earlyMorning2"[^>]*placeholder="(?:ตามยอดกลาง|company-wide) 22"/.test(html),
+    'a blank cell must name the company-wide amount as the source, not show a bare number');
+  assert.ok(!/placeholder="\d+"/.test(html),
+    'no cell may fall back to a bare number again — that is what looked like typed-in data');
   assert.ok(!/disabled/.test(html), 'with the switch on, no cell is disabled');
   assert.ok(/checked/.test(html), 'the switch must render ticked when enabled');
+});
+
+// ---- 2026-10-14 (owner): why the add-a-role dropdown is short ----
+// The owner saw a dropdown offering only `user` and read it as the system limiting him to one
+// role. It is not: the list is the roles eligible for the early/late allowance, and it grows by
+// itself the day another role is made eligible. Nothing on screen said so, so the table now says
+// where eligibility is granted -- and says it even when there is nothing left to add, which is
+// exactly when the dropdown disappears and the question gets louder.
+test('the table says where the addable roles come from', () => {
+  const html = renderTable({
+    allowances: { earlyMorning1: 11, earlyMorning2: 22, lateNight1: 33, lateNight2: 44 },
+    allowanceEligibility: { earlyLate: ['manager', 'user'] },
+    allowanceRoleRates: { enabled: true, byRole: { manager: { earlyMorning1: 7 } } },
+  });
+  assert.ok(/id="set-rolerate-add"/.test(html), 'precondition: this case still has a role to add');
+  assert.ok(/eligible .*(early|late)|สิทธิ์รับเบี้ยมาเช้า/i.test(html),
+    'the table must say that only roles eligible for the allowance can be added');
+  assert.ok(/eligibility table above|ตารางสิทธิ์เบี้ยเลี้ยงด้านบน/i.test(html),
+    'it must point at where eligibility is granted, or the owner cannot act on it');
+});
+
+test('that explanation is still there when every eligible role already has a row', () => {
+  const html = renderTable({
+    allowances: { earlyMorning1: 11, earlyMorning2: 22, lateNight1: 33, lateNight2: 44 },
+    allowanceEligibility: { earlyLate: ['manager'] },
+    allowanceRoleRates: { enabled: true, byRole: { manager: { earlyMorning1: 7 } } },
+  });
+  assert.ok(!/id="set-rolerate-add"/.test(html), 'precondition: nothing is addable, so the dropdown is gone');
+  assert.ok(/eligible .*(early|late)|สิทธิ์รับเบี้ยมาเช้า/i.test(html),
+    'with the dropdown gone the explanation matters more, not less');
 });
 
 test('the rendered table is disabled and dimmed while the switch is off, without losing amounts', () => {
@@ -1104,6 +1140,115 @@ test('a role whose row was removed is dropped, which is how it returns to the ce
   assert.strictEqual(got.ok, true, got.message);
   const v = JSON.parse(JSON.stringify(got.value));
   assert.deepStrictEqual(Object.keys(v.byRole), ['manager'], 'only the rendered row survives');
+});
+
+// ---- 2026-10-14 (owner): ticking a role eligible must reach the dropdown immediately ----
+// The dropdown reads the eligibility list, which is right, but it read the SAVED one -- so
+// ticking a role eligible in the table above left the dropdown unchanged until the owner saved
+// and came back. That is indistinguishable from "the list is fixed", which is what the owner
+// concluded. It reads the ticks that are on screen now. Runs the real refreshRoleRateTable()
+// against a fake DOM, so this cannot pass while the code does the wrong thing.
+function extractConst(src, name) {
+  const m = new RegExp(`const ${name} = (\\[[^\\]]*\\]);`).exec(src);
+  if (!m) throw new Error(`${name} not found`);
+  return m[1];
+}
+function runRefresh({ savedElig, tickedElig, byRole, typed }) {
+  let rendered = null;
+  // The refresh re-reads the cells that are ON SCREEN, so the fake DOM must actually contain the
+  // rendered row for every stored role -- answering [] here would simulate a table that is not
+  // rendered at all and would quietly drop the amounts under test.
+  const cells = {};
+  for (const [role, row] of Object.entries(byRole || {})) {
+    for (const [k, v] of Object.entries(row)) cells[`set-rolerate-${role}-${k}`] = String(v);
+  }
+  // `typed` overlays what the owner has keyed in but not saved, including values the save path
+  // would refuse.
+  for (const [id, v] of Object.entries(typed || {})) cells[id] = String(v);
+  const ctx = {
+    document: {
+      getElementById: (id) => {
+        if (id === 'rolerate-block') return { set outerHTML(v) { rendered = v; } };
+        if (id === 'set-rolerate-enabled') return { checked: true };
+        if (id.startsWith('set-elig-earlyLate-')) {
+          if (tickedElig === null) return null; // the eligibility table is not on screen
+          return { checked: tickedElig.includes(id.slice('set-elig-earlyLate-'.length)) };
+        }
+        return Object.prototype.hasOwnProperty.call(cells, id) ? { id, value: cells[id] } : null;
+      },
+      querySelectorAll: () => Object.keys(cells).map(id => ({ id, value: cells[id] })),
+    },
+    APP_SETTINGS: {
+      allowances: { earlyMorning1: 11, earlyMorning2: 22, lateNight1: 33, lateNight2: 44 },
+      allowanceEligibility: { earlyLate: savedElig },
+      allowanceRoleRates: { enabled: true, byRole: byRole || {} },
+    },
+    L: (en) => en,
+    escapeHtml: (s) => String(s == null ? '' : s),
+    escapeJsAttr: (s) => String(s == null ? '' : s),
+    Object, Number, Array, String, Set,
+  };
+  vm.createContext(ctx);
+  vm.runInContext(
+    `const EARLY_LATE_RATE_KEYS = ${extractKeys(APP_SRC)};\n` +
+    `const ROLE_KEYS = ${extractConst(APP_SRC, 'ROLE_KEYS')};\n` +
+    'let _roleRateAdded = [];\n' +
+    ['roleRateRolesFrom', 'roleRateShownRoles', 'renderRoleRateTable',
+      'readRoleRateTableFromForm', 'readEarlyLateEligFromForm', 'readRoleRateCellsRaw',
+      'refreshRoleRateTable']
+      .map(n => extractFunction(APP_SRC, n)).join('\n') + '\n' +
+    'refreshRoleRateTable();', ctx);
+  return rendered;
+}
+
+test('ticking a role eligible offers it in the dropdown before anything is saved', () => {
+  const html = runRefresh({ savedElig: ['manager'], tickedElig: ['manager', 'marketing'], byRole: {} });
+  assert.ok(/<option value="marketing"/.test(html),
+    'marketing was just ticked eligible on screen, so it must be addable without saving first');
+});
+
+test('un-ticking a role withdraws it from the dropdown just as fast', () => {
+  const html = runRefresh({ savedElig: ['manager', 'marketing'], tickedElig: ['manager'], byRole: {} });
+  assert.ok(!/<option value="marketing"/.test(html),
+    'a role no longer ticked eligible must stop being offered');
+});
+
+test('a role that already has stored amounts keeps its row even after losing eligibility', () => {
+  const html = runRefresh({
+    savedElig: ['manager', 'marketing'], tickedElig: ['manager'],
+    byRole: { marketing: { earlyMorning1: 7 } },
+  });
+  assert.ok(/id="set-rolerate-marketing-earlyMorning1"/.test(html),
+    'its leftover amount must stay visible and removable, or it is impossible to clear');
+});
+
+// 2026-10-14 (review of this same change): a re-render is cosmetic and must never cost the owner
+// the cells they already typed. readRoleRateTableFromForm() refuses an out-of-range cell -- right
+// for a SAVE, wrong here, because falling back to the saved settings silently reverted every
+// OTHER unsaved cell too. Ticking a role eligible made that fire during ordinary editing, which
+// is what turned a pre-existing sharp edge into a likely one.
+test('one bad cell does not revert the other cells the owner has typed', () => {
+  const html = runRefresh({
+    savedElig: ['manager', 'user'],
+    tickedElig: ['manager', 'user', 'marketing'],
+    byRole: { manager: { earlyMorning1: 11, earlyMorning2: 22 } },
+    typed: {
+      'set-rolerate-manager-earlyMorning1': '360',    // good, typed, unsaved
+      'set-rolerate-manager-earlyMorning2': '200000', // out of range: the save path must refuse it
+    },
+  });
+  assert.ok(/id="set-rolerate-manager-earlyMorning1"[^>]*value="360"/.test(html),
+    'the good typed value must survive a re-render triggered by an unrelated tick');
+  assert.ok(!/id="set-rolerate-manager-earlyMorning1"[^>]*value="11"/.test(html),
+    'it must not silently revert to the last saved amount');
+  assert.ok(/<option value="marketing"/.test(html),
+    'and the tick that triggered the re-render must still take effect');
+});
+
+test('with the eligibility table off screen it falls back to the saved list, not to nothing', () => {
+  const html = runRefresh({ savedElig: ['manager', 'user'], tickedElig: null, byRole: {} });
+  assert.ok(/<option value="manager"/.test(html) && /<option value="user"/.test(html),
+    'reading no checkboxes must mean "not rendered", never "nobody is eligible"');
 });
 
 // The one way rows could vanish by accident: the block not being rendered at all. Then the save
