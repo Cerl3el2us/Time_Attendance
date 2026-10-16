@@ -167,4 +167,40 @@ test('เช็กอินที่ไม่ได้มาจากเคร�
   assert.strictEqual(bothEnginesScanBlocks({ earlyMorningAutoEnabled: false }, 'web'), false);
 });
 
+// ---------------------------------------------------------------------------------------------
+// A guard bought with a real mistake, 2026-10-16.
+//
+// The Settings toggle for this switch was written with an HTML comment above it, and that comment
+// contained a backtick -- inside a JavaScript template literal, where a backtick ENDS the string
+// and everything after it is parsed as code. `node --check` passed, because what comes out is
+// still valid JavaScript; it simply means something else. Every one of the 44 test files passed
+// too, because none of them renders the Settings page. The whole Settings screen threw
+// "false is not a function" and only a browser run found it.
+//
+// This lives in this file rather than a general one because this feature is what paid for it. It
+// checks the two files that build HTML inside template literals.
+// ---------------------------------------------------------------------------------------------
+test('ไม่มี backtick ในคอมเมนต์ HTML ของไฟล์ที่ประกอบ HTML ด้วย template literal', () => {
+  const offenders = [];
+  for (const [file, src] of Object.entries(SOURCES)) {
+    const lines = src.split('\n');
+    let inComment = false;
+    lines.forEach((line, i) => {
+      let rest = line;
+      if (!inComment) {
+        const open = rest.indexOf('<!--');
+        if (open === -1) return;
+        rest = rest.slice(open);
+        inComment = true;
+      }
+      const close = rest.indexOf('-->');
+      const body = close === -1 ? rest : rest.slice(0, close + 3);
+      if (body.includes('`')) offenders.push(`${file}:${i + 1}: ${body.trim().slice(0, 70)}`);
+      if (close !== -1) inComment = false;
+    });
+  }
+  assert.deepStrictEqual(offenders, [],
+    'a backtick inside an HTML comment closes the surrounding template literal:\n  ' + offenders.join('\n  '));
+});
+
 console.log(`\nearly-morning-auto-switch: ${passed} passed${process.exitCode ? ', some failed' : ''}`);

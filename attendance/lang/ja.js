@@ -1552,4 +1552,10 @@ window.LANG_JA = {
   "Radius (m)": "半径（メートル）",
   "Inside this radius the web check-in button is refused — people must scan their face at the device. Outside it, web check-in works normally.": "この半径の中ではWebからの打刻はできません。顔認証端末で打刻してください。半径の外では通常どおりWeb打刻ができます。",
   "Drivers are always exempt from this check.": "運転手は常にこの確認の対象外です。",
+
+  // 2026-10-16: the switch that stops Early Morning being paid automatically off the face scanner.
+  // With it off the allowance is not lost, it is claimed with the Early Morning button and goes
+  // through the normal approval.
+  "Pay Early Morning automatically from the face scanner": "顔認証端末の記録から早朝手当を自動で支給する",
+  "Off: nobody is paid automatically. Anyone who qualifies asks with the Early Morning button and it goes through the normal approval. Days already paid keep their allowance.": "オフ：自動支給は行われません。条件を満たす方は早朝手当ボタンから申請し、通常どおり承認を受けます。すでに支給された日の手当はそのままです。",
 };

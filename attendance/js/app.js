@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 119;
+const APP_BUILD = 121;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -5874,8 +5874,12 @@ function renderSettingsPage(_skipRefresh) {
            this changes nothing until somebody turns it off. With it off the allowance is not lost,
            it is asked for: the Early Morning button appears on a qualifying day and the request
            goes through the normal approval. The owner was asked directly and confirmed that an
-           employee who never asks simply does not get it that day. Reads `=== false` so a stored
-           0 or '' cannot switch it off by accident. -->
+           employee who never asks simply does not get it that day. Compared with a strict
+           not-equal-false so a stored 0 or empty string cannot switch it off by accident.
+           NOTE: no backticks in this comment -- it sits inside a JS template literal, where a
+           backtick ends the string and the rest is parsed as code. That exact slip rendered this
+           whole page unusable until a browser run caught it; node --check cannot, because the
+           result is still valid JavaScript, it just means something else. -->
       <label style="display:flex;align-items:flex-start;gap:8px;margin:12px 0 12px;font-size:13px;font-weight:600;color:#374151;cursor:pointer">
         <input id="set-em-auto" type="checkbox" ${s.allowances.earlyMorningAutoEnabled === false ? '' : 'checked'} style="width:18px;height:18px;cursor:pointer;margin-top:2px">
         <span>${L('Pay Early Morning automatically from the face scanner','จ่ายเบี้ยมาเช้าอัตโนมัติจากเครื่องสแกนหน้า')}
@@ -20542,6 +20546,17 @@ function openEarlyMorningModal(date) {
   document.getElementById('earlymorning-reason').value = '';
   _earlyMorningSelected = 0;
   refreshEarlyMorningGate();
+  // 2026-10-16 (owner's decision): the x1/x2 tier is worked out from the check-in instead of being
+  // chosen. Asked directly when the automatic payment gained its off switch -- with the switch off
+  // people are sent to this button, and nobody should have to know which band their morning falls
+  // in. The two buttons stay on screen so the claim is still legible and a smaller tier can still
+  // be picked deliberately; selectEarlyMorningTier()'s own gate still refuses a tier the check-in
+  // does not support, so this only pre-answers the question, it does not widen what can be claimed.
+  // Runs before the edit path in openLeaveForEdit() restores a stored tier, so editing an existing
+  // request still shows what was actually claimed rather than what today's rule would pick.
+  const emAutoGate = canSubmitEarlyMorningForDate(targetDate);
+  const emAutoTier = earlyMorningTierFromCheckIn((emAutoGate.row && emAutoGate.row.checkIn) || '', APP_SETTINGS);
+  if (emAutoGate.ok && emAutoTier) selectEarlyMorningTier(emAutoTier);
   const noteEl = document.getElementById('earlymorning-approval-note');
   if (noteEl) noteEl.textContent = approvalRouteNoteText('early-morning');
   document.getElementById('earlymorning-modal').classList.add('show');
