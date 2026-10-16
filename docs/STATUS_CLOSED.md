@@ -27,6 +27,35 @@
 
 ## ปิดไปแล้ว 2026-10-16 — อย่าเสนอซ้ำ
 
+- **deploy backend จากเครื่องออฟฟิศ (`tairo`) ทำได้จริง — คำสั่งคือ `py` ไม่ใช่ `python` และรันพิสูจน์แล้ว**
+  · **ที่พังคือคำสั่งในเอกสาร ไม่ใช่สคริปต์**: ทุกฉบับสั่ง `python <path>\deploy_backend.py` แต่บนเครื่องนี้
+    `python`/`python3` เปล่าๆ ไปโดน app execution alias ของ Microsoft Store (อยู่ก่อนตัวจริงบน PATH)
+    แล้ว **exit 49** พร้อมข้อความ "Python was not found; run without arguments to install from the
+    Microsoft Store" ⇒ backend ไม่ถูกรีสตาร์ตเลย แต่ข้อความอ่านเหมือน "ยังไม่ได้ลง Python" ไม่ใช่
+    "deploy ล้ม" · และกฎบรรทัดถัดไปใน AGENTS.md คือ "deploy ก่อนทดสอบอะไรที่เขียนข้อมูล"
+    ซึ่งเคยทำข้อมูลจริงหายมาแล้ว ⇒ ช่องนี้จบที่ทดสอบการเขียนทับโค้ดเก่า
+  · **`py` ใช้ได้ ไม่ต้องปิด alias**: `python.exe` กับ `py.exe` ใน `WindowsApps` เป็น alias 0 ไบต์ทั้งคู่
+    แต่ชี้คนละที่ — ตัว `py` ไปที่ launcher ของ Python Install Manager ซึ่งหา 3.14 เจอ
+    (วัด 2026-10-16: `py --list` = `-V:3.14[-64] * Python 3.14.4` · `py -c "import paramiko"` = 5.0.0)
+    · โน้ตเก่าที่เขียนว่า `py` โดน stub ด้วยนั้นผิด — ไม่เคยวัดแยกตัว
+  · **ยามใน `setup_deploy.ps1` เป็นช่องเงียบอีกชั้น**: เดิมเช็ก `Get-Command python` ซึ่ง **ผ่าน**
+    กับ alias (ไฟล์มีจริง) ⇒ test ล็อกอินไม่เคยรันแต่ไม่มีใครรู้ · ตอนนี้ไล่ลองรันจริงทีละตัว
+    และต้องส่งผ่าน `cmd /c ... >NUL 2>NUL` เพราะการ redirect stderr ของ exe ใน PowerShell 5.1
+    สร้าง `NativeCommandError` ซึ่งเจอกับ `$ErrorActionPreference='Stop'` ที่หัวไฟล์แล้ว
+    **ฆ่าสคริปต์ทิ้งที่ candidate พังตัวแรก** (เวอร์ชันแรกของการแก้มีบั๊กนี้ จับได้เพราะทดสอบทางที่พัง
+    ไม่ใช่แค่ทางที่สำเร็จ) · `Start-Process -RedirectStandard*` ใช้แทนไม่ได้ มันปฏิเสธ `py` ที่ดีอยู่แล้ว
+  · **เจ้าของอนุมัติให้รันจริง 2026-10-16 แล้ววัดเองไม่ใช่เชื่อสคริปต์**: ก่อนรัน PID `23869`
+    (เริ่ม Oct14) health 200 → หลังรัน PID `18575` (เริ่ม 10:50) health 200 · เจ้าของ process เป็น
+    `Teerawat` ไม่ใช่ root ⇒ บั๊ก watchdog แย่ง respawn ที่เคยทำให้ deploy ถัดไปตายถาวรไม่เกิดรอบนี้
+    · เว็บจริงผ่าน Cloudflare Tunnel ตอบ 200 · production tree สะอาดก่อนรีสตาร์ต ⇒ โหลดโค้ดที่
+    commit แล้วของ `main` (`f291caf`) ไม่ใช่ของค้างครึ่งทาง · `[NOTE] read timed out` ที่ขึ้นตอน start
+    คืออาการที่สคริปต์รู้จักและรองรับไว้แล้ว ไม่ใช่ความล้มเหลว
+  · แก้เอกสารแล้วทั้ง AGENTS.md ข้อ 6, `attendance/CLAUDE.md`, `DEVELOPER_HANDOFF.md` และ
+    `attendance-server/scripts/README.md` (ฉบับหลังเคยบอกว่าโฟลเดอร์ deploy มีสคริปต์ตัวเดียว
+    ผิดมาตั้งแต่ initial commit — `setup_deploy.*`, `check_nas_account.py`, `nas_known_hosts`,
+    `nginx/` ถูกเพิ่มทีหลังแล้วไม่มีใครเห็น) · memory 2 ไฟล์ที่อ้าง path เก่า
+    `Z:\attendance-server\scripts\deploy\` (layout ก่อน 2026-08-16) แก้แล้วเช่นกัน
+
 - **ปลั๊กอิน github ต่อติดแล้ว — ทดสอบจริงที่เครื่องออฟฟิศ**
   · เดิมข้อนี้อยู่ใน "ส่งต่อรอบหน้า" เพราะเจ้าของตั้งชื่อตัวแปร token ถูกแล้วเมื่อ 2026-10-16
     แต่ยังไม่เคยทดสอบว่าต่อติด · ทดสอบแล้ววันเดียวกันที่เครื่องออฟฟิศ (`tairo`) ด้วยชุดเดียวกับ
