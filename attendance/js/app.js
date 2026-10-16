@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 122;
+const APP_BUILD = 123;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -10728,7 +10728,12 @@ function buildRowActions(row, readOnly, actionUser) {
     const ldHide = (!row.checkIn || ldApproved) ? 'visibility:hidden;pointer-events:none' : '';
     // 2026-10-16: a day whose starting mileage is saved but not yet finished is marked, so the
     // driver can see from the table that something is waiting rather than having to open each day.
-    const ldOpen = mileageOpenFor(row.date);
+    // Only ever on the viewer's OWN rows: DATA_MILEAGE_OPEN holds the signed-in person's rows and
+    // nobody else's (the server scopes the GET), so reading it while looking at someone else's
+    // table would paint the viewer's own saved start onto that person's day. Review finding,
+    // 2026-10-16 -- the first version keyed on currentUser while every other decision here uses
+    // `actor`, which is the employee being looked at.
+    const ldOpen = (currentUser && actor.id === currentUser.id) ? mileageOpenFor(row.date) : null;
     const ldStyle = ldOpen ? 'color:#b45309;background:#fef3c7;border-radius:6px' : 'color:#0369a1';
     const ldTitle = ldOpen
       ? L('Long Distance — starting mileage saved, waiting for the end', 'Long Distance — บันทึกเลขเริ่มต้นไว้แล้ว รอเลขไมล์สุดท้าย')
@@ -18583,14 +18588,32 @@ const LONG_DISTANCE_ALLOWANCE = 150;
 // field stays editable: a misread odometer has to be fixable without clearing anything.
 // Editing an existing request takes precedence -- openLeaveForEdit() writes the stored readings
 // after this runs, and what was actually claimed must be what the form shows.
-function applyLongDistanceSavedStart() {
+// `onlyIfUntouched` is for the callback of the background re-fetch: by the time it answers the
+// driver may already have typed the reading themselves, and replacing what they typed with an
+// older saved value would be the worst kind of wrong -- silent, and in the number that decides the
+// money. Review finding, 2026-10-16.
+function applyLongDistanceSavedStart(opts) {
   const startEl = document.getElementById('longdistance-mileage-start');
   const noteEl  = document.getElementById('longdistance-start-saved');
   if (!startEl || !noteEl) return;
+  const filled = startEl.dataset.savedFill;           // what THIS function last wrote, if anything
+  const untouched = startEl.value === '' || (filled !== undefined && startEl.value === filled);
+  if (opts && opts.onlyIfUntouched && !untouched) return;
   const dateEl = document.getElementById('longdistance-date');
   const row = editingLeaveId ? null : mileageOpenFor(dateEl ? dateEl.value : '');
-  if (!row) { noteEl.style.display = 'none'; noteEl.textContent = ''; return; }
+  if (!row) {
+    // Nothing saved for the newly chosen date. A value this function put there belongs to the day
+    // that was chosen a moment ago, so it has to go -- leaving it would attach one day's odometer
+    // to another day's request with nothing on screen saying so. Anything the driver typed stays.
+    // Review finding, 2026-10-16.
+    if (filled !== undefined && startEl.value === filled) { startEl.value = ''; calcLongDistance(); }
+    delete startEl.dataset.savedFill;
+    noteEl.style.display = 'none';
+    noteEl.textContent = '';
+    return;
+  }
   startEl.value = Number(row.mileageStart);
+  startEl.dataset.savedFill = startEl.value;
   noteEl.style.display = '';
   noteEl.textContent = L('Starting mileage saved ', 'บันทึกเลขเริ่มต้นไว้เมื่อ ') + fmtSavedAt(row.savedAt);
   calcLongDistance();
@@ -18612,6 +18635,11 @@ async function saveLongDistanceStart() {
   if (!date) { showToast(L('⚠️ Please specify the date', '⚠️ กรุณาระบุวันที่'), 'warning'); return; }
   const ldGate = canSubmitLongDistanceForDate(date);
   if (!ldGate.ok) { showToast(checkedInDateBlockedMessage(ldGate), 'warning'); return; }
+  // The same two refusals submitLongDistance() applies. Without them a start could be saved
+  // against a company-trip or abroad day and then never completed, leaving the row marked as
+  // waiting for an end that submission will always refuse. Review finding, 2026-10-16.
+  if (blockIfCompanyTrip(date)) return;
+  if (blockIfAbroadDay(date, 'long-distance')) return;
   if (mStart === '' || !Number.isFinite(Number(mStart)) || Number(mStart) < 0) {
     showToast(L('⚠️ Enter the starting mileage', '⚠️ กรุณากรอกเลขไมล์เริ่มต้น'), 'warning');
     return;
@@ -18657,7 +18685,8 @@ function openLongDistanceModal(date) {
   document.getElementById('longdistance-result-display').style.display = 'none';
   // 2026-10-16: fetch fresh rather than trusting the map loaded at sign-in -- the driver may have
   // saved the start on another device, and showing an empty field would invite a second reading.
-  loadMileageOpenFromBackend().then(() => applyLongDistanceSavedStart());
+  delete document.getElementById('longdistance-mileage-start').dataset.savedFill;
+  loadMileageOpenFromBackend().then(() => applyLongDistanceSavedStart({ onlyIfUntouched: true }));
   applyLongDistanceSavedStart();
   // Saving a start makes no sense while editing a request that already exists.
   const saveStartBtn = document.getElementById('longdistance-save-start');
@@ -18804,8 +18833,12 @@ async function submitLongDistance() {
     }
   }
   // 2026-10-16: the request now exists with both readings, so the saved start for that date has
-  // done its job. Awaited so the table redraw below no longer marks the row as waiting.
-  await clearLongDistanceSavedStart(date);
+  // done its job. Dropped from the local map at once so the redraw below stops marking the row,
+  // and the DELETE is left to settle on its own -- NOT awaited. Review finding, 2026-10-16: the
+  // first version awaited it, so a hung delete held the modal open with no toast after a
+  // submission that had already succeeded, and the driver would reasonably submit again.
+  if (currentUser) delete DATA_MILEAGE_OPEN[`${currentUser.id}_${date}`];
+  clearLongDistanceSavedStart(date);
   updateMyRequestsBadge();
   updateApprovalBadge();
   closeLongDistanceModal();
