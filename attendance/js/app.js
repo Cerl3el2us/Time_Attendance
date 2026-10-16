@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 132;
+const APP_BUILD = 133;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -11313,30 +11313,18 @@ function renderAttendanceTable() {
     const ldBadge = (canLongDistTarget && row.longDistance)
       ? attAllowIcon('🚗', `${L('Long Distance', 'Long Distance')} ${Number(row.longDistanceKm) || 0} ${L('km', 'กม.')}${row.longDistanceAllowance > 0 ? ` (+฿${row.longDistanceAllowance})` : ''}`)
       : '';
-    // 2026-10-16 (owner): the icons have to line up down the column. They were already emitted in
-    // one fixed order -- this array is the only thing that decides it and nothing reorders it --
-    // but .filter(Boolean) closed the gaps, so a row without Holiday Work began with 🌅 while the
-    // row under it began with 🔄 and nothing matched vertically. The owner read that as the order
-    // changing from row to row. The actions column beside this one has kept its icons in place
-    // with a hidden placeholder since before today (see the visibility:hidden note further up);
-    // the same answer is used here rather than inventing a second one.
-    // A slot is emitted only for an allowance this person can actually earn, so nobody reads past
-    // seven blanks to find their two icons -- the eligibility flags are the ones the column's own
-    // hasAnyAllowanceTarget is built from. The placeholder keeps that slot's real icon, hidden, so
-    // the width of a slot is the width of what belongs in it.
-    const allowSlots = [
-      [canHolidayWorkTarget, holidayWorkBadge, '🔄'],
-      [canEarlyLateTarget,   earlyBadge,       '🌅'],
-      [canEarlyLateTarget,   lateBadge,        '🌙'],
-      [canOTTarget,          otBadge,          '⏱️'],
-      [canUpcountryTarget,   upcountryBadge,   '🗺️'],
-      [canLongDistTarget,    ldBadge,          '🚗'],
-      [canPersonalCarTarget, personalCarBadge, '🚙'],
-    ].filter(slot => slot[0]);
-    const allowIcons = allowSlots.some(slot => slot[1])
-      ? allowSlots.map(slot => slot[1] ||
-          `<span class="att-allow-icon" style="visibility:hidden" aria-hidden="true">${slot[2]}</span>`).join('')
-      : '';
+    // THE ORDER OF THIS ARRAY IS THE ORDER ON SCREEN. It is the only thing that decides it, and
+    // nothing downstream reorders it, so a new allowance icon goes in the position it belongs in
+    // rather than on the end.
+    // 2026-10-16 (owner's decision): packed left, no gaps. The owner reported the icons as
+    // "swapped around from row to row"; they were not -- every row followed this array -- but a
+    // row missing Holiday Work started with 🌅 while the row under it started with 🔄, so nothing
+    // matched vertically. A version that held each allowance in a fixed slot with a hidden
+    // placeholder was built and deployed so it could be looked at, and the owner chose against it:
+    // "เรียงชิดกันได้ แต่ลำดับต้องไม่สลับกัน ไม่จำเป็นต้องเว้นว่างไว้" -- keep them together, keep
+    // the order. So .filter(Boolean) stays, and what this comment adds is the reason it stays,
+    // which is a decision and not an oversight.
+    const allowIcons = [holidayWorkBadge, earlyBadge, lateBadge, otBadge, upcountryBadge, ldBadge, personalCarBadge].filter(Boolean).join('');
     const allowIconsHtml = allowIcons
       ? `<span class="att-allow-icons">${allowIcons}</span>`
       : '<span style="color:#cbd5e1">—</span>';
@@ -11558,7 +11546,7 @@ function buildAttendancePrintView({ targetUser, days, start, end, workDays, late
         <th>${L('Status', 'สถานะ')}</th>
         <th>${L('Check In', 'เวลาเข้า')}</th>
         <th>${L('Check Out', 'เวลาออก')}</th>
-        <th>${L('Notes', 'รายการพิเศษ')}</th>
+        <th>${L('Approved allowances', 'เบี้ยเลี้ยงที่ได้รับการอนุมัติ')}</th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>

@@ -181,17 +181,17 @@ test('the row shows a Holiday Work icon of its own, not only the OT one', () => 
   const fn = extractFunction(APP_SRC, 'renderAttendanceTable');
   assert.ok(/holidayWorkBadge/.test(fn),
     'renderAttendanceTable() builds no holidayWorkBadge — an approved Holiday Work day still says nothing');
-  // 2026-10-16: the list moved from `const allowIcons = [...]` to `const allowSlots = [...]` when
-  // the column gained fixed slots, so its icons line up down the page instead of closing ranks.
-  // The intent here is unchanged -- the badge must be IN the list the cell is built from, not
-  // merely built and dropped -- and the second assertion is new: the list is only worth checking
-  // if it is still the one the cell is rendered from.
-  const listed = /const allowSlots\s*=\s*\[([\s\S]*?)\]\s*\.filter/.exec(fn);
-  assert.ok(listed, 'could not find the allowSlots list the icon cell is built from');
+  const listed = /const allowIcons\s*=\s*\[([^\]]*)\]/.exec(fn);
+  assert.ok(listed, 'could not find the allowIcons list');
   assert.ok(/holidayWorkBadge/.test(listed[1]),
     `holidayWorkBadge is built but not in the icon list: ${listed[1].trim()}`);
-  assert.ok(/const allowIcons\s*=\s*allowSlots/.test(fn),
-    'allowIcons no longer derives from allowSlots — the list checked above may not be what renders');
+  // 2026-10-16: the badge must also come FIRST, because that array is the on-screen order and the
+  // owner's rule for this column is that the order never changes from row to row. A reordering
+  // that moved Holiday Work would pass the membership check above and still break what was asked
+  // for, so the position is pinned too.
+  const order = listed[1].split(',').map(s => s.trim()).filter(Boolean);
+  assert.strictEqual(order[0], 'holidayWorkBadge',
+    `Holiday Work must stay first in the icon order, found: ${order.join(', ')}`);
 });
 
 // 2026-10-08 (review): the first version of this change reached the desktop table and stopped
