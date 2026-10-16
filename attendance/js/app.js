@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 127;
+const APP_BUILD = 128;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -2010,6 +2010,29 @@ function deviceScanQualifiesForEarlyMorning(d, holidayWorkDateSet) {
   // day-pay preview and the attendance badge all route through it.
   if (!earlyMorningCheckInOk(d)) return false;
   return true;
+}
+// 2026-10-16: which tier does the payslip ACTUALLY pay for an approved Early Morning request on
+// this day -- 1, 2, or 0 for nothing. The Details popup used to decide that for itself and asked
+// fewer questions than computePayroll does, so it promised money on three kinds of day the payslip
+// pays nothing for: a full day of personal leave, an approved Abroad day, and a rest day with no
+// approved Holiday Work claim. The gates below are computePayroll's own, in its order, so the
+// badge and the payslip answer with one number -- tests/early-morning-badge-matches-payslip.test.js
+// runs the real payroll out of both engines beside this and requires them to agree.
+// Display-side only: payroll keeps its own loop (the money path is not being rewritten here), and
+// that test is what stops the two drifting.
+function earlyMorningRequestPaidTier(l, d, approvedHolidayWorkDates) {
+  if (!l || l.type !== 'early-morning' || l.status !== 'approved') return 0;
+  if (!d || !d.date || d.date !== l.dateFrom) return 0;
+  if (d.status === 'company-trip' || isCompanyTripDay(d.date)) return 0;
+  // The scan path already paid this day, so payroll skips the request -- same reason, same check.
+  if (deviceScanQualifiesForEarlyMorning(d, approvedHolidayWorkDates)) return 0;
+  if (isFullDayPersonalLeaveStatus(d.status)) return 0;
+  if (d.status === 'abroad') return 0;
+  if (isHolidayWorkDay(d.date) && !(approvedHolidayWorkDates && approvedHolidayWorkDates.has(d.date))) return 0;
+  // Not `|| 1`: both engines validate the stored tier to be 1 or 2, and the repo's rate guard
+  // refuses a `|| default` next to a rate lookup -- 0 is a legal rate.
+  const tier = Number(l.earlyMorningTier);
+  return tier === 1 || tier === 2 ? tier : 0;
 }
 // 2026-10-02 (owner): Early Morning pays off the face scanner alone -- unlike Late Night, which
 // also needs an approved claim -- so sleeping at the office after a party and walking through the
@@ -21761,7 +21784,12 @@ function showAttendanceDetail(date) {
     // date, because a rest day pays the automatic allowance only with one. Handing it the date
     // unconditionally would tell it every rest day has a claim, hiding the request badge on rest
     // days that have none -- so it is answered with the same check the Early In chip above uses.
-    const emHwDates = (d, uid) => hasHolidayWorkClaimOnDate(d, uid, false) ? new Set([d]) : new Set();
+    // approvedOnly: TRUE here, unlike the Early In chip above. That chip answers "does this rest
+    // day look worked", a display question the repo has always answered from any live claim. This
+    // set feeds earlyMorningRequestPaidTier(), which answers "what does the payslip pay" -- and
+    // payroll counts approved Holiday Work and nothing else, so a pending claim must not make a
+    // rest day look paid here.
+    const emHwDates = (d, uid) => hasHolidayWorkClaimOnDate(d, uid, true) ? new Set([d]) : new Set();
 
     // Early Morning claimed with the button. The chip above only covers the automatic path, so a
     // day paid through an approved request showed nothing at all -- the case that becomes the
@@ -21772,11 +21800,13 @@ function showAttendanceDetail(date) {
     // matters. deviceScanQualifiesForEarlyMorning() already answers "did the automatic path pay
     // this day", switch included, so ask it instead of guessing from the source.
     const emRec = dayLeave('early-morning');
-    if (emRec && isAllowanceEligible(APP_SETTINGS.allowanceEligibility, targetRole, 'earlyLate')
-        && !deviceScanQualifiesForEarlyMorning(row, emHwDates(row.date, targetUserId))) {
-      // Not `|| 1`: the repo's rate guard refuses that shape near a rate lookup, and rightly --
-      // the stored tier is validated to be 1 or 2, so read it as such rather than defaulting.
-      const emTier = Number(emRec.earlyMorningTier) === 2 ? 2 : 1;
+    // One question, asked once: earlyMorningRequestPaidTier() holds every gate computePayroll
+    // applies to an approved request. Restating them here is what put "+฿555" on days the payslip
+    // pays nothing for -- a full day of leave, an approved Abroad day, a rest day with no claim.
+    const emTier = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, targetRole, 'earlyLate')
+      ? earlyMorningRequestPaidTier(emRec, row, emHwDates(row.date, targetUserId))
+      : 0;
+    if (emTier) {
       const emAmt = earlyMorningAllowanceForTier(emTier, targetRole);
       tagsEl.innerHTML += `<span class="badge badge-success">🌅 ${L('Early Morning (requested)', 'เบี้ยมาเช้า (ยื่นขอ)')} (+฿${Number(emAmt).toLocaleString()})</span>`;
     }
