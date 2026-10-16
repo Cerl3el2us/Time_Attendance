@@ -1558,4 +1558,12 @@ window.LANG_JA = {
   // through the normal approval.
   "Pay Early Morning automatically from the face scanner": "顔認証端末の記録から早朝手当を自動で支給する",
   "Off: nobody is paid automatically. Anyone who qualifies asks with the Early Morning button and it goes through the normal approval. Days already paid keep their allowance.": "オフ：自動支給は行われません。条件を満たす方は早朝手当ボタンから申請し、通常どおり承認を受けます。すでに支給された日の手当はそのままです。",
+
+  // 2026-10-16: Long Distance mileage entered in two goes -- the start saved on its own, the end
+  // added later. Saving a start is not a request; nothing is submitted until both readings exist.
+  "Save starting mileage": "開始メーターを保存",
+  "Starting mileage saved ": "開始メーター保存日時 ",
+  "⚠️ Enter the starting mileage": "⚠️ 開始メーターを入力してください",
+  "🚗 Starting mileage saved — enter the ending mileage when you finish": "🚗 開始メーターを保存しました — 運転終了後に終了メーターを入力してください",
+  "Long Distance — starting mileage saved, waiting for the end": "Long Distance — 開始メーター保存済み、終了メーター待ち",
 };

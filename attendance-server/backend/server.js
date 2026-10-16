@@ -3947,6 +3947,105 @@ app.get('/api/checkin-time-edits', handleGetCheckinTimeEdits);
 app.put('/api/checkin-time-edits', requireRole('md', 'accounting'), withCheckinEditsLock(handlePutCheckinTimeEdit));
 app.get('/api/checkout-reviews', handleGetCheckoutReviews);
 app.put('/api/checkout-reviews', requireRole('md', 'accounting'), withCheckoutReviewsLock(handlePutCheckoutReview));
+
+// ===== LONG DISTANCE: a starting odometer reading saved on its own, waiting for its end =====
+// 2026-10-16 (owner's decision). Design:
+// docs/superpowers/specs/2026-10-16-long-distance-two-step-mileage-design.md
+//
+// Drivers enter the start before driving and the end afterwards, sometimes after midnight, and
+// sometimes both at once. The last case is the one most days take and it is untouched.
+//
+// This is deliberately NOT a leave record in waiting. A request still cannot exist without both
+// readings -- the server derives distanceKm from the pair (the 2026-08-13 audit fix) -- so a saved
+// start could not be a request even if we wanted it to be. Keeping it a store of its own means
+// approval, both payroll engines, the badges, cancel and revoke learn nothing new, and a
+// half-filled entry cannot reach a payslip because of the structure rather than because somewhere
+// remembered to filter it out.
+const MILEAGE_OPEN_FILE = 'mileage-open.json';
+const MILEAGE_OPEN_UNAVAILABLE = 'Service temporarily unavailable';
+const withMileageOpenLock = makeHandlerLock('MILEAGE_OPEN');
+function readMileageOpen() {
+  const data = readJSON(MILEAGE_OPEN_FILE, {});
+  if (data === null) return null;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  return data;
+}
+// Owner-only, with no full-access branch on purpose: the owner was asked and chose that a saved
+// start is visible to nobody else, the way a request is invisible until it is sent.
+function mileageOpenOwnRows(all, userId) {
+  const prefix = `${userId}_`;
+  const own = {};
+  Object.keys(all).forEach(k => { if (k.startsWith(prefix)) own[k] = all[k]; });
+  return own;
+}
+// Resolves the caller against the live user file, 503 rather than guessing when it cannot be read.
+// The system account is refused here as it is on every other submission path.
+function mileageOpenActor(req, res) {
+  const users = readUsers();
+  if (users === null) { res.status(503).json({ success: false, message: MILEAGE_OPEN_UNAVAILABLE }); return null; }
+  const live = users.find(u => u.id === req.user.sub);
+  if (!live) { res.status(403).json({ success: false, message: 'Forbidden' }); return null; }
+  if (isSuperAdminUser(live)) {
+    res.status(403).json({ success: false, message: 'System account cannot save a starting mileage' });
+    return null;
+  }
+  return live;
+}
+function handleGetMileageOpen(req, res) {
+  const live = mileageOpenActor(req, res);
+  if (!live) return;
+  const all = readMileageOpen();
+  if (all === null) return res.status(503).json({ success: false, message: MILEAGE_OPEN_UNAVAILABLE });
+  return res.json({ success: true, open: mileageOpenOwnRows(all, live.id) });
+}
+// The three conditions that need data are checked against the live files here, so that a start
+// cannot be saved on a day a request could never be made for. They mirror what
+// canSubmitLongDistanceForDate() applies in the browser.
+function handlePutMileageOpen(req, res) {
+  const live = mileageOpenActor(req, res);
+  if (!live) return;
+  const err = mileageOpenSaveError(req.body);
+  if (err) return res.status(400).json({ success: false, message: err });
+  const date = req.body.date;
+  if (!isAllowanceEligible(getAppSettings().allowanceEligibility, live.role, 'longDistance')) {
+    return res.status(403).json({ success: false, message: 'You are not eligible for the long distance allowance' });
+  }
+  const day = attendanceDayForUser(live, date);
+  if (!day || !day.checkIn) {
+    return res.status(400).json({ success: false, message: 'A starting mileage needs a check-in on that date' });
+  }
+  const leaves = readLeaves();
+  if (leaves === null) return res.status(503).json({ success: false, message: MILEAGE_OPEN_UNAVAILABLE });
+  const already = leaves.some(l =>
+    l.userId === live.id && l.type === 'long-distance' && l.dateFrom === date && !isVoidLeaveStatus(l.status));
+  if (already) {
+    return res.status(409).json({ success: false, message: 'A long distance request already exists for that date' });
+  }
+  const all = readMileageOpen();
+  if (all === null) return res.status(503).json({ success: false, message: MILEAGE_OPEN_UNAVAILABLE });
+  all[mileageOpenKey(live.id, date)] = {
+    mileageStart: Number(req.body.mileageStart),
+    savedAt: new Date().toISOString(),
+  };
+  writeJSON(MILEAGE_OPEN_FILE, all);
+  return res.json({ success: true, open: mileageOpenOwnRows(all, live.id) });
+}
+// Deleting one that is not there is a success: the browser deletes after a request is created, and
+// a retry of that must not turn into an error the driver has to think about.
+function handleDeleteMileageOpen(req, res) {
+  const live = mileageOpenActor(req, res);
+  if (!live) return;
+  const date = (req.body || {}).date;
+  if (!isValidDateStr(date)) return res.status(400).json({ success: false, message: 'date must be a valid YYYY-MM-DD date' });
+  const all = readMileageOpen();
+  if (all === null) return res.status(503).json({ success: false, message: MILEAGE_OPEN_UNAVAILABLE });
+  delete all[mileageOpenKey(live.id, date)];
+  writeJSON(MILEAGE_OPEN_FILE, all);
+  return res.json({ success: true, open: mileageOpenOwnRows(all, live.id) });
+}
+app.get('/api/mileage-open', handleGetMileageOpen);
+app.put('/api/mileage-open', withMileageOpenLock(handlePutMileageOpen));
+app.delete('/api/mileage-open', withMileageOpenLock(handleDeleteMileageOpen));
 // 2026-10-02 (owner): the morning twin of the check-out review above. Same storage shape, same
 // scoping, same guards -- what differs is only which time is being judged. Kept as its own file
 // and its own endpoints rather than a mode flag on the evening ones, because the two answer
@@ -6361,6 +6460,43 @@ function isFiniteNonNegNumber(v) {
   const n = Number(v);
   return Number.isFinite(n) && n >= 0;
 }
+// 2026-10-16: a Long Distance request needs BOTH odometer readings, and the end must be past the
+// start -- the owner asked for this to stay true when the two-goes button was added. Returns
+// 'missing', 'order', or null, so each engine can keep wording its own message: the browser has
+// told people which of the two problems it is since long before this, and collapsing that into one
+// sentence would be a quiet downgrade.
+// A reading of 0 is a real odometer value, so blankness is tested explicitly rather than by
+// falsiness (memory feedback_attendance_falsy_zero_settings.md).
+// The same text lives in attendance/js/app.js -- the number that decides the allowance must not be
+// reachable through two different rules (feedback_attendance_payroll_engine_dual_sync.md).
+function longDistanceMileageError(mileageStart, mileageEnd) {
+  const blank = v => v === null || v === undefined || v === '';
+  if (blank(mileageStart) || blank(mileageEnd)) return 'missing';
+  const ms = Number(mileageStart), me = Number(mileageEnd);
+  if (!Number.isFinite(ms) || !Number.isFinite(me)) return 'missing';
+  if (me <= ms) return 'order';
+  return null;
+}
+// 2026-10-16: a saved starting reading, waiting for its end. One row per person per day, which is
+// what the system already allows -- a day can carry only one Long Distance request. Keyed the same
+// way as checkin-time-edits.json and checkout-reviews.json so the three stores read alike.
+function mileageOpenKey(userId, dateStr) {
+  return `${userId}_${dateStr}`;
+}
+// The format half of saving one. The three conditions that need data -- eligible for the allowance,
+// the day was actually worked, no request exists for it yet -- are checked by the handler against
+// the live files, so this stays a pure function the tests can run directly.
+// mileageStart of 0 is a real odometer reading and passes; isFiniteNonNegNumber is the same check
+// the leave validator applies to the same field.
+function mileageOpenSaveError(body) {
+  const b = body || {};
+  if (!isValidDateStr(b.date)) return 'date must be a valid YYYY-MM-DD date';
+  if (b.mileageStart === null || b.mileageStart === undefined || b.mileageStart === '' ||
+      !isFiniteNonNegNumber(b.mileageStart)) {
+    return 'mileageStart must be a non-negative number';
+  }
+  return null;
+}
 
 // SECURITY FIX 2026-08-09 (Opus audit finding 1.4): lateOutTime/otEndTime/otHours/mileageStart/
 // mileageEnd/distanceKm had NO format validation at all (only hourlyStart/hourlyEnd and
@@ -6732,11 +6868,15 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
     // trip whose actual mileage delta doesn't clear the threshold. Same "not derivable -> require +
     // derive it outright" pattern as upcountry `locations`/time-correction `correctedTime` above.
     if (type === 'long-distance') {
-      const ms = Number(body.mileageStart), me = Number(body.mileageEnd);
-      if (!Number.isFinite(ms) || !Number.isFinite(me) || me <= ms) {
+      // 2026-10-16: the same rule, moved into longDistanceMileageError() so it can be exercised
+      // directly by tests/long-distance-two-step.test.js on both engines. The two-goes button added
+      // that day saves a starting reading on its own, which is exactly the kind of change that
+      // could quietly turn into a way to send a half-filled request -- so the rule is pinned rather
+      // than left inline where nothing could reach it. Behaviour is unchanged.
+      if (longDistanceMileageError(body.mileageStart, body.mileageEnd)) {
         return res.status(400).json({ success:false, message:'mileageStart/mileageEnd are required for long-distance requests, and mileageEnd must be greater than mileageStart' });
       }
-      body.distanceKm = me - ms;
+      body.distanceKm = Number(body.mileageEnd) - Number(body.mileageStart);
     }
     const users = readUsers() || [];
     const live = users.find(u => u.id === req.user.sub);

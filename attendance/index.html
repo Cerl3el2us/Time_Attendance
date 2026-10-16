@@ -1979,6 +1979,7 @@
         <div class="form-field" style="margin-bottom:0">
           <label data-en="Starting Mileage (km)">เลขไมล์เริ่มต้น (กม.)</label>
           <input type="number" id="longdistance-mileage-start" min="0" placeholder="0" oninput="calcLongDistance()">
+          <div id="longdistance-start-saved" style="display:none;font-size:11.5px;color:#0369a1;margin-top:4px"></div>
         </div>
         <div class="form-field" style="margin-bottom:0">
           <label data-en="Ending Mileage (km)">เลขไมล์สุดท้าย (กม.)</label>
@@ -1999,6 +2000,7 @@
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="closeLongDistanceModal()" data-en="Cancel">ยกเลิก</button>
+      <button class="btn btn-ghost" id="longdistance-save-start" onclick="saveLongDistanceStart()" data-en="Save starting mileage">บันทึกเลขเริ่มต้นไว้ก่อน</button>
       <button class="btn btn-primary" onclick="submitLongDistance()" data-en="📤 Submit Request">📤 ยื่นคำขอ</button>
     </div>
   </div>
@@ -2758,10 +2760,10 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js" integrity="sha384-SYKAG6cglRMN0RVvhNeBY0r3FYKNOJtznwA0v7B5Vp9tr31xAHsZC0DqkQ/pZDmj" crossorigin="anonymous"></script>
-<script src="lang/ja.js?v=20261016a"></script>  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js" integrity="sha384-5JqMv4L/Xa0hfvtF06qboNdhvuYXUku9ZrhZh3bSk8VXF0A/RuSLHpLsSV9Zqhl6" crossorigin="anonymous"></script>
+<script src="lang/ja.js?v=20261016b"></script>  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js" integrity="sha384-5JqMv4L/Xa0hfvtF06qboNdhvuYXUku9ZrhZh3bSk8VXF0A/RuSLHpLsSV9Zqhl6" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ja.js" integrity="sha384-mKor8U8jwukUkfxaFPCsxKF9S62PXq4gG7zcZ5yQ2x3KL1msprJZeFlKFEDeeb5V" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/th.js" integrity="sha384-E6OVFg1zUc/pckGxry0YZ6VeZ1E17l7Jl8ZQx58jbEfxxkz9LqknQhiIrA9zg/8b" crossorigin="anonymous"></script>
 
-<script src="js/app.js?v=20261016d"></script>
+<script src="js/app.js?v=20261016e"></script>
 </body>
 </html>

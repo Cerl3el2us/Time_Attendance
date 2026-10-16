@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 121;
+const APP_BUILD = 122;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -1486,6 +1486,24 @@ function canSubmitUpcountryForDate(dateStr, userId) {
     return { ok: true };
   });
 }
+// 2026-10-16: a Long Distance request needs BOTH odometer readings, and the end must be past the
+// start -- the owner asked for this to stay true when the two-goes button was added. Returns
+// 'missing', 'order', or null, so each engine can keep wording its own message: the browser has
+// told people which of the two problems it is since long before this, and collapsing that into one
+// sentence would be a quiet downgrade.
+// A reading of 0 is a real odometer value, so blankness is tested explicitly rather than by
+// falsiness (memory feedback_attendance_falsy_zero_settings.md).
+// The same text lives in attendance-server/backend/server.js -- the number that decides the
+// allowance must not be reachable through two different rules
+// (feedback_attendance_payroll_engine_dual_sync.md).
+function longDistanceMileageError(mileageStart, mileageEnd) {
+  const blank = v => v === null || v === undefined || v === '';
+  if (blank(mileageStart) || blank(mileageEnd)) return 'missing';
+  const ms = Number(mileageStart), me = Number(mileageEnd);
+  if (!Number.isFinite(ms) || !Number.isFinite(me)) return 'missing';
+  if (me <= ms) return 'order';
+  return null;
+}
 function canSubmitLongDistanceForDate(dateStr, userId) {
   const uid = userId || (currentUser && currentUser.id);
   const user = DATA_USERS.find(u => u.id === uid) || currentUser;
@@ -1515,8 +1533,10 @@ function initUpcountryDatePicker() {
 }
 function setLongDistanceDate(dateStr) { setRestrictedDate('longdistance-date', dateStr); }
 function initLongDistanceDatePicker() {
+  // 2026-10-16: changing the date re-reads the start saved for the newly chosen day, so the field
+  // never shows yesterday's reading against today's date.
   initRestrictedCheckInPicker('longdistance-date', 'ld-long-distance-cal', 'ld-day-selectable',
-    canSubmitLongDistanceForDate, null);
+    canSubmitLongDistanceForDate, applyLongDistanceSavedStart);
 }
 // The login card offers all three languages directly (toggleLang cycles, which is fine for the
 // one button in the topbar but makes someone press it twice to reach Japanese). Everything else
@@ -2281,6 +2301,10 @@ let DATA_CHECKOUT_REVIEWS = {};
 // 2026-10-14: check-in corrections made by Accounting/MD, keyed `${userId}_${date}`. The server
 // scopes the GET: a full-access role receives all of them, everyone else only their own days.
 let DATA_CHECKIN_EDITS = {};
+// 2026-10-16: starting odometer readings saved on their own, waiting for their end. Keyed
+// "<userId>_<YYYY-MM-DD>" like the server file. Only ever holds the signed-in person's own rows --
+// the owner chose that a saved start is visible to nobody else.
+let DATA_MILEAGE_OPEN = {};
 // 2026-10-14: which optional appSettings sections the SERVER actually holds. A section it has
 // never stored is left out of the PUT while it still matches the default, so a backend that
 // predates the feature does not 400 the whole save during the window between publishing app.js
@@ -7707,6 +7731,30 @@ async function loadCheckoutReviewsFromBackend() {
 // 2026-10-14: loads the check-in corrections. Kept separate from the attendance fetch so a failure
 // here cannot blank the attendance log -- on failure the page simply shows the uncorrected times,
 // which is the state it was in before this feature existed.
+// 2026-10-16: the saved starting mileages. Design:
+// docs/superpowers/specs/2026-10-16-long-distance-two-step-mileage-design.md
+async function loadMileageOpenFromBackend() {
+  try {
+    const res = await apiFetch('/api/mileage-open');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    if (!data || !data.success || !data.open || typeof data.open !== 'object' || Array.isArray(data.open)) {
+      throw new Error('bad payload');
+    }
+    DATA_MILEAGE_OPEN = data.open;
+    return true;
+  } catch(e) {
+    console.error('[APP] loadMileageOpenFromBackend error:', e.message);
+    return false;
+  }
+}
+// The saved start for one date, or null. Reads only the signed-in person's own key, so a stale map
+// from a previous session cannot show somebody else's reading.
+function mileageOpenFor(dateStr) {
+  if (!currentUser || !dateStr) return null;
+  const row = DATA_MILEAGE_OPEN[`${currentUser.id}_${dateStr}`];
+  return (row && Number.isFinite(Number(row.mileageStart))) ? row : null;
+}
 async function loadCheckinEditsFromBackend() {
   try {
     const res = await apiFetch('/api/checkin-time-edits');
@@ -8446,6 +8494,9 @@ function initApp(startPage) {
   // once they arrive rather than leaving the page showing uncorrected times until the next fetch.
   loadCheckinEditsFromBackend().then(ok => { if (ok) loadAttendanceFromBackend().then(() => rerenderAfterCheckoutReviews()); });
   loadMorningReviewsFromBackend().then(ok => { if (ok) rerenderAfterCheckoutReviews(); });
+  // 2026-10-16: needed before the attendance table draws, so a day with a saved starting mileage
+  // can be marked on its Long Distance button.
+  loadMileageOpenFromBackend().then(ok => { if (ok && currentPage === 'attendance') renderAttendanceTable(); });
   if (currentPage === 'dashboard') fetchExchangeRate();
   loadAttendanceFromBackend().then(ok => {
     if (ok) {
@@ -10675,7 +10726,14 @@ function buildRowActions(row, readOnly, actionUser) {
       !['leave-annual', 'leave-sick', 'leave-business', 'abroad'].includes(row.status)) {
     const ldApproved = DATA_LEAVES.find(l => l.userId === actor.id && l.type === 'long-distance' && l.dateFrom === row.date && l.status === 'approved');
     const ldHide = (!row.checkIn || ldApproved) ? 'visibility:hidden;pointer-events:none' : '';
-    html += `<button class="btn btn-ghost btn-sm" style="color:#0369a1;margin-left:4px;${ldHide}" title="${L('Report Long Distance', 'แจ้ง Long Distance')}" onclick="openLongDistanceModal('${row.date}')">🚗</button>`;
+    // 2026-10-16: a day whose starting mileage is saved but not yet finished is marked, so the
+    // driver can see from the table that something is waiting rather than having to open each day.
+    const ldOpen = mileageOpenFor(row.date);
+    const ldStyle = ldOpen ? 'color:#b45309;background:#fef3c7;border-radius:6px' : 'color:#0369a1';
+    const ldTitle = ldOpen
+      ? L('Long Distance — starting mileage saved, waiting for the end', 'Long Distance — บันทึกเลขเริ่มต้นไว้แล้ว รอเลขไมล์สุดท้าย')
+      : L('Report Long Distance', 'แจ้ง Long Distance');
+    html += `<button class="btn btn-ghost btn-sm" style="${ldStyle};margin-left:4px;${ldHide}" title="${ldTitle}" onclick="openLongDistanceModal('${row.date}')">🚗</button>`;
   }
 
   if (isHolidayRow && canHolidayWorkRow) {
@@ -18520,6 +18578,75 @@ async function submitUpcountry() {
 const LONG_DISTANCE_THRESHOLD_KM = 250;
 const LONG_DISTANCE_ALLOWANCE = 150;
 
+// 2026-10-16: fills the starting-mileage field from a start saved earlier for the chosen date, and
+// says when it was saved so the driver can tell it is this trip's reading and not a leftover. The
+// field stays editable: a misread odometer has to be fixable without clearing anything.
+// Editing an existing request takes precedence -- openLeaveForEdit() writes the stored readings
+// after this runs, and what was actually claimed must be what the form shows.
+function applyLongDistanceSavedStart() {
+  const startEl = document.getElementById('longdistance-mileage-start');
+  const noteEl  = document.getElementById('longdistance-start-saved');
+  if (!startEl || !noteEl) return;
+  const dateEl = document.getElementById('longdistance-date');
+  const row = editingLeaveId ? null : mileageOpenFor(dateEl ? dateEl.value : '');
+  if (!row) { noteEl.style.display = 'none'; noteEl.textContent = ''; return; }
+  startEl.value = Number(row.mileageStart);
+  noteEl.style.display = '';
+  noteEl.textContent = L('Starting mileage saved ', 'บันทึกเลขเริ่มต้นไว้เมื่อ ') + fmtSavedAt(row.savedAt);
+  calcLongDistance();
+}
+// Short, local, and never throws on a value that is not a date -- the note is a reassurance, so a
+// bad timestamp must not take the form down with it.
+function fmtSavedAt(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '-';
+  return d.toLocaleString(currentLang === 'ja' ? 'ja-JP' : currentLang === 'en' ? 'en-GB' : 'th-TH',
+    { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+// Saves the starting reading on its own. Deliberately NOT a request: nothing enters approval and
+// there is nothing to withdraw. The end is still required before anything can be submitted.
+async function saveLongDistanceStart() {
+  if (blockIfObserver()) return;
+  const date   = document.getElementById('longdistance-date').value;
+  const mStart = document.getElementById('longdistance-mileage-start').value;
+  if (!date) { showToast(L('⚠️ Please specify the date', '⚠️ กรุณาระบุวันที่'), 'warning'); return; }
+  const ldGate = canSubmitLongDistanceForDate(date);
+  if (!ldGate.ok) { showToast(checkedInDateBlockedMessage(ldGate), 'warning'); return; }
+  if (mStart === '' || !Number.isFinite(Number(mStart)) || Number(mStart) < 0) {
+    showToast(L('⚠️ Enter the starting mileage', '⚠️ กรุณากรอกเลขไมล์เริ่มต้น'), 'warning');
+    return;
+  }
+  try {
+    const res = await apiFetch('/api/mileage-open', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, mileageStart: Number(mStart) }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) throw new Error(data.message || ('HTTP ' + res.status));
+    DATA_MILEAGE_OPEN = data.open || DATA_MILEAGE_OPEN;
+  } catch (e) {
+    showToast(L('❌ Could not save: ', '❌ ไม่สามารถบันทึกได้: ') + e.message, 'danger');
+    return;
+  }
+  closeLongDistanceModal();
+  if (currentPage === 'attendance') renderAttendanceTable();
+  showToast(L('🚗 Starting mileage saved — enter the ending mileage when you finish',
+              '🚗 บันทึกเลขไมล์เริ่มต้นแล้ว — กรอกเลขไมล์สุดท้ายเมื่อเลิกขับ'), 'success');
+}
+// Removes the saved start once its request exists. A row that is not there is not an error, so a
+// retry cannot turn into something the driver has to think about.
+async function clearLongDistanceSavedStart(date) {
+  try {
+    const res = await apiFetch('/api/mileage-open', {
+      method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.success && data.open) DATA_MILEAGE_OPEN = data.open;
+  } catch (e) {
+    console.error('[APP] clearLongDistanceSavedStart error:', e.message);
+  }
+}
 function openLongDistanceModal(date) {
   initLongDistanceDatePicker();
   const targetDate = resolveSelectableDate(date || businessDateStr(), canSubmitLongDistanceForDate);
@@ -18528,6 +18655,13 @@ function openLongDistanceModal(date) {
   document.getElementById('longdistance-mileage-end').value = '';
   document.getElementById('longdistance-reason').value = '';
   document.getElementById('longdistance-result-display').style.display = 'none';
+  // 2026-10-16: fetch fresh rather than trusting the map loaded at sign-in -- the driver may have
+  // saved the start on another device, and showing an empty field would invite a second reading.
+  loadMileageOpenFromBackend().then(() => applyLongDistanceSavedStart());
+  applyLongDistanceSavedStart();
+  // Saving a start makes no sense while editing a request that already exists.
+  const saveStartBtn = document.getElementById('longdistance-save-start');
+  if (saveStartBtn) saveStartBtn.style.display = editingLeaveId ? 'none' : '';
   const noteEl = document.getElementById('longdistance-approval-note');
   if (noteEl) noteEl.textContent = approvalRouteNoteText('long-distance');
   const threshold = APP_SETTINGS.allowances.longDistanceThresholdKm || LONG_DISTANCE_THRESHOLD_KM;
@@ -18642,8 +18776,11 @@ async function submitLongDistance() {
   }
   if (blockIfCompanyTrip(date)) return;
   if (blockIfAbroadDay(date, 'long-distance')) return;
-  if (isNaN(mStart) || isNaN(mEnd)) { showToast(L('⚠️ Please fill in both mileage fields', '⚠️ กรุณากรอกเลขไมล์ให้ครบทั้ง 2 ช่อง'), 'warning'); return; }
-  if (mEnd <= mStart) { showToast(L('⚠️ Ending mileage must be greater than starting mileage', '⚠️ เลขไมล์สุดท้ายต้องมากกว่าเลขไมล์เริ่มต้น'), 'warning'); return; }
+  // 2026-10-16: one rule, shared with the server (longDistanceMileageError), but each side keeps
+  // its own wording -- this screen has always said WHICH of the two problems it is.
+  const mileageErr = longDistanceMileageError(mStart, mEnd);
+  if (mileageErr === 'missing') { showToast(L('⚠️ Please fill in both mileage fields', '⚠️ กรุณากรอกเลขไมล์ให้ครบทั้ง 2 ช่อง'), 'warning'); return; }
+  if (mileageErr === 'order') { showToast(L('⚠️ Ending mileage must be greater than starting mileage', '⚠️ เลขไมล์สุดท้ายต้องมากกว่าเลขไมล์เริ่มต้น'), 'warning'); return; }
   const distanceKm = mEnd - mStart;
   const threshold = APP_SETTINGS.allowances.longDistanceThresholdKm || LONG_DISTANCE_THRESHOLD_KM;
   const rate      = APP_SETTINGS.allowances.longDistance || LONG_DISTANCE_ALLOWANCE;
@@ -18666,6 +18803,9 @@ async function submitLongDistance() {
       return;
     }
   }
+  // 2026-10-16: the request now exists with both readings, so the saved start for that date has
+  // done its job. Awaited so the table redraw below no longer marks the row as waiting.
+  await clearLongDistanceSavedStart(date);
   updateMyRequestsBadge();
   updateApprovalBadge();
   closeLongDistanceModal();
