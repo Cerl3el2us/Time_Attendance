@@ -4004,9 +4004,17 @@ function handleGetMileageOpen(req, res) {
 function handlePutMileageOpen(req, res) {
   const live = mileageOpenActor(req, res);
   if (!live) return;
-  const err = mileageOpenSaveError(req.body);
+  // 2026-10-16: this file mounts `express.raw({ type: '*/*' })`, so req.body is ALWAYS a Buffer --
+  // every other route in it reads the payload through parseBody(). These three handlers read
+  // req.body directly, which made `req.body.date` undefined on every call: the save and the delete
+  // answered 400 "date must be a valid YYYY-MM-DD date" for every request ever sent to them, so
+  // the two-step mileage feature could not work at all. Found on the first real click, which is
+  // also the first time these endpoints were called by anything other than a 401 probe -- the
+  // branch was verified against a static harness with no backend.
+  const body = parseBody(req);
+  const err = mileageOpenSaveError(body);
   if (err) return res.status(400).json({ success: false, message: err });
-  const date = req.body.date;
+  const date = body.date;
   if (!isAllowanceEligible(getAppSettings().allowanceEligibility, live.role, 'longDistance')) {
     return res.status(403).json({ success: false, message: 'You are not eligible for the long distance allowance' });
   }
@@ -4024,7 +4032,7 @@ function handlePutMileageOpen(req, res) {
   const all = readMileageOpen();
   if (all === null) return res.status(503).json({ success: false, message: MILEAGE_OPEN_UNAVAILABLE });
   all[mileageOpenKey(live.id, date)] = {
-    mileageStart: Number(req.body.mileageStart),
+    mileageStart: Number(body.mileageStart),
     savedAt: new Date().toISOString(),
   };
   writeJSON(MILEAGE_OPEN_FILE, all);
@@ -4035,7 +4043,7 @@ function handlePutMileageOpen(req, res) {
 function handleDeleteMileageOpen(req, res) {
   const live = mileageOpenActor(req, res);
   if (!live) return;
-  const date = (req.body || {}).date;
+  const date = parseBody(req).date;   // req.body is a raw Buffer here -- see handlePutMileageOpen
   if (!isValidDateStr(date)) return res.status(400).json({ success: false, message: 'date must be a valid YYYY-MM-DD date' });
   const all = readMileageOpen();
   if (all === null) return res.status(503).json({ success: false, message: MILEAGE_OPEN_UNAVAILABLE });
