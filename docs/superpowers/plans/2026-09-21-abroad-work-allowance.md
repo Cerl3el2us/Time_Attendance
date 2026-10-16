@@ -160,7 +160,7 @@ Expected: `[AFTER] running pid(s):` differs from `[BEFORE]`, then `[VERIFY] heal
 
 - [ ] **Step 5: Live-test submit and reject**
 
-As a real employee account (`teerawat` / `1234`), `POST /api/leaves` with `{type:'abroad', dateFrom:'2026-10-05', dateTo:'2026-10-09', location:'Japan', reason:'customer visit'}` → expect 201/200 and status `pending-md`.
+As a real employee account (`teerawat`, password from the owner), `POST /api/leaves` with `{type:'abroad', dateFrom:'2026-10-05', dateTo:'2026-10-09', location:'Japan', reason:'customer visit'}` → expect 201/200 and status `pending-md`.
 
 Negative tests, each must 400: `dateTo` before `dateFrom`; a 120-day range; empty `location`; empty `reason`.
 

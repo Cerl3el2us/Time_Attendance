@@ -2293,7 +2293,7 @@ This bump is deliberately made after the backend restart, so browsers only pick 
 
 - [ ] **Step 4: Confirm the new code is live (Playwright, Accounting)**
 
-Navigate to `https://attendance.tozaiboeki.co.th`, log in as `sirintorn` / `1234`, and reload. Then `browser_evaluate`:
+Navigate to `https://attendance.tozaiboeki.co.th`, log in as `sirintorn` (password from the owner), and reload. Then `browser_evaluate`:
 
 ```js
 ({ app: document.querySelector('script[src*="js/app.js"]').src, ja: document.querySelector('script[src*="lang/ja.js"]').src,
@@ -2357,7 +2357,7 @@ found
 
 - [ ] **Step 8: Employee view (teerawat)**
 
-1. Log out, then log in as `teerawat` / `1234` and reload. Go to Attendance. The QA_DATE row shows `✅ Reviewed — you can submit 🌙`, and the 🌙 row button is visible. **Do not submit 🌙.** No ✅/❌/↩️ buttons appear anywhere on the page. Take a screenshot.
+1. Log out, then log in as `teerawat` (password from the owner) and reload. Go to Attendance. The QA_DATE row shows `✅ Reviewed — you can submit 🌙`, and the 🌙 row button is visible. **Do not submit 🌙.** No ✅/❌/↩️ buttons appear anywhere on the page. Take a screenshot.
 2. `browser_evaluate`: `Object.keys((await (await apiFetch('/api/checkout-reviews')).json()).reviews).every(k => k.startsWith(currentUser.id + '_'))` → `true`.
 3. `browser_evaluate` of a direct PUT: `(await apiFetch('/api/checkout-reviews', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: currentUser.id, date: QA_DATE, decision: 'deny' }) })).status` → `403` (role gate).
 4. Log out, log in as `sirintorn` and clear the review with ↩️ on the Attendance row. Then `GET /api/checkout-reviews` → `reviews: {}`. **This is the revert.** Confirm the pending box lists QA_DATE again.

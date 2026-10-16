@@ -319,6 +319,14 @@ locations, reasons and names are all user-controlled.
 
 Do not rewrite it casually. Test credentials are deliberately not stored in this repo — ask the owner.
 
+2026-10-16 (owner's decision): that rule had been broken anyway. Six lines across
+`SECURITY_REVIEW_AND_FIX_PLAN.md`, `docs/design-history/` and `docs/superpowers/plans/` spelled out a
+QA account **and its password** next to the live URL — working logins, published for as long as the
+GitHub repository was public. They now say "password from the owner" / "รหัสถามเจ้าของ" instead. Write
+the account name if a step needs it; never the password. Lines that merely *describe* the old weak
+seed password (finding F-09) were left alone on purpose: they are the record of the weakness, and the
+seed itself is gone (`DEFAULT_USERS = []`).
+
 ### The NAS repo prints a scary error on every commit
 
 ```

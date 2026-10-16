@@ -332,7 +332,7 @@ password reset (563–574) ไม่ invalidate token เก่า
 **Sprint 3 (ปรับปรุง):** F-10 ถึง F-16
 
 ## หลักการทดสอบ (สำคัญมาก — ทำทุก fix)
-1. **Regression ต่อ role:** ใช้ QA accounts ทั้ง 5 role (`takiuchi`/md, `sirintorn`/accounting, `loesan`/manager, `teerawat`/user, `jaraspong`/driver — รหัส `1234`) ผ่าน Playwright ยืนยันว่างานเดิมของแต่ละ role ยังทำได้
+1. **Regression ต่อ role:** ใช้ QA accounts ทั้ง 5 role (`takiuchi`/md, `sirintorn`/accounting, `loesan`/manager, `teerawat`/user, `jaraspong`/driver — รหัสของ QA account: ถามเจ้าของ) ผ่าน Playwright ยืนยันว่างานเดิมของแต่ละ role ยังทำได้
 2. **Negative test:** ยืนยันว่า role ที่ไม่มีสิทธิ์ได้ 403 จริง (ไม่ใช่แค่ปุ่มหายที่ UI — ต้องยิง API ตรงด้วย)
 3. **ห้าม deploy ทับ backend โดยไม่ทดสอบ** — restart backend ล้าง rate-limit + ต้องเช็ค log ว่าไม่มี error ตอน start (ดู memory: จด line count ก่อน restart แล้ว `tail -n +N`)
 4. อัปเดต memory `project_time_attendance.md` ทุก fix ที่ทำเสร็จ

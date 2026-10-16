@@ -35,8 +35,8 @@
 
 ## Test
 1. `node --check "Z:\attendance\js\app.js"` ต้องผ่าน
-2. เปิดเว็บจริงผ่าน Playwright (login `takiuchi`/md หรือ `sirintorn`/accounting, password `1234`) → เข้าหน้า Employees → ยืนยันปุ่ม "🔄 Sync จาก Hikvision" ยังอยู่และกดได้ปกติ (ปุ่มนี้ไม่ได้อยู่ในขอบเขตที่ลบ) → ไม่มี console error หลังลบโค้ด (โดยเฉพาะเช็คว่าไม่มีจุดไหนยังเรียก `openDeviceSyncModal()`/`DEVICE_USERS` ที่หลงเหลือแล้วพัง)
-3. เข้าหน้า "ลงเวลาทำงาน" (Check-in) ด้วย account จริงที่เป็น role `user`/`driver` (เช่น `teerawat`/`1234`) → ยืนยันปุ่ม check-in/check-out จริง (ปุ่มวงกลมเขียว) ยังทำงานปกติ 100% (คนละจุดกับที่ลบ แต่ verify เผื่อพลาด)
+2. เปิดเว็บจริงผ่าน Playwright (login `takiuchi`/md หรือ `sirintorn`/accounting, รหัสถามเจ้าของ) → เข้าหน้า Employees → ยืนยันปุ่ม "🔄 Sync จาก Hikvision" ยังอยู่และกดได้ปกติ (ปุ่มนี้ไม่ได้อยู่ในขอบเขตที่ลบ) → ไม่มี console error หลังลบโค้ด (โดยเฉพาะเช็คว่าไม่มีจุดไหนยังเรียก `openDeviceSyncModal()`/`DEVICE_USERS` ที่หลงเหลือแล้วพัง)
+3. เข้าหน้า "ลงเวลาทำงาน" (Check-in) ด้วย account จริงที่เป็น role `user`/`driver` (เช่น `teerawat` — รหัสถามเจ้าของ) → ยืนยันปุ่ม check-in/check-out จริง (ปุ่มวงกลมเขียว) ยังทำงานปกติ 100% (คนละจุดกับที่ลบ แต่ verify เผื่อพลาด)
 4. Frontend live-mounted files (`Z:\attendance\js\app.js`, `Z:\attendance\index.html`) — เห็นผลทันทีที่ reload browser ไม่ต้อง deploy backend (การลบนี้ไม่แตะ backend เลย)
 
 ## Report

@@ -352,7 +352,20 @@ if (!fs.existsSync(VAPID_FILE) || vapidParseFailed) {
 } else {
   secureChmod(VAPID_FILE);
 }
-webpush.setVapidDetails('mailto:tairo.b@hotmail.co.jp', VAPID_KEYS.publicKey, VAPID_KEYS.privateKey);
+// 2026-10-16 (owner's decision): this hardcoded the owner's personal hotmail address. It is sent to
+// Google's/Apple's push services as the JWT `sub` claim -- a contact channel for them, not a secret
+// -- but it sat in a git-tracked file while the repo was public. The company address is the default
+// now, and VAPID_CONTACT_EMAIL overrides it without a code edit (nothing forwards that var to the
+// NAS process today, so the default is what production uses). Browser subscriptions are bound to
+// the VAPID *public key*, not to this value, so changing it re-permits nothing: existing devices
+// keep receiving push.
+// The `mailto:` prefix is added here rather than expected in the env var, so VAPID_CONTACT_EMAIL
+// can be set to a plain address; a value that already carries the scheme is accepted too. Measured
+// against web-push 3.6.7, `setVapidDetails` throws only on a subject that is not a valid URL (bare
+// `a@b.com`, empty, whitespace) -- prefixed, every value passes, including `mailto:` with nothing
+// after it. So a typo here never blocks startup; it only leaves the push services a dead address.
+const VAPID_CONTACT = (process.env.VAPID_CONTACT_EMAIL || 'Teerawat@tozai-jpn.co.jp').trim().replace(/^mailto:/i, '');
+webpush.setVapidDetails(`mailto:${VAPID_CONTACT}`, VAPID_KEYS.publicKey, VAPID_KEYS.privateKey);
 
 const PUSH_STATUS_TO_ROLE = { pending: 'manager', 'pending-accounting': 'accounting', 'pending-md': 'md' };
 
