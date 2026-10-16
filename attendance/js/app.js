@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 128;
+const APP_BUILD = 129;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -15331,7 +15331,7 @@ async function renderPayslip() {
   const ldRowEl = document.getElementById('payslip-longdistance-row');
   if (ldRowEl) ldRowEl.style.display = view.eligibility.longDistance ? '' : 'none';
   el('payslip-longdistance').textContent = longDistanceTotal > 0 ? fmtB(longDistanceTotal) : '—';
-  el('payslip-longdistance-detail').textContent = longDistanceCount > 0 ? `${longDistanceCount} ${t('pay_times')} × ฿${view.display.rates.longDistance || LONG_DISTANCE_ALLOWANCE}` : '—';
+  el('payslip-longdistance-detail').textContent = longDistanceCount > 0 ? `${longDistanceCount} ${t('pay_times')} × ฿${view.display.rates.longDistance || 0}` : '—';
   const pcRowEl = document.getElementById('payslip-personalcar-row');
   if (pcRowEl) pcRowEl.style.display = view.eligibility.personalCar ? '' : 'none';
   el('payslip-personalcar').textContent = personalCarTotal > 0 ? fmtB(personalCarTotal) : '—';
@@ -18613,7 +18613,17 @@ async function submitUpcountry() {
 // Distance over 250km/day earns a flat ฿150 allowance — paid out via the payslip's Long
 // Distance line (see renderPayslip() / calcFinalizeEmployee()).
 const LONG_DISTANCE_THRESHOLD_KM = 250;
-const LONG_DISTANCE_ALLOWANCE = 150;
+// 2026-10-16: the rate the SERVER actually pays, read the server's way. Every display site used to
+// fall back to a hardcoded 150 whenever the setting was falsy -- so an owner who set the rate to 0
+// to stop paying the allowance, or a settings file old enough never to have had the key, had the
+// driver told "+฿150/day" on the request form while the server stamped the request with ฿0 and the
+// payslip paid nothing. server.js decides with `S.allowances.longDistance || 0` (two sites, the
+// POST and the PUT), so an unset or zero rate pays nothing, and that is what the form must say.
+// The threshold keeps its 250 fallback on purpose: server.js falls back to the same 250, so the
+// two already agree there. (project trap: `setting || default` discards a legitimate 0.)
+function longDistanceRateOf(S) {
+  return ((S || {}).allowances || {}).longDistance || 0;
+}
 
 // 2026-10-16: fills the starting-mileage field from a start saved earlier for the chosen date, and
 // says when it was saved so the driver can tell it is this trip's reading and not a leftover. The
@@ -18726,7 +18736,7 @@ function openLongDistanceModal(date) {
   const noteEl = document.getElementById('longdistance-approval-note');
   if (noteEl) noteEl.textContent = approvalRouteNoteText('long-distance');
   const threshold = APP_SETTINGS.allowances.longDistanceThresholdKm || LONG_DISTANCE_THRESHOLD_KM;
-  const rate      = APP_SETTINGS.allowances.longDistance || LONG_DISTANCE_ALLOWANCE;
+  const rate      = longDistanceRateOf(APP_SETTINGS);
   const thresholdEl = document.getElementById('longdistance-threshold-note');
   if (thresholdEl) thresholdEl.textContent = currentLang === 'ja' ? `📌 走行距離が${threshold}kmを超えると1日あたり฿${rate}の追加手当が支給されます。` : L(`📌 Distance over ${threshold} km gets an extra ฿${rate}/day allowance.`, `📌 ถ้าระยะทางเกิน ${threshold} กม. จะได้รับเบี้ยเลี้ยงเพิ่ม ${rate} บาท/วัน`);
   document.getElementById('longdistance-modal').classList.add('show');
@@ -18807,7 +18817,7 @@ function calcLongDistance() {
   const textEl  = document.getElementById('longdistance-result-text');
   if (isNaN(mStart) || isNaN(mEnd) || mEnd <= mStart) { display.style.display = 'none'; return; }
   const threshold = APP_SETTINGS.allowances.longDistanceThresholdKm || LONG_DISTANCE_THRESHOLD_KM;
-  const rate      = APP_SETTINGS.allowances.longDistance || LONG_DISTANCE_ALLOWANCE;
+  const rate      = longDistanceRateOf(APP_SETTINGS);
   const km = mEnd - mStart;
   const qualifies = km > threshold;
   textEl.textContent = currentLang === 'ja'
@@ -18844,7 +18854,7 @@ async function submitLongDistance() {
   if (mileageErr === 'order') { showToast(L('⚠️ Ending mileage must be greater than starting mileage', '⚠️ เลขไมล์สุดท้ายต้องมากกว่าเลขไมล์เริ่มต้น'), 'warning'); return; }
   const distanceKm = mEnd - mStart;
   const threshold = APP_SETTINGS.allowances.longDistanceThresholdKm || LONG_DISTANCE_THRESHOLD_KM;
-  const rate      = APP_SETTINGS.allowances.longDistance || LONG_DISTANCE_ALLOWANCE;
+  const rate      = longDistanceRateOf(APP_SETTINGS);
   const longDistanceAllowance = distanceKm > threshold ? rate : 0;
   const leaveData = {
     userId: currentUser.id, type: 'long-distance', dateFrom: date, dateTo: date, days: 0,
