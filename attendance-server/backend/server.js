@@ -876,26 +876,34 @@ function readLeaves() {
 function saveLeaves(arr) { atomicWrite(LEAVES_FILE, JSON.stringify(arr, null, 2)); }
 
 // ===== USERS =====
-// IMPORTANT: DEFAULT_USERS is used ONLY as a one-time seed when users.json does not exist.
-// The live source of truth is data/users.json — do NOT overwrite it or reset this array
-// without first exporting the current users.json content. Last synced: 2026-06-29.
-// L7 (2026-08-02 Opus audit): these used to be plaintext '1234' literals. Inert either way (only
-// read if users.json is missing entirely, which never happens in production) but plaintext
-// passwords in source are a code smell worth removing outright rather than leaving for later.
-// Each hash below is bcrypt('1234', BCRYPT_ROUNDS) -- same seed password as before, login behavior
-// unchanged (isHashed() already routes these through bcrypt.compare()).
-const DEFAULT_USERS = [
-  { id:1,  employeeNo:'7',  username:'katagiri',   password:'$2b$10$10EPswn1T26jZlvu7tjPJ.6W324yCbva599e5KoMb2.soAPgTS.IS', name:'Daiki Katagiri',           facePhoto:'images/employees/emp_7.jpg',  role:'md',         dept:'Management',  position:'Managing Director', salary:0, idCard:'', phone:'', email:'Katagiri@tozai-jpn.co.jp',    address:'', startDate:'2024-01-01', bankName:'', bankAccount:'', emergencyContact:'', emergencyPhone:'', annualLeave:10, sickLeave:30, businessLeave:3, transport:3000, positionAllowance:10000, housing:5000, allowance3:0, pvdRate:5, active:false },
-  { id:2,  employeeNo:'10', username:'takiuchi',   password:'$2b$10$ZqIiwaVUN5FNH87Hn6sj9.0IbH9cNWzxsbGzLCROL93Lx/i1UI2iG', name:'Toshifumi Takiuchi',      facePhoto:'images/employees/emp_10.jpg', role:'md',         dept:'Management',  position:'Managing Director', salary:0, idCard:'', phone:'', email:'Takiuchi@tozai-jpn.co.jp',    address:'', startDate:'2024-01-01', bankName:'', bankAccount:'', emergencyContact:'', emergencyPhone:'', annualLeave:10, sickLeave:30, businessLeave:3, transport:3000, positionAllowance:10000, housing:5000, allowance3:0, pvdRate:5, active:true },
-  { id:3,  employeeNo:'1',  username:'loesan',     password:'$2b$10$PZPzd6CYNDGuoTsBBC.xa.Oj7SxS3Lc/M24e71MlyMRhcXYoxVNCi', name:'Loesan Siributwong',      facePhoto:'images/employees/emp_1.jpg',  role:'manager',    dept:'Operations',  position:'Manager',           salary:0, idCard:'', phone:'', email:'loesan@tozaiboeki.co.th',     address:'', startDate:'2024-01-01', bankName:'', bankAccount:'', emergencyContact:'', emergencyPhone:'', annualLeave:8,  sickLeave:30, businessLeave:3, transport:3000, positionAllowance:5000,  housing:3000, allowance3:0, pvdRate:5, active:true },
-  { id:4,  employeeNo:'5',  username:'sirintorn',  password:'$2b$10$JNJQEoxWwX./QyNUdytut.cc4mYAlTlIIhCvsQezEtboyHrV.7dWC', name:'Sirintorn Torcharoensap', facePhoto:'images/employees/emp_5.jpg',  role:'accounting', dept:'Finance',     position:'Accounting',        salary:0, idCard:'', phone:'', email:'sirintorn@tozai-jpn.co.jp',   address:'', startDate:'2024-01-01', bankName:'', bankAccount:'', emergencyContact:'', emergencyPhone:'', annualLeave:8,  sickLeave:30, businessLeave:3, transport:3000, positionAllowance:2000,  housing:0,    allowance3:0, pvdRate:5, active:true },
-  { id:5,  employeeNo:'2',  username:'prida',      password:'$2b$10$lUPQ80xmUIzYrZ6Nd8CWNOuyI1XuDybBaotOnOg/hXvWVq5TfBU7e', name:'Prida Srikhaetrai',       facePhoto:'images/employees/emp_2.jpg',  role:'user',       dept:'Engineering', position:'Engineer',          salary:0, idCard:'', phone:'', email:'prida@tozaiboeki.co.th',      address:'', startDate:'2024-01-01', bankName:'', bankAccount:'', emergencyContact:'', emergencyPhone:'', annualLeave:8,  sickLeave:30, businessLeave:3, transport:3000, positionAllowance:0,     housing:0,    allowance3:0, pvdRate:5, active:true },
-  { id:6,  employeeNo:'3',  username:'somrak',     password:'$2b$10$5LSlZs05nLilWbgB24Rw0.FZPro/t/J/uMHT2.SSvDi4Iv8FnBMuO', name:'Somrak Likham',           facePhoto:'images/employees/emp_3.jpg',  role:'user',       dept:'Engineering', position:'Engineer',          salary:0, idCard:'', phone:'', email:'somrak@tozaiboeki.co.th',     address:'', startDate:'2024-01-01', bankName:'', bankAccount:'', emergencyContact:'', emergencyPhone:'', annualLeave:8,  sickLeave:30, businessLeave:3, transport:3000, positionAllowance:0,     housing:0,    allowance3:0, pvdRate:5, active:true },
-  { id:7,  employeeNo:'9',  username:'teerawat',   password:'$2b$10$52uzj3HdXsYlvHr2pJ7JT.0JcgaWGWtwUsl/K1bmWPVW.dMwUHaZy', name:'Teerawat Rungraung',      facePhoto:'images/employees/emp_9.jpg',  role:'user',       dept:'Sales',       position:'Sales Engineer',    salary:0, idCard:'', phone:'', email:'teerawat@tozai-jpn.co.jp',    address:'', startDate:'2024-01-01', bankName:'', bankAccount:'', emergencyContact:'', emergencyPhone:'', annualLeave:8,  sickLeave:30, businessLeave:3, transport:3000, positionAllowance:0,     housing:0,    allowance3:0, pvdRate:5, active:true },
-  { id:8,  employeeNo:'4',  username:'thitima',    password:'$2b$10$DInqmpkIp4Mq77xcUG1ohOzKwixrQnOxi5DNmLPmD0zBIswPhTU9O', name:'Thitima Phutain',         facePhoto:'images/employees/emp_4.jpg',  role:'marketing',  dept:'Marketing',   position:'Marketing',         salary:0, idCard:'', phone:'', email:'Thitima@tozai-jpn.co.jp',     address:'', startDate:'2024-01-01', bankName:'', bankAccount:'', emergencyContact:'', emergencyPhone:'', annualLeave:10, sickLeave:30, businessLeave:3, transport:3000, positionAllowance:0,     housing:0,    allowance3:0, pvdRate:3, active:true },
-  { id:9,  employeeNo:'6',  username:'ratanavalee',password:'$2b$10$9IG4mrU8YauKj9DJtm0wkeqojH/P1YoxaTSLVW7tDPRQLixv6I9na', name:'Ratanavalee Pratumsila',  facePhoto:'',                           role:'user',       dept:'Sales',       position:'Sales Engineer',    salary:0, idCard:'', phone:'', email:'ratanavalee@tozaiboeki.co.th', address:'', startDate:'2024-01-01', bankName:'', bankAccount:'', emergencyContact:'', emergencyPhone:'', annualLeave:8,  sickLeave:30, businessLeave:3, transport:3000, positionAllowance:0,     housing:0,    allowance3:0, pvdRate:5, active:true },
-  { id:10, employeeNo:'8',  username:'jaraspong',  password:'$2b$10$OzcKvRGLSwT5W4xiS3pZAOth1gtvhYOHq1QHea84Jr7V5/0vaRvrq', name:'Jaraspong Thawonjarensukko', facePhoto:'',                        role:'driver',     dept:'',            position:'Driver',            salary:0, idCard:'', phone:'', email:'',                            address:'', startDate:'2026-06-26', bankName:'', bankAccount:'', emergencyContact:'', emergencyPhone:'', annualLeave:8,  sickLeave:30, businessLeave:3, transport:3000, positionAllowance:0,     housing:0,    allowance3:0, pvdRate:5, active:true },
-];
+// PII REMOVAL 2026-10-16 (owner's decision): this array used to hold the 10 real employees --
+// full names, usernames, company e-mail addresses, employeeNo, role/dept/position and every
+// person's transport / positionAllowance / housing / pvdRate figures. server.js is tracked in
+// git, and on 2026-10-16 the GitHub mirror of this repo was found to be publicly readable
+// (files fetched over HTTP 200 with no login), so the entire company roster and its per-person
+// allowance figures were world-readable. The bcrypt hashes in it were all bcrypt('1234') --
+// verified by running compareSync('1234', h) against all ten -- and every live password in
+// data/users.json differs from them, so no usable credential leaked. The personal data did.
+//
+// Why this is empty instead of a set of invented placeholder employees: the seed below only
+// ever ran on a machine with no data/users.json at all. That happened once, when the app was
+// first stood up in 2026-06, and has not happened since -- the live roster is data/users.json
+// (gitignored), and real employees are created by the face-scan device sync (see
+// /api/sync-hikvision) or by an administrator through POST /api/users, never from here.
+// Placeholder employees would keep a login whose password is printed in a public repo alive
+// forever, to serve a situation that no longer occurs. The owner weighed that on 2026-10-16
+// and chose to drop the employee seed outright rather than replace it.
+//
+// A machine installed from scratch therefore starts with no employee accounts at all. The
+// first login is the non-employee system account that bootstrapSystemAccount() below
+// re-creates from its env password -- see systemAccount.js and DEVELOPER_HANDOFF.md; setting
+// that password is already a required install step, and the deploy script prints a note when
+// it is missing. That account passes the md/accounting/manager gates
+// (roleAllowedByRequireRole) and so can create the real employees.
+//
+// IMPORTANT (unchanged): the live source of truth is data/users.json. Do NOT re-add real
+// people to this array, and do not "restore" it from users.json -- export users.json instead.
+const DEFAULT_USERS = [];
 
 function readUsersRaw() {
   try { return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')); } catch(e) { return null; }
@@ -919,10 +927,14 @@ function saveUsers(u) {
   atomicWrite(USERS_FILE, JSON.stringify(ensured.users, null, 2), true);
 }
 
-// Seed users.json once
+// Create users.json once, on a machine that has none yet.
+// 2026-10-16 (owner's decision, see DEFAULT_USERS above): DEFAULT_USERS is now empty, so this
+// no longer seeds employees -- it only creates the file (and chmods it) so that
+// bootstrapSystemAccount() below has something to write the system account into, and so that
+// readUsers() returns [] rather than null (null makes every request fail closed with 503).
 if (!fs.existsSync(USERS_FILE)) {
   saveUsers(DEFAULT_USERS);
-  console.log('[USERS] Seeded users.json with', DEFAULT_USERS.length, 'employees');
+  console.log('[USERS] Created an empty users.json — employees are created by the device sync or an administrator');
 }
 // Ensure the protected superadmin system account exists (re-created if deleted from users.json).
 // AI POLICY: do not delete this bootstrap or skip ensureSystemAccounts in readUsers/saveUsers.

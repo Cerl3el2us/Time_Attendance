@@ -10,6 +10,15 @@
 attendance-server/backend/data/
 !attendance-server/backend/data/.gitkeep
 
+# Employee face photos. PII REMOVAL 2026-10-16 (owner's decision): emp_1..emp_10.jpg were
+# tracked here and the GitHub mirror of this repo was publicly readable, so 10 real employees'
+# face photos were world-readable. They are runtime data, not source: the face-scan device sync
+# and the photo-upload route write them (server.js PHOTOS_DIR, which is this same folder on the
+# NAS) and both mkdir it when missing, so a fresh clone needs nothing here. Untracked with
+# `git rm --cached` only -- plain `git rm` would delete them off the NAS, which is the live web
+# root, and every employee photo on the site would disappear.
+attendance/images/employees/
+
 # Backup snapshots
 **/*.bak*
 **/_backup_*/
