@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 117;
+const APP_BUILD = 118;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -891,9 +891,39 @@ function echoTypedTimeInput(inp) {
   inp.dispatchEvent(new Event('input', { bubbles: true }));
   inp._typedTimeEcho = false;
 }
+// 2026-10-16 (owner's decision): a 1-to-3-digit entry used to become a time only on blur or Enter,
+// so a field holding "13" looked unfinished and people kept typing until it was four digits long.
+// The owner asked for the time to appear without having to leave the field. It cannot be done on
+// every keystroke: rewriting "9" to "09:00" at once fills the field to its four-digit maximum, and
+// the next keystroke of someone typing "930" would be dropped by timeDigitsOf()'s slice -- so
+// "930" and "945", which the owner asked for in the same breath, would become untypable.
+// Idle is the only signal that separates "done typing" from "mid-entry", hence the pause below.
+const TYPED_TIME_IDLE_MS = 700;
+function clearTypedTimeIdle(inp) {
+  if (inp._typedTimeIdleTimer) { clearTimeout(inp._typedTimeIdleTimer); inp._typedTimeIdleTimer = null; }
+}
+// Digits to show when someone keeps typing after an idle commit already formatted the field:
+// the commit turned "9" into "09:00", so the field now reads 0900 and a typed "3" arrives as
+// "09003". Rebuild what they meant -- the digits before the commit plus the new ones -- instead of
+// letting the slice throw the keystroke away. Returns null when this is not that situation.
+function resumeTypedTimeDigits(unsliced, autoDigits, rawDigits) {
+  if (!autoDigits || typeof unsliced !== 'string') return null;
+  if (!unsliced.startsWith(autoDigits) || unsliced.length <= autoDigits.length) return null;
+  return (String(rawDigits || '') + unsliced.slice(autoDigits.length)).slice(0, TIME_DIGITS_MAX);
+}
 function onTypedTimeInput(e) {
   const inp = e.target;
   if (inp._typedTimeEcho) return;
+  clearTypedTimeIdle(inp);
+  // Typing straight after an idle commit means the entry was not finished after all.
+  if (inp._typedTimeAutoDigits) {
+    const resumed = resumeTypedTimeDigits(
+      String(inp.value == null ? '' : inp.value).replace(/\D/g, ''),
+      inp._typedTimeAutoDigits, inp._typedTimeRawDigits);
+    inp._typedTimeAutoDigits = null;
+    inp._typedTimeRawDigits = null;
+    if (resumed !== null) inp.value = resumed;
+  }
   const d = timeDigitsOf(inp.value);
   // Only insert the separator once the split is unambiguous, so the text never flickers between
   // two different readings while the user is still typing.
@@ -910,6 +940,20 @@ function onTypedTimeInput(e) {
   }
   if (inp.value !== d) inp.value = d;
   markTimeFieldInvalid(inp, false);
+  // A short entry becomes a time once typing stops, without waiting for blur. commitTypedTime()
+  // is the same path blur uses, so the dependent maths recalculates identically either way.
+  if (d) {
+    inp._typedTimeIdleTimer = setTimeout(() => {
+      inp._typedTimeIdleTimer = null;
+      if (document.activeElement !== inp) return;        // blur already handled it
+      const norm = normalizeTypedTime(inp.value);
+      if (!norm) return;                                 // impossible time: leave it for blur to reject
+      const before = timeDigitsOf(inp.value);
+      commitTypedTime(inp);
+      inp._typedTimeRawDigits = before;
+      inp._typedTimeAutoDigits = norm.replace(/\D/g, '');
+    }, TYPED_TIME_IDLE_MS);
+  }
 }
 function commitTypedTime(inp) {
   const raw = inp.value;
@@ -933,6 +977,11 @@ function commitTypedTime(inp) {
 }
 function onTypedTimeBlur(e) {
   const inp = e.target;
+  // Leaving the field settles it now; a pending idle commit would only fire against a field that
+  // no longer has focus, and its bookkeeping would outlive the entry it belongs to.
+  clearTypedTimeIdle(inp);
+  inp._typedTimeAutoDigits = null;
+  inp._typedTimeRawDigits = null;
   if (timeDigitsOf(inp.value) && normalizeTypedTime(inp.value) === null) {
     // Refuse an impossible time outright instead of leaving it for flatpickr. Its own allowInput
     // blur parser coerces "2500" into a perfectly plausible-looking 01:00 — a silently wrong time
@@ -949,6 +998,9 @@ function onTypedTimeBlur(e) {
 }
 function onTypedTimeKeydown(e) {
   if (e.key !== 'Enter') return;
+  clearTypedTimeIdle(e.target);
+  e.target._typedTimeAutoDigits = null;
+  e.target._typedTimeRawDigits = null;
   commitTypedTime(e.target);
   if (e.target._flatpickr) e.target._flatpickr.close();
 }
@@ -18397,6 +18449,7 @@ async function submitUpcountry() {
   updateMyRequestsBadge();
   updateApprovalBadge();
   closeUpcountryModal();
+  if (currentPage === 'attendance') renderAttendanceTable();
   if (currentPage === 'my-requests') renderMyRequests();
   renderDashboard();
   showToast(isEdit
@@ -18559,6 +18612,7 @@ async function submitLongDistance() {
   updateMyRequestsBadge();
   updateApprovalBadge();
   closeLongDistanceModal();
+  if (currentPage === 'attendance') renderAttendanceTable();
   if (currentPage === 'my-requests') renderMyRequests();
   renderDashboard();
   showToast(isEdit
@@ -19356,6 +19410,7 @@ async function submitOT() {
   updateMyRequestsBadge();
   updateApprovalBadge();
   closeOTModal();
+  if (currentPage === 'attendance') renderAttendanceTable();
   if (currentPage === 'my-requests') renderMyRequests();
   if (currentPage === 'leave') renderLeaveHistory();
   renderDashboard();
@@ -19492,6 +19547,7 @@ async function submitDriverOT() {
   updateMyRequestsBadge();
   updateApprovalBadge();
   closeOTModal();
+  if (currentPage === 'attendance') renderAttendanceTable();
   if (currentPage === 'my-requests') renderMyRequests();
   if (currentPage === 'leave') renderLeaveHistory();
   renderDashboard();
@@ -19991,6 +20047,7 @@ async function submitAbroad() {
   updateMyRequestsBadge();
   updateApprovalBadge();
   closeAbroadModal();
+  if (currentPage === 'attendance') renderAttendanceTable();
   if (currentPage === 'my-requests') renderMyRequests();
   if (currentPage === 'leave') renderLeaveHistory();
   renderDashboard();
@@ -20333,6 +20390,7 @@ async function submitHolidayWork() {
   updateMyRequestsBadge();
   updateApprovalBadge();
   closeHolidayWorkModal();
+  if (currentPage === 'attendance') renderAttendanceTable();
   if (currentPage === 'my-requests') renderMyRequests();
   if (currentPage === 'leave') renderLeaveHistory();
   renderDashboard();
@@ -20537,6 +20595,7 @@ async function submitEarlyMorning() {
   updateMyRequestsBadge();
   updateApprovalBadge();
   closeEarlyMorningModal();
+  if (currentPage === 'attendance') renderAttendanceTable();
   if (currentPage === 'my-requests') renderMyRequests();
   renderDashboard();
   showToast(isEdit
