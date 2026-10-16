@@ -317,7 +317,32 @@ const longestWord = (line) => (line.replace(/[*·]/g, ' ').match(/\S{6,}/g) || [
 test('parse (real STATUS.md): the first handoff item keeps the text on its continuation lines', () => {
   const text = fs.readFileSync(STATUS_PATH, 'utf8');
   const { handoff } = parseStatus(text);
-  assert.ok(handoff.length >= 1, 'STATUS.md has no handoff item, so there is nothing to read');
+
+  // 2026-10-16, decided by Claude and NOT yet ruled on by the owner: this used to assert
+  // `handoff.length >= 1`, which made the two guards over this file contradict each other.
+  // tests/status-structure.test.js says in its own words that an empty handoff section is a
+  // legitimate state ("the handoff test passes when the section has no items"), and it went red
+  // here the first time that state actually happened -- the office machine closed the only handoff
+  // item (the github-plugin connection test) on 2026-10-16 and had nothing to hand over. A real
+  // file with no handoff item cannot exercise truncation, so this case reports that it was not
+  // exercised instead of failing. It stays red for every OTHER reason: an item that is present but
+  // malformed, one missing a field, and one whose fields are all single-line are all still
+  // failures below, so the guard wakes up by itself as soon as a handoff item comes back.
+  // The section must still exist and be genuinely empty -- a parser that stopped finding items
+  // would otherwise slip through here.
+  if (handoff.length === 0) {
+    assert.ok(/^## ส่งต่อรอบหน้า\s*$/m.test(text), 'STATUS.md has no "## ส่งต่อรอบหน้า" section');
+    const lines = text.split(/\r?\n/);
+    const from = lines.findIndex(l => /^## ส่งต่อรอบหน้า\s*$/.test(l));
+    let to = from + 1;
+    while (to < lines.length && !/^## /.test(lines[to])) to++;
+    const stray = lines.slice(from + 1, to).findIndex(l => /^- \*\*/.test(l));
+    assert.strictEqual(stray, -1,
+      `the handoff section has an item on line ${from + 2 + stray} that parseStatus did not return`);
+    console.log('       NOT EXERCISED: the handoff section is empty, so there is no real item to read');
+    return;
+  }
+
   const f = handoff[0].fields;
   const src = firstHandoffFieldLines(text);
 
