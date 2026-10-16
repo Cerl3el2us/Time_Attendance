@@ -5446,6 +5446,11 @@ function hasUpcountryLocation(l) {
 // DUAL-SYNC (identical text): app.js / server.js holidayTransportForRecord.
 function holidayTransportForRecord(l, S, abroadDates) {
   if (!l || l.compensationMode !== 'paid') return 0;
+  // 2026-10-16 (owner's decision): no upcountry location, no transport money. The upcountry
+  // allowance has always been filtered by hasUpcountryLocation(); this one was not, so a paid-mode
+  // Holiday Work record with the field left empty still collected the transport rate. The owner
+  // asked for the two to follow the same condition: leave the field empty and neither is paid.
+  if (!hasUpcountryLocation(l)) return 0;
   if (abroadDates && abroadDates.has(l.dateFrom)) return 0;
   const rate = S && S.allowances ? S.allowances.holidayTransport : undefined;
   return rate != null ? rate : 500;

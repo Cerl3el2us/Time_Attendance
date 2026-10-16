@@ -352,9 +352,12 @@ function payrollWorld() {
     L(1, { type: 'early-morning', dateFrom: '2026-11-26', earlyMorningTier: 1 }),
     L(2, { type: 'early-morning', dateFrom: '2026-11-27', earlyMorningTier: 2 }), // approved, then trip declared
     L(3, { type: 'ot', dateFrom: '2026-11-26', otHours: 2, otMultiplier: 1.5 }),
+    // 2026-10-16 (owner): holiday transport needs an upcountry location, so the two paid Holiday
+    // Work records below carry one -- otherwise their transport is 0 and this case would be
+    // asserting the absence of money for the wrong reason.
     L(4, { type: 'ot', dateFrom: '2026-11-27', otHours: 3, otMultiplier: 1.5 }),
-    L(5, { type: 'holiday-work', compensationMode: 'paid', dateFrom: '2026-11-28', otHours20: 8, otHours30: 0 }),
-    L(6, { type: 'holiday-work', compensationMode: 'paid', dateFrom: '2026-11-29', otHours20: 2, otHours30: 1 }),
+    L(5, { type: 'holiday-work', compensationMode: 'paid', dateFrom: '2026-11-28', otHours20: 8, otHours30: 0, locations: [{ name: 'ระยอง' }] }),
+    L(6, { type: 'holiday-work', compensationMode: 'paid', dateFrom: '2026-11-29', otHours20: 2, otHours30: 1, locations: [{ name: 'ระยอง' }] }),
     L(7, { type: 'personal-car', dateFrom: '2026-11-27', personalCarRate: 1000 }),
   ];
   return world({ leaves, pDays, user: { ...USER, personalCarEligible: true } });

@@ -225,7 +225,10 @@ function payWorld(status) {
   const leaves = [
     rec({ type: 'ot', dateFrom: '2026-11-23', otHours: 2, otMultiplier: 1.5, status }),
     rec({ type: 'early-morning', dateFrom: '2026-11-24', earlyMorningTier: 1, status }),
-    rec({ type: 'holiday-work', compensationMode: 'paid', dateFrom: '2026-11-28', otHours20: 2, otHours30: 0, status }),
+    // 2026-10-16 (owner): holiday transport is paid only when an upcountry location was entered,
+    // so this record carries one -- the case is about approved-vs-cancelled, and it needs a record
+    // that pays something in the approved run for the comparison to mean anything.
+    rec({ type: 'holiday-work', compensationMode: 'paid', dateFrom: '2026-11-28', otHours20: 2, otHours30: 0, locations: [{ name: 'ระยอง' }], status }),
     rec({ type: 'long-distance', dateFrom: '2026-11-24', longDistanceAllowance: 300, status }),
     rec({ type: 'personal-car', dateFrom: '2026-11-23', personalCarRate: 1000, status }),
   ];

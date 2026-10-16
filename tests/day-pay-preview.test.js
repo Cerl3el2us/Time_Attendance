@@ -225,16 +225,33 @@ test('the x2 and x3 tiers are itemised together', () => {
 
 console.log('T3 Holiday Work — the two modes, side by side');
 
+// The shared fixture has NO upcountry location on purpose: that is the ordinary Holiday Work day,
+// and since 2026-10-16 (owner) it pays neither the upcountry allowance nor the transport. The
+// cases below that are about a trip add `locations` themselves.
 const HW = { date: '2026-09-27', hwStartTime: '08:30', hwEndTime: '17:30' };
 
-test('paid mode pays holiday transport plus x2 hours, lunch excluded', () => {
+test('paid mode with no upcountry location pays the x2 hours and no transport', () => {
   const W = makeWorld({ date: HW.date });
   const est = W.estimateDayEarnings({ ...HW, user: STAFF, mode: 'paid' });
   // 08:30-17:30 minus the 12:00-13:00 lunch = 8 paid hours at x2.
   assert.strictEqual(amountOf(est, 'ot'), 1600);
-  assert.strictEqual(amountOf(est, 'holiday-transport'), 500);
-  assert.strictEqual(est.total, 2100);
+  // 2026-10-16 (owner): the transport follows the upcountry field. Nothing was entered here, so
+  // the line is absent -- it used to be 500 regardless.
+  assert.strictEqual(amountOf(est, 'holiday-transport'), null);
+  assert.strictEqual(est.total, 1600);
   assert.strictEqual(est.earnsLeaveDay, false);
+});
+
+// The preview builds its own record for holidayTransportForRecord(), so it has to pass `locations`
+// through or it would read 0 for a trip that really does pay -- the estimate would disagree with
+// the payslip. This case is what keeps that wiring honest.
+test('paid mode with an upcountry location pays transport and upcountry together', () => {
+  const W = makeWorld({ date: HW.date });
+  const est = W.estimateDayEarnings({ ...HW, user: STAFF, mode: 'paid', locations: [{ name: 'Rayong' }] });
+  assert.strictEqual(amountOf(est, 'ot'), 1600);
+  assert.strictEqual(amountOf(est, 'holiday-transport'), 500);
+  assert.strictEqual(amountOf(est, 'upcountry'), 240);
+  assert.strictEqual(est.total, 2340);
 });
 
 test('annual-leave mode pays neither transport nor OT, and earns the day', () => {
@@ -382,7 +399,10 @@ console.log('T6 the rules extracted out of computePayroll still hold for both ca
 test('holidayTransportForRecord: paid mode only, never on an Abroad day, a deliberate 0 stays 0', () => {
   const W = makeWorld({ date: '2026-09-27' });
   const S = SETTINGS();
-  const rec = { compensationMode: 'paid', dateFrom: '2026-09-27' };
+  // 2026-10-16 (owner): the record carries an upcountry location now, because without one the
+  // transport is not paid at all -- see tests/holiday-transport-needs-upcountry.test.js. The rest
+  // of this case is unchanged and still checks the rules that were already here.
+  const rec = { compensationMode: 'paid', dateFrom: '2026-09-27', locations: [{ name: 'ระยอง' }] };
   assert.strictEqual(W.holidayTransportForRecord(rec, S, new Set()), 500);
   assert.strictEqual(W.holidayTransportForRecord({ ...rec, compensationMode: 'annual-leave' }, S, new Set()), 0);
   assert.strictEqual(W.holidayTransportForRecord(rec, S, new Set(['2026-09-27'])), 0);

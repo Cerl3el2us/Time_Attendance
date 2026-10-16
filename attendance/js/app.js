@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 123;
+const APP_BUILD = 124;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -2760,6 +2760,11 @@ function hasUpcountryLocation(l) {
 // DUAL-SYNC (identical text): app.js / server.js holidayTransportForRecord.
 function holidayTransportForRecord(l, S, abroadDates) {
   if (!l || l.compensationMode !== 'paid') return 0;
+  // 2026-10-16 (owner's decision): no upcountry location, no transport money. The upcountry
+  // allowance has always been filtered by hasUpcountryLocation(); this one was not, so a paid-mode
+  // Holiday Work record with the field left empty still collected the transport rate. The owner
+  // asked for the two to follow the same condition: leave the field empty and neither is paid.
+  if (!hasUpcountryLocation(l)) return 0;
   if (abroadDates && abroadDates.has(l.dateFrom)) return 0;
   const rate = S && S.allowances ? S.allowances.holidayTransport : undefined;
   return rate != null ? rate : 500;
@@ -3036,7 +3041,11 @@ function estimateDayEarnings(opts) {
   }
 
   // --- Holiday transport: paid-mode Holiday Work only ---
-  const transport = holidayTransportForRecord({ compensationMode: o.mode, dateFrom: date }, S, abroadDates);
+  // 2026-10-16: `locations` has to travel with the synthetic record now that no upcountry location
+  // means no transport money. Without it the preview would read 0 for a trip that really does pay
+  // -- the estimate would quietly disagree with the payslip. The Upcountry line below already
+  // reads the same field.
+  const transport = holidayTransportForRecord({ compensationMode: o.mode, dateFrom: date, locations: o.locations }, S, abroadDates);
   if (transport > 0) {
     lines.push({ key: 'holiday-transport', label: `🚐 ${L('Holiday transport', 'ค่าเดินทางวันหยุด')}`, amount: transport });
   }
