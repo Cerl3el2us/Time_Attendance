@@ -189,7 +189,7 @@ function earlyMorningPayFor(src, day) {
   }, DEPS);
   vm.createContext(ctx);
   vm.runInContext(
-    ['earlyMorningCheckInOk', 'deviceScanQualifiesForEarlyMorning', 'applyCheckinEdits']
+    ['earlyMorningCheckInOk', 'earlyMorningAutoPayEnabled', 'deviceScanQualifiesForEarlyMorning', 'applyCheckinEdits']
       .map(n => extractFunction(src, n)).join('\n') +
     '\nthis.qualifies = deviceScanQualifiesForEarlyMorning; this.apply = applyCheckinEdits;', ctx);
   if (!ctx.qualifies(day, new Set())) return 0;

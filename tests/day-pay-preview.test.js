@@ -44,7 +44,7 @@ const FNS = [
   'earlyLateRateFor',
   'round2HalfUp', 'isVoidLeaveStatus', 'parseHHMMToMins', 'lateNightCheckoutMins', 'lateNightThresholdHourOf',
   'lateNightThresholdMins', 'lateOutAllowanceForHour', 'isDeviceScanSource',
-  'isEarlyMorningDayStatus', 'isRestAttendanceDay', 'deviceScanQualifiesForEarlyMorning', 'earlyMorningCheckInOk',
+  'isEarlyMorningDayStatus', 'isRestAttendanceDay', 'deviceScanQualifiesForEarlyMorning', 'earlyMorningAutoPayEnabled', 'earlyMorningCheckInOk',
   'earlyMorningThresholdMins', 'earlyMorningAllowanceForTier', 'earlyMorningTierFromCheckIn',
   'effectiveOtMultiplier', 'standardOtMultiplier', 'isNonWorkDayForComp', 'deriveOfficeOtFromEndTime',
   'holidayWorkEndMins', 'splitHolidayWorkOtMinutes', 'addOtHours', 'accumulateApprovedOtHours',

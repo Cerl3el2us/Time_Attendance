@@ -59,7 +59,7 @@ const SHARED = [
   'earlyLateRateFor',
   'isVoidLeaveStatus', 'round2HalfUp', 'round1HalfUp', 'lateNightCheckoutMins', 'lateNightThresholdMins', 'lateNightThresholdHourOf', 'parseHHMMToMins',
   'isHolidayWorkDay', 'isNonWorkDayForComp', 'isHolidayWorkOtRecord', 'isFullDayPersonalLeaveStatus',
-  'isRestAttendanceDay', 'isDeviceScanSource', 'isEarlyMorningDayStatus', 'deviceScanQualifiesForEarlyMorning', 'earlyMorningCheckInOk',
+  'isRestAttendanceDay', 'isDeviceScanSource', 'isEarlyMorningDayStatus', 'deviceScanQualifiesForEarlyMorning', 'earlyMorningAutoPayEnabled', 'earlyMorningCheckInOk',
   'deviceScanQualifiesForLateNight', 'lateNightCheckoutOk', 'addOtHours', 'accumulateApprovedOtHours', 'otPayFromHourBuckets', 'effectiveOtMultiplier',
   'computePayroll', 'splitHolidayWorkOtMinutes', 'holidayWorkEndMins', 'standardOtMultiplier', 'abroadTravelCreditDays',
   'isAbroadTravelDay', 'isRevocableLeaveType',

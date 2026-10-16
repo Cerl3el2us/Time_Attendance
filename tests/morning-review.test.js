@@ -42,7 +42,7 @@ function extractConstObject(src, name) {
 const FNS = ['isAllowanceEligible', 'isDeviceScanSource', 'isEarlyMorningDayStatus',
   'isFullDayPersonalLeaveStatus', 'isRestAttendanceDay', 'parseHHMMToMins',
   'morningReviewWindowOf', 'morningReviewTrigger', 'morningReviewDecisionFor',
-  'earlyMorningCheckInOk', 'deviceScanQualifiesForEarlyMorning', 'morningReviewSettingsError'];
+  'earlyMorningCheckInOk', 'earlyMorningAutoPayEnabled', 'deviceScanQualifiesForEarlyMorning', 'morningReviewSettingsError'];
 function load(src) {
   const ctx = { HHMM_RE: /^([01][0-9]|2[0-3]):[0-5][0-9]$/ };
   vm.createContext(ctx);

@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 118;
+const APP_BUILD = 119;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -1945,7 +1945,43 @@ function isRestAttendanceDay(d) {
 }
 // Auto early: Hikvision device scan only. Rest days (weekend/public holiday) pay only when
 // approved holiday-work exists for that date — then both may apply (user 2026-08-31).
+// 2026-10-16 (owner's decision): is Early Morning still paid automatically off the face scanner?
+// This is the ONE place the browser reads that switch. Its twin in attendance-server/backend/
+// server.js answers the same question from the server's settings; the two bodies differ on purpose,
+// and that is exactly why the switch is read through a helper -- deviceScanQualifiesForEarlyMorning()
+// below is pinned byte-identical across both engines by tests/morning-review.test.js.
+// `!== false`, not a truthy test: a settings.json holding 0 or '' must not switch everyone's
+// allowance off by accident (memory feedback_attendance_falsy_zero_settings.md). Absent means on,
+// so an older settings file keeps paying exactly as it did before this switch existed.
+// `typeof` guard: this predicate is lifted into a bare vm sandbox by several tests, where the
+// settings object may not exist at all. Missing settings means ON -- the behaviour that was in
+// place before the switch -- so an unreachable setting can never silently stop the money.
+function earlyMorningAutoPayEnabled() {
+  const S = typeof APP_SETTINGS !== 'undefined' ? APP_SETTINGS : null;
+  return ((S || {}).allowances || {}).earlyMorningAutoEnabled !== false;
+}
+// 2026-10-16: both engines refuse an Early Morning request for a day whose check-in came from the
+// face scanner, telling the employee the allowance is automatic and no request is needed. That is
+// only true while the automatic payment is switched on. Without this condition, turning the switch
+// off would remove the allowance AND refuse the request meant to replace it -- the employee would
+// be told to use a button that is not allowed to work. Same text in both engines on purpose.
+function earlyMorningScanBlocksRequest(checkInSource) {
+  return earlyMorningAutoPayEnabled() && isDeviceScanSource(checkInSource);
+}
 function deviceScanQualifiesForEarlyMorning(d, holidayWorkDateSet) {
+  // 2026-10-16 (owner's decision): an off switch for the AUTOMATIC payment. With it off nobody is
+  // paid off the scanner any more -- whoever qualifies asks with the Early Morning button instead
+  // and the request goes through the normal approval, like every other allowance. Sits at the top
+  // of this predicate because it is the one gate the scan path asks everywhere (payroll, payslip,
+  // day-pay preview, attendance badge all route through it), so a single false here stops the
+  // automatic money in all of them at once rather than in whichever caller someone remembered.
+  // Approved requests are paid by a different branch and are untouched, which is what makes the
+  // owner's rule work: a day already paid automatically keeps its money, and only a day that has
+  // not been paid yet now needs asking for.
+  // Read through earlyMorningAutoPayEnabled() rather than inline: this function is pinned
+  // byte-identical across both engines (tests/morning-review.test.js) while the two reach their
+  // settings differently, so that helper is where the difference is allowed to live.
+  if (!earlyMorningAutoPayEnabled()) return false;
   if (!d || !d.checkIn || d.status === 'company-trip') return false;
   if (!isEarlyMorningDayStatus(d.status) || !isDeviceScanSource(d.checkInSource)) return false;
   if (isRestAttendanceDay(d) && !(holidayWorkDateSet && holidayWorkDateSet.has(d.date))) return false;
@@ -3186,7 +3222,7 @@ function canSubmitEarlyMorningForDate(dateStr, userId) {
   if (isApprovedFullDayPersonalLeaveDate(dateStr, uid)) {
     return { ok: false, reason: 'full-leave' };
   }
-  if (isDeviceScanSource(times.checkInSource)) {
+  if (earlyMorningScanBlocksRequest(times.checkInSource)) {
     return { ok: false, reason: 'device-scan' };
   }
   const mins = parseHHMMToMins(times.checkIn);
@@ -5834,6 +5870,18 @@ function renderSettingsPage(_skipRefresh) {
         field(L('Check-in before (×1 rate)','เช็กอินก่อนกี่โมงได้ ×1'), `<input id="set-early-thr1" type="time" value="${minsToTime(s.allowances.earlyThreshold1Min)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 07:30','เช่น 07:30')),
         field(L('Check-in before (×2 rate)','เช็กอินก่อนกี่โมงได้ ×2'), `<input id="set-early-thr2" type="time" value="${minsToTime(s.allowances.earlyThreshold2Min)}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box">`, L('e.g. 06:30','เช่น 06:30'))
       )}
+      <!-- 2026-10-16 (owner): the automatic payment can be switched off. Default ON, so deploying
+           this changes nothing until somebody turns it off. With it off the allowance is not lost,
+           it is asked for: the Early Morning button appears on a qualifying day and the request
+           goes through the normal approval. The owner was asked directly and confirmed that an
+           employee who never asks simply does not get it that day. Reads `=== false` so a stored
+           0 or '' cannot switch it off by accident. -->
+      <label style="display:flex;align-items:flex-start;gap:8px;margin:12px 0 12px;font-size:13px;font-weight:600;color:#374151;cursor:pointer">
+        <input id="set-em-auto" type="checkbox" ${s.allowances.earlyMorningAutoEnabled === false ? '' : 'checked'} style="width:18px;height:18px;cursor:pointer;margin-top:2px">
+        <span>${L('Pay Early Morning automatically from the face scanner','จ่ายเบี้ยมาเช้าอัตโนมัติจากเครื่องสแกนหน้า')}
+          <span style="display:block;font-weight:400;color:#64748b;font-size:11.5px;margin-top:3px;line-height:1.5">${L('Off: nobody is paid automatically. Anyone who qualifies asks with the Early Morning button and it goes through the normal approval. Days already paid keep their allowance.','ปิด: จะไม่มีใครได้อัตโนมัติ คนที่เข้าเกณฑ์ต้องกดปุ่มเบี้ยมาเช้าขอเอง แล้วผ่านการอนุมัติตามปกติ · วันที่ได้ไปแล้วยังได้เหมือนเดิม')}</span>
+        </span>
+      </label>
       <div style="font-size:12px;font-weight:600;color:#64748b;margin:12px 0 8px">${L('Late Night Bonus','เบี้ยเลี้ยงกลับดึก')}</div>
       ${row2(
         field(L('×1 (late night) ฿','×1 (แจ้งกลับดึก) ฿'), inp('set-late1-amt', centralEarlyLateRate(s, 2), 'number')),
@@ -6719,6 +6767,11 @@ async function saveSettingsPage() {
   // false -- and the two times and the gap only overwrite when they parse.
   const mrToggle = document.getElementById('set-mr-enabled');
   if (mrToggle) APP_SETTINGS.allowances.morningReviewEnabled = !!mrToggle.checked;
+  // 2026-10-16 (owner): the automatic-payment switch. Written only when the checkbox is on the
+  // page, like its neighbour above -- a Settings save from a page that never rendered this section
+  // must not invent a value and switch the allowance off for everybody.
+  const emAutoToggle = document.getElementById('set-em-auto');
+  if (emAutoToggle) APP_SETTINGS.allowances.earlyMorningAutoEnabled = !!emAutoToggle.checked;
   // Same guarded read: an absent element must leave the stored value alone, not write false.
   const crToggle = document.getElementById('set-cr-enabled');
   if (crToggle) APP_SETTINGS.allowances.checkoutReviewEnabled = !!crToggle.checked;

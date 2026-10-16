@@ -5586,7 +5586,7 @@ function earlyMorningSubmitBlockReason(user, dateStr) {
   if (!isEarlyMorningDayStatus(day.status)) {
     return 'Early morning claim requires a check-in on a working, weekend, or public-holiday day';
   }
-  if (isDeviceScanSource(day.checkInSource)) {
+  if (earlyMorningScanBlocksRequest(day.checkInSource)) {
     return 'Early morning allowance is automatic when you check in at the face scanner — no request needed';
   }
   const mins = parseHHMMToMins(day.checkIn);
@@ -9681,7 +9681,43 @@ function isRestAttendanceDay(d) {
 }
 // Auto early: Hikvision device scan only. Rest days (weekend/public holiday) pay only when
 // approved holiday-work exists for that date — then both may apply (user 2026-08-31).
+// 2026-10-16 (owner's decision): is Early Morning still paid automatically off the face scanner?
+// This is the ONE place the server reads that switch. Its twin in attendance/js/app.js answers the
+// same question from the browser's own settings object; the two bodies differ on purpose, and that
+// is exactly why the switch is read through a helper -- deviceScanQualifiesForEarlyMorning() below
+// is pinned byte-identical across both engines by tests/morning-review.test.js.
+// `!== false`, not a truthy test: a settings.json holding 0 or '' must not switch everyone's
+// allowance off by accident (memory feedback_attendance_falsy_zero_settings.md). Absent means on,
+// so an older settings file keeps paying exactly as it did before this switch existed.
+// `typeof` guard: this predicate is lifted into a bare vm sandbox by several tests, where the
+// settings accessor may not exist at all. Missing settings means ON -- the behaviour that was in
+// place before the switch -- so an unreachable setting can never silently stop the money.
+function earlyMorningAutoPayEnabled() {
+  const S = typeof getAppSettings === 'function' ? getAppSettings() : null;
+  return ((S || {}).allowances || {}).earlyMorningAutoEnabled !== false;
+}
+// 2026-10-16: both engines refuse an Early Morning request for a day whose check-in came from the
+// face scanner, telling the employee the allowance is automatic and no request is needed. That is
+// only true while the automatic payment is switched on. Without this condition, turning the switch
+// off would remove the allowance AND refuse the request meant to replace it -- the employee would
+// be told to use a button that is not allowed to work. Same text in both engines on purpose.
+function earlyMorningScanBlocksRequest(checkInSource) {
+  return earlyMorningAutoPayEnabled() && isDeviceScanSource(checkInSource);
+}
 function deviceScanQualifiesForEarlyMorning(d, holidayWorkDateSet) {
+  // 2026-10-16 (owner's decision): an off switch for the AUTOMATIC payment. With it off nobody is
+  // paid off the scanner any more -- whoever qualifies asks with the Early Morning button instead
+  // and the request goes through the normal approval, like every other allowance. Sits at the top
+  // of this predicate because it is the one gate the scan path asks everywhere (payroll, payslip,
+  // day-pay preview, attendance badge all route through it), so a single false here stops the
+  // automatic money in all of them at once rather than in whichever caller someone remembered.
+  // Approved requests are paid by a different branch and are untouched, which is what makes the
+  // owner's rule work: a day already paid automatically keeps its money, and only a day that has
+  // not been paid yet now needs asking for.
+  // Read through earlyMorningAutoPayEnabled() rather than inline: this function is pinned
+  // byte-identical across both engines (tests/morning-review.test.js) while the two reach their
+  // settings differently, so that helper is where the difference is allowed to live.
+  if (!earlyMorningAutoPayEnabled()) return false;
   if (!d || !d.checkIn || d.status === 'company-trip') return false;
   if (!isEarlyMorningDayStatus(d.status) || !isDeviceScanSource(d.checkInSource)) return false;
   if (isRestAttendanceDay(d) && !(holidayWorkDateSet && holidayWorkDateSet.has(d.date))) return false;
