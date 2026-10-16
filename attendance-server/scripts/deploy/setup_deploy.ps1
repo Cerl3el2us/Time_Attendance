@@ -46,14 +46,34 @@ Write-Host ("Saved. NAS_USER = {0}, NAS_PASSWORD = (hidden)" -f $nasUser) -Foreg
 Write-Host ''
 $doTest = Read-Host 'Test the login against the NAS now? (y/N)'
 if ($doTest -match '^[Yy]') {
-  $py = (Get-Command python -ErrorAction SilentlyContinue)
-  if (-not $py) {
-    Write-Host 'python not found on PATH - skipping the test. Install Python, then re-run this file.' -ForegroundColor Yellow
+  # 2026-10-16: this used to be `Get-Command python`, which PASSES on a machine where the only
+  # `python.exe` on PATH is Windows' Microsoft Store app execution alias (a real file, so
+  # Get-Command finds it) -- it then prints "Python was not found" and exits 49, so the login test
+  # silently never ran while this script reported nothing wrong. Measured on the office machine
+  # (`tairo`): `python`/`python3` = alias, exit 49; `py` = real Python 3.14.4. So resolve the
+  # interpreter by RUNNING each candidate, not by asking whether the name exists.
+  # The probe runs through `cmd /c ... >NUL 2>NUL` on purpose: redirecting a native command's
+  # stderr inside PowerShell 5.1 raises a NativeCommandError, and this script runs with
+  # $ErrorActionPreference = 'Stop', so `& $cand -c 'import sys' *> $null` KILLS the script on the
+  # very first broken candidate instead of falling through to the next one (measured 2026-10-16 --
+  # the first version of this fix had that bug). Letting cmd.exe swallow the output keeps the
+  # failure out of PowerShell's error stream entirely; $LASTEXITCODE is then cmd's, i.e. the child's.
+  $interpreter = $null
+  foreach ($cand in @('py', 'python', 'python3')) {
+    if (-not (Get-Command $cand -ErrorAction SilentlyContinue)) { continue }
+    & cmd.exe /c "$cand -c ""import sys"" >NUL 2>NUL"
+    if ($LASTEXITCODE -eq 0) { $interpreter = $cand; break }
+    Write-Host ("'{0}' is on PATH but did not run (exit {1}) - trying the next one." -f $cand, $LASTEXITCODE) -ForegroundColor DarkYellow
+  }
+  if (-not $interpreter) {
+    Write-Host 'No working Python found on PATH - skipping the test.' -ForegroundColor Yellow
+    Write-Host 'Install Python (python.org gives you `py`), then re-run this file.' -ForegroundColor Yellow
   } else {
+    Write-Host ("Using interpreter: {0}" -f $interpreter) -ForegroundColor Green
     $env:NAS_USER = $nasUser
     $env:NAS_PASSWORD = $plain
     $probe = Join-Path $PSScriptRoot 'check_nas_account.py'
-    if (Test-Path $probe) { & python $probe } else { Write-Host "Missing $probe - skipping." -ForegroundColor Yellow }
+    if (Test-Path $probe) { & $interpreter $probe } else { Write-Host "Missing $probe - skipping." -ForegroundColor Yellow }
   }
 }
 

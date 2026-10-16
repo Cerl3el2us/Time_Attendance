@@ -40,8 +40,10 @@ Sync เฉพาะไฟล์ memory ของโปรเจกต์ Time A
 - **Backend:** NAS SSH → `/volume1/web/Time_Attendance/attendance-server/backend/server.js`
   (moved 2026-08-16 from `/volume1/web/attendance-server/`, which itself was moved 2026-07-14
   from `/volume1/Teerawat/attendance-backend/`)
-- **Deploy:** `python Z:\Time_Attendance\attendance-server\scripts\deploy\deploy_backend.py`
-  (needs `NAS_PASSWORD` env var set first, via `setx NAS_PASSWORD "..."` in cmd.exe;
+- **Deploy:** `py Z:\Time_Attendance\attendance-server\scripts\deploy\deploy_backend.py`
+  (`py`, not `python` — changed 2026-10-16: Windows' Microsoft Store app execution alias for
+  `python.exe` comes first on `PATH` on the office machine and exits 49 with "Python was not
+  found" instead of deploying; see AGENTS.md section 6 for the measurement;
   optional `NAS_USER` picks the DSM account — unset = `Teerawat`; the account must be
   a DSM administrator because the restart step uses `sudo`. Full setup steps live in
   `attendance-server/DEVELOPER_HANDOFF.md`)

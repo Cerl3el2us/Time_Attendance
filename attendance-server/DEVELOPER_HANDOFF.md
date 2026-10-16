@@ -115,10 +115,25 @@ If `NAS_PASSWORD` is missing the script stops immediately and prints the exact
 ## Restarting the backend — do NOT skip the gotchas below
 
 `server.js` does not hot-reload. After any edit, run
-`Z:\Time_Attendance\attendance-server\scripts\deploy\deploy_backend.py` (needs `NAS_PASSWORD`
-env var set first, via `setx NAS_PASSWORD "..."` in **cmd.exe**, not
-PowerShell) — don't hand-roll your own restart, this script encodes real
-scar tissue from this specific NAS:
+
+```
+py Z:\Time_Attendance\attendance-server\scripts\deploy\deploy_backend.py
+```
+
+(needs `NAS_PASSWORD` env var set first, via `setx NAS_PASSWORD "..."` in
+**cmd.exe**, not PowerShell) — don't hand-roll your own restart, this script
+encodes real scar tissue from this specific NAS:
+
+- **Call it with `py`, never bare `python`** (2026-10-16). Windows keeps
+  Microsoft Store "app execution aliases" for `python.exe`/`python3.exe` in
+  `%LOCALAPPDATA%\Microsoft\WindowsApps`, ahead of any real Python on `PATH`.
+  Measured on the office machine (`tairo`): `python` and `python3` hit that
+  alias, print *"Python was not found; run without arguments to install from
+  the Microsoft Store"* and exit **49** — so the backend is never restarted,
+  and the output looks like a missing tool rather than a failed deploy. The
+  next step after a deploy here is usually testing something that writes
+  data, against what you believe is new code. `py` is the Python launcher and
+  ignores the alias (3.14.4 + paramiko 5.0.0 on that machine).
 
 - **`fuser` and `ss` do not exist on this DSM 7.3 box** (`netstat` does, but
   the script still doesn't use it). The script finds the running backend's PID via

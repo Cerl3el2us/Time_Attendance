@@ -251,12 +251,24 @@ Tell the owner to hard-reload (Ctrl+F5) when you are done.
 `server.js` on the NAS is the file the Node process runs, but it only picks up changes on restart:
 
 ```bash
-python Z:/Time_Attendance/attendance-server/scripts/deploy/deploy_backend.py
+py Z:/Time_Attendance/attendance-server/scripts/deploy/deploy_backend.py
 ```
 
 Requires the `NAS_PASSWORD` environment variable (`setx NAS_PASSWORD "..."` in cmd.exe), and the DSM
 account must be an administrator because the restart uses `sudo`. `NAS_USER` optionally selects the
 account. Full setup in `attendance-server/DEVELOPER_HANDOFF.md`.
+
+**Use `py`, not `python`** (changed 2026-10-16 after measuring it on the office machine). Windows
+ships "app execution aliases" for `python.exe`/`python3.exe` in
+`%LOCALAPPDATA%\Microsoft\WindowsApps`, which sits ahead of a real Python on `PATH`. Measured on the
+office machine (`tairo`): `python` and `python3` reach that alias, print *"Python was not found; run
+without arguments to install from the Microsoft Store"* and exit **49** — a message that reads like
+advice rather than a failure, so the backend never restarts while the deploy looks like it merely
+needs a tool installed. With the rule right above this ("deploy before testing anything that writes
+data") that is the exact path to testing writes against old code. `py` is the Python launcher and
+resolves the real interpreter regardless of alias order: measured 3.14.4 + paramiko 5.0.0 here, and
+the home machine's python.org install provides `py` too. If `py` is ever missing, call the
+interpreter by full path — never trust bare `python` on Windows.
 
 **Deploy before testing anything that writes data.** Testing a write against a backend still running
 the old code has destroyed real data here before.
