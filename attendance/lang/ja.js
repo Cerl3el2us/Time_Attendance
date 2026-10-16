@@ -3,6 +3,12 @@ window.LANG_JA = {
   // 2026-07-18 i18n gap audit — data-en/data-en-ph/data-en-title attributes with no JA entry at
   // all (silently fell back to English in JA mode; found while auditing modals for the Leave/
   // Comp/Long-Distance English-leak bug reported by user)
+  // 2026-10-16 (owner): the two timesheet columns were renamed to say what they hold. The left one
+  // lists the allowances that day has already earned; the right one holds the buttons for the
+  // allowances this person may still ask for. The old headings were "รายการพิเศษ / OT" and an
+  // empty cell, which named neither.
+  "Approved allowances": "承認済みの手当",
+  "Allowances you can request": "申請できる手当",
   "🗓️ Leave Balance (Year ": "🗓️ 有給休暇残日数（",
   "This document was issued by the Time Attendance system — Tozai Boeki Kaisha (Thailand) Ltd. | Created: ": "この書類はTime Attendanceシステムより発行されました — Tozai Boeki Kaisha (Thailand) Ltd. | 作成日: ",
   "⏱️ Total OT ": "⏱️ OT合計 ",
