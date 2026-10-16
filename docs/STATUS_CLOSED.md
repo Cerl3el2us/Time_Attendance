@@ -27,6 +27,22 @@
 
 ## ปิดไปแล้ว 2026-10-16 — อย่าเสนอซ้ำ
 
+- **endpoint เลขไมล์ 2 ครั้ง อ่าน body ไม่ได้ — แก้ deploy backend และกดจริงผ่านครบแล้ว**
+  `server.js` ใช้ `express.raw({ type: '*/*' })` ⇒ `req.body` เป็น Buffer เสมอ ทุก route ต้องผ่าน
+  `parseBody(req)` · `handlePutMileageOpen` กับ `handleDeleteMileageOpen` อ่าน `req.body.date` ตรงๆ
+  ซึ่งได้ `undefined` ⇒ ตอบ 400 *"date must be a valid YYYY-MM-DD date"* ทุกคำขอที่เคยส่งเข้ามา
+  **ฟีเจอร์นี้ใช้ไม่ได้เลยตั้งแต่วันแรก** · `GET` ไม่กระทบเพราะไม่มี body และ 401 ก็ไม่เคยเดินทางไป
+  ถึงการอ่าน body ⇒ หลักฐาน "endpoint ตอบ 401 แปลว่ามีจริง" ที่เคยเขียนไว้จึงดูผ่านทั้งที่ของพัง
+  · เจอด้วยการกดปุ่มจริง ไม่ใช่การอ่านโค้ด — เจ้าของล็อกอิน `driver` บนเว็บจริงให้
+  · ทดสอบครบทั้งสองครึ่งหลัง deploy: บันทึกเลขเริ่มต้น 120000 สำเร็จ · เปิดใหม่เลขเติมกลับมาพร้อม
+    ป้ายเวลา · ปุ่ม 🚗 เป็น `#fef3c7` · ยื่นคำขอ 300 กม. → `id 41` `pending-accounting` เบี้ย ฿150
+    · ป้ายเหลืองหาย และแถวเลขเริ่มต้นถูกลบเหลือ 0 (พิสูจน์ว่า `DELETE` ที่พังเหมือนกันก็ใช้ได้แล้ว)
+  · `tests/mileage-open-body-parsing.test.js` ยิง handler จริงด้วย Buffer จริง
+
+- **อัตราเบี้ยที่ตั้งเป็น 0 ถูกกลืนด้วยค่าตั้งต้น — แก้แล้วทั้ง Long Distance และ FAQ รถส่วนตัว**
+  รายละเอียดการกวาดและข้อที่เลือกไม่แก้อยู่ใน
+  `docs/superpowers/notes/2026-10-16-allowance-default-sweep.md`
+
 - **repo บน GitHub ปิดเป็น private แล้ว — ตรวจแล้วได้ 404**
   ข้อนี้เคยอยู่ใน "ส่งต่อรอบหน้า" ให้ไปถามเจ้าของว่าปิดหรือยัง · ตรวจเองได้ด้วยคำสั่งเดียว
   `curl -s -o /dev/null -w "%{http_code}" https://raw.githubusercontent.com/Cerl3el2us/Time_Attendance/main/README.md`
