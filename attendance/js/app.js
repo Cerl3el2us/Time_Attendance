@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 125;
+const APP_BUILD = 126;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -21761,9 +21761,14 @@ function showAttendanceDetail(date) {
     // Early Morning claimed with the button. The chip above only covers the automatic path, so a
     // day paid through an approved request showed nothing at all -- the case that becomes the
     // normal one whenever the automatic payment is switched off in Settings.
+    // Shown whenever the automatic chip above did not already account for the day. Gating this on
+    // "not a scanner check-in" was wrong: with the automatic payment switched off, a scanner day
+    // IS the case that produces a request, so the badge would have been hidden exactly when it
+    // matters. deviceScanQualifiesForEarlyMorning() already answers "did the automatic path pay
+    // this day", switch included, so ask it instead of guessing from the source.
     const emRec = dayLeave('early-morning');
     if (emRec && isAllowanceEligible(APP_SETTINGS.allowanceEligibility, targetRole, 'earlyLate')
-        && !isDeviceScanSource(row.checkInSource)) {
+        && !deviceScanQualifiesForEarlyMorning(row, new Set([row.date]))) {
       // Not `|| 1`: the repo's rate guard refuses that shape near a rate lookup, and rightly --
       // the stored tier is validated to be 1 or 2, so read it as such rather than defaulting.
       const emTier = Number(emRec.earlyMorningTier) === 2 ? 2 : 1;
@@ -21778,8 +21783,11 @@ function showAttendanceDetail(date) {
       const mode = paid ? L('paid', 'รับเป็นเงิน') : L('day off in lieu', 'แลกวันหยุด');
       tagsEl.innerHTML += `<span class="badge" style="background:#ffedd5;color:#9a3412">🎌 ${L('Holiday Work', 'ทำงานวันหยุด')} ${hwHrs ? hwHrs + L('h', ' ชม.') + ' ' : ''}— ${mode}</span>`;
       // The transport follows the upcountry field as of today, so it is read through the same
-      // function payroll uses rather than assumed from the mode.
-      const hwTransport = holidayTransportForRecord(hwRec, APP_SETTINGS, new Set());
+      // function payroll uses rather than assumed from the mode. The abroad set must carry this
+      // date when the day IS abroad -- passing an empty set would have shown +500 on a day payroll
+      // pays nothing for, because the Abroad allowance already covers it.
+      const hwAbroad = row.status === 'abroad' ? new Set([row.date]) : new Set();
+      const hwTransport = holidayTransportForRecord(hwRec, APP_SETTINGS, hwAbroad);
       if (hwTransport > 0) {
         tagsEl.innerHTML += `<span class="badge" style="background:#ffedd5;color:#9a3412">🚐 ${L('Holiday transport', 'ค่าเดินทางวันหยุด')} (+฿${Number(hwTransport).toLocaleString()})</span>`;
       }
