@@ -1566,4 +1566,10 @@ window.LANG_JA = {
   "⚠️ Enter the starting mileage": "⚠️ 開始メーターを入力してください",
   "🚗 Starting mileage saved — enter the ending mileage when you finish": "🚗 開始メーターを保存しました — 運転終了後に終了メーターを入力してください",
   "Long Distance — starting mileage saved, waiting for the end": "Long Distance — 開始メーター保存済み、終了メーター待ち",
+
+  // 2026-10-16: the day-detail popup lists the allowances a day actually earned. The other words
+  // it needs (Holiday Work, Holiday transport, Long Distance, h, km) were already in this file.
+  "Early Morning (requested)": "早朝手当（申請）",
+  "paid": "手当として受取",
+  "day off in lieu": "代休として受取",
 };

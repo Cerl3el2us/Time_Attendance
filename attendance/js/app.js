@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 124;
+const APP_BUILD = 125;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -21748,6 +21748,49 @@ function showAttendanceDetail(date) {
   if (pcRecord) {
     const pcRate = pcRecord.personalCarRate != null ? pcRecord.personalCarRate : (APP_SETTINGS.allowances.personalCar != null ? APP_SETTINGS.allowances.personalCar : 1000);
     tagsEl.innerHTML += `<span class="badge" style="background:#fef9c3;color:#854d0e">🚙 ${L('Personal Car', 'รถส่วนตัว')} (+฿${pcRate.toLocaleString()})</span>`;
+  }
+  // 2026-10-16 (owner asked why the popup listed almost nothing): this block was written badge by
+  // badge and never gained the allowance types added after it, so a Saturday with approved Holiday
+  // Work showed only the automatic Early In chip and looked like the rest paid nothing. The four
+  // below are read from the person's own approved records for that date, the same records payroll
+  // counts, so what the popup says and what the payslip pays come from one place.
+  if (row.status !== 'company-trip') {
+    const dayLeave = type => DATA_LEAVES.find(l =>
+      l.userId === targetUserId && l.type === type && l.dateFrom === date && l.status === 'approved');
+
+    // Early Morning claimed with the button. The chip above only covers the automatic path, so a
+    // day paid through an approved request showed nothing at all -- the case that becomes the
+    // normal one whenever the automatic payment is switched off in Settings.
+    const emRec = dayLeave('early-morning');
+    if (emRec && isAllowanceEligible(APP_SETTINGS.allowanceEligibility, targetRole, 'earlyLate')
+        && !isDeviceScanSource(row.checkInSource)) {
+      // Not `|| 1`: the repo's rate guard refuses that shape near a rate lookup, and rightly --
+      // the stored tier is validated to be 1 or 2, so read it as such rather than defaulting.
+      const emTier = Number(emRec.earlyMorningTier) === 2 ? 2 : 1;
+      const emAmt = earlyMorningAllowanceForTier(emTier, targetRole);
+      tagsEl.innerHTML += `<span class="badge badge-success">🌅 ${L('Early Morning (requested)', 'เบี้ยมาเช้า (ยื่นขอ)')} (+฿${Number(emAmt).toLocaleString()})</span>`;
+    }
+
+    const hwRec = dayLeave('holiday-work');
+    if (hwRec) {
+      const paid = hwRec.compensationMode === 'paid';
+      const hwHrs = (Number(hwRec.otHours20) || 0) + (Number(hwRec.otHours30) || 0);
+      const mode = paid ? L('paid', 'รับเป็นเงิน') : L('day off in lieu', 'แลกวันหยุด');
+      tagsEl.innerHTML += `<span class="badge" style="background:#ffedd5;color:#9a3412">🎌 ${L('Holiday Work', 'ทำงานวันหยุด')} ${hwHrs ? hwHrs + L('h', ' ชม.') + ' ' : ''}— ${mode}</span>`;
+      // The transport follows the upcountry field as of today, so it is read through the same
+      // function payroll uses rather than assumed from the mode.
+      const hwTransport = holidayTransportForRecord(hwRec, APP_SETTINGS, new Set());
+      if (hwTransport > 0) {
+        tagsEl.innerHTML += `<span class="badge" style="background:#ffedd5;color:#9a3412">🚐 ${L('Holiday transport', 'ค่าเดินทางวันหยุด')} (+฿${Number(hwTransport).toLocaleString()})</span>`;
+      }
+    }
+
+    const ldRec = dayLeave('long-distance');
+    if (ldRec) {
+      const km = Number(ldRec.distanceKm) || 0;
+      const amt = Number(ldRec.longDistanceAllowance) || 0;
+      tagsEl.innerHTML += `<span class="badge" style="background:#e0f2fe;color:#0369a1">🚗 ${L('Long Distance', 'Long Distance')} ${km.toLocaleString()} ${L('km', 'กม.')}${amt > 0 ? ` (+฿${amt.toLocaleString()})` : ''}</span>`;
+    }
   }
   if (!tagsEl.innerHTML) {
     tagsEl.innerHTML = `<span style="font-size:12px;color:#94a3b8">${L('No special items — only allowances your role is eligible for are shown here.', 'ไม่มีรายการพิเศษ — จะแสดงเฉพาะเบี้ยเลี้ยงที่ตำแหน่งของคุณมีสิทธิ์ได้รับ')}</span>`;
