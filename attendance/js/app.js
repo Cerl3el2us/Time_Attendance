@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 126;
+const APP_BUILD = 127;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -21757,6 +21757,11 @@ function showAttendanceDetail(date) {
   if (row.status !== 'company-trip') {
     const dayLeave = type => DATA_LEAVES.find(l =>
       l.userId === targetUserId && l.type === type && l.dateFrom === date && l.status === 'approved');
+    // deviceScanQualifiesForEarlyMorning() asks whether an approved Holiday Work claim covers the
+    // date, because a rest day pays the automatic allowance only with one. Handing it the date
+    // unconditionally would tell it every rest day has a claim, hiding the request badge on rest
+    // days that have none -- so it is answered with the same check the Early In chip above uses.
+    const emHwDates = (d, uid) => hasHolidayWorkClaimOnDate(d, uid, false) ? new Set([d]) : new Set();
 
     // Early Morning claimed with the button. The chip above only covers the automatic path, so a
     // day paid through an approved request showed nothing at all -- the case that becomes the
@@ -21768,7 +21773,7 @@ function showAttendanceDetail(date) {
     // this day", switch included, so ask it instead of guessing from the source.
     const emRec = dayLeave('early-morning');
     if (emRec && isAllowanceEligible(APP_SETTINGS.allowanceEligibility, targetRole, 'earlyLate')
-        && !deviceScanQualifiesForEarlyMorning(row, new Set([row.date]))) {
+        && !deviceScanQualifiesForEarlyMorning(row, emHwDates(row.date, targetUserId))) {
       // Not `|| 1`: the repo's rate guard refuses that shape near a rate lookup, and rightly --
       // the stored tier is validated to be 1 or 2, so read it as such rather than defaulting.
       const emTier = Number(emRec.earlyMorningTier) === 2 ? 2 : 1;
