@@ -100,6 +100,24 @@ test('the hardcoded 150 is gone from app.js entirely', () => {
     'LONG_DISTANCE_ALLOWANCE is back -- it is the default that caused the mismatch');
 });
 
+// Same trap, different allowance. server.js stamps a personal-car request with
+// `S.allowances.personalCar != null ? ... : 1000`, so a rate the owner set to 0 pays 0 -- and
+// app.js hides the request button at 0 as well. The FAQ answer was the one place still reading it
+// as `|| 1000`, telling employees "฿1,000 per use" in all three languages for an allowance that
+// was switched off. The money sites were already correct; this guard is what keeps them that way.
+test('no site invents a personal-car rate either: every fallback is 0 or the null-aware default', () => {
+  const bad = [...APP_SRC.matchAll(/\.allowances\.personalCar\s*\|\|\s*([A-Za-z0-9_]+)/g)]
+    .map(m => m[1])
+    .filter(x => x !== '0');
+  assert.deepStrictEqual(bad, [],
+    `a 0 rate would be read as these instead, so the screen promises what nothing pays: ${bad.join(', ')}`);
+});
+
+test('the personal-car FAQ answer exists in all three languages and reads the rate the same way', () => {
+  const n = (APP_SRC.match(/S\.allowances\.personalCar != null \? S\.allowances\.personalCar : 1000/g) || []).length;
+  assert.ok(n >= 3, `expected the three FAQ languages to share one reader, found ${n} uses`);
+});
+
 test('server.js still decides with `|| 0`, at both the create and the edit site', () => {
   const sites = [...SERVER_SRC.matchAll(/S\.allowances\.longDistance\s*\|\|\s*([A-Za-z0-9_]+)/g)]
     .map(m => m[1]);

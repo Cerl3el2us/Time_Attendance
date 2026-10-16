@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 129;
+const APP_BUILD = 130;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -24636,9 +24636,9 @@ function _faqRulesItems() {
       a: _faq(
         // 2026-08-16 (Opus audit A-3): "Default ฿1,000" was a stale hardcoded number, unlike every
         // other item in this list which interpolates from live Settings -- reads the real rate now.
-        `฿${(S.allowances.personalCar || 1000).toLocaleString()} per use (may vary per employee — check the rate shown in the request form). Goes through the same approval route as other requests (defaults to Managing Director) — paid on the payslip only after it is approved. ${_faqNotEligibleText('personalCar')}`,
-        `฿${(S.allowances.personalCar || 1000).toLocaleString()} ต่อครั้ง (อาจต่างกันแต่ละคน — เช็คอัตราที่ขึ้นในฟอร์มคำขอ) เข้าคิวอนุมัติเหมือนคำขอประเภทอื่น (ค่าเริ่มต้นคือ Managing Director) — จ่ายในสลิปเมื่อได้รับการอนุมัติแล้วเท่านั้น ${_faqNotEligibleText('personalCar')}`,
-        `1回あたり฿${(S.allowances.personalCar || 1000).toLocaleString()}（従業員によって異なる場合があります — 申請フォームに表示されるレートを確認してください）。他の申請と同じ承認ルートを通ります（デフォルトはManaging Director）。承認後にのみ給与明細へ反映されます。${_faqNotEligibleText('personalCar')}`
+        `฿${(S.allowances.personalCar != null ? S.allowances.personalCar : 1000).toLocaleString()} per use (may vary per employee — check the rate shown in the request form). Goes through the same approval route as other requests (defaults to Managing Director) — paid on the payslip only after it is approved. ${_faqNotEligibleText('personalCar')}`,
+        `฿${(S.allowances.personalCar != null ? S.allowances.personalCar : 1000).toLocaleString()} ต่อครั้ง (อาจต่างกันแต่ละคน — เช็คอัตราที่ขึ้นในฟอร์มคำขอ) เข้าคิวอนุมัติเหมือนคำขอประเภทอื่น (ค่าเริ่มต้นคือ Managing Director) — จ่ายในสลิปเมื่อได้รับการอนุมัติแล้วเท่านั้น ${_faqNotEligibleText('personalCar')}`,
+        `1回あたり฿${(S.allowances.personalCar != null ? S.allowances.personalCar : 1000).toLocaleString()}（従業員によって異なる場合があります — 申請フォームに表示されるレートを確認してください）。他の申請と同じ承認ルートを通ります（デフォルトはManaging Director）。承認後にのみ給与明細へ反映されます。${_faqNotEligibleText('personalCar')}`
       ) },
     { icon: '📅', roles: ['md','accounting','manager','user','driver','marketing'], q: _faq('When does the payroll period start?', 'รอบเงินเดือนเริ่มวันไหน?', '給与計算期間はいつ始まりますか？'),
       a: _faq(
