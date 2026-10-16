@@ -5497,6 +5497,19 @@ function hasActiveHolidayWork(leaves, userId, dateFrom, exceptId) {
     l.dateFrom === dateFrom && !isVoidLeaveStatus(l.status)
   );
 }
+// 2026-10-16: the same question for Long Distance, which had no duplicate guard at all while
+// personal-car and holiday-work each had one -- and for the same reason those two carry: payroll
+// counts RECORDS, not distinct dates, so two approved claims for one day pay the allowance twice.
+// The browser already refuses the second claim; this is the layer behind it, because a page left
+// open from before the first claim existed, or a direct API call, never asks the browser.
+// exceptId matches the two guards beside it: an edit saving its own record unchanged is not a
+// duplicate of itself.
+function hasActiveLongDistance(leaves, userId, dateFrom, exceptId) {
+  return (leaves || []).some(l =>
+    l.id !== exceptId && l.userId === userId && l.type === 'long-distance' &&
+    l.dateFrom === dateFrom && !isVoidLeaveStatus(l.status)
+  );
+}
 function hasActiveOfficeOt(leaves, userId, dateFrom, exceptId) {
   return (leaves || []).some(l =>
     l.id !== exceptId && l.userId === userId && l.type === 'ot' && !l.isDriverOT &&
@@ -7116,6 +7129,11 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
         l.userId === userId && l.type === 'holiday-work' && l.dateFrom === body.dateFrom && !isVoidLeaveStatus(l.status))) {
       return res.status(409).json({ success:false, message:'A holiday work request for this date already exists' });
     }
+    // 2026-10-16: the third of the same guard. Long Distance had none, so the browser's refusal
+    // was the only thing standing between payroll and two allowances for one day.
+    if (type === 'long-distance' && hasActiveLongDistance(leaves, userId, body.dateFrom)) {
+      return res.status(409).json({ success:false, message:'A long distance request already exists for this date' });
+    }
     if (type === 'holiday-work' && hasActiveOfficeOt(leaves, userId, body.dateFrom)) {
       return res.status(409).json({ success:false, message:'An OT request already exists for this date — do not stack holiday work with office OT' });
     }
@@ -7594,6 +7612,15 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
       if (hasActiveHolidayWork(leaves, leave.userId, resolvedDateFromForLock, leave.id)) {
         return res.status(409).json({ success:false, message:'A holiday work request already exists for this date — upcountry is included automatically' });
       }
+    }
+    // 2026-10-16: the edit twin of the POST-side Long Distance duplicate guard. long-distance is
+    // in EDITABLE_LEAVE_TYPES, so without this a driver submits on a free date and then moves the
+    // record onto one that already has a claim -- the same duplicate by the other road, which is
+    // exactly why the guards above all have a PUT-side twin. Checked against the RESOLVED date,
+    // and excluding this record, so re-saving it unchanged is not a duplicate of itself.
+    if (newType === 'long-distance' &&
+        hasActiveLongDistance(leaves, leave.userId, resolvedDateFromForLock, leave.id)) {
+      return res.status(409).json({ success:false, message:'A long distance request already exists for this date' });
     }
     // CORRECTNESS FIX 2026-08-16 (Opus re-audit of C-3): the POST-side "workedDate required and
     // must be a non-work day" check has no PUT-side twin -- saveLeaveEdit() never sends `type` at
