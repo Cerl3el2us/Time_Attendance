@@ -30,22 +30,21 @@
 > ที่มาของกฎนี้: โน้ตที่เคยเขียนว่า "รอบหน้าเตือนเรื่อง superadmin" เดินทางไปถึงอีกเครื่องจริง
 > แต่ความรู้ว่าเตือนเรื่องอะไรและให้ทำอะไร ไม่ได้ไปด้วย ⇒ อีกเครื่องรับโน้ตแล้วทำอะไรไม่ได้
 
-- **เปิดเซสชันช้า — แก้ครบแล้วที่เครื่องบ้าน แต่เครื่องออฟฟิศต้องทำซ้ำเอง 2 ขั้น (เป็นค่าเฉพาะเครื่อง)**
-  · **ให้ทำอะไร:** ถ้านี่คือเครื่องออฟฟิศ (windows user `tairo`) และเปิดเซสชันช้า ให้ทำสองข้อนี้
-    แล้วปิดแอปทั้งตัวเปิดใหม่ (เปิดแค่เซสชันใหม่ไม่พอ ค่า environment อ่านตอน process เริ่ม) ·
-    (1) ตั้ง environment variable ของ Windows ชื่อ `GITHUB_PERSONAL_ACCESS_TOKEN` เป็นค่า token ที่เจ้าของ
-    จดไว้ (ตัวเดียวกับเครื่องบ้านใช้ได้ เพราะผูกกับบัญชีไม่ใช่เครื่อง) — **ให้เจ้าของเป็นคนวางค่าเอง
-    ผ่านหน้าต่าง Windows ห้าม Claude แตะ token และห้ามพิมพ์ลง Terminal panel**
-    (2) ปิดปลั๊กอิน `cloudflare@claude-plugins-official` และ `desktop-commander@claude-plugins-official`
-    ใน `C:\Users\tairo\.claude\settings.json` (ตั้งเป็น `false`) · เหตุผลเต็มอยู่ใน memory
-    `feedback_attendance_announce_skills_and_tooling.md` หัวข้อ 2026-10-13
-  · **ที่มา:** 2026-10-13 เจ้าของบอกว่าเปิดเซสชัน "นานมาก" · วัดแล้วไม่ใช่กลไก memory แต่เป็น MCP server
-    ที่ต่อไม่ติดแล้วรอจนหมดเวลา — `desktop-commander` และ `github` ตัวละ 30 วินาที และ `cloudflare`
-    พ่วง 5 server โดย 4 ตัวรอ OAuth ที่ไม่เคยอนุมัติ · ที่เครื่องบ้านแก้ครบแล้ว: ปิดสองตัวแรก และซ่อม
-    `github` ด้วย token (สิทธิ์ Contents + Pull requests read/write)
-  · **หลักฐาน:** ที่เครื่องบ้าน 2026-10-13 ตรวจผ่านแล้ว — `get_me` ตอบ `Cerl3el2us` · `list_pull_requests`
-    เรียกผ่าน · และเซสชันที่เปิดหลังแก้ **ไม่มี `CONNECT_TIMEOUT` เลยสักตัว** (ก่อนหน้านั้นมี 2 ตัว)
-    · ถ้าเครื่องไหนยังช้าหลังทำครบ ให้ดู log ตอนเปิดเซสชันว่าเหลือ server ไหน timeout อยู่
+- **เปิดเซสชันช้า — เครื่องออฟฟิศเหลือขั้นเดียว และเป็นขั้นที่เจ้าของต้องทำเอง (token)**
+  · **ให้ทำอะไร:** เจ้าของตั้ง environment variable ของ Windows ชื่อ `GITHUB_PERSONAL_ACCESS_TOKEN`
+    (สิทธิ์ Contents + Pull requests read/write · token ตัวเดียวกับเครื่องบ้านใช้ได้ เพราะผูกกับบัญชี)
+    โดย **เจ้าของเป็นคนวางค่าเองผ่านหน้าต่าง Windows — ห้าม Claude แตะค่า token และห้ามพิมพ์ลง Terminal** ·
+    แล้วปิดแอปทั้งตัวเปิดใหม่ (ค่า environment อ่านตอน process เริ่ม) · ถ้าไม่อยากใช้ token ทางเลือกคือ
+    ปิด `github@claude-plugins-official` ใน `C:\Users\tairo\.claude\settings.json`
+  · **ที่มา:** 2026-10-13 เจ้าของบอกว่าเปิดเซสชัน "นานมาก" — เหตุคือ MCP server ที่ต่อไม่ติดแล้วรอหมดเวลา
+    (`desktop-commander` และ `github` ตัวละ 30 วินาที · `cloudflare` พ่วง 5 server ที่ 4 ตัวรอ OAuth
+    ที่ไม่เคยอนุมัติ) · เครื่องบ้านแก้ครบแล้ว และตรวจแล้วว่าไม่มี `CONNECT_TIMEOUT` เหลือ
+  · **หลักฐาน:** 2026-10-16 ตรวจที่เครื่องออฟฟิศ — ขั้น "ปิดสองปลั๊กอิน" **ไม่ต้องทำ**: `cloudflare` กับ
+    `desktop-commander` ไม่อยู่ใน `enabledPlugins` และโปรเจกต์นี้ไม่มี `mcpServers` เลย (ที่ grep เจอเป็น
+    ของอื่น — สิทธิ์ `npx cloudflared` และสถิติ `desktop-commander@inline` usageCount 0) · เหลือ `github`
+    ที่ **พัง ไม่ใช่ช้า**: `.mcp.json` ของปลั๊กอินส่ง `Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}` ไปที่
+    api.githubcopilot.com แต่ตัวแปรไม่ได้ตั้งทั้ง User และ Machine scope ⇒ ได้ header เปล่า ตรงกับ error
+    ตอนเปิดเซสชันนี้พอดี (400 `Authorization header is badly formatted`)
 ## เปิดอยู่
 
 - **ปิด/เปิด เช็กอินบนเว็บ — ขึ้นเว็บแล้ว 2026-10-14 สวิตช์ยังเปิด ยังไม่มีอะไรเปลี่ยน**
