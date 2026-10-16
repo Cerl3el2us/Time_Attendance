@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 130;
+const APP_BUILD = 131;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -3228,9 +3228,24 @@ function earlyLateRateFor(role, key, S) {
   return v;
 }
 
+// 2026-10-16: the Early Morning tier thresholds, read so that a deliberate 0 survives. Twelve
+// sites across this file read them with a hardcoded fallback -- badges, report
+// counts, the dashboard, the submission gate -- while computePayroll and server.js both read the
+// stored number raw. Setting a threshold to 0, which is how the owner closes a tier so nobody
+// qualifies, therefore left every screen still counting at the old default while the payslip paid
+// at 0, and the request form offered a tier the server then refused with a 400. Proven before the
+// fix: with the threshold set to 0 in the browser's memory alone, earlyMorningTierAllowed('06:00',
+// 2) answered true on this side and false in server.js's own copy run against the same input.
+// The default is kept for an ABSENT key, where the server would refuse everything instead -- both
+// engines write 450/390 into settings when they create it, so that case is theoretical, and
+// matching it would mean every badge vanishing on a settings file nobody has.
+// (project trap: `setting || default` silently discards a legitimate 0.)
+function earlyThresholdMinsOf(a, tier) {
+  const v = tier === 2 ? (a || {}).earlyThreshold2Min : (a || {}).earlyThreshold1Min;
+  return v != null ? v : (tier === 2 ? 390 : 450);
+}
 function earlyMorningThresholdMins(tier) {
-  const S = APP_SETTINGS.allowances;
-  return tier === 2 ? (S.earlyThreshold2Min || 390) : (S.earlyThreshold1Min || 450);
+  return earlyThresholdMinsOf(APP_SETTINGS.allowances, tier);
 }
 // 2026-10-13: `role` picks whose rate to report. It defaults to effectiveRole() because every
 // existing caller is a self-service screen; a screen showing someone else must pass that person's
@@ -11175,9 +11190,9 @@ function renderAttendanceTable() {
     if (canEarlyLateTarget && row.checkIn && row.status !== 'company-trip') {
       const [h, m] = row.checkIn.split(':').map(Number);
       const mins = h * 60 + m;
-      if (mins <= (_ATallowances.earlyThreshold1Min || 450) && isDeviceScanSource(row.checkInSource)
+      if (mins <= earlyThresholdMinsOf(_ATallowances, 1) && isDeviceScanSource(row.checkInSource)
           && (!isRestAttendanceDay(row) || hasHolidayWorkClaimOnDate(row.date, targetUserId, false))) {
-        const bonus = mins <= (_ATallowances.earlyThreshold2Min || 390)
+        const bonus = mins <= earlyThresholdMinsOf(_ATallowances, 2)
           ? `฿${_elRateTarget('earlyMorning2')}`
           : `฿${_elRateTarget('earlyMorning1')}`;
         // 2026-10-02 (owner): the 🌅 kept its normal look while the money behind it was being
@@ -11460,7 +11475,7 @@ function buildAttendancePrintView({ targetUser, days, start, end, workDays, late
     if (canEarlyLateTarget && row.checkIn && row.status !== 'company-trip' && isDeviceScanSource(row.checkInSource)
         && (!isRestAttendanceDay(row) || hasHolidayWorkClaimOnDate(row.date, targetUser.id, false))) {
       const [h, m] = row.checkIn.split(':').map(Number);
-      if (h * 60 + m <= (_pA.earlyThreshold1Min || 450)) badges.push('🌅');
+      if (h * 60 + m <= earlyThresholdMinsOf(_pA, 1)) badges.push('🌅');
     }
     if (canEarlyLateTarget && deviceScanQualifiesForLateNight(row, new Set(DATA_LEAVES.filter(l =>
       l.userId === targetUser.id && l.type === 'holiday-work' && l.status === 'approved'
@@ -11670,7 +11685,7 @@ function renderDashboard() {
     if (deviceScanQualifiesForEarlyMorning(d, _dashHwDates)) {
       const [h, m] = d.checkIn.split(':').map(Number);
       const mins = h * 60 + m;
-      earlyCount += mins <= (_S.earlyThreshold2Min||390) ? 2 : mins <= (_S.earlyThreshold1Min||450) ? 1 : 0;
+      earlyCount += mins <= earlyThresholdMinsOf(_S, 2) ? 2 : mins <= earlyThresholdMinsOf(_S, 1) ? 1 : 0;
     }
     if (d.lateOut && deviceScanQualifiesForLateNight(d, _dashHwDates)) {
       lateNightCount += lateNightPoints(d.lateOut, _ln2Thr);
@@ -12126,8 +12141,8 @@ function showDashPeriodDetail(kind) {
       </tr>`);
   } else if (kind === 'early') {
     headers = TH(L('Date', 'วันที่'), c) + THC(L('Check In', 'เวลาเข้า'), c) + THC(L('Count', 'จำนวนครั้ง'), c);
-    const t1 = _S.earlyThreshold1Min || 450;
-    const t2 = _S.earlyThreshold2Min || 390;
+    const t1 = earlyThresholdMinsOf(_S, 1);
+    const t2 = earlyThresholdMinsOf(_S, 2);
     let tot = 0;
     rows = days.filter(d => {
       const hwDates = new Set(DATA_LEAVES.filter(l =>
@@ -13930,8 +13945,8 @@ function computeReportPeriodStats(u, start, end, periodIndex) {
   if (canEarlyLateRow) days.filter(d => deviceScanQualifiesForEarlyMorning(d, _rptHwDates)).forEach(d => {
     const [h, m] = d.checkIn.split(':').map(Number);
     const mins = h * 60 + m;
-    if (mins <= (_SA.earlyThreshold2Min || 390)) earlyCount += 2;
-    else if (mins <= (_SA.earlyThreshold1Min || 450)) earlyCount += 1;
+    if (mins <= earlyThresholdMinsOf(_SA, 2)) earlyCount += 2;
+    else if (mins <= earlyThresholdMinsOf(_SA, 1)) earlyCount += 1;
   });
 
   const _ln2 = lateNightThresholdHourOf(_SA, 2);
@@ -14416,8 +14431,8 @@ function buildReportDetailTables(u, days, startStr, endStr) {
   }
 
   const _rdA = APP_SETTINGS.allowances || {};
-  const earlyThr1 = _rdA.earlyThreshold1Min || 450;
-  const earlyThr2 = _rdA.earlyThreshold2Min || 390;
+  const earlyThr1 = earlyThresholdMinsOf(_rdA, 1);
+  const earlyThr2 = earlyThresholdMinsOf(_rdA, 2);
   const lnThr2 = lateNightThresholdHourOf(_rdA, 2);
   const earlyDays=canEarlyLateRpt?days.filter(d=>{const hwDates=new Set(DATA_LEAVES.filter(l=>l.userId===u.id&&l.type==='holiday-work'&&l.status==='approved').map(l=>l.dateFrom));if(!deviceScanQualifiesForEarlyMorning(d,hwDates))return false;const[h,m]=d.checkIn.split(':').map(Number);return h*60+m<=earlyThr1;}):[];
   if (earlyDays.length>0) {
@@ -14482,7 +14497,7 @@ function showReportDetail(userId) {
   const annual    = days.filter(d => d.status==='leave-annual').length;
   const sick      = days.filter(d => d.status==='leave-sick').length;
   const upcountry   = canUpcountryRpt ? days.filter(d => d.upcountry && d.status !== 'company-trip').length : 0;
-  const _rdSA=APP_SETTINGS.allowances; let earlyCount=0; if (canEarlyLateRpt) { const hwDates=new Set(DATA_LEAVES.filter(l=>l.userId===u.id&&l.type==='holiday-work'&&l.status==='approved').map(l=>l.dateFrom)); days.filter(d=>deviceScanQualifiesForEarlyMorning(d,hwDates)).forEach(d=>{const[h,m]=d.checkIn.split(':').map(Number);const mins=h*60+m;const p=mins<=(_rdSA.earlyThreshold2Min||390)?2:mins<=(_rdSA.earlyThreshold1Min||450)?1:0;earlyCount+=p;}); }
+  const _rdSA=APP_SETTINGS.allowances; let earlyCount=0; if (canEarlyLateRpt) { const hwDates=new Set(DATA_LEAVES.filter(l=>l.userId===u.id&&l.type==='holiday-work'&&l.status==='approved').map(l=>l.dateFrom)); days.filter(d=>deviceScanQualifiesForEarlyMorning(d,hwDates)).forEach(d=>{const[h,m]=d.checkIn.split(':').map(Number);const mins=h*60+m;const p=mins<=earlyThresholdMinsOf(_rdSA, 2)?2:mins<=earlyThresholdMinsOf(_rdSA, 1)?1:0;earlyCount+=p;}); }
   // 2026-09-24 (Opus review): the one site the lateNightThresholdHourOf() migration missed. With
   // `||` a configured 00:00 fell through to 20:00, so this detail modal counted ×2 Late Night from
   // 20:00 while the Reports table beside it (already migrated) counted from midnight -- two
