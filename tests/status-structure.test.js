@@ -448,9 +448,9 @@ function closedTargets(text) {
     const line = raw.trimEnd();
     if (/^## /.test(line)) { section = line; inIndex = line === CLOSED_INDEX_HEADING; }
     if (inIndex) continue;
-    if (/^#{2,4} /.test(line)) { targets.push({ title: line, section }); continue; }
+    if (/^#{2,4} /.test(line)) { targets.push({ title: line, section, isHeading: true }); continue; }
     const m = line.match(CLOSED_BULLET);
-    if (m) targets.push({ title: m[2].trim(), section });
+    if (m) targets.push({ title: m[2].trim(), section, isHeading: false });
   }
   return targets;
 }
@@ -495,6 +495,28 @@ function validateClosedCoverage(indexBlocks, closedText) {
     const named = targets.some(t => t.section === h && titles.some(x => t.title.includes(x)));
     if (!named) {
       problems.push(`no line in the closed index points at docs/STATUS_CLOSED.md heading: ${snip(h)}`);
+    }
+  }
+  // 2026-10-17 (owner asked how this should work; measured first, then decided): per SECTION was
+  // not enough. A day with several closed topics stayed green when one of them lost its index
+  // line, because a sibling topic still covered the heading -- and that lost topic is then
+  // invisible from the index, which is the one failure the index exists to prevent. Checked per
+  // TOPIC as well now: every column-one `- **…**` bullet under a dated section must be named.
+  // Why a bullet is the right unit: the file is already written that way. All 11 bullets under
+  // 2026-10-09 are separate finished topics (settings.json, session_start.ps1 twice, the Check-in
+  // card, npm run status, npm run backup, the bump guard, the stale memory folder, launch.json,
+  // ...), and sub-points are indented `· ` continuation lines, never column-one bullets. So this
+  // writes down the convention the file follows rather than imposing a new one. Counted before
+  // changing it: 62 index lines for 57 bullets plus 5 `###` headings, so the index was already
+  // more complete than the topics -- this was never a "go fill in dozens of gaps" change.
+  // Headings stay valid targets (`###` sections exist under one day), so nothing that pointed at
+  // a heading has to be rewritten.
+  for (const t of targets) {
+    if (t.isHeading) continue;
+    if (!t.section) continue;             // above the first section there is no day to file it under
+    if (!titles.some(x => t.title.includes(x))) {
+      problems.push(`no line in the closed index points at this topic: ${snip(t.title)}`
+        + ` (under ${snip(t.section)})`);
     }
   }
   return problems;
@@ -1055,16 +1077,23 @@ test('fixture: validateClosedCoverage accepts a closed file whose every "## " se
   const closed = '# title\n\n## ปิดไปแล้ว 2026-10-12 — อย่าเสนอซ้ำ\n### ✅ a detail heading\n- x\n';
   expectClean(validateClosedCoverage(['- **2026-10-12** — ปิดไปแล้ว 2026-10-12 — อย่าเสนอซ้ำ'], closed));
 });
-test('fixture: validateClosedCoverage accepts a section named only through one of its bullets', () => {
-  // The companion of the widened title rule: a section whose topics are bullets is covered by
-  // naming a topic. Demanding the heading text as well would make the two rules contradict -- the
-  // index would have to carry a topic-free line next to every topic line to stay green.
+test('fixture: validateClosedCoverage wants EVERY topic of a section named, not just one', () => {
+  // 2026-10-17: this used to assert the opposite -- that naming one bullet covered its whole
+  // section. That is what let a day with several closed topics stay green while one of them had
+  // no index line at all and so could be proposed again. A section whose topics are bullets is
+  // now covered only when every one of those bullets is named.
   expectClean(validateClosedCoverage([
     '- **2026-10-12** — ไทล์สถิติ dashboard',
+    '- **2026-10-12** — `session_start.ps1` รอบสอง',
     '- **2026-10-11** — กฎ "ต้องมีพิกัด" — ตรวจแล้วผ่าน',
   ], CLOSED_SAMPLE));
+  // the second topic of 2026-10-12 left out: red, and the message names the topic that is missing
+  expectRejected(validateClosedCoverage([
+    '- **2026-10-12** — ไทล์สถิติ dashboard',
+    '- **2026-10-11** — กฎ "ต้องมีพิกัด" — ตรวจแล้วผ่าน',
+  ], CLOSED_SAMPLE), /session_start\.ps1/);
   // one of the two sections named, the other not, is still a red
-  expectRejected(validateClosedCoverage(['- **2026-10-12** — ไทล์สถิติ dashboard'], CLOSED_SAMPLE), /กฎพิกัด/);
+  expectRejected(validateClosedCoverage(['- **2026-10-12** — ไทล์สถิติ dashboard'], CLOSED_SAMPLE), /กฎพิกัด|session_start/);
   // a bullet that sits under NO "## " heading covers nothing
   expectRejected(validateClosedCoverage(['- **2026-10-12** — บูลเล็ตที่อยู่เหนือหัวข้อทุกอัน'], CLOSED_SAMPLE), /ปิดไปแล้ว 2026-10-12/);
   // and naming a topic of one section does not cover a different section
