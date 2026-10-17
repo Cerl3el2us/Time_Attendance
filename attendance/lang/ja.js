@@ -267,6 +267,9 @@ window.LANG_JA = {
   "Clear Old Attachments": "古い添付ファイルを削除",
   "Click 'Edit' on the newly added row and fill in what's still missing: salary, position, personal details, bank account, etc.": "追加した行の「編集」をクリックし、給与・役職・個人情報・口座番号などを入力してください。",
   "Click to open Google Maps": "クリックしてGoogle Mapsを開く",
+  // 2026-10-17 (owner): the GPS link shows its coordinate instead of a street address — the
+  // reverse-geocode lookup is gone, so this word labels the numbers as what they are.
+  "coords": "座標",
   "Click to revoke": "クリックして取り消し",
   "Runs automatically in January (and still in February if the server was off): each employee’s remaining annual leave for last year (up to max, expired carry-forward excluded) is carried into this year. If it has not run, use the button (any month, once per year). From 15 January, MD and Accounting get a daily notification (from 09:00) until it has run.": "毎年1月に自動で実行されます（サーバー停止時は2月にも実行）：各社員の前年の有給残日数（上限まで、失効した繰越分を除く）を今年に繰り越します。実行されていない場合はボタンを使用してください（何月でも可、年1回）。1月15日以降、実行されるまでMDと経理に毎日（9:00以降）通知が届きます。",
   "Click to view details": "クリックして詳細を表示",

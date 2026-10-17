@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 134;
+const APP_BUILD = 136;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -7264,7 +7264,6 @@ let payslipPeriodIndex = 0;
 let reportsViewMode = 'monthly'; // 'monthly' | 'yearly' -- see switchReportsView()
 let selectedReportYear = null;
 let selectedAttUserId = null;
-const geoCache = {};
 let checkedIn = false;
 let checkInTime = null;
 let sidebarOpen = false;
@@ -10919,13 +10918,21 @@ function renderAttTodayCard() {
   }
 }
 
-function reverseGeocode(lat, lng, callback) {
-  const key = `${lat.toFixed(5)},${lng.toFixed(5)}`;
-  if (geoCache[key]) { callback(geoCache[key]); return; }
-  fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&accept-language=th`)
-    .then(r => r.json())
-    .then(data => { geoCache[key] = data.display_name || `${lat}, ${lng}`; callback(geoCache[key]); })
-    .catch(() => callback(`${lat.toFixed(6)}, ${lng.toFixed(6)}`));
+// 2026-10-17 (owner): the GPS link no longer turns its coordinate into a street address. It never
+// worked on the live site anyway -- Nominatim answered every /reverse call from this office's IP
+// with HTTP 429, and a 429 page carries no Access-Control-Allow-Origin header, so the browser
+// reported a CORS error and the real cause stayed hidden. The measurements are in
+// docs/superpowers/notes/2026-10-17-gps-reverse-geocode-429.md.
+//
+// Making it work was possible (remember the refusals, one queue at 1 req/sec, or a backend proxy
+// with a permanent cache) and was written before the owner asked the prior question: what is the
+// address FOR. Nothing in the system reads it -- the geofence decides from the raw coordinate and
+// a distance, server-side, and the link beside the text already opens Google Maps at that exact
+// point, so the address was only ever a convenience label. The owner's answer on 2026-10-17 was
+// to drop it. Gone with it: every employee coordinate that used to leave the company on each
+// render. What is left is the coordinate, labelled as one so the numbers cannot read as a place.
+function gpsCoordsLabel(lat, lng) {
+  return `${L('coords', 'พิกัด')} ${lat.toFixed(6)}, ${lng.toFixed(6)}`;
 }
 
 function renderAttEmployeeSelector() {
@@ -11368,11 +11375,11 @@ function renderAttendanceTable() {
     const gpsInBtn  = (canSeeGPS && row.checkInSource  === 'web' && row.checkInGPS  && row.checkInGPS  !== 'ไม่ทราบตำแหน่ง')
       ? `<a href="#" target="_blank" rel="noopener" class="gps-map-link" data-gps="${safeGpsIn}" data-gps-acc="${gpsAccIn === null ? '' : gpsAccIn}" title="${safeGpsIn}${gpsAccuracyText(gpsAccIn)}"
            style="display:block;font-size:11px;color:#2563eb;text-decoration:none;margin-top:3px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-           📍 <span>${L('Loading...', 'กำลังโหลด...')}</span></a>` : '';
+           📍 <span>${safeGpsIn}</span></a>` : '';
     const gpsOutBtn = (canSeeGPS && row.checkOutSource === 'web' && row.checkOutGPS && row.checkOutGPS !== 'ไม่ทราบตำแหน่ง')
       ? `<a href="#" target="_blank" rel="noopener" class="gps-map-link" data-gps="${safeGpsOut}" data-gps-acc="${gpsAccOut === null ? '' : gpsAccOut}" title="${safeGpsOut}${gpsAccuracyText(gpsAccOut)}"
            style="display:block;font-size:11px;color:#2563eb;text-decoration:none;margin-top:3px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-           📍 <span>${L('Loading...', 'กำลังโหลด...')}</span></a>` : '';
+           📍 <span>${safeGpsOut}</span></a>` : '';
 
     tr.innerHTML = `
       <td class="date-cell">
@@ -11445,7 +11452,7 @@ function renderAttendanceTable() {
       mobileCards.appendChild(card);
     }
   });
-  geocodeTableGpsLinks();
+  labelTableGpsLinks();
 
   buildAttendancePrintView({
     targetUser, days, start, end,
@@ -11591,49 +11598,27 @@ function buildAttendancePrintView({ targetUser, days, start, end, workDays, late
     <div class="att-print-footer">Tozai Boeki Kaisha (Thailand) Ltd. — ${L('Time Attendance System', 'ระบบ Time Attendance')}</div>`;
 }
 
-function geocodeTableGpsLinks() {
-  // 2026-08-17 (review fix): the desktop table's <tr> and the mobile card for the same day are
-  // both always rendered (only CSS display:none hides whichever one isn't active), so every GPS
-  // coordinate now has 2 links, not 1. This used to schedule one reverseGeocode() call PER LINK
-  // with a 1.1s stagger keyed on element index -- since the duplicate link never contributed a
-  // new index to "seen", its own call always landed at delay=0, defeating the stagger and firing
-  // simultaneous requests against Nominatim's 1 req/sec policy. Group by coordinate first and
-  // geocode each unique coordinate exactly once, fanning the result out to every link that shares
-  // it, so the stagger is keyed on unique coordinates rather than link count.
-  const groups = new Map();
+// Points every GPS button in the table it has just rendered at Google Maps, and labels it with
+// its own coordinate. Synchronous since 2026-10-17: with the address lookup gone there is
+// nothing to wait for, so no button ever shows a placeholder.
+//
+// 2026-08-17 (review fix): the desktop <tr> and the mobile card for the same day are both always
+// rendered (only CSS display:none hides whichever one is not active), so every coordinate owns 2
+// links, not 1. Each link is labelled from its OWN parsed lat/lng -- two links a few metres apart
+// must not end up printing one another's numbers.
+function labelTableGpsLinks() {
   document.querySelectorAll('a.gps-map-link[data-gps]').forEach(el => {
-    const gpsStr = el.dataset.gps;
-    const m = gpsStr.match(/(-?\d+\.?\d*),\s*(-?\d+\.?\d*)/);
+    const m = el.dataset.gps.match(/(-?\d+\.?\d*),\s*(-?\d+\.?\d*)/);
     if (!m) return;
     const lat = parseFloat(m[1]), lng = parseFloat(m[2]);
-    el.href = `https://www.google.com/maps?q=${lat},${lng}`;
     // 2026-09-25 (geofence T6): the accuracy stamped on the button by renderAttendanceTable() via
-    // data-gps-acc -- carried through so the reverse-geocode below doesn't overwrite it away.
-    // '' means "no stored accuracy" (old record), not 0.
+    // data-gps-acc. '' means "no stored accuracy" (an old record), not 0.
     const acc = el.dataset.gpsAcc === '' || el.dataset.gpsAcc === undefined ? null : Number(el.dataset.gpsAcc);
-    const key = `${lat.toFixed(4)},${lng.toFixed(4)}`;
-    if (!groups.has(key)) groups.set(key, { lat, lng, els: [] });
-    // 2026-08-17 (review fix): keep each element's OWN parsed lat/lng alongside it -- the group's
-    // lat/lng (whichever element was encountered first) is only used to pick where to geocode
-    // FROM, not what to print in each element's own tooltip. Two elements can share a geocode
-    // group (rounded to 4 decimals, ~11m) while still differing at the 6-decimal display
-    // precision below.
-    groups.get(key).els.push({ el, lat, lng, acc });
-  });
-  let i = 0;
-  groups.forEach(({ lat, lng, els }) => {
-    setTimeout(() => {
-      reverseGeocode(lat, lng, name => {
-        const short = name.split(',').slice(0, 2).join(',').trim();
-        els.forEach(({ el, lat: ownLat, lng: ownLng, acc }) => {
-          const title = name + '\n(' + ownLat.toFixed(6) + ', ' + ownLng.toFixed(6) + ')' + gpsAccuracyText(acc) + '\n' + L('Click to open Google Maps', 'คลิกเพื่อเปิด Google Maps');
-          const span = el.querySelector('span');
-          if (span) span.textContent = short;
-          el.title = title;
-        });
-      });
-    }, i * 1100);
-    i++;
+    const label = gpsCoordsLabel(lat, lng);
+    el.href = `https://www.google.com/maps?q=${lat},${lng}`;
+    const span = el.querySelector('span');
+    if (span) span.textContent = label;
+    el.title = label + gpsAccuracyText(acc) + '\n' + L('Click to open Google Maps', 'คลิกเพื่อเปิด Google Maps');
   });
 }
 
@@ -21742,21 +21727,18 @@ function showAttendanceDetail(date) {
     if (!m) { el.style.color = ''; el.textContent = prefix + gpsStr; return; }
     const lat = parseFloat(m[1]), lng = parseFloat(m[2]);
     const mapsUrl = `https://www.google.com/maps?q=${lat},${lng}`;
-    const uid = elId + '-name';
     el.style.color = '';
+    // 2026-10-17: this used to print "Loading..." and then wait on a reverse-geocode that was
+    // always refused, so the popup sat on that word. There is nothing to wait for now -- the
+    // coordinate is already in hand and the link opens Google Maps at it.
+    // 2026-09-25 (geofence T6): the stored accuracy goes in the tooltip beside the coordinate when
+    // the event has one -- gpsAccuracyText() returns '' for an old record with none.
+    const label = gpsCoordsLabel(lat, lng);
     el.innerHTML = `${prefix}<a href="${mapsUrl}" target="_blank" rel="noopener"
+      title="${escapeHtml(label + gpsAccuracyText(acc) + '\n' + L('Click to open Google Maps', 'คลิกเพื่อเปิด Google Maps'))}"
       style="color:#2563eb;text-decoration:none;font-weight:500">
-      📍 <span id="${uid}">${L('Loading...', 'กำลังโหลด...')}</span>
+      📍 <span>${escapeHtml(label)}</span>
     </a>`;
-    reverseGeocode(lat, lng, name => {
-      const span = document.getElementById(uid);
-      if (span) {
-        span.textContent = name.split(',').slice(0, 3).join(',').trim();
-        // 2026-09-25 (geofence T6): the stored accuracy, alongside the coordinates, when the
-        // event has one -- gpsAccuracyText() returns '' for an old record with none.
-        span.parentElement.title = name + '\n(' + lat.toFixed(6) + ', ' + lng.toFixed(6) + ')' + gpsAccuracyText(acc);
-      }
-    });
   }
 
   // GPS only ever applies to web check-ins/outs — device scans never carry a location,

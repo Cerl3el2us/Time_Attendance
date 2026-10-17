@@ -122,6 +122,10 @@ const canAddEmp = (role === 'md' || role === 'accounting' || role === 'superadmi
 | `login` | ยิงก่อนมี session จึงผ่าน gate ไม่ได้ และตอนนั้นยังไม่มีการสวมใคร |
 | `getVapidPublicKey` · `loadGpsCartoStyle` · `reverseGeocode` | GET ล้วน ไม่เขียนอะไร |
 
+> **2026-10-17:** `reverseGeocode` ถูกลบทั้งฟังก์ชัน (เจ้าของสั่งเลิกแปลงพิกัดเป็นที่อยู่) หมุดของมันใน
+> `tests/superadmin-reach.test.js` จึงถูกถอดตามไปด้วย · เหลือ `loadGpsCartoStyle` เป็น fetch ตัวเดียว
+> ใน `app.js` ที่ออกนอกองค์กร
+
 ---
 
 ## สิ่งที่จะทำ
