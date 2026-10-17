@@ -81,10 +81,17 @@ const MAX_BYTES = 20480;
 
 const SEC_HANDOFF = 'ส่งต่อรอบหน้า';
 const SEC_OPEN = 'เปิดอยู่';
+// 2026-10-17: this section lives in docs/STATUS_CLOSED.md now, NOT in STATUS.md. It grew by one
+// line per closed topic and never shrank -- 10,263 of STATUS.md's 20,381 bytes, half the file,
+// leaving 99 bytes of the 20,480 ceiling while only 124 of the 150 lines were used (Thai costs
+// 2.14 bytes per character, so the byte ceiling stopped measuring what it was set to measure).
+// A list that grows without bound does not belong in the file with a fixed "read in one pass"
+// budget, and it never answered "what is open" anyway. The ceiling itself was left alone.
 const SEC_CLOSED = 'ปิดแล้ว (สารบัญ)';
 
 const HANDOFF_LABELS = ['**ให้ทำอะไร:**', '**ที่มา:**', '**หลักฐาน:**'];
-const MANAGED_SECTIONS = [SEC_HANDOFF, SEC_OPEN, SEC_CLOSED];
+// The sections STATUS.md itself must hold, exactly once each and nothing else.
+const MANAGED_SECTIONS = [SEC_HANDOFF, SEC_OPEN];
 
 // The standing explanation of the four required fields: the ONLY blockquote lines `## ส่งต่อรอบหน้า`
 // may contain. Pinned here byte for byte because blockquote lines are dropped from item blocks, so
@@ -152,8 +159,9 @@ function topHeadings(text) { return splitLines(text).filter(l => /^## /.test(l))
 
 // `sectionLines` takes the FIRST match, so a second `## เปิดอยู่` hides every item under it: the
 // parser never sees them, and no assertion ever runs on them. A duplicated heading is what a bad
-// git merge of this file produces, and two machines edit it. A fourth section is rejected too:
-// AGENTS.md states as a fact that this file holds exactly these three.
+// git merge of this file produces, and two machines edit it. A third section is rejected too:
+// AGENTS.md states as a fact that this file holds exactly these two (it held three until
+// 2026-10-17, when the closed index moved to docs/STATUS_CLOSED.md).
 function validateHeadings(text) {
   const problems = [];
   const headings = topHeadings(text);
@@ -163,7 +171,7 @@ function validateHeadings(text) {
   }
   for (const h of headings) {
     if (!MANAGED_SECTIONS.some(t => h === `## ${t}`)) {
-      problems.push(`unexpected "## " heading (this file has exactly three): ${snip(h)}`);
+      problems.push(`unexpected "## " heading (this file has exactly two): ${snip(h)}`);
     }
   }
   return problems;
@@ -426,12 +434,20 @@ const CLOSED_BULLET = /^- +(\*\*|__)(.+?)\1/;
 // Everything an index line may point at: `{ title, section }` for every heading and every
 // column-one bold bullet, where `section` is the `## ` heading it sits under (null above the first
 // one, which no date can match -- a topic outside every section cannot be filed under a day).
+// 2026-10-17: the index now sits in this same file, so it has to be skipped when collecting what
+// an index line may point at -- otherwise the index would be a target of itself. Its lines read
+// `- **2026-10-17** — <title>`, which CLOSED_BULLET matches with the DATE as the bold title, so
+// without this the file would also grow a target per index line whose title is a date.
+const CLOSED_INDEX_HEADING = `## ${SEC_CLOSED}`;
+
 function closedTargets(text) {
   const targets = [];
   let section = null;
+  let inIndex = false;
   for (const raw of splitLines(text)) {
     const line = raw.trimEnd();
-    if (/^## /.test(line)) section = line;
+    if (/^## /.test(line)) { section = line; inIndex = line === CLOSED_INDEX_HEADING; }
+    if (inIndex) continue;
     if (/^#{2,4} /.test(line)) { targets.push({ title: line, section }); continue; }
     const m = line.match(CLOSED_BULLET);
     if (m) targets.push({ title: m[2].trim(), section });
@@ -475,6 +491,7 @@ function validateClosedCoverage(indexBlocks, closedText) {
   const targets = closedTargets(closedText);
   const problems = [];
   for (const h of topHeadings(closedText)) {
+    if (h === CLOSED_INDEX_HEADING) continue; // the index does not index itself (2026-10-17)
     const named = targets.some(t => t.section === h && titles.some(x => t.title.includes(x)));
     if (!named) {
       problems.push(`no line in the closed index points at docs/STATUS_CLOSED.md heading: ${snip(h)}`);
@@ -564,24 +581,27 @@ test('fixture: sectionLines needs the heading at column one to start AND to end 
 });
 
 // --- validateHeadings -------------------------------------------------------------------------
-const THREE_HEADINGS = `## ${SEC_HANDOFF}\n## ${SEC_OPEN}\n## ${SEC_CLOSED}\n`;
-test('fixture: validateHeadings accepts the three managed headings, once each', () => {
-  expectClean(validateHeadings('# t\n\n' + THREE_HEADINGS));
+const TWO_HEADINGS = `## ${SEC_HANDOFF}\n## ${SEC_OPEN}\n`;
+test('fixture: validateHeadings accepts the two managed headings, once each', () => {
+  expectClean(validateHeadings('# t\n\n' + TWO_HEADINGS));
+});
+test('fixture: validateHeadings rejects the closed index inside STATUS.md (moved out 2026-10-17)', () => {
+  expectRejected(validateHeadings('# t\n' + TWO_HEADINGS + `## ${SEC_CLOSED}\n`), /unexpected "## " heading/);
 });
 test('fixture: validateHeadings rejects a duplicated heading (the shape a bad merge produces)', () => {
-  expectRejected(validateHeadings('# t\n' + THREE_HEADINGS + `## ${SEC_OPEN}\n`), /occurs 2 times/);
+  expectRejected(validateHeadings('# t\n' + TWO_HEADINGS + `## ${SEC_OPEN}\n`), /occurs 2 times/);
   // Why it matters: sectionLines takes the FIRST match, so everything under the second heading is
   // never parsed and never validated -- `- **b**` below has no check id and nothing notices.
-  const dup = `## ${SEC_OPEN}\n- **a**\n  · ตรวจ: id-a\n## ${SEC_CLOSED}\n- x\n## ${SEC_OPEN}\n- **b**\n`;
+  const dup = `## ${SEC_OPEN}\n- **a**\n  · ตรวจ: id-a\n## ${SEC_HANDOFF}\n- x\n## ${SEC_OPEN}\n- **b**\n`;
   const seen = sectionLines(dup, SEC_OPEN);
   if (JSON.stringify(seen) !== JSON.stringify(['- **a**', '  · ตรวจ: id-a'])) {
     throw new Error(`expected only the first section's lines, got ${JSON.stringify(seen)}`);
   }
   if (seen.includes('- **b**')) throw new Error('the duplicate section was parsed after all');
 });
-test('fixture: validateHeadings rejects a missing managed heading and a fourth section', () => {
-  expectRejected(validateHeadings(`## ${SEC_HANDOFF}\n## ${SEC_OPEN}\n`), /occurs 0 times/);
-  expectRejected(validateHeadings('# t\n' + THREE_HEADINGS + '## บันทึกเพิ่มเติม\n'), /unexpected "## " heading/);
+test('fixture: validateHeadings rejects a missing managed heading and a third section', () => {
+  expectRejected(validateHeadings(`## ${SEC_HANDOFF}\n`), /occurs 0 times/);
+  expectRejected(validateHeadings('# t\n' + TWO_HEADINGS + '## บันทึกเพิ่มเติม\n'), /unexpected "## " heading/);
 });
 
 // --- itemsOf ----------------------------------------------------------------------------------
@@ -914,7 +934,7 @@ function documentProblems(text) {
   }
   return problems;
 }
-const docOf = (handoff, open) => `## ${SEC_HANDOFF}\n\n${handoff}\n\n## ${SEC_OPEN}\n\n${open}\n\n## ${SEC_CLOSED}\n`;
+const docOf = (handoff, open) => `## ${SEC_HANDOFF}\n\n${handoff}\n\n## ${SEC_OPEN}\n\n${open}\n`;
 const REFUSED_BY_PARSER = [
   ['text after the bold subject', docOf(GOOD_HANDOFF.replace('**ทำแผนที่ 2 ต่อ**', '**ทำแผนที่ 2 ต่อ** (2026-10-13)'), GOOD_OPEN), /after the bold subject/],
   ['text before the first label', docOf(GOOD_HANDOFF.replace('  · **ให้ทำอะไร:**', '  · อธิบายก่อน\n  · **ให้ทำอะไร:**'), GOOD_OPEN), /before the item's first field label/],
@@ -1071,6 +1091,19 @@ test('fixture: validateClosedCoverage rejects a "## " section that no index line
 // ---------------------------------------------------------------------------------------------
 
 function realStatus() { return fs.readFileSync(STATUS_PATH, 'utf8'); }
+function realClosed() { return fs.readFileSync(CLOSED_PATH, 'utf8'); }
+
+// The closed index, read from docs/STATUS_CLOSED.md since 2026-10-17 (it was a section of
+// STATUS.md until then). Same item parser as the STATUS.md sections, so a malformed index line is
+// still a red rather than a line nothing inspects.
+function closedIndexItems() {
+  const text = realClosed();
+  const lines = sectionLines(text, SEC_CLOSED);
+  if (lines === null) throw new Error(`missing section in docs/STATUS_CLOSED.md: ## ${SEC_CLOSED}`);
+  const r = itemsOf(lines, sectionFirstLine(text, SEC_CLOSED));
+  expectClean(r.problems.map(p => `docs/STATUS_CLOSED.md ## ${SEC_CLOSED}: ${p}`));
+  return r.blocks;
+}
 
 // Managed-section items for the real file; throws if the section's lines have an unrecognised shape.
 // Problems name their section and their real file line, so a red can be acted on without counting.
@@ -1088,18 +1121,18 @@ test('STATUS.md stays small enough to read in one pass', () => {
   expectClean(checkSize(realStatus()));
 });
 
-test('the three required sections are present', () => {
+test('the two required sections are present', () => {
   const text = realStatus();
   for (const t of MANAGED_SECTIONS) {
     if (sectionLines(text, t) === null) throw new Error(`missing section: ## ${t}`);
   }
 });
 
-test('each managed heading occurs exactly once and there is no fourth "## " section', () => {
+test('each managed heading occurs exactly once and there is no third "## " section', () => {
   expectClean(validateHeadings(realStatus()));
 });
 
-test('every line in the three sections is a valid item or a continuation of one', () => {
+test('every line in the two sections is a valid item or a continuation of one', () => {
   const text = realStatus();
   const problems = [];
   for (const t of MANAGED_SECTIONS) {
@@ -1135,17 +1168,17 @@ test('the handoff section holds the standing rubric and no other "> " prose', ()
 });
 
 test('every closed-index line names a real heading or bullet title and sits under its date', () => {
-  const index = realItems(SEC_CLOSED);
+  const index = closedIndexItems();
   if (index.length === 0) throw new Error('the closed index is empty -- "do not propose this again" has no teeth');
-  const targets = closedTargets(fs.readFileSync(CLOSED_PATH, 'utf8'));
+  const targets = closedTargets(realClosed());
   if (targets.length === 0) throw new Error('docs/STATUS_CLOSED.md has no heading and no bullet title -- the parser or the file is wrong');
   for (const block of index) expectClean(validateIndexItem(block, targets));
 });
 
 test('every "## " section of docs/STATUS_CLOSED.md is named by a closed-index line', () => {
-  const closed = fs.readFileSync(CLOSED_PATH, 'utf8');
+  const closed = realClosed();
   if (topHeadings(closed).length === 0) throw new Error('docs/STATUS_CLOSED.md has no "## " section -- the parser or the file is wrong');
-  expectClean(validateClosedCoverage(realItems(SEC_CLOSED), closed));
+  expectClean(validateClosedCoverage(closedIndexItems(), closed));
 });
 
 console.log(`status-structure: ${passed} passed, ${failed} failed`);

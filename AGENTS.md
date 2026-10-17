@@ -26,8 +26,12 @@ SessionStart hook. `superpowers` and `playwright` are the two that actually matt
 **2. Read `STATUS.md` in this folder before saying anything about what is or is not pending.**
 It is the answer to "what is the other machine in the middle of?" — open work travels with the
 code, not in Claude's memory, and not in `MEMORY.md`. Never answer that you do not know. It holds
-three sections: `## ส่งต่อรอบหน้า` (items handed to the next session), `## เปิดอยู่` and
-`## ปิดแล้ว (สารบัญ)`; details of closed work are in `docs/STATUS_CLOSED.md`. Every entry records
+two sections: `## ส่งต่อรอบหน้า` (items handed to the next session) and `## เปิดอยู่`.
+**"Has this already been done?" is answered by `docs/STATUS_CLOSED.md`, not by `STATUS.md`** — both
+the index (`## ปิดแล้ว (สารบัญ)`, one line per finished topic) and the records live there. The index
+moved out of `STATUS.md` on 2026-10-17: it was half the file and grew by a line per closed topic,
+leaving 99 bytes of the 20,480-byte ceiling while only 124 of the 150 lines were used. Read that
+index before proposing anything. Every entry records
 when it was last checked against real code, because an entry you do not re-verify is how a
 finished job gets reopened.
 To re-verify, run `npm run backlog` (in Claude Code, `/backlog`) -- the one command to remember. It re-runs

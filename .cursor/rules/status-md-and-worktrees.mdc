@@ -27,10 +27,13 @@ The shape (the three sections, in this order):
 - `## เปิดอยู่` — work still open. An item is a column-one `- ` bullet and needs at least one of
   `· ตรวจ: <id>` (something a script or a person can check) or `· รอเจ้าของ: <what the owner must decide>`.
   At most one line of each kind per item.
-- `## ปิดแล้ว (สารบัญ)` — one line per finished topic, written `- **YYYY-MM-DD** — <title>`.
+Those are the only two `## ` sections `STATUS.md` may have. The closed index — `## ปิดแล้ว (สารบัญ)`,
+one line per finished topic, written `- **YYYY-MM-DD** — <title>` — moved to `docs/STATUS_CLOSED.md`
+on 2026-10-17, because it was half of `STATUS.md` and grew by a line every time a topic closed.
+Putting it back in `STATUS.md` is a red.
 
 Every non-blank line inside those sections is a column-one `- ` item, an indented continuation, or a `>`
-blockquote. The file has hard size limits (150 lines, 20 KB).
+blockquote. The file has hard size limits (150 lines, 20 KB) — unchanged by that move.
 
 **`tests/status-structure.test.js` is the authority, not this summary.** It enforces all of the above and
 more, and its error messages say what to fix. Run `npm run check` before you finish, and do not finish
@@ -48,7 +51,8 @@ while it is red. Never loosen the test to make a `STATUS.md` edit pass.
    the two. A brand-new section needs nothing extra: the index line from step 4 is what keeps it covered by
    the both-directions rule. **Never edit the content already in that file** — it was copied verbatim on
    purpose so that it works as evidence. Append only.
-4. Add the matching line to `## ปิดแล้ว (สารบัญ)`, written `- **YYYY-MM-DD** — <title>`. Its title must be
+4. Add the matching line to `## ปิดแล้ว (สารบัญ)` **in `docs/STATUS_CLOSED.md`** (above the `---`, not in
+   `STATUS.md`), written `- **YYYY-MM-DD** — <title>`. Its title must be
    copied exactly from the bold title (or heading) of the record you just appended, and its date must be the
    date of the `## ` heading that record sits under. Never backdate it to match an older heading — move the
    record under the right heading instead.
