@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 137;
+const APP_BUILD = 138;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -1578,7 +1578,7 @@ function applyLanguage() {
     applyDarkMode(document.documentElement.getAttribute('data-theme') === 'dark');
     initDatePickers();
     if (currentUser) { applyRolePermissions(); updateUserUI(); }
-    if (currentPage && currentUser) navigateTo(currentPage);
+    if (currentPage && currentUser) navigateTo(currentPage, { reRender: true });
     // Employee Profile modal is built from a JS template (L() baked in at render time, not
     // data-en attributes), so it doesn't self-heal like the rest of the static UI — rebuild it
     // in place if it's currently open, keeping whichever tab was active.
@@ -8817,7 +8817,16 @@ function closeSidebar() {
 }
 
 // ===== NAVIGATION =====
-function navigateTo(page) {
+// opts.reRender means "redraw the page the user is already on", not "the user opened this page".
+// 2026-10-17: applyLanguage() redraws the current page by calling navigateTo(currentPage), and the
+// page blocks below cannot tell that apart from an arrival -- so switching language threw away
+// whatever the user had set up on three pages: the employee an accountant/manager was looking at
+// (reported by the owner), the Approvals history tab, and which page of the audit log. Only the
+// resets are skipped; everything still re-renders, which is the whole point of the call.
+// The superadmin preview switches also redraw through navigateTo() and deliberately do NOT pass
+// this: changing who you are previewing SHOULD land you back on that person's own record.
+function navigateTo(page, opts) {
+  const isReRender = !!(opts && opts.reRender === true);
   const viewRole = effectiveRole();
   if (page === 'finalize' && viewRole !== 'accounting' && viewRole !== 'superadmin') {
     showToast(L('⛔ Finalize Payroll is for Accounting only', '⛔ Finalize Payroll สำหรับ Accounting เท่านั้น'), 'danger');
@@ -8915,7 +8924,7 @@ function navigateTo(page) {
     // themselves, not whichever other employee they last checked (MD is unaffected: MD has
     // no "own" record here and intentionally keeps browsing the same employee across visits).
     const _attRole = effectiveRole();
-    if ((_attRole === 'accounting' || _attRole === 'manager') && isEmployeeRecord(currentUser)) {
+    if (!isReRender && (_attRole === 'accounting' || _attRole === 'manager') && isEmployeeRecord(currentUser)) {
       selectedAttUserId = currentUser.id;
     }
     renderAttendanceTable();
@@ -8923,7 +8932,7 @@ function navigateTo(page) {
   if (page === 'myattendance') { clearInterval(myAttLiveTimer); renderMyAttendance(); }
   if (page === 'leave')        renderLeaveHistory();
   if (page === 'my-requests')  renderMyRequests();
-  if (page === 'approval')     { resetApprovalViewOnNavigate(); renderApprovals(); }
+  if (page === 'approval')     { if (!isReRender) resetApprovalViewOnNavigate(); renderApprovals(); }
   if (page === 'payslip')      { renderPayslipEmployeeList(); populatePayslipPeriodDropdown(); renderPayslip(); }
   if (page === 'finalize')     renderFinalize();
   if (page === 'dashboard')    { renderDashboard(); fetchExchangeRate(); }
@@ -8942,7 +8951,7 @@ function navigateTo(page) {
   if (page === 'archive')          renderArchivePage();
   if (page === 'tawi50')           { populateTawi50YearDropdown(); render50Tawi(); }
   if (page === 'payroll-history')  renderPayrollHistory();
-  if (page === 'audit-log')        { _auditPage = 0; renderAuditLog(); }
+  if (page === 'audit-log')        { if (!isReRender) _auditPage = 0; renderAuditLog(); }
   if (page === 'faq')              renderFAQPage();
   // Several pages above (holidays' Company Trip range, settings' digest time, payslip, etc.)
   // build fresh date/time inputs on every render — the initial DOMContentLoaded pass only ever
@@ -11034,9 +11043,14 @@ function reverseGeocode(lat, lng, callback) {
   const coords = `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
   const known = geoKnown(key);
   if (known) { callback(known.n || coords, !!known.n); return; }
-  if (Date.now() < geoPausedUntil) { callback(coords, false); return; }
+  // Joining an existing request comes BEFORE the pause check, not after. A request already on the
+  // wire is going to answer whatever the pause says, and a caller turned away here would never be
+  // told: settleGeo only resolves the callbacks collected before the pause, which by then belong
+  // to a render that has been replaced. The link would sit on coordinates for a place whose
+  // address is already in geoStore, until some later render happened to redraw it.
   const waiting = geoPending.get(key);
   if (waiting) { waiting.push(callback); return; }
+  if (Date.now() < geoPausedUntil) { callback(coords, false); return; }
   geoPending.set(key, [callback]);
   geoQueue.push({ key, lat, lng, coords });
   runGeoQueue();
@@ -21917,14 +21931,20 @@ function showAttendanceDetail(date) {
     if (!m) { el.style.color = ''; el.textContent = prefix + gpsStr; return; }
     const lat = parseFloat(m[1]), lng = parseFloat(m[2]);
     const mapsUrl = `https://www.google.com/maps?q=${lat},${lng}`;
-    const uid = elId + '-name';
     el.style.color = '';
     el.innerHTML = `${prefix}<a href="${mapsUrl}" target="_blank" rel="noopener"
       style="color:#2563eb;text-decoration:none;font-weight:500">
-      📍 <span id="${uid}">${L('Loading...', 'กำลังโหลด...')}</span>
+      📍 <span>${L('Loading...', 'กำลังโหลด...')}</span>
     </a>`;
+    // 2026-10-17: the span used to be found again by an id built from elId alone, which is the
+    // same string for every date ('att-detail-gps-out-name'). A late answer therefore landed in
+    // whichever popup happened to be open -- open one day's Details, close it, open another
+    // before the answer arrives, and the second day showed the first day's address. The queue
+    // added in the same change can delay an answer by seconds, so the window is no longer small.
+    // Holding the element itself means a stale answer writes into a detached node and is lost,
+    // which is the correct outcome.
+    const span = el.querySelector('span');
     reverseGeocode(lat, lng, (name, ok) => {
-      const span = document.getElementById(uid);
       if (span) {
         // 2026-10-17: without the `ok` branch this popup left "Loading..." on screen whenever the
         // lookup failed -- reverseGeocode() answered with the coordinates, but the only thing that

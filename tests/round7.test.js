@@ -537,7 +537,16 @@ test('navigateTo(approval) shows the queue; only openVoidHistoryForDate keeps th
   X.resetApprovalViewState();
   assert.deepStrictEqual(J(X.st()), ['queue', 0, false]);
   const nav = extractFunction(APP_SRC, 'navigateTo');
-  assert.ok(nav.includes("if (page === 'approval')     { resetApprovalViewOnNavigate(); renderApprovals(); }"));
+  // 2026-10-17: the reset is now skipped on a re-render. applyLanguage() redraws the current page
+  // through navigateTo(), which used to count as arriving at it, so switching language threw an
+  // approver out of the history view and back to the queue. The pin still exists for its original
+  // reason -- the reset must not quietly disappear from navigateTo() -- so it names the guarded
+  // line rather than being dropped, and the guard itself is named so removing the reset outright
+  // still fails here.
+  assert.ok(nav.includes("if (page === 'approval')     { if (!isReRender) resetApprovalViewOnNavigate(); renderApprovals(); }"),
+    'navigateTo must still reset the Approvals view on a real navigation');
+  assert.ok(/const isReRender = !!\(opts && opts\.reRender === true\);/.test(nav),
+    'the re-render guard must come from navigateTo\'s own opts, not from ambient state');
   assert.ok(/resetNotifications\(\);[\s\S]{0,120}resetApprovalViewState\(\);/.test(extractFunction(APP_SRC, 'logout')), 'logout');
 });
 test('lateNightThresholdMins / lateNightPoints identical both sides; a threshold before 05 is after midnight', () => {

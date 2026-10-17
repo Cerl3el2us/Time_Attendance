@@ -217,6 +217,37 @@ const OFFICE = [
     assert.ok(ctx.geoPausedUntil - Date.now() <= GEO_PAUSE_MS, 'the pause must not be open-ended');
   });
 
+  await test('a request already on the wire is joined, not pre-empted by the pause', async () => {
+    // The queue spaces requests but does not wait for one to finish before sending the next, so a
+    // slow request can still be in flight when later ones are refused and the queue pauses. A
+    // render that asks for that coordinate during the pause must be attached to the request that
+    // is already running: turning it away with coordinates loses the address for good, because
+    // the answer only ever reaches the callbacks collected before the pause -- which belong to a
+    // render that has since been replaced.
+    const A = [1.5, 2.5];
+    const doomed = [[13.701, 100.501], [13.702, 100.502], [13.703, 100.503]];
+    assert.strictEqual(doomed.length, GEO_FAIL_LIMIT, 'this case needs exactly enough refusals to pause');
+    let landA;
+    const slowA = new Promise(res => { landA = res; });
+    const { ctx, calls } = load(makeStorage(), url => (url.includes('lat=1.5') ? slowA : refused()));
+
+    const firstAsker = new Promise(res => ctx.reverseGeocode(A[0], A[1], (text, isAddress) => res({ text, isAddress })));
+    await sleep(TEST_INTERVAL_MS * 2);          // let A go out and stay unanswered
+    await askAll(ctx, doomed);                  // these three are refused, which pauses the queue
+    assert.ok(ctx.geoPausedUntil > Date.now(), 'the refusals should have paused the queue');
+
+    const sentSoFar = calls.length;
+    const secondAsker = new Promise(res => ctx.reverseGeocode(A[0], A[1], (text, isAddress) => res({ text, isAddress })));
+    landA({ ok: true, json: () => Promise.resolve({ display_name: 'Later, Bangkok, Thailand' }) });
+    const [first, second] = await Promise.all([firstAsker, secondAsker]);
+
+    assert.strictEqual(calls.length, sentSoFar, 'joining an in-flight request must not send another');
+    assert.strictEqual(first.isAddress, true, 'the original asker must get the address');
+    assert.strictEqual(second.isAddress, true,
+      'the asker during the pause was answered with coordinates instead of joining the live request');
+    assert.strictEqual(second.text, first.text);
+  });
+
   await test('a 200 with no place name is an answer, not a refusal: it does not pause the queue', async () => {
     const many = [];
     for (let i = 0; i < GEO_FAIL_LIMIT + 2; i++) many.push([13.70 + i / 1000, 100.50 + i / 1000]);
