@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 133;
+const APP_BUILD = 134;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -11066,6 +11066,28 @@ function renderAttendanceTable() {
   const thAllowances = tbody.closest('table')?.querySelector('thead th#att-th-allowances');
   if (thAllowances) { thAllowances.style.display = hasAnyAllowanceTarget ? '' : 'none'; }
 
+  // 2026-10-17: the last column was named "เบี้ยเลี้ยงที่สามารถยื่นขอได้" on 2026-10-16 (owner's
+  // wording), but buildRowActions() puts THREE kinds of thing in that cell and only one of them is
+  // an allowance: the Details button (every past row), ✏️ Edit Time (a time-correction request,
+  // not an allowance) and the 🗺️🌅🚗🔄🌙⏱️🚙 allowance buttons. The heading named only the third,
+  // so an employee with no entitlements read "allowances" over a cell holding one Details button.
+  // Asked the owner split-vs-rename on 2026-10-17; they had no preference, so this is my call:
+  // renamed, not split, because this table already has 6 columns and hides one on phones -- a 7th
+  // would widen it on the narrowest screen.
+  // The heading must follow what the cells actually hold or it repeats the bug it fixes: in a
+  // read-only view buildRowActions() returns the Details button ALONE (accounting/MD looking at
+  // someone else's table), so a heading mentioning requests would again promise what is not there.
+  // attActionsReadOnly is the SAME expression the two buildRowActions() call sites below pass, and
+  // they now read this const instead of repeating it -- otherwise the heading and the cells could
+  // drift apart later and nothing would catch it.
+  const attActionsReadOnly = !isViewingSelf && !qaAttendanceActionsEnabled(targetUser);
+  const thActions = tbody.closest('table')?.querySelector('thead th#att-th-actions');
+  if (thActions) {
+    thActions.textContent = attActionsReadOnly
+      ? L('Details', 'รายละเอียด')
+      : L('Details / Requests', 'รายละเอียด / ยื่นคำขอ');
+  }
+
   // Today card — hide when viewing someone else's data
   const todayContainer = document.getElementById('att-today-card-container');
   if (todayContainer) todayContainer.style.display = isViewingSelf ? '' : 'none';
@@ -11372,7 +11394,7 @@ function renderAttendanceTable() {
           : (row.checkIn ? `<span style="color:#f59e0b;font-size:11px">⚠️ ${L('No check-out', 'ไม่มีข้อมูลออก')}</span>` : '<span style="color:#cbd5e1">—</span>'))
       }</td>
       <td class="col-hide-mobile"${hasAnyAllowanceTarget ? '' : ' style="display:none"'}>${allowIconsHtml}</td>
-      <td style="white-space:nowrap">${buildRowActions(row, !isViewingSelf && !qaAttendanceActionsEnabled(targetUser), qaAttendanceInspectUser(targetUser))}</td>`;
+      <td style="white-space:nowrap">${buildRowActions(row, attActionsReadOnly, qaAttendanceInspectUser(targetUser))}</td>`;
     tbody.appendChild(tr);
 
     // Mobile card
@@ -11418,7 +11440,7 @@ function renderAttendanceTable() {
           </div>
         </div>
         ${badgesArr.length ? `<div class="att-card-badges att-allow-icons">${badgesArr.join('')}</div>` : ''}
-        <div class="att-card-actions">${buildRowActions(row, !isViewingSelf && !qaAttendanceActionsEnabled(targetUser), qaAttendanceInspectUser(targetUser))}</div>
+        <div class="att-card-actions">${buildRowActions(row, attActionsReadOnly, qaAttendanceInspectUser(targetUser))}</div>
       `;
       mobileCards.appendChild(card);
     }

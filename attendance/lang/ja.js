@@ -7,8 +7,13 @@ window.LANG_JA = {
   // lists the allowances that day has already earned; the right one holds the buttons for the
   // allowances this person may still ask for. The old headings were "รายการพิเศษ / OT" and an
   // empty cell, which named neither.
+  // 2026-10-17: the right-hand heading was "Allowances you can request" / "申請できる手当" for one
+  // day. It was wrong: that cell also holds the Details button and ✏️ Edit Time, neither of which
+  // is an allowance. Renamed to name all three; the old key is gone because nothing reads it any
+  // more (the only data-en that used it is index.html's att-th-actions). "Details" alone, used for
+  // the read-only view of the same column, is already in this file further down.
   "Approved allowances": "承認済みの手当",
-  "Allowances you can request": "申請できる手当",
+  "Details / Requests": "詳細／申請",
   "🗓️ Leave Balance (Year ": "🗓️ 有給休暇残日数（",
   "This document was issued by the Time Attendance system — Tozai Boeki Kaisha (Thailand) Ltd. | Created: ": "この書類はTime Attendanceシステムより発行されました — Tozai Boeki Kaisha (Thailand) Ltd. | 作成日: ",
   "⏱️ Total OT ": "⏱️ OT合計 ",
