@@ -218,10 +218,8 @@ const FETCH_PINS = [
   { code: 'const res = await fetch(`${NAS_BACKEND}/api/push/vapid-public-key`);',
     why: 'getVapidPublicKey(): GET' },
   { code: '_gpsCartoStyleLoading = fetch(url)', why: 'loadGpsCartoStyle(): GET, a map stylesheet' },
-  // 2026-10-17 (owner): reverseGeocode()'s pin is gone with the function. The GPS link no longer
-  // turns its coordinate into a street address, so nothing in the app calls Nominatim and no
-  // employee coordinate leaves the company. This is now the only external fetch left in app.js --
-  // if a second one appears here, ask what it sends out before pinning it.
+  { code: 'fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&accept-language=th`)',
+    why: 'reverseGeocode(): GET, and to OpenStreetMap, not to our backend' },
 ];
 
 const squash = s => s.replace(/\s+/g, ' ').trim();

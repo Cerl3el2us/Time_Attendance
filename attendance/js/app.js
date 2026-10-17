@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 136;
+const APP_BUILD = 137;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -10918,21 +10918,187 @@ function renderAttTodayCard() {
   }
 }
 
-// 2026-10-17 (owner): the GPS link no longer turns its coordinate into a street address. It never
-// worked on the live site anyway -- Nominatim answered every /reverse call from this office's IP
-// with HTTP 429, and a 429 page carries no Access-Control-Allow-Origin header, so the browser
-// reported a CORS error and the real cause stayed hidden. The measurements are in
-// docs/superpowers/notes/2026-10-17-gps-reverse-geocode-429.md.
+// 2026-10-17: the address beside a GPS link never appeared. The console was full of CORS errors
+// against nominatim.openstreetmap.org, which reads like a CSP problem and is not one -- the
+// requests were answered with HTTP 429 "Too many requests", and a 429 page carries no
+// Access-Control-Allow-Origin header, so the browser blocked it and reported the CORS symptom
+// instead of the status. It was not an outage either (/status.php answered 200 from the same IP in
+// the same minute) and not the identifying User-Agent the usage policy asks for (adding one
+// changed nothing, and fetch() cannot set that header anyway).
 //
-// Making it work was possible (remember the refusals, one queue at 1 req/sec, or a backend proxy
-// with a permanent cache) and was written before the owner asked the prior question: what is the
-// address FOR. Nothing in the system reads it -- the geofence decides from the raw coordinate and
-// a distance, server-side, and the link beside the text already opens Google Maps at that exact
-// point, so the address was only ever a convenience label. The owner's answer on 2026-10-17 was
-// to drop it. Gone with it: every employee coordinate that used to leave the company on each
-// render. What is left is the coordinate, labelled as one so the numbers cannot read as a place.
-function gpsCoordsLabel(lat, lng) {
+// **We earned that 429 ourselves.** The cache was written INSIDE .then(), so only successes were
+// ever remembered: every refusal was asked again on the next render, from every logged-in browser,
+// out of one office IP, against a policy of at most 1 request/second and no bulk use. The limit
+// then kept itself alive, because being limited produced the failures that caused the retries.
+// With the flood stopped, the same coordinates answered 200 with real Thai addresses from the same
+// network the same day. docs/superpowers/notes/2026-10-17-gps-reverse-geocode-429.md has both runs.
+//
+// So: a coordinate is asked about ONCE. Refusals are remembered too, and a coordinate already
+// queued or in flight collects the new callback instead of starting a second request (two renders
+// less than 1.1s apart used to do exactly that). Every caller shares ONE queue spaced
+// GEO_MIN_INTERVAL_MS apart -- the old stagger lived in geocodeTableGpsLinks(), restarted from zero
+// on each render, and the detail popup's caller had none at all, so neither honoured 1 req/sec.
+// After GEO_FAIL_LIMIT refusals in a row the queue stops asking for a while, since hammering a
+// service that is refusing us is the behaviour that started this.
+//
+// Nothing here is permanent. The pause expires, and a refused coordinate is remembered with a
+// timestamp rather than forever: the limit lets a fraction through, so one bad minute must not
+// blank a place for good.
+const GEO_MIN_INTERVAL_MS = 1100;   // Nominatim usage policy: an absolute maximum of 1 req/sec
+const GEO_FAIL_LIMIT = 3;
+const GEO_PAUSE_MS = 5 * 60 * 1000;        // queue stops asking this long after GEO_FAIL_LIMIT refusals
+const GEO_RETRY_AFTER_MS = 10 * 60 * 1000; // a refused coordinate is not asked about again for this long
+const GEO_ADDRESS_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const GEO_STORE_KEY = 'ta_geocache_v1';
+const GEO_STORE_MAX = 300;          // oldest entries are dropped past this; a month holds a handful
+// key -> { n: '<address>', t } for an answer, { t } for a refusal. Mirrored into localStorage
+// because Nominatim's quota counts per IP and this office shares one: a cache that died on every
+// refresh would ask about the same handful of coordinates all day, which is how the limit was
+// earned in the first place. Every localStorage access is wrapped -- a private window, blocked
+// site data or a full quota all throw, and the feature has to keep working (by asking again).
+const geoStore = {};
+let geoStoreLoaded = false;
+const geoPending = new Map();       // key -> callbacks waiting on one in-flight/queued request
+let geoQueue = [];
+let geoQueueTimer = null;
+let geoLastSentAt = 0;
+let geoConsecutiveFails = 0;
+let geoPausedUntil = 0;
+
+// TH/EN/JA. The screen has to SAY it is showing coordinates: falling back to bare numbers silently
+// reads as if the address of that place simply is a pair of numbers, and leaving "Loading..." on
+// screen reads as still working. Both were the old behaviour.
+function geoUnavailableNote() {
+  return L('Address lookup unavailable — showing coordinates', 'แปลงเป็นชื่อสถานที่ไม่ได้ — แสดงเป็นพิกัด');
+}
+
+// The short form that fits the 150px-wide link in the timesheet, where a whole sentence cannot.
+function geoCoordsLabel(lat, lng) {
   return `${L('coords', 'พิกัด')} ${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+}
+
+// Reads what a previous page, or a previous visit, already learned. Called lazily rather than at
+// load so a session that never opens the timesheet never touches storage.
+function loadGeoStore() {
+  if (geoStoreLoaded) return;
+  geoStoreLoaded = true;   // set BEFORE the read: a throwing localStorage must not be retried on
+                           // every single lookup for the rest of the page's life.
+  let raw;
+  try { raw = localStorage.getItem(GEO_STORE_KEY); } catch (e) { return; }
+  if (!raw) return;
+  try {
+    const saved = JSON.parse(raw);
+    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return;
+    // Validated per entry: this is data from an earlier version of this code, or from whatever
+    // else wrote to this origin. A bad entry is skipped, it does not throw away the good ones.
+    for (const [key, e] of Object.entries(saved)) {
+      if (e && typeof e.t === 'number' && (e.n === undefined || typeof e.n === 'string')) geoStore[key] = e;
+    }
+  } catch (e) { /* corrupt JSON: start empty rather than break the page */ }
+}
+
+function saveGeoStore() {
+  try {
+    const keys = Object.keys(geoStore);
+    if (keys.length > GEO_STORE_MAX) {
+      keys.sort((a, b) => geoStore[a].t - geoStore[b].t)
+        .slice(0, keys.length - GEO_STORE_MAX)
+        .forEach(k => delete geoStore[k]);
+    }
+    localStorage.setItem(GEO_STORE_KEY, JSON.stringify(geoStore));
+  } catch (e) { /* quota, private window, blocked site data: the in-memory copy still serves this tab */ }
+}
+
+// What we already know about a coordinate, or null to go and ask. Entries expire: an address after
+// GEO_ADDRESS_TTL_MS, a refusal after the much shorter GEO_RETRY_AFTER_MS, so being rate-limited
+// once never blanks a place permanently.
+function geoKnown(key) {
+  loadGeoStore();
+  const e = geoStore[key];
+  if (!e) return null;
+  const age = Date.now() - e.t;
+  if (e.n) return age < GEO_ADDRESS_TTL_MS ? e : null;
+  return age < GEO_RETRY_AFTER_MS ? e : null;
+}
+
+function rememberGeo(key, name) {
+  loadGeoStore();
+  geoStore[key] = name ? { n: name, t: Date.now() } : { t: Date.now() };
+  saveGeoStore();
+}
+
+// callback(text, ok): ok === true means `text` is a real address from Nominatim. ok === false means
+// we asked and did not get one, and `text` is the coordinates -- callers must label it as such.
+function reverseGeocode(lat, lng, callback) {
+  const key = `${lat.toFixed(5)},${lng.toFixed(5)}`;
+  const coords = `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+  const known = geoKnown(key);
+  if (known) { callback(known.n || coords, !!known.n); return; }
+  if (Date.now() < geoPausedUntil) { callback(coords, false); return; }
+  const waiting = geoPending.get(key);
+  if (waiting) { waiting.push(callback); return; }
+  geoPending.set(key, [callback]);
+  geoQueue.push({ key, lat, lng, coords });
+  runGeoQueue();
+}
+
+// One job's callbacks, all of them, exactly once. A throwing callback must not strand the others
+// or stop the queue: every element on screen that shares this coordinate still needs its answer.
+function settleGeo(key, text, ok) {
+  const callbacks = geoPending.get(key) || [];
+  geoPending.delete(key);
+  for (const cb of callbacks) {
+    try { cb(text, ok); } catch (e) { console.error('reverseGeocode callback failed', e); }
+  }
+}
+
+function runGeoQueue() {
+  if (Date.now() < geoPausedUntil) {
+    // Answer everything still queued from its coordinates and send nothing while paused. These
+    // keys are deliberately NOT recorded as refused: the pause already silences them, and marking
+    // them would extend that silence past the pause for no reason. The next render after the
+    // pause ends queues them again.
+    const stranded = geoQueue;
+    geoQueue = [];
+    for (const job of stranded) settleGeo(job.key, job.coords, false);
+    return;
+  }
+  if (geoQueueTimer || !geoQueue.length) return;
+  geoQueueTimer = setTimeout(() => {
+    geoQueueTimer = null;
+    const job = geoQueue.shift();
+    if (!job) return;
+    geoLastSentAt = Date.now();
+    const { lat, lng } = job;
+    fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&accept-language=th`)
+      // r.json() used to be called on any response at all, so a 429 error page counted as a
+      // network failure only because parsing its HTML threw. Read the status instead.
+      .then(r => { if (!r.ok) throw new Error(`Nominatim HTTP ${r.status}`); return r.json(); })
+      .then(data => {
+        geoConsecutiveFails = 0;   // the service answered, whatever it said
+        if (data && data.display_name) {
+          rememberGeo(job.key, data.display_name);
+          settleGeo(job.key, data.display_name, true);
+        } else {
+          // A 200 with no display_name (open sea, or an error object) is an answer, not a refusal,
+          // so it must not count towards the pause. Recorded like one only so the next render does
+          // not ask again immediately.
+          rememberGeo(job.key, null);
+          settleGeo(job.key, job.coords, false);
+        }
+      })
+      .catch(() => {
+        rememberGeo(job.key, null);
+        geoConsecutiveFails++;
+        if (geoConsecutiveFails >= GEO_FAIL_LIMIT) {
+          // Back off, then let the queue have another GEO_FAIL_LIMIT attempts.
+          geoPausedUntil = Date.now() + GEO_PAUSE_MS;
+          geoConsecutiveFails = 0;
+        }
+        settleGeo(job.key, job.coords, false);
+      })
+      .then(() => runGeoQueue());
+  }, Math.max(0, GEO_MIN_INTERVAL_MS - (Date.now() - geoLastSentAt)));
 }
 
 function renderAttEmployeeSelector() {
@@ -11375,11 +11541,11 @@ function renderAttendanceTable() {
     const gpsInBtn  = (canSeeGPS && row.checkInSource  === 'web' && row.checkInGPS  && row.checkInGPS  !== 'ไม่ทราบตำแหน่ง')
       ? `<a href="#" target="_blank" rel="noopener" class="gps-map-link" data-gps="${safeGpsIn}" data-gps-acc="${gpsAccIn === null ? '' : gpsAccIn}" title="${safeGpsIn}${gpsAccuracyText(gpsAccIn)}"
            style="display:block;font-size:11px;color:#2563eb;text-decoration:none;margin-top:3px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-           📍 <span>${safeGpsIn}</span></a>` : '';
+           📍 <span>${L('Loading...', 'กำลังโหลด...')}</span></a>` : '';
     const gpsOutBtn = (canSeeGPS && row.checkOutSource === 'web' && row.checkOutGPS && row.checkOutGPS !== 'ไม่ทราบตำแหน่ง')
       ? `<a href="#" target="_blank" rel="noopener" class="gps-map-link" data-gps="${safeGpsOut}" data-gps-acc="${gpsAccOut === null ? '' : gpsAccOut}" title="${safeGpsOut}${gpsAccuracyText(gpsAccOut)}"
            style="display:block;font-size:11px;color:#2563eb;text-decoration:none;margin-top:3px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-           📍 <span>${safeGpsOut}</span></a>` : '';
+           📍 <span>${L('Loading...', 'กำลังโหลด...')}</span></a>` : '';
 
     tr.innerHTML = `
       <td class="date-cell">
@@ -11452,7 +11618,7 @@ function renderAttendanceTable() {
       mobileCards.appendChild(card);
     }
   });
-  labelTableGpsLinks();
+  geocodeTableGpsLinks();
 
   buildAttendancePrintView({
     targetUser, days, start, end,
@@ -11598,27 +11764,51 @@ function buildAttendancePrintView({ targetUser, days, start, end, workDays, late
     <div class="att-print-footer">Tozai Boeki Kaisha (Thailand) Ltd. — ${L('Time Attendance System', 'ระบบ Time Attendance')}</div>`;
 }
 
-// Points every GPS button in the table it has just rendered at Google Maps, and labels it with
-// its own coordinate. Synchronous since 2026-10-17: with the address lookup gone there is
-// nothing to wait for, so no button ever shows a placeholder.
-//
-// 2026-08-17 (review fix): the desktop <tr> and the mobile card for the same day are both always
-// rendered (only CSS display:none hides whichever one is not active), so every coordinate owns 2
-// links, not 1. Each link is labelled from its OWN parsed lat/lng -- two links a few metres apart
-// must not end up printing one another's numbers.
-function labelTableGpsLinks() {
+function geocodeTableGpsLinks() {
+  // 2026-08-17 (review fix): the desktop table's <tr> and the mobile card for the same day are
+  // both always rendered (only CSS display:none hides whichever one isn't active), so every GPS
+  // coordinate now has 2 links, not 1. This used to schedule one reverseGeocode() call PER LINK
+  // with a 1.1s stagger keyed on element index -- since the duplicate link never contributed a
+  // new index to "seen", its own call always landed at delay=0, defeating the stagger and firing
+  // simultaneous requests against Nominatim's 1 req/sec policy. Group by coordinate first and
+  // geocode each unique coordinate exactly once, fanning the result out to every link that shares
+  // it, so the stagger is keyed on unique coordinates rather than link count.
+  const groups = new Map();
   document.querySelectorAll('a.gps-map-link[data-gps]').forEach(el => {
-    const m = el.dataset.gps.match(/(-?\d+\.?\d*),\s*(-?\d+\.?\d*)/);
+    const gpsStr = el.dataset.gps;
+    const m = gpsStr.match(/(-?\d+\.?\d*),\s*(-?\d+\.?\d*)/);
     if (!m) return;
     const lat = parseFloat(m[1]), lng = parseFloat(m[2]);
-    // 2026-09-25 (geofence T6): the accuracy stamped on the button by renderAttendanceTable() via
-    // data-gps-acc. '' means "no stored accuracy" (an old record), not 0.
-    const acc = el.dataset.gpsAcc === '' || el.dataset.gpsAcc === undefined ? null : Number(el.dataset.gpsAcc);
-    const label = gpsCoordsLabel(lat, lng);
     el.href = `https://www.google.com/maps?q=${lat},${lng}`;
-    const span = el.querySelector('span');
-    if (span) span.textContent = label;
-    el.title = label + gpsAccuracyText(acc) + '\n' + L('Click to open Google Maps', 'คลิกเพื่อเปิด Google Maps');
+    // 2026-09-25 (geofence T6): the accuracy stamped on the button by renderAttendanceTable() via
+    // data-gps-acc -- carried through so the reverse-geocode below doesn't overwrite it away.
+    // '' means "no stored accuracy" (old record), not 0.
+    const acc = el.dataset.gpsAcc === '' || el.dataset.gpsAcc === undefined ? null : Number(el.dataset.gpsAcc);
+    const key = `${lat.toFixed(4)},${lng.toFixed(4)}`;
+    if (!groups.has(key)) groups.set(key, { lat, lng, els: [] });
+    // 2026-08-17 (review fix): keep each element's OWN parsed lat/lng alongside it -- the group's
+    // lat/lng (whichever element was encountered first) is only used to pick where to geocode
+    // FROM, not what to print in each element's own tooltip. Two elements can share a geocode
+    // group (rounded to 4 decimals, ~11m) while still differing at the 6-decimal display
+    // precision below.
+    groups.get(key).els.push({ el, lat, lng, acc });
+  });
+  // 2026-10-17: the 1.1s stagger that used to sit here is gone -- reverseGeocode() now owns one
+  // queue for the whole app, so a second render starting mid-stagger can no longer land its
+  // requests on top of the first render's (the stagger's `i` restarted from 0 every call).
+  groups.forEach(({ lat, lng, els }) => {
+    reverseGeocode(lat, lng, (name, ok) => {
+      const short = ok ? name.split(',').slice(0, 2).join(',').trim() : null;
+      els.forEach(({ el, lat: ownLat, lng: ownLng, acc }) => {
+        const head = ok ? name : geoUnavailableNote();
+        const title = head + '\n(' + ownLat.toFixed(6) + ', ' + ownLng.toFixed(6) + ')' + gpsAccuracyText(acc) + '\n' + L('Click to open Google Maps', 'คลิกเพื่อเปิด Google Maps');
+        const span = el.querySelector('span');
+        // When there is no address, the link says "coords <lat>, <lng>" rather than numbers on
+        // their own, so the cell cannot be read as "the address of this place is 13.72, 100.55".
+        if (span) span.textContent = ok ? short : geoCoordsLabel(ownLat, ownLng);
+        el.title = title;
+      });
+    });
   });
 }
 
@@ -21727,18 +21917,24 @@ function showAttendanceDetail(date) {
     if (!m) { el.style.color = ''; el.textContent = prefix + gpsStr; return; }
     const lat = parseFloat(m[1]), lng = parseFloat(m[2]);
     const mapsUrl = `https://www.google.com/maps?q=${lat},${lng}`;
+    const uid = elId + '-name';
     el.style.color = '';
-    // 2026-10-17: this used to print "Loading..." and then wait on a reverse-geocode that was
-    // always refused, so the popup sat on that word. There is nothing to wait for now -- the
-    // coordinate is already in hand and the link opens Google Maps at it.
-    // 2026-09-25 (geofence T6): the stored accuracy goes in the tooltip beside the coordinate when
-    // the event has one -- gpsAccuracyText() returns '' for an old record with none.
-    const label = gpsCoordsLabel(lat, lng);
     el.innerHTML = `${prefix}<a href="${mapsUrl}" target="_blank" rel="noopener"
-      title="${escapeHtml(label + gpsAccuracyText(acc) + '\n' + L('Click to open Google Maps', 'คลิกเพื่อเปิด Google Maps'))}"
       style="color:#2563eb;text-decoration:none;font-weight:500">
-      📍 <span>${escapeHtml(label)}</span>
+      📍 <span id="${uid}">${L('Loading...', 'กำลังโหลด...')}</span>
     </a>`;
+    reverseGeocode(lat, lng, (name, ok) => {
+      const span = document.getElementById(uid);
+      if (span) {
+        // 2026-10-17: without the `ok` branch this popup left "Loading..." on screen whenever the
+        // lookup failed -- reverseGeocode() answered with the coordinates, but the only thing that
+        // told them apart from an address was that they looked like numbers.
+        span.textContent = ok ? name.split(',').slice(0, 3).join(',').trim() : geoCoordsLabel(lat, lng);
+        // 2026-09-25 (geofence T6): the stored accuracy, alongside the coordinates, when the
+        // event has one -- gpsAccuracyText() returns '' for an old record with none.
+        span.parentElement.title = (ok ? name : geoUnavailableNote()) + '\n(' + lat.toFixed(6) + ', ' + lng.toFixed(6) + ')' + gpsAccuracyText(acc);
+      }
+    });
   }
 
   // GPS only ever applies to web check-ins/outs — device scans never carry a location,
