@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 138;
+const APP_BUILD = 139;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -23720,8 +23720,24 @@ function processLiveScanEvent(ev) {
 }
 
 function initHikvisionLive() {
-  if (hikvisionWs) { try { hikvisionWs.close(); } catch(e) {} }
+  // 2026-10-17: detach the replaced socket's handlers BEFORE closing it. close() is asynchronous,
+  // so the old socket's onclose used to run AFTER the clearTimeout below and set
+  // wsReconnectTimer = setTimeout(initHikvisionLive, 5000) all over again -- a timer nothing could
+  // cancel any more. One disconnect then put the tab into a permanent 5s connect/close cycle that
+  // never recovered: the timer replaced the healthy socket, whose onclose armed the next timer.
+  // Measured on the live site before the fix: close code 1005 (a LOCAL close with no status) with
+  // wasClean true every ~5.5s, and initHikvisionLive() entered from an empty stack (a bare timer)
+  // four times in 22 seconds. Nobody could see it -- the status dot read "connected" because a
+  // socket was open most of the time -- while any scan event arriving inside a gap was lost.
+  // Guarded by tests/ws-reconnect.test.js. Do not fold this back into a one-line close().
+  if (hikvisionWs) {
+    const stale = hikvisionWs;
+    hikvisionWs = null;
+    stale.onopen = stale.onmessage = stale.onclose = stale.onerror = null;
+    try { stale.close(); } catch(e) {}
+  }
   clearTimeout(wsReconnectTimer);
+  wsReconnectTimer = null;
 
   // SECURITY FIX 2026-08-13: the backend socket now requires a valid JWT (see server.js's
   // authenticateWsRequest()) -- browsers can't set a custom Authorization header on a WebSocket
