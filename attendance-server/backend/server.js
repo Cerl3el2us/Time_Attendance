@@ -3980,19 +3980,29 @@ function mileageOpenOwnRows(all, userId) {
 }
 // Resolves the caller against the live user file, 503 rather than guessing when it cannot be read.
 // The system account is refused here as it is on every other submission path.
-function mileageOpenActor(req, res) {
+// 2026-10-19: `forWrite` exists because this one guard served all three handlers, and its system
+// account refusal is written for a WRITE ("cannot save a starting mileage"). Applied to the GET it
+// refused the system account a read of its OWN saved starts -- which is empty by construction, so
+// there was nothing to protect -- and the message did not even describe the request it answered.
+// The cost was not the refusal but the noise: loadMileageOpenFromBackend() is called on every page
+// load with no role check, so every superadmin page load logged a console error. That matters
+// because superadmin is the account QA is done from, and on 2026-10-17 a real WebSocket bug went
+// unexamined for a whole day behind exactly this kind of console noise. Writes are still refused:
+// the system account has no employeeNo and must never own a mileage row.
+// Guarded by tests/mileage-open-system-account.test.js.
+function mileageOpenActor(req, res, forWrite = true) {
   const users = readUsers();
   if (users === null) { res.status(503).json({ success: false, message: MILEAGE_OPEN_UNAVAILABLE }); return null; }
   const live = users.find(u => u.id === req.user.sub);
   if (!live) { res.status(403).json({ success: false, message: 'Forbidden' }); return null; }
-  if (isSuperAdminUser(live)) {
+  if (forWrite && isSuperAdminUser(live)) {
     res.status(403).json({ success: false, message: 'System account cannot save a starting mileage' });
     return null;
   }
   return live;
 }
 function handleGetMileageOpen(req, res) {
-  const live = mileageOpenActor(req, res);
+  const live = mileageOpenActor(req, res, false);
   if (!live) return;
   const all = readMileageOpen();
   if (all === null) return res.status(503).json({ success: false, message: MILEAGE_OPEN_UNAVAILABLE });
