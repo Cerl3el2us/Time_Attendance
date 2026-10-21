@@ -190,4 +190,30 @@ test('ทุกสีตัวอักษรที่ฝังใน inline sty
     ` · รายการที่ยังไม่มีกฎ: ${ตก.join(', ')}`);
 });
 
+test('ปุ่มที่ฝังพื้นสีพร้อมตัวอักษรขาว ต้องไม่ต่ำกว่า 3:1', () => {
+  const INDEX_SRC = fs.readFileSync(path.join(ROOT, 'attendance/index.html'), 'utf8');
+  const src = APP_SRC + INDEX_SRC;
+  const hex = h => ({ r: parseInt(h.slice(1, 3), 16), g: parseInt(h.slice(3, 5), 16), b: parseInt(h.slice(5, 7), 16) });
+  const lum = c => { const f = v => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+    return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b); };
+  const ratio = (a, b) => { const l1 = lum(hex(a)), l2 = lum(hex(b)), hi = Math.max(l1, l2), lo = Math.min(l1, l2);
+    return (hi + 0.05) / (lo + 0.05); };
+  const พบ = {};
+  for (const m of src.matchAll(/style="([^"]*background:\s*(#[0-9a-fA-F]{3,6})[^"]*)"/g)) {
+    if (!/color:\s*(#fff(fff)?|white)\b/i.test(m[1])) continue;
+    let b = m[2].toLowerCase();
+    if (b.length === 4) b = '#' + b[1] + b[1] + b[2] + b[2] + b[3] + b[3];
+    พบ[b] = (พบ[b] || 0) + 1;
+  }
+  // เส้นที่ใช้คือ 3:1 ไม่ใช่ 4.5:1 โดยตั้งใจ -- ช่วง 3-4.5 เจ้าของดูแล้วและตัดสินว่ารับได้
+  // (#ef4444 = 3.76 ใช้ 5 จุด · #3b82f6 = 3.68 ใช้ 1 จุด) ⇒ ยามนี้กันเฉพาะของที่แย่กว่านั้น
+  // ถ้าวันหนึ่งอยากยกเป็น 4.5 ต้องถามเจ้าของก่อน เพราะมันเปลี่ยนหน้าตาปุ่มที่ใช้อยู่จริงหลายจุด
+  const ตก = Object.entries(พบ).filter(([b]) => ratio('#ffffff', b) < 3)
+    .map(([b, n]) => `${b} x${n} (${ratio('#ffffff', b).toFixed(2)}:1)`);
+  assert.deepStrictEqual(ตก, [],
+    'ปุ่มเหล่านี้ฝังพื้นสีอ่อนคู่กับตัวอักษรสีขาว ⇒ ตัวอักษรจมหายไปกับพื้น' +
+    ' · ที่เจอบนเว็บจริง: ปุ่ม "✅ Approve ทั้งหมด (6)" ในหน้าจัดการคำขอ พื้น #10b981 วัดได้ 2.54' +
+    ` · รายการที่ตก: ${ตก.join(', ')}`);
+});
+
 console.log(`\ntheme-aware-colors: ${passed} passed`);

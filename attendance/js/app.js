@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 145;
+const APP_BUILD = 146;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -2298,9 +2298,12 @@ async function checkUnknownScans() {
     const banner = document.getElementById('unknown-scan-banner');
     if (banner) {
       if (unknownNos.length > 0) {
+        // 2026-10-21: พื้นปุ่ม Sync เคยเป็น #f59e0b ซึ่งคู่กับตัวอักษรขาวได้แค่ 2.15:1 (แย่ที่สุด
+        // ในบรรดาปุ่มที่ฝังสีเองทั้งแอป) · #b45309 เป็นส้มเข้มที่แอปใช้อยู่แล้ว ให้ 5.02:1
+        // ยาม: tests/theme-aware-colors.test.js
         banner.style.display = '';
         banner.innerHTML = `⚠️ ${L('Detected scans from Hikvision ID', 'พบการสแกนจาก Hikvision ID')} <b>${escapeHtml(unknownNos.join(', '))}</b> ${L('not yet in the system', 'ที่ยังไม่มีในระบบ')}
-          &nbsp;<button class="btn btn-sm" style="background:#f59e0b;color:#fff;border:none;padding:4px 12px;border-radius:6px;cursor:pointer" onclick="syncHikvisionEmployees()">${L('🔄 Auto-sync', '🔄 Sync เพิ่มอัตโนมัติ')}</button>`;
+          &nbsp;<button class="btn btn-sm" style="background:#b45309;color:#fff;border:none;padding:4px 12px;border-radius:6px;cursor:pointer" onclick="syncHikvisionEmployees()">${L('🔄 Auto-sync', '🔄 Sync เพิ่มอัตโนมัติ')}</button>`;
       } else {
         banner.style.display = 'none';
       }
@@ -16768,7 +16771,10 @@ function renderApprovals() {
         <button onclick="toggleQuickMode()" style="padding:6px 14px;border-radius:8px;border:2px solid ${_approvalQuickMode ? '#3b82f6' : 'var(--border)'};background:${_approvalQuickMode ? (_isDarkToolbar ? 'rgba(59,130,246,0.25)' : '#eff6ff') : 'var(--bg-card)'};color:${_approvalQuickMode ? (_isDarkToolbar ? '#93c5fd' : '#1d4ed8') : 'var(--text-muted)'};font-size:12px;font-weight:700;cursor:pointer">
           ${_approvalQuickMode ? '📋 Card View' : '⚡ Quick Mode'}
         </button>
-        <button onclick="approveAllFiltered()" style="padding:6px 14px;border-radius:8px;background:#10b981;color:#fff;border:none;font-size:12px;font-weight:700;cursor:pointer">
+        ${/* 2026-10-21: เขียวของปุ่มอนุมัติเคยเป็น #10b981 ซึ่งคู่กับตัวอักษรขาวได้แค่ 2.54:1
+             (วัดบนเว็บจริงตอนกวาดหลัง deploy -- ตัวหนังสือจมไปกับพื้น) · #047857 เป็นเขียวเข้มชุดเดียวกัน
+             ให้ 5.48:1 · ใช้เหมือนกันทั้งสามปุ่มอนุมัติ · ยาม: tests/theme-aware-colors.test.js */''}
+        <button onclick="approveAllFiltered()" style="padding:6px 14px;border-radius:8px;background:#047857;color:#fff;border:none;font-size:12px;font-weight:700;cursor:pointer">
           ${L('✅ Approve All', '✅ Approve ทั้งหมด')} (${pendingFiltered.length})
         </button>
         <button onclick="openApprovalFlowChart()" style="padding:6px 14px;border-radius:8px;background:var(--bg-card);border:1px solid var(--border);color:var(--text-muted);font-size:12px;font-weight:700;cursor:pointer">
@@ -16871,7 +16877,7 @@ function renderApprovals() {
                      buttons. An emoji carries its own colour and ignores `color:#fff`, so a red
                      cross sat on a red button and all but vanished. Plain glyphs take the white
                      the button already asks for. */}
-                <button onclick="approveMockLeave(${l.id})" style="padding:4px 10px;border-radius:6px;background:#10b981;color:#fff;border:none;font-size:13px;font-weight:700;line-height:1;cursor:pointer;margin-right:4px" title="${escapeHtml(L('Approve', 'อนุมัติ'))}">✓</button>
+                <button onclick="approveMockLeave(${l.id})" style="padding:4px 10px;border-radius:6px;background:#047857;color:#fff;border:none;font-size:13px;font-weight:700;line-height:1;cursor:pointer;margin-right:4px" title="${escapeHtml(L('Approve', 'อนุมัติ'))}">✓</button>
                 <button onclick="rejectMockLeave(${l.id})" style="padding:4px 10px;border-radius:6px;background:#ef4444;color:#fff;border:none;font-size:13px;font-weight:700;line-height:1;cursor:pointer" title="${escapeHtml(L('Reject', 'ปฏิเสธ'))}">✕</button>
               </td>
             </tr>`;
@@ -18187,7 +18193,7 @@ function showApprovalDetail(id) {
   const canAct = ['pending', 'pending-md', 'pending-accounting'].includes(l.status) && isMyTurnNow(l, _effectiveType);
   const actionButtons = canAct
     ? `<div style="display:flex;gap:10px">
-        <button onclick="approveMockLeave(${l.id});closeApprovalDetail();" style="flex:1;padding:11px;border-radius:8px;background:#10b981;color:#fff;border:none;font-size:14px;font-weight:700;cursor:pointer">✅ ${L('Approve', 'อนุมัติ')}</button>
+        <button onclick="approveMockLeave(${l.id});closeApprovalDetail();" style="flex:1;padding:11px;border-radius:8px;background:#047857;color:#fff;border:none;font-size:14px;font-weight:700;cursor:pointer">✅ ${L('Approve', 'อนุมัติ')}</button>
         <button onclick="rejectMockLeave(${l.id});closeApprovalDetail();" style="flex:1;padding:11px;border-radius:8px;background:#ef4444;color:#fff;border:none;font-size:14px;font-weight:700;cursor:pointer">✕ ${L('Reject', 'ไม่อนุมัติ')}</button>
       </div>`
     : '';
