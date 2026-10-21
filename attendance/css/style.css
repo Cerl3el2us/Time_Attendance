@@ -1793,7 +1793,12 @@ table tbody tr:last-child td { border-bottom: none; }
     justify-content: center;
     gap: 3px;
     cursor: pointer;
-    color: #94a3b8;
+    /* 2026-10-21 (กวาดบนเว็บจริงหลัง deploy, วัดที่ 390px): เคยเป็น #94a3b8 ⇒ ป้าย "หน้าหลัก /
+       ตารางเวลา / ตอกบัตร / โปรไฟล์" ได้ 2.56:1 บนแถบล่างพื้นขาว และโผล่ทุกหน้าบนมือถือ
+       ใช้ token แทนสีตายตัวด้วยเหตุผลเดียวกับ .cal-dow: คลาสนี้ไม่มีกฎโหมดมืดของตัวเอง
+       ⇒ --text-muted ให้ #64748b (4.76) ในสว่าง และ #94a3b8 (5.71) ในมืด · ตัวที่กำลังเปิดอยู่
+       ใช้ var(--secondary) ของเดิม ไม่ถูกแตะ · ยาม: tests/theme-aware-colors.test.js */
+    color: var(--text-muted);
     padding: 8px 4px;
     position: relative;
     transition: color 0.2s;
