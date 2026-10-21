@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 142;
+const APP_BUILD = 143;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -14107,7 +14107,13 @@ function syncReportYearDropdown() {
 function applyReportsViewStyle() {
   const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
   const active   = `background:${isDark ? '#334155' : 'white'};color:${isDark ? 'var(--text)' : '#1e3a5f'};box-shadow:0 1px 3px rgba(0,0,0,.1)`;
-  const inactive = `background:transparent;color:${isDark ? '#64748b' : '#94a3b8'}`;
+  // 2026-10-21: ปุ่มที่ "ไม่ถูกเลือก" จางเกินไปทั้งสองธีม วัดบนเว็บจริงได้ 2.34:1 ในโหมดสว่าง
+  // (#94a3b8 บนพื้นกลุ่มปุ่ม #f1f5f9) และคำนวณได้ 3.07:1 ในโหมดมืด (#64748b บน #1e293b)
+  // ปุ่มเป็นของที่กดได้ จึงยึดเกณฑ์ข้อความหลัก 4.5:1 ไม่ใช่ 3:1 ของข้อความรอง
+  // ค่าใหม่วัดแล้ว: สว่าง 6.92:1 · มืด 5.71:1 และยังจางกว่าปุ่มที่ถูกเลือกอยู่ จึงยังบอกสถานะได้
+  // บทเรียน: ฟังก์ชันนี้เช็ค isDark อยู่แล้ว จึงเคยถูกผมจัดว่า "ปลอดภัย" -- การเช็คธีมไม่ได้แปลว่า
+  // ค่าที่เลือกผ่านเกณฑ์ ต้องวัดเสมอ
+  const inactive = `background:transparent;color:${isDark ? '#94a3b8' : '#475569'}`;
   const base = 'padding:7px 14px;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;';
   const mBtn = document.getElementById('rpt-view-monthly-btn');
   const yBtn = document.getElementById('rpt-view-yearly-btn');
