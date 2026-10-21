@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 144;
+const APP_BUILD = 145;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -25540,10 +25540,14 @@ function _finalizeMobileLayout() {
 // บางคนก็ปรับใหญ่" ⇒ การย้ายแถวต้องเกิดตอนลากเปลี่ยนขนาดหน้าต่างด้วย ไม่ใช่แค่ตอนเปิดหน้า
 // วาดใหม่เฉพาะตอน "ข้าม" เส้น 768px เท่านั้น -- ไม่ใช่ทุก pixel ที่ลาก ซึ่งจะวาดตารางรัวๆ
 if (typeof window !== 'undefined') {
-  let _finLastIsMobile = null;
+  // 2026-10-21 (แก้หลัง deploy): ของเดิมตั้งค่าเริ่มต้นเป็น null แล้วให้ resize ครั้งแรกเป็นคนจดค่า
+  // แล้ว return ⇒ ถ้าการย่อ/ขยายครั้งแรกข้ามเส้น 768 พอดี การข้ามครั้งนั้นถูกกลืนหายไปเสมอ
+  // วัดบนเว็บจริงแล้วพังทั้งสองทิศ: เปิดที่ 1280 ย่อไป 390 ได้แถวปุ่มมือถือ 0 แถวและตารางล้น 26px ·
+  // เปิดที่ 390 ขยายไป 1280 แถวปุ่มมือถือค้าง 9 แถว หัวตาราง 10 ช่องแต่ข้อมูลเหลือ 9 ช่อง
+  // จดค่าตั้งแต่ตอนโหลดแทน ⇒ ไม่มีการข้ามครั้งไหนที่ไม่ถูกนับ · ยาม: tests/finalize-resize-switch.test.js
+  let _finLastIsMobile = _finalizeMobileLayout();
   window.addEventListener('resize', () => {
     const now = _finalizeMobileLayout();
-    if (_finLastIsMobile === null) { _finLastIsMobile = now; return; }
     if (now === _finLastIsMobile) return;
     _finLastIsMobile = now;
     if (typeof currentPage !== 'undefined' && currentPage === 'finalize') renderFinalize();
