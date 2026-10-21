@@ -3113,6 +3113,38 @@ tr.finalize-row-confirmed:hover td {
    เหมือนเดิมทุกพิกเซล -- สิ่งที่เพิ่มเข้ามาคือกฎของโหมดมืดเท่านั้น
    ยาม: tests/theme-aware-colors.test.js */
 
+/* 2026-10-21: ข้อความช่วยเหลือสีจาง -- #94a3b8 ถูกใช้เป็นสีตัวหนังสือ 181 จุดทั่วทั้งโค้ด
+   (62 จุดใน index.html, 119 จุดใน app.js) สำหรับคำอธิบายใต้ช่องกรอกและข้อความประกอบ
+   วัดจากเว็บจริง: บนพื้นขาวได้ 2.56:1 ซึ่ง **ต่ำกว่าเกณฑ์ข้อความรอง 3:1 ด้วยซ้ำ** ส่วนในโหมดมืด
+   (บนพื้น #1e293b) ได้ 5.71:1 ซึ่งผ่านสบาย ⇒ ปัญหาอยู่ที่โหมดสว่าง ไม่ใช่โหมดมืด
+   โปรเจกต์นี้มี token ที่ถูกต้องอยู่แล้วพอดี: --text-muted คือ #64748b ในโหมดสว่าง (4.76:1 บนการ์ด
+   ขาว) และ #94a3b8 ในโหมดมืด ⇒ กฎสองข้อนี้คือการพาสีที่ฝังไว้กลับไปหา token ของธีม
+   ใช้ !important เพราะกำลังทับ inline style ซึ่งเป็นวิธีเดียวกับกฎดักสีสว่างอีก 67 ข้อในไฟล์นี้
+   ยาม: tests/theme-aware-colors.test.js (ข้อ "ข้อความช่วยเหลือสีจาง") */
+[style*="color:#94a3b8"] { color: #64748b !important; }
+[data-theme="dark"] [style*="color:#94a3b8"] { color: #94a3b8 !important; }
+
+/* 2026-10-21: ป้ายบอก role บนพื้นสว่าง
+   ชุดสีของ .role-* (บรรทัด ~319) ถูกออกแบบมาสำหรับ sidebar ซึ่งพื้นเข้มเสมอ -- คอมเมนต์เมื่อ
+   2026-10-08 ในบล็อกนั้นก็พูดถึงแต่ sidebar · แต่ป้ายชุดเดียวกันถูกใช้ในตารางพนักงานด้วย ซึ่ง
+   อยู่ใน .card พื้นขาว ⇒ วัดบนเว็บจริงได้ 1.26 ถึง 1.98:1 ทั้ง 6 role (เกณฑ์ 4.5) คือมองแทบ
+   ไม่เห็นตัวหนังสือ · ในโหมดมืดชุดเดิมได้ 4.04-6.39 ซึ่งผ่าน จึงคืนค่าเดิมให้ทั้งหมด
+   เล็งด้วย `.card` ไม่ใช่ `[data-theme]` เพราะตัวแปรจริงคือ "พื้นข้างหลังสว่างหรือเข้ม" ไม่ใช่ธีม
+   -- sidebar เข้มอยู่แล้วในทั้งสองธีม การเล็งที่ธีมจะไปทำ sidebar พังแทน
+   คู่สีใหม่วัดแล้ว: 6.37 / 6.78 / 7.57 / 7.15 / 6.73 / 6.71 ตามลำดับด้านล่าง */
+.card .role-md         { background: #fef3c7; color: #92400e; }
+.card .role-manager    { background: #d1fae5; color: #065f46; }
+.card .role-accounting { background: #ede9fe; color: #5b21b6; }
+.card .role-user       { background: #dbeafe; color: #1e40af; }
+.card .role-driver     { background: #ccfbf1; color: #115e59; }
+.card .role-marketing  { background: #fce7f3; color: #9d174d; }
+[data-theme="dark"] .card .role-md         { background: rgba(245,158,11,0.25); color: #fbbf24; }
+[data-theme="dark"] .card .role-manager    { background: rgba(16,185,129,0.25); color: #34d399; }
+[data-theme="dark"] .card .role-accounting { background: rgba(139,92,246,0.25); color: #a78bfa; }
+[data-theme="dark"] .card .role-user       { background: rgba(37,99,235,0.25);  color: #93c5fd; }
+[data-theme="dark"] .card .role-driver     { background: rgba(20,184,166,0.25); color: #2dd4bf; }
+[data-theme="dark"] .card .role-marketing  { background: rgba(236,72,153,0.25); color: #f472b6; }
+
 /* ปุ่มเลือก "เวลาเข้างาน / เวลาออกงาน" ในโมดัลขอแก้ไขเวลาย้อนหลัง
    นี่คือจุดที่เจ้าของถ่ายรูปมา: ของเดิมเซ็ต "แค่พื้น" ไม่เซ็ตสีตัวหนังสือคู่ไปด้วย ⇒ พอกดเลือก
    ในโหมดมืด พื้นกลายเป็นขาว แต่ตัวหนังสือยังเป็นสีอ่อนของธีมมืด = ขาวบนขาว วัดได้ 1.01:1 */
