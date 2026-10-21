@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 140;
+const APP_BUILD = 141;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -1180,6 +1180,15 @@ function initDatePickers() {
       // having to click elsewhere to dismiss it -- flatpickr has no built-in OK button in
       // noCalendar/time-only mode, so append one directly onto the popup each time it opens.
       onReady: (selectedDates, dateStr, fp) => {
+        // 2026-10-21: บนมือถือ flatpickr ยกหน้าที่เลือกเวลาให้ตัวเลือกของระบบปฏิบัติการ และ
+        // **ไม่สร้างปฏิทินของตัวเองเลย** ⇒ `fp.calendarContainer` เป็น undefined · โค้ดเดิมแปะปุ่ม
+        // ลงไปทุกครั้งโดยไม่ถาม จึงพ่น TypeError **12 ครั้งต่อการเปิด modal หนึ่งครั้ง** บนจอมือถือ
+        // (วัดเองที่ 375px เทียบกับเดสก์ท็อปที่ได้ 0) · ช่องเวลายังใช้งานได้ครบทุกแถวทั้งสองแบบ
+        // ⇒ สิ่งที่เสียไปคือ console ที่เต็มไปด้วย error ปลอม ซึ่งโปรเจกต์นี้มีบทเรียนแล้วว่าทำให้
+        // บั๊กจริงถูกมองข้าม (2026-10-17 บั๊ก WebSocket หายไปในเสียงรบกวนแบบนี้ทั้งวัน)
+        // ไม่ต้องหาที่แปะปุ่มใหม่บนมือถือ -- ตัวเลือกของระบบมีปุ่มยืนยันของตัวเองอยู่แล้ว
+        // ยาม: tests/timepicker-mobile-ok-button.test.js
+        if (!fp.calendarContainer) return;
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'flatpickr-time-ok-btn';
