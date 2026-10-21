@@ -3090,6 +3090,22 @@ tr.finalize-row-confirmed:hover td {
    the "OK" button appended via onReady() (app.js) picks up this same narrower width automatically. */
 .flatpickr-calendar.noCalendar { width: auto !important; min-width: 0; }
 .flatpickr-calendar.noCalendar .flatpickr-time { width: auto; }
+
+/* 2026-10-21 (เจ้าของรายงานพร้อมภาพหน้าจอมือถือ): ช่องเวลาของ Upcountry กว้างจนบังช่องสถานที่
+   ต้นเหตุ -- ความกว้างเคยเขียนเป็น inline style บน <input type="time"> โดยตรง (`width:88px;
+   flex-shrink:0`) แต่ flatpickr ตรวจพบอุปกรณ์มือถือแล้ว **สร้าง input ตัวใหม่ขึ้นมาแทน** และซ่อน
+   ตัวเดิมเป็น type="hidden" ⇒ ความกว้างที่ตั้งไว้ติดอยู่กับตัวที่ถูกซ่อน ส่วนตัวที่ผู้ใช้เห็นจริง
+   ไม่มีความกว้างกำกับเลย · วัดได้ที่ viewport 375px: ตัวที่เห็น 283px ส่วนช่องสถานที่เหลือ 31px
+   บนเดสก์ท็อปไม่มีอาการ เพราะ flatpickr ไม่สลับตัว -- นั่นคือเหตุผลที่บั๊กนี้รอดสายตามาตลอด
+   ทางแก้ -- ย้ายความกว้างมาเป็นกฎ CSS ที่เกาะ class ซึ่ง flatpickr คัดลอกต่อให้ตัวใหม่เสมอ
+   (`upc-loc-time` อยู่บนทั้งตัวเดิมและตัวที่มันสร้าง) จึงครอบได้ทั้งสามสภาพ: ก่อน flatpickr ทำงาน,
+   บนเดสก์ท็อป (flatpickr เปลี่ยน type เป็น text), และบนมือถือ (ตัวใหม่ที่มี .flatpickr-mobile)
+   `min-width: 0` ทั้งสองฝั่งสำคัญกว่าที่เห็น: ค่าตั้งต้นของ flex item คือ `min-width: auto` ซึ่ง
+   แปลว่า "ห้ามเล็กกว่าเนื้อในตัวเอง" ⇒ ตัวควบคุมเวลาที่เบราว์เซอร์วาดเองจะไม่ยอมหดไม่ว่าจะตั้ง
+   width ไว้เท่าไร และไปบีบช่องข้างๆ แทน */
+.upc-loc-row { display: flex; gap: 8px; }
+.upc-loc-time { flex: 0 0 96px; width: 96px; min-width: 0; box-sizing: border-box; }
+.upc-loc-name { flex: 1 1 0; min-width: 0; }
 .flatpickr-time-ok-btn {
   display: block; width: calc(100% - 16px); margin: 0 8px 8px; padding: 6px 0;
   background: var(--secondary); color: #fff; border: none; border-radius: 6px;

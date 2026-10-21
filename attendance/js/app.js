@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 139;
+const APP_BUILD = 140;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -18446,6 +18446,13 @@ function setLeaveType(type) {
   // show/hide medical row
   const medRow = document.getElementById('leave-medical-row');
   if (medRow) medRow.style.display = type === 'sick' ? '' : 'none';
+  // 2026-10-21 (เจ้าของตัดสิน): บังคับเหตุผลเฉพาะลากิจ (ดู submitLeave()) ⇒ ดอกจันแดงที่แปลว่า
+  // "ต้องกรอก" ต้องหายไปสำหรับลาป่วยและลาพักร้อน ไม่งั้นผู้ใช้ยังเชื่อว่าถูกบังคับและกรอกต่อไป
+  // เหมือนเดิม = แก้โค้ดแล้วแต่สิ่งที่เจ้าของขอไม่เกิดขึ้นจริงในสายตาคนใช้
+  // เงื่อนไขสะท้อน submitLeave() ตัวต่อตัว -- ถ้าสองที่นี้ไม่ตรงกันเมื่อไร หน้าจอจะโกหกทันที
+  // ยาม: tests/sick-leave-reason.test.js
+  const reqStar = document.getElementById('leave-reason-required');
+  if (reqStar) reqStar.style.display = type === 'business' ? '' : 'none';
   const noteEl = document.getElementById('leave-approval-note');
   if (noteEl) noteEl.textContent = approvalRouteNoteText(type);
 }
@@ -18571,7 +18578,17 @@ async function submitLeave() {
   if (_leaveSubmitInFlight) return;
   const type   = document.getElementById('leave-form-type')?.value || 'annual';
   const reason = document.getElementById('leave-form-reason')?.value.trim();
-  if (!reason) { showToast(L('⚠️ Please specify a reason for leave', '⚠️ กรุณาระบุเหตุผลการลา'), 'warning'); return; }
+  // 2026-10-21 (เจ้าของตัดสิน: "เพิ่มลาพักร้อนไม่ต้องบังคับด้วย บังคับแค่ลากิจ"): บังคับกรอกเหตุผล
+  // เฉพาะลากิจเท่านั้น -- ลาป่วยกับลาพักร้อนไม่ต้อง · คนที่ป่วยไม่ควรต้องอธิบายอาการตัวเองเป็น
+  // ตัวหนังสือก่อนจึงจะยื่นใบลาได้ และวันพักร้อนเป็นสิทธิ์ของพนักงานอยู่แล้ว ไม่ต้องขอเหตุผล
+  // ของเดิมบังคับ "ทุก" ประเภท ซึ่งเป็นด่านที่มีอยู่ฝั่งหน้าจอฝ่ายเดียว: `POST /api/leaves` ใน
+  // server.js บังคับ reason เฉพาะ type 'excused' กับ 'late-out' เท่านั้น ไม่เคยบังคับกับการลา
+  // ที่พนักงานยื่นเอง ⇒ การถอดด่านนี้ออกทำให้สองฝั่งเข้าใกล้กัน ไม่ใช่ทำให้หลวมลง และไม่ต้อง
+  // แตะ server.js (กฎ dual-sync ใช้กับสูตรเงิน -- ด่านนี้ไม่ใช่สูตรเงิน และไม่มีคู่ในเซิร์ฟเวอร์)
+  // เขียนเป็น `=== 'business'` ไม่ใช่ `!== 'sick' && !== 'annual'` โดยตั้งใจ: ประเภทที่เพิ่มวันหน้า
+  // จะได้ไม่ตกไปอยู่ฝั่ง "บังคับ" เงียบๆ โดยไม่มีใครตัดสินใจ
+  // ยาม: tests/sick-leave-reason.test.js (รัน submitLeave() ตัวจริง ไม่ใช่จับข้อความในซอร์ส)
+  if (!reason && type === 'business') { showToast(L('⚠️ Please specify a reason for leave', '⚠️ กรุณาระบุเหตุผลการลา'), 'warning'); return; }
 
   let dateFrom, dateTo, days, timePart = '', hourlyStart, hourlyEnd;
 

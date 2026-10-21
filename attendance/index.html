@@ -21,7 +21,7 @@
   <meta name="theme-color" content="#2563eb">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/style.css?v=20261012b">
+  <link rel="stylesheet" href="css/style.css?v=20261021a">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css" integrity="sha384-MinO0mNliZ3vwppuPOUnGa+iq619pfMhLVUXfC4LHwSCvF9H+6P/KO4Q7qBOYV5V" crossorigin="anonymous"/>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css" integrity="sha384-RkASv+6KfBMW9eknReJIJ6b3UnjKOKC5bOUaNgIY778NFbQ8MtWq9Lr/khUgqtTt" crossorigin="anonymous">
 </head>
@@ -1345,7 +1345,9 @@
 
       <!-- Reason -->
       <div class="form-field" style="margin-bottom:0">
-        <label><span data-en="Reason for Leave">เหตุผลการลา</span> <span style="color:#ef4444">*</span></label>
+        <!-- 2026-10-21 (เจ้าของตัดสิน): ดอกจันมี id เพื่อให้ setLeaveType() ซ่อนได้ตอนเลือกลาป่วย
+             ซึ่งไม่บังคับเหตุผลแล้ว -- ปล่อยดอกจันค้างไว้เท่ากับหน้าจอบอกผู้ใช้ตรงข้ามกับความจริง -->
+        <label><span data-en="Reason for Leave">เหตุผลการลา</span> <span id="leave-reason-required" style="color:#ef4444">*</span></label>
         <textarea id="leave-form-reason" rows="3" maxlength="2000" placeholder="กรุณาระบุเหตุผลการลา..." data-en-ph="Please specify the reason for leave..."></textarea>
       </div>
 
@@ -1834,33 +1836,33 @@
       <div class="form-field" style="margin-bottom:0">
         <label><span data-en="Customer / Location (up to 6 stops, at least 1 required)">ชื่อลูกค้า / สถานที่ (สูงสุด 6 แห่ง อย่างน้อย 1 แห่ง)</span> <span style="color:#ef4444">*</span></label>
         <div style="display:flex;gap:8px;font-size:11px;color:#94a3b8;margin-bottom:4px">
-          <div style="width:88px;flex-shrink:0" data-en="Time">เวลา</div>
+          <div class="upc-loc-time" data-en="Time">เวลา</div>
           <div data-en="Customer / Location">ชื่อลูกค้า / สถานที่</div>
         </div>
         <div style="display:flex;flex-direction:column;gap:6px">
-          <div style="display:flex;gap:8px">
-            <input type="time" id="upcountry-loc-time-1" style="width:88px;flex-shrink:0">
-            <input type="text" id="upcountry-loc-name-1" maxlength="200" placeholder="เช่น บริษัท ABC, โคราช, นิคมอมตะ..." data-en-ph="e.g. ABC Co., Korat, Amata Industrial Estate..." style="flex:1">
+          <div class="upc-loc-row">
+            <input type="time" id="upcountry-loc-time-1" class="upc-loc-time">
+            <input type="text" id="upcountry-loc-name-1" maxlength="200" placeholder="เช่น บริษัท ABC, โคราช, นิคมอมตะ..." data-en-ph="e.g. ABC Co., Korat, Amata Industrial Estate..." class="upc-loc-name">
           </div>
-          <div style="display:flex;gap:8px">
-            <input type="time" id="upcountry-loc-time-2" style="width:88px;flex-shrink:0">
-            <input type="text" id="upcountry-loc-name-2" maxlength="200" placeholder="(ถ้ามี)" data-en-ph="(optional)" style="flex:1">
+          <div class="upc-loc-row">
+            <input type="time" id="upcountry-loc-time-2" class="upc-loc-time">
+            <input type="text" id="upcountry-loc-name-2" maxlength="200" placeholder="(ถ้ามี)" data-en-ph="(optional)" class="upc-loc-name">
           </div>
-          <div style="display:flex;gap:8px">
-            <input type="time" id="upcountry-loc-time-3" style="width:88px;flex-shrink:0">
-            <input type="text" id="upcountry-loc-name-3" maxlength="200" placeholder="(ถ้ามี)" data-en-ph="(optional)" style="flex:1">
+          <div class="upc-loc-row">
+            <input type="time" id="upcountry-loc-time-3" class="upc-loc-time">
+            <input type="text" id="upcountry-loc-name-3" maxlength="200" placeholder="(ถ้ามี)" data-en-ph="(optional)" class="upc-loc-name">
           </div>
-          <div style="display:flex;gap:8px">
-            <input type="time" id="upcountry-loc-time-4" style="width:88px;flex-shrink:0">
-            <input type="text" id="upcountry-loc-name-4" maxlength="200" placeholder="(ถ้ามี)" data-en-ph="(optional)" style="flex:1">
+          <div class="upc-loc-row">
+            <input type="time" id="upcountry-loc-time-4" class="upc-loc-time">
+            <input type="text" id="upcountry-loc-name-4" maxlength="200" placeholder="(ถ้ามี)" data-en-ph="(optional)" class="upc-loc-name">
           </div>
-          <div style="display:flex;gap:8px">
-            <input type="time" id="upcountry-loc-time-5" style="width:88px;flex-shrink:0">
-            <input type="text" id="upcountry-loc-name-5" maxlength="200" placeholder="(ถ้ามี)" data-en-ph="(optional)" style="flex:1">
+          <div class="upc-loc-row">
+            <input type="time" id="upcountry-loc-time-5" class="upc-loc-time">
+            <input type="text" id="upcountry-loc-name-5" maxlength="200" placeholder="(ถ้ามี)" data-en-ph="(optional)" class="upc-loc-name">
           </div>
-          <div style="display:flex;gap:8px">
-            <input type="time" id="upcountry-loc-time-6" style="width:88px;flex-shrink:0">
-            <input type="text" id="upcountry-loc-name-6" maxlength="200" placeholder="(ถ้ามี)" data-en-ph="(optional)" style="flex:1">
+          <div class="upc-loc-row">
+            <input type="time" id="upcountry-loc-time-6" class="upc-loc-time">
+            <input type="text" id="upcountry-loc-name-6" maxlength="200" placeholder="(ถ้ามี)" data-en-ph="(optional)" class="upc-loc-name">
           </div>
         </div>
       </div>
@@ -2767,6 +2769,6 @@
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ja.js" integrity="sha384-mKor8U8jwukUkfxaFPCsxKF9S62PXq4gG7zcZ5yQ2x3KL1msprJZeFlKFEDeeb5V" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/th.js" integrity="sha384-E6OVFg1zUc/pckGxry0YZ6VeZ1E17l7Jl8ZQx58jbEfxxkz9LqknQhiIrA9zg/8b" crossorigin="anonymous"></script>
 
-<script src="js/app.js?v=20261017f"></script>
+<script src="js/app.js?v=20261021a"></script>
 </body>
 </html>
