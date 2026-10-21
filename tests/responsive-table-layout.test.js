@@ -158,6 +158,20 @@ test('กฎลดช่องไฟในเซลล์ตารางต้�
   }
 });
 
+test('กฎช่องไฟของจอแคบต้องอยู่หลังกฎช่องไฟของจอคอมฯ ไม่งั้นมันไม่เคยชนะ', () => {
+  const idxOf = pred => RULES.findIndex(pred);
+  const กว้าง = idxOf(x => /\.table-wrap table th/.test(x.selector) && /padding-left:\s*8px/.test(x.body)
+                          && minWidthOf(x.media) === 769 && !maxWidthOf(x.media));
+  const แคบ = idxOf(x => /\.table-wrap table th/.test(x.selector) && /padding-left:\s*[0-7]px/.test(x.body)
+                        && maxWidthOf(x.media));
+  if (กว้าง < 0 || แคบ < 0) return; // ยังไม่มีคู่นี้ก็ไม่มีอะไรให้ตรวจ
+  assert.ok(แคบ > กว้าง,
+    'กฎช่องไฟของช่วงจอแคบถูกเขียนไว้ "ก่อน" กฎของจอคอมฯ ที่ตั้ง 8px — selector เหมือนกัน specificity' +
+    ' เท่ากัน ผู้ชนะจึงตัดสินด้วยลำดับในไฟล์ ⇒ กฎของจอแคบจะไม่เคยมีผลที่ความกว้างใดเลย' +
+    ' (เกิดขึ้นจริง 2026-10-21: เทสต์เขียว deploy ขึ้นเว็บแล้ว แต่ของที่ตั้งใจแก้ยังล้น 3px เท่าเดิม' +
+    ' จับได้ตอนอ่าน CSSOM บนหน้าจริงเท่านั้น)');
+});
+
 // ---- 6) การจัดวางสองแบบของหน้า Finalize: JS กับ CSS ต้องใช้เส้นแบ่งเดียวกัน ----
 const APP = fs.readFileSync(path.join(ROOT, 'attendance/js/app.js'), 'utf8');
 
