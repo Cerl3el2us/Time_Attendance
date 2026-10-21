@@ -2888,6 +2888,12 @@ tr.finalize-row-confirmed:hover td {
 [data-theme="dark"] .emp-field label { color: var(--text-muted); }
 [data-theme="dark"] .table-total-row { color: var(--text); }
 [data-theme="dark"] .sig-label { color: var(--text-muted); }
+/* 2026-10-21 (กวาดบนเว็บจริงหลัง deploy): .sig-title คือชื่อผู้รับเงินใต้เส้นลายเซ็น มันถูกลืมตอนที่
+   เพื่อนบ้านในบล็อกเดียวกันได้กฎโหมดมืด ⇒ น้ำเงิน #2563eb ค้างอยู่บนพื้นเข้ม วัดได้ 2.83 ขณะที่
+   .sig-label และ .sig-date ในบล็อกเดียวกันได้ 5.71 · #93c5fd คือคู่โหมดมืดของ #2563eb ที่ไฟล์นี้
+   ใช้อยู่แล้วกับสีฝังใน inline style ⇒ 8.11 · โหมดสว่างไม่ถูกแตะ (#2563eb บนกระดาษขาว = 5.17)
+   ยาม: tests/theme-aware-colors.test.js */
+[data-theme="dark"] .sig-title { color: #93c5fd; }
 [data-theme="dark"] .nav-section { color: rgba(255,255,255,0.35); }
 [data-theme="dark"] #dark-mode-toggle { background: rgba(255,255,255,0.12) !important; color: rgba(255,255,255,0.9) !important; }
 /* Leave cards */
