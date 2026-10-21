@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 143;
+const APP_BUILD = 144;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -25528,6 +25528,28 @@ function goToFinalizeForPeriod(dateStr) {
   navigateTo('finalize');
 }
 
+// 2026-10-21: ตารางหน้านี้จัดวางต่างกันสองแบบตามความกว้างจอ (ดูเหตุผลที่จุดสร้าง
+// .fin-mobile-actions ด้านล่าง) · 768px คือ breakpoint เดียวกับที่ css/style.css ใช้ทั้งไฟล์
+// -- ถ้าแก้ตรงนี้ต้องแก้ที่นั่นด้วย ไม่งั้นแถวจะถูกย้ายแต่ CSS ไม่จัดให้ หรือกลับกัน
+const FINALIZE_MOBILE_MAX_WIDTH = 768;
+function _finalizeMobileLayout() {
+  return typeof window !== 'undefined'
+    && window.matchMedia(`(max-width: ${FINALIZE_MOBILE_MAX_WIDTH}px)`).matches;
+}
+// เจ้าของย้ำว่าต้อง "ยืดหยุ่นตามขนาดที่ผู้ใช้งานใช้จริง เพราะบางคนก็ปรับขนาด browser เล็ก
+// บางคนก็ปรับใหญ่" ⇒ การย้ายแถวต้องเกิดตอนลากเปลี่ยนขนาดหน้าต่างด้วย ไม่ใช่แค่ตอนเปิดหน้า
+// วาดใหม่เฉพาะตอน "ข้าม" เส้น 768px เท่านั้น -- ไม่ใช่ทุก pixel ที่ลาก ซึ่งจะวาดตารางรัวๆ
+if (typeof window !== 'undefined') {
+  let _finLastIsMobile = null;
+  window.addEventListener('resize', () => {
+    const now = _finalizeMobileLayout();
+    if (_finLastIsMobile === null) { _finLastIsMobile = now; return; }
+    if (now === _finLastIsMobile) return;
+    _finLastIsMobile = now;
+    if (typeof currentPage !== 'undefined' && currentPage === 'finalize') renderFinalize();
+  });
+}
+
 async function renderFinalize() {
   await loadFinalizeData();
   syncFinalizePeriodDropdown();
@@ -25666,6 +25688,37 @@ async function renderFinalize() {
         </div>
       </td>`;
     tbody.appendChild(tr);
+
+    // 2026-10-21 (เจ้าของสั่งหลังดูหน้าจอมือถือจริง): บนมือถือ ย้ายปุ่ม "ปรับค่าเบี้ยฯ" กับช่อง
+    // สถานะ/ปุ่มยืนยัน ลงมาอยู่แถวของตัวเองที่กินความกว้างเต็มตาราง
+    //
+    // ทำไมต้องย้าย ไม่ใช่แค่บีบให้พอดี: ที่ 390px ตารางนี้ล้น 24px และวัดแล้วพบว่าบีบต่อไม่ได้
+    // โดยไม่เสียอย่างอื่น -- ถ้าหรี่ช่องกรอกภาษีให้แคบพอจนตารางพอดีจอ (72px) ตัวเลขที่กรอกไว้จะ
+    // ถูกตัดจนอ่านไม่ครบ 8 จาก 9 ช่อง ซึ่งรับไม่ได้ในตารางเงินเดือน · พอย้ายสองอย่างนี้ลงมา
+    // คอลัมน์ที่เหลือหายใจออก: ตารางพอดีจอ (0px) ชื่อพนักงานกลับมาอยู่บรรทัดเดียว และหัวคอลัมน์
+    // "สุทธิ" ที่เคยถูกดันหายไปก็กลับมา
+    //
+    // ย้ายของจริง ไม่ใช่สร้างสำเนา: ป้ายสถานะกับปุ่มยืนยันมี id (finalize-status-N / finalize-btn-N)
+    // ที่โค้ดอื่นอ้างถึงอยู่ -- ถ้า render สองชุดจะได้ id ซ้ำและ getElementById จะหยิบผิดตัว
+    if (_finalizeMobileLayout()) {
+      const statusCell = tr.cells[8];                      // คอลัมน์ "สถานะ"
+      const adjBtn = tr.cells[0] && tr.cells[0].querySelector('button');
+      if (statusCell) {
+        const actionRow = document.createElement('tr');
+        actionRow.className = 'fin-mobile-actions';
+        const cell = document.createElement('td');
+        cell.colSpan = 10;
+        const bar = document.createElement('div');
+        bar.className = 'fin-mobile-actions-bar';
+        if (adjBtn) bar.appendChild(adjBtn);              // ปุ่มปรับค่าเบี้ยฯ ชิดซ้าย
+        while (statusCell.firstChild) bar.appendChild(statusCell.firstChild);  // สถานะ+ยืนยัน ชิดขวา
+        statusCell.style.display = 'none';
+        cell.appendChild(bar);
+        actionRow.appendChild(cell);
+        tbody.appendChild(actionRow);
+      }
+    }
+
     // Manual Allowances sub-row (collapsed by default unless items exist)
     const adjRow = document.createElement('tr');
     adjRow.id = `finalize-adj-row-${u.id}`;

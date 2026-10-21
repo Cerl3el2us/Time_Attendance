@@ -4465,3 +4465,23 @@ tr.finalize-row-confirmed:hover td {
      (กฎ .btn-sm/.btn ในช่วงมือถือของไฟล์นี้ตั้ง min-height:44px ไว้ด้วยเหตุผลเดียวกัน) */
   .table-wrap table td:first-child .btn { font-size: 11px; padding-left: 8px; padding-right: 8px; }
 }
+
+/* ---- แถวปุ่มบนมือถือของหน้า Finalize Payroll (2026-10-21) ----------------------------
+   app.js (renderFinalize) ย้ายปุ่ม "ปรับค่าเบี้ยฯ" กับป้ายสถานะ+ปุ่มยืนยัน ลงมาอยู่แถวนี้
+   เมื่อจอแคบกว่า 768px · ค่า 768 ต้องตรงกับ FINALIZE_MOBILE_MAX_WIDTH ใน app.js
+   เหตุผลที่ต้องย้าย ไม่ใช่บีบ: วัดแล้วถ้าบีบช่องกรอกภาษีจนตารางพอดีจอ ตัวเลขที่กรอกไว้จะถูกตัด
+   8 จาก 9 ช่อง ซึ่งรับไม่ได้ในตารางเงินเดือน */
+@media (max-width: 768px) {
+  #fin-th-status { display: none; }   /* หัวคอลัมน์ต้องหายไปพร้อมเซลล์ ไม่งั้นหัวกับข้อมูลเลื่อนไม่ตรงกัน */
+  .fin-mobile-actions > td { padding: 0 5px 10px; border-top: none; }
+  .fin-mobile-actions-bar { display: flex; align-items: center; gap: 8px; width: 100%; }
+  /* ปุ่มปรับค่าเบี้ยฯ ชิดซ้าย ที่เหลือ (สถานะ + ปุ่มยืนยัน) ถูกดันไปชิดขวา */
+  .fin-mobile-actions-bar > .btn:first-child { margin-right: auto; }
+  .fin-mobile-actions-bar > div { display: flex; flex-direction: row !important; align-items: center; gap: 8px; }
+
+  /* ตัวเลขในแถวเดียวกันขนาดเท่ากัน (เจ้าของ: "ทำให้ตัวเลขทั้ง 3 ชุดมีขนาดที่เท่ากัน")
+     ยกเว้นช่องกรอกภาษี ซึ่งต้องคง 16px ตามกฎกัน iOS ซูม -- เป็นข้อจำกัดของแพลตฟอร์ม
+     ไม่ใช่การเลือกของเรา (ดูคอมเมนต์ที่กฎ `input, select, textarea` ด้านบนของไฟล์นี้) */
+  .fin-gross-mobile { font-size: 14px !important; }
+  #page-finalize .table-wrap table tbody td { vertical-align: middle; }
+}

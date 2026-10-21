@@ -133,4 +133,36 @@ test('แถบขวาบนสุดต้องหดได้ ไม่ง�
     ' เหลือให้ชื่อหน้าแค่ 7px จนตัวอักษรไทยเรียงลงมาทีละตัว (วัดที่ viewport 1152)');
 });
 
+// ---- 6) การจัดวางสองแบบของหน้า Finalize: JS กับ CSS ต้องใช้เส้นแบ่งเดียวกัน ----
+const APP = fs.readFileSync(path.join(ROOT, 'attendance/js/app.js'), 'utf8');
+
+test('ค่า breakpoint ของหน้า Finalize ใน app.js ต้องตรงกับที่ CSS ใช้', () => {
+  const m = /const FINALIZE_MOBILE_MAX_WIDTH = (\d+);/.exec(APP);
+  assert.ok(m, 'ไม่พบ FINALIZE_MOBILE_MAX_WIDTH ใน app.js');
+  const jsBreak = +m[1];
+  const cssRule = RULES.find(r => /#fin-th-status/.test(r.selector) && /display:\s*none/.test(r.body));
+  assert.ok(cssRule, 'ไม่พบกฎที่ซ่อนหัวคอลัมน์สถานะบนมือถือ');
+  assert.strictEqual(maxWidthOf(cssRule.media), jsBreak,
+    `app.js ย้ายแถวที่ ${jsBreak}px แต่ CSS จัดรูปแบบที่ ${maxWidthOf(cssRule.media)}px` +
+    ' ⇒ จะมีช่วงความกว้างที่แถวถูกย้ายแต่ CSS ไม่จัดให้ (หรือกลับกัน)');
+});
+
+test('ถ้าย้ายเซลล์สถานะออกไป หัวคอลัมน์ต้องถูกซ่อนด้วยในช่วงความกว้างเดียวกัน', () => {
+  assert.ok(/statusCell\.style\.display\s*=\s*'none'/.test(APP),
+    'app.js ไม่ได้ซ่อนเซลล์สถานะหลังย้ายเนื้อในออกไป ⇒ จะเหลือเซลล์ว่างค้างในตาราง');
+  const ซ่อนหัว = RULES.find(r => /#fin-th-status/.test(r.selector) && /display:\s*none/.test(r.body));
+  assert.ok(ซ่อนหัว,
+    'เซลล์สถานะถูกซ่อนใน JS แต่หัวคอลัมน์ไม่ถูกซ่อนใน CSS ⇒ หัวตารางกับข้อมูลจะเลื่อนไม่ตรงกัน' +
+    ' (เจ้าของเจอเองตอนทดลอง: หัวตารางเหลือ 2 คอลัมน์ ขณะที่ข้อมูลยังมี 4)');
+});
+
+test('ปุ่มยืนยันกับป้ายสถานะต้องถูกย้าย ไม่ใช่สร้างสำเนา (กัน id ซ้ำ)', () => {
+  assert.ok(/actionRow\.className\s*=\s*'fin-mobile-actions'/.test(APP),
+    'ไม่พบโค้ดสร้างแถวปุ่มของมือถือใน app.js');
+  assert.ok(/while\s*\(statusCell\.firstChild\)\s*bar\.appendChild\(statusCell\.firstChild\)/.test(APP),
+    'ต้องย้ายลูกของเซลล์สถานะมาทั้งหมด (appendChild ย้ายของจริง) ไม่ใช่ render ซ้ำ —' +
+    ' ป้ายสถานะกับปุ่มยืนยันมี id finalize-status-N / finalize-btn-N ที่โค้ดอื่นอ้างถึง' +
+    ' ถ้ามีสองชุด getElementById จะหยิบผิดตัว');
+});
+
 console.log(`\nresponsive-table-layout: ${passed} passed`);
