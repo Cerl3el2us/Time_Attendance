@@ -133,6 +133,18 @@ test('แถบขวาบนสุดต้องหดได้ ไม่ง�
     ' เหลือให้ชื่อหน้าแค่ 7px จนตัวอักษรไทยเรียงลงมาทีละตัว (วัดที่ viewport 1152)');
 });
 
+test('ถ้าสั่งให้แถบขวาหดได้ ลูกของมันต้องหดได้ด้วย ไม่งั้นเนื้อในทะลักออกนอกจอแทน', () => {
+  const หดได้ = find(x => /\.topbar-right/.test(x.selector) && /flex-shrink:\s*1/.test(x.body));
+  if (!หดได้.length) return; // ข้อก่อนหน้าจับกรณีที่ไม่มีกฎนี้แล้ว
+  const ลูกหดได้ = find(x => /\.topbar-right\s*>\s*\*/.test(x.selector) && /min-width:\s*0/.test(x.body)
+                            && !(maxWidthOf(x.media) && maxWidthOf(x.media) < 769));
+  assert.ok(ลูกหดได้.length > 0,
+    'ไม่พบกฎ `.topbar-right > * { min-width: 0 }` สำหรับจอคอมพิวเตอร์ — ค่าตั้งต้นของ flex item คือ' +
+    ' min-width:auto ⇒ สั่งให้พ่อหดได้อย่างเดียว พ่อจะถูกบีบจริงแต่ลูกไม่ยอมหด เนื้อในเลยล้นออกนอกกรอบ' +
+    ' (วัดบนเว็บจริงที่ viewport 1280 ด้วยบัญชีที่มี dropdown สวมบทบาท: ฝั่งขวาต้องการ 736px ได้ไป 660px' +
+    ' ⇒ ป้ายชื่อผู้ใช้ยื่นไปถึง x=1321 บนจอกว้าง 1274 และทั้งหน้าเลื่อนแนวนอนได้ 47px)');
+});
+
 // ---- 6) การจัดวางสองแบบของหน้า Finalize: JS กับ CSS ต้องใช้เส้นแบ่งเดียวกัน ----
 const APP = fs.readFileSync(path.join(ROOT, 'attendance/js/app.js'), 'utf8');
 
