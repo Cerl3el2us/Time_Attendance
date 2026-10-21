@@ -152,4 +152,42 @@ test('กล่องผลคำนวณระยะทางไกลไม�
   assertNoHardcodedColor('calcLongDistance');
 });
 
+// ---- 2026-10-21 รอบสอง (กวาดบนเว็บจริงหลัง deploy) -------------------------------------
+// สองข้อนี้เป็นคนละจุดบอดกับด้านบน: ด้านบนคือ "JS เซ็ตสีเอง" · ข้างล่างคือ "สีที่ฝังไว้ใน
+// inline style ของ HTML" ซึ่งกลไกเดิมดักด้วย [style*="..."] -- กลไกนั้นมีรูสองรู
+
+test('กฎแปลงสีโหมดมืดต้องไม่จับโดน border-color หรือ background-color', () => {
+  const หลวม = [...CSS_SRC.matchAll(/\[style\*="color:(#[0-9a-fA-F]{6})"\]/g)].map(m => m[1]);
+  assert.strictEqual(หลวม.length, 0,
+    `กฎ ${หลวม.length} ข้อใช้ \`[style*="color:#xxxxxx"]\` ซึ่งเป็นการ "มีสตริงนี้อยู่" ⇒ มันจับ` +
+    ' `border-color:#xxxxxx` และ `background-color:#xxxxxx` ไปด้วย เพราะคำว่า color: เป็นส่วนท้าย' +
+    ' ของคำเหล่านั้น · เกิดขึ้นจริงกับปุ่ม "⏱️ ยื่นขอ OT" ที่มี style="background:#ea580c;' +
+    'border-color:#ea580c" ⇒ โหมดมืดเปลี่ยนตัวอักษรเป็นส้มอ่อนบนพื้นส้ม วัดได้ 2.11 (ตาเห็นว่า' +
+    ' อ่านยากกว่าปุ่มข้างๆ ชัดเจน) · ต้องเขียนเป็น [style^="color:#xxxxxx"] คู่กับ' +
+    ` [style*=";color:#xxxxxx"] แทน · สีที่ยังหลวมอยู่: ${หลวม.slice(0, 6).join(', ')}`);
+});
+
+test('ทุกสีตัวอักษรที่ฝังใน inline style ต้องอ่านออกในโหมดมืด', () => {
+  const INDEX_SRC = fs.readFileSync(path.join(ROOT, 'attendance/index.html'), 'utf8');
+  const src = APP_SRC + INDEX_SRC;
+  const ใช้ = new Set();
+  for (const m of src.matchAll(/(?:^|;|style=")color:(#[0-9a-fA-F]{6})/gm)) ใช้.add(m[1].toLowerCase());
+  const มีกฎ = new Set([...CSS_SRC.matchAll(/\[style[*^]="?;?color:(#[0-9a-fA-F]{6})"\]/g)].map(m => m[1].toLowerCase()));
+
+  const hex = h => ({ r: parseInt(h.slice(1, 3), 16), g: parseInt(h.slice(3, 5), 16), b: parseInt(h.slice(5, 7), 16) });
+  const lum = c => { const f = v => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+    return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b); };
+  const ratio = (a, b) => { const l1 = lum(hex(a)), l2 = lum(hex(b)), hi = Math.max(l1, l2), lo = Math.min(l1, l2);
+    return (hi + 0.05) / (lo + 0.05); };
+  const พื้นการ์ดโหมดมืด = '#1e293b';
+
+  const ตก = [...ใช้].filter(c => !มีกฎ.has(c) && ratio(c, พื้นการ์ดโหมดมืด) < 4.5)
+    .map(c => `${c} (${ratio(c, พื้นการ์ดโหมดมืด).toFixed(2)}:1)`);
+  assert.deepStrictEqual(ตก, [],
+    'สีเหล่านี้ถูกฝังเป็นสีตัวอักษรใน inline style แต่ไม่มีกฎโหมดมืดรองรับ และวัดบนพื้นการ์ด' +
+    ' โหมดมืด (#1e293b) แล้วต่ำกว่า 4.5:1 ⇒ เป็นตัวหนังสือเข้มบนพื้นเข้ม · ที่เจอบนเว็บจริง:' +
+    ' บรรทัดช่วยเหลือ "🛠️ ปุ่มคำขอแสดงตามพนักงานที่เลือก..." สี #9a3412 วัดได้ 2.00' +
+    ` · รายการที่ยังไม่มีกฎ: ${ตก.join(', ')}`);
+});
+
 console.log(`\ntheme-aware-colors: ${passed} passed`);
