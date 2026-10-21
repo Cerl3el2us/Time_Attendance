@@ -3103,6 +3103,66 @@ tr.finalize-row-confirmed:hover td {
    `min-width: 0` ทั้งสองฝั่งสำคัญกว่าที่เห็น: ค่าตั้งต้นของ flex item คือ `min-width: auto` ซึ่ง
    แปลว่า "ห้ามเล็กกว่าเนื้อในตัวเอง" ⇒ ตัวควบคุมเวลาที่เบราว์เซอร์วาดเองจะไม่ยอมหดไม่ว่าจะตั้ง
    width ไว้เท่าไร และไปบีบช่องข้างๆ แทน */
+/* 2026-10-21 (เจ้าของรายงานพร้อมภาพ: "dark mode มันดูแปลกๆ ทำไมมันขาวๆแบบนั้น"):
+   สามจุดที่ JavaScript เคยเซ็ตสีเองด้วยค่าตายตัว ย้ายมาอยู่ที่นี่ทั้งหมด
+   ทำไมการเซ็ตสีจาก JS ถึงอันตรายเป็นพิเศษในไฟล์นี้: กฎราว 67 ข้อด้านบน (`[data-theme="dark"]
+   [style*="background:#f8fafc"]`) ดักสีสว่างจาก inline style ได้ก็จริง แต่ดักได้เฉพาะที่เขียนไว้
+   ใน HTML -- พอ JS สั่ง `el.style.background = '#eff6ff'` เบราว์เซอร์เขียน attribute ใหม่เป็น
+   `background: rgb(239, 246, 255)` ซึ่งไม่ตรงกับ selector ที่มองหา hex อีกต่อไป ⇒ กฎธีมหลุดหมด
+   ค่าของโหมดสว่างด้านล่างคัดลอกมาจากค่าที่ JS เคยตั้งไว้ "ตัวต่อตัว" เพื่อให้โหมดสว่างหน้าตา
+   เหมือนเดิมทุกพิกเซล -- สิ่งที่เพิ่มเข้ามาคือกฎของโหมดมืดเท่านั้น
+   ยาม: tests/theme-aware-colors.test.js */
+
+/* ปุ่มเลือก "เวลาเข้างาน / เวลาออกงาน" ในโมดัลขอแก้ไขเวลาย้อนหลัง
+   นี่คือจุดที่เจ้าของถ่ายรูปมา: ของเดิมเซ็ต "แค่พื้น" ไม่เซ็ตสีตัวหนังสือคู่ไปด้วย ⇒ พอกดเลือก
+   ในโหมดมืด พื้นกลายเป็นขาว แต่ตัวหนังสือยังเป็นสีอ่อนของธีมมืด = ขาวบนขาว วัดได้ 1.01:1 */
+.tc-field-btn {
+  flex: 1; padding: 14px 8px; border-radius: 12px; cursor: pointer;
+  text-align: center; transition: all .15s;
+  border: 2px solid #e2e8f0; background: #f8fafc;
+}
+.tc-field-btn.tc-field-selected { border-color: #93c5fd; background: #eff6ff; }
+[data-theme="dark"] .tc-field-btn { border-color: var(--border); background: var(--bg-card); }
+/* สีทึบ ไม่ใช่สีโปร่งแสง โดยตั้งใจ: ค่าโปร่งแสงต้องนำไปผสมกับพื้นข้างหลังก่อนจึงจะรู้สีจริง
+   ซึ่งทั้งคนและเครื่องวัดพลาดได้ง่าย (รอบแรกผมเองคำนวณได้ 2.98 ทั้งที่ของจริงเข้มกว่านั้น)
+   #1d4ed8 วัดแล้ว: ตัดกับตัวหนังสือของธีมมืด 5.44:1 (เกณฑ์ 4.5) และต่างจากปุ่มที่ไม่ถูกเลือก
+   2.18:1 ซึ่งแยกออกด้วยตาได้ และยังมีสีขอบช่วยบอกสถานะอีกชั้น ไม่ได้พึ่งสีพื้นอย่างเดียว */
+[data-theme="dark"] .tc-field-btn.tc-field-selected {
+  border-color: var(--primary); background: #1d4ed8;
+}
+/* ตัวหนังสือข้างในปุ่มที่ถูกเลือก: HTML ฝัง color ไว้ที่ตัว div เอง (`color:#1e293b` สำหรับชื่อ
+   และ `color:#64748b` สำหรับบรรทัดเวลา) ซึ่งทั้งคู่จางเกินไปบนพื้นน้ำเงินเข้มของสถานะถูกเลือก
+   -- วัดได้ 2.61:1 สำหรับบรรทัดเวลา ขณะที่เกณฑ์ข้อความรองคือ 3:1
+   ต้องใช้ !important เพราะกำลังทับ inline style ซึ่งเป็นวิธีเดียวกับที่ไฟล์นี้ใช้อยู่แล้วกับ
+   กฎดักสีสว่างอีก 67 ข้อด้านบน */
+[data-theme="dark"] .tc-field-btn.tc-field-selected > div { color: #eff6ff !important; }
+
+/* แถบบัญชีระบบ -- พื้นขาวจ้ากลางโหมดมืด และโผล่ทุกหน้าที่ superadmin เปิด (วัดได้ 19 หน้า) */
+#system-account-banner { background: #fff7ed; border-bottom-color: #fed7aa; color: #9a3412; }
+#system-account-banner.sysacct-impersonating { background: #fef2f2; border-bottom-color: #fecaca; color: #991b1b; }
+/* สีทึบทั้งหมด ไม่ใช้ค่าโปร่งแสง: ค่าโปร่งแสงต้องผสมกับพื้นข้างหลังก่อนจึงจะรู้สีจริง ทำให้ทั้ง
+   คนและเครื่องวัด contrast พลาดได้ง่าย (รอบแรกผมใส่ rgba ไว้แล้วตัววัดอ่านได้ 1.98 ทั้งที่ของจริง
+   ไม่ได้แย่ขนาดนั้น -- เสียเวลาไล่หาสาเหตุที่ไม่มีอยู่จริง)
+   วัดแล้ว: แถบปกติ 10.0:1 · แถบตอนสวมเป็นคนอื่น 9.67:1 (เกณฑ์ 4.5) */
+[data-theme="dark"] #system-account-banner {
+  background: #4a2410; border-bottom-color: #7c2d12; color: #fed7aa;
+}
+[data-theme="dark"] #system-account-banner.sysacct-impersonating {
+  background: #4c1d1d; border-bottom-color: #991b1b; color: #fecaca;
+}
+
+/* กล่องผลคำนวณระยะทางไกล -- ค่าของโหมดสว่างคือค่าที่ calcLongDistance() เคยเซ็ตไว้ตัวต่อตัว
+   (สีที่ฝังอยู่ใน index.html เดิมคือสีก่อน JS คำนวณเสร็จ ซึ่งผู้ใช้ไม่เคยเห็นเพราะกล่องยัง
+   display:none อยู่ตอนนั้น จึงถอดออกได้โดยไม่เปลี่ยนสิ่งที่ใครเห็น) */
+#longdistance-result-display { background: #f8fafc; border-color: #e2e8f0; color: #64748b; }
+#longdistance-result-display.ld-qualifies { background: #f0fdf4; border-color: #86efac; color: #166534; }
+[data-theme="dark"] #longdistance-result-display {
+  background: var(--bg-card); border-color: var(--border); color: var(--text);
+}
+[data-theme="dark"] #longdistance-result-display.ld-qualifies {
+  background: #064e3b; border-color: #10b981; color: #a7f3d0;
+}
+
 .upc-loc-row { display: flex; gap: 8px; }
 .upc-loc-time { flex: 0 0 96px; width: 96px; min-width: 0; box-sizing: border-box; }
 .upc-loc-name { flex: 1 1 0; min-width: 0; }

@@ -21,7 +21,7 @@
   <meta name="theme-color" content="#2563eb">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/style.css?v=20261021a">
+  <link rel="stylesheet" href="css/style.css?v=20261021e">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css" integrity="sha384-MinO0mNliZ3vwppuPOUnGa+iq619pfMhLVUXfC4LHwSCvF9H+6P/KO4Q7qBOYV5V" crossorigin="anonymous"/>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css" integrity="sha384-RkASv+6KfBMW9eknReJIJ6b3UnjKOKC5bOUaNgIY778NFbQ8MtWq9Lr/khUgqtTt" crossorigin="anonymous">
 </head>
@@ -194,7 +194,7 @@
       <div id="notif-list" class="notif-list" role="list"></div>
     </div>
 
-    <div id="system-account-banner" style="display:none;align-items:center;gap:10px;padding:10px 16px;background:#fff7ed;border-bottom:1px solid #fed7aa;color:#9a3412;font-size:13px;font-weight:600">
+    <div id="system-account-banner" style="display:none;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid;font-size:13px;font-weight:600">
       <span>🛠️</span>
       <!-- 2026-10-05: filled by updateSystemAccountUI() — says which role is being impersonated and
            offers the way out. Empty (and the banner stays orange) at Full access. -->
@@ -1395,13 +1395,13 @@
         <label style="font-size:12px;font-weight:600;color:#64748b;margin-bottom:8px;display:block" data-en="Which field to edit">แก้ไขข้อมูลใด</label>
         <div style="display:flex;gap:10px">
           <button id="tc-btn-in" onclick="selectCorrectionField('checkIn')"
-            style="flex:1;padding:14px 8px;border-radius:12px;border:2px solid #e2e8f0;background:#f8fafc;cursor:pointer;text-align:center;transition:all .15s">
+            class="tc-field-btn">
             <div style="font-size:20px">⬆️</div>
             <div style="font-size:13px;font-weight:700;color:#1e293b;margin-top:4px" data-en="Check-In Time">เวลาเข้างาน</div>
             <div id="tc-current-in" style="font-size:12px;color:#64748b;margin-top:2px">—</div>
           </button>
           <button id="tc-btn-out" onclick="selectCorrectionField('checkOut')"
-            style="flex:1;padding:14px 8px;border-radius:12px;border:2px solid #e2e8f0;background:#f8fafc;cursor:pointer;text-align:center;transition:all .15s">
+            class="tc-field-btn">
             <div style="font-size:20px">⬇️</div>
             <div style="font-size:13px;font-weight:700;color:#1e293b;margin-top:4px" data-en="Check-Out Time">เวลาออกงาน</div>
             <div id="tc-current-out" style="font-size:12px;color:#64748b;margin-top:2px">—</div>
@@ -1991,7 +1991,7 @@
           <input type="number" id="longdistance-mileage-end" min="0" placeholder="0" oninput="calcLongDistance()">
         </div>
       </div>
-      <div id="longdistance-result-display" style="display:none;background:#f0f9ff;border:1px solid #7dd3fc;border-radius:10px;padding:10px 14px;font-size:13px;color:#0369a1;font-weight:600">
+      <div id="longdistance-result-display" style="display:none;border:1px solid;border-radius:10px;padding:10px 14px;font-size:13px;font-weight:600">
         <span id="longdistance-result-text"></span>
       </div>
       <div class="form-field" style="margin-bottom:0">
@@ -2769,6 +2769,6 @@
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ja.js" integrity="sha384-mKor8U8jwukUkfxaFPCsxKF9S62PXq4gG7zcZ5yQ2x3KL1msprJZeFlKFEDeeb5V" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/th.js" integrity="sha384-E6OVFg1zUc/pckGxry0YZ6VeZ1E17l7Jl8ZQx58jbEfxxkz9LqknQhiIrA9zg/8b" crossorigin="anonymous"></script>
 
-<script src="js/app.js?v=20261021b"></script>
+<script src="js/app.js?v=20261021c"></script>
 </body>
 </html>

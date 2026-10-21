@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 141;
+const APP_BUILD = 142;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -345,9 +345,12 @@ function updateSystemAccountUI() {
   if (banner && live) {
     const asPerson = isImpersonatingPerson();
     const on = isSuperAdmin() && (asPerson || !!previewRole);
-    banner.style.background = on ? '#fef2f2' : '#fff7ed';
-    banner.style.borderBottomColor = on ? '#fecaca' : '#fed7aa';
-    banner.style.color = on ? '#991b1b' : '#9a3412';
+    // 2026-10-21: สีย้ายไป css/style.css (#system-account-banner / .sysacct-impersonating)
+    // ของเดิมเขียนพื้นสีสว่างลงไปตรงนี้ ⇒ แถบนี้เป็นแถบขาวจ้ากลางโหมดมืด และเพราะมันอยู่บนสุด
+    // ของทุกหน้าที่บัญชีระบบเปิด มันจึงโผล่ 19 หน้า (วัดด้วยตัวกวาดบนเว็บจริง 2026-10-21)
+    // ยังอ่านออกอยู่ (ความต่างสี 7.6) เพราะที่นี่เซ็ตสีตัวหนังสือคู่กับพื้นมาแต่ไหนแต่ไร -- ต่างจาก
+    // ปุ่มในโมดัลแก้ไขเวลาที่เซ็ตแค่พื้นแล้วพัง · ยาม: tests/theme-aware-colors.test.js
+    banner.classList.toggle('sysacct-impersonating', on);
     // Naming the person, not just "an employee": the risk is spending ten minutes reading the
     // system from somebody else's seat, and a name is what interrupts that.
     const who = asPerson
@@ -19090,9 +19093,10 @@ function calcLongDistance() {
     : (qualifies
         ? L(`🚗 Distance: ${km.toLocaleString()} km — qualifies for +฿${rate} allowance`, `🚗 ระยะทาง: ${km.toLocaleString()} กม. — ได้รับเบี้ยเลี้ยงเพิ่ม +฿${rate}`)
         : L(`🚗 Distance: ${km.toLocaleString()} km — under ${threshold} km, no extra allowance`, `🚗 ระยะทาง: ${km.toLocaleString()} กม. — ไม่ถึง ${threshold} กม. ไม่ได้รับเบี้ยเลี้ยงเพิ่ม`));
-  display.style.background = qualifies ? '#f0fdf4' : '#f8fafc';
-  display.style.borderColor = qualifies ? '#86efac' : '#e2e8f0';
-  display.style.color = qualifies ? '#166534' : '#64748b';
+  // 2026-10-21: สีย้ายไป css/style.css (#longdistance-result-display / .ld-qualifies)
+  // เหตุผลเดียวกับอีกสองจุด: สีที่เซ็ตจาก JS ไม่ถูกกฎโหมดมืดดัก กล่องนี้จึงเป็นแผ่นสว่าง
+  // กลางหน้าจอมืด · ยาม: tests/theme-aware-colors.test.js
+  display.classList.toggle('ld-qualifies', qualifies);
   display.style.display = 'block';
 }
 
@@ -21217,10 +21221,14 @@ function selectCorrectionField(field) {
   const isIn = field === 'checkIn';
   const inBtn  = document.getElementById('tc-btn-in');
   const outBtn = document.getElementById('tc-btn-out');
-  inBtn.style.borderColor  = isIn  ? '#93c5fd' : '#e2e8f0';
-  inBtn.style.background   = isIn  ? '#eff6ff' : '#f8fafc';
-  outBtn.style.borderColor = !isIn ? '#93c5fd' : '#e2e8f0';
-  outBtn.style.background  = !isIn ? '#eff6ff' : '#f8fafc';
+  // 2026-10-21 (เจ้าของรายงานพร้อมภาพหน้าจอโหมดมืด): ของเดิมเขียนสีลงไปตรงๆ ตรงนี้ ซึ่งชนะกฎธีม
+  // ทุกข้อ และเซ็ตแค่ "พื้น" ไม่ได้เซ็ตสีตัวหนังสือคู่ไปด้วย ⇒ ในโหมดมืด ปุ่มที่ถูกเลือกกลายเป็น
+  // พื้นขาวขณะที่ตัวหนังสือยังเป็นสีอ่อนของธีมมืด วัดในเบราว์เซอร์จริงได้ความต่างสี 1.01:1
+  // (เกณฑ์ขั้นต่ำคือ 4.5:1) = มองไม่เห็นข้อความบนปุ่มที่ตัวเองเพิ่งกดเลือก
+  // สีทั้งหมดย้ายไป css/style.css (.tc-field-btn / .tc-field-selected) ซึ่งมีกฎของทั้งสองธีม
+  // ยาม: tests/theme-aware-colors.test.js
+  inBtn.classList.toggle('tc-field-selected', isIn);
+  outBtn.classList.toggle('tc-field-selected', !isIn);
 }
 
 async function submitTimeCorrection() {
