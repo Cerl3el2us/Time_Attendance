@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 146;
+const APP_BUILD = 147;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -9235,7 +9235,7 @@ function checkinEditBtnHtml(row, targetUser) {
   if (targetUser.role === 'accounting' && effectiveRole() !== 'md') return '';
   if (!checkinEditWindowOk(row.rawCheckIn || row.checkIn)) return '';
   const edited = row.checkInEdited ? ' ✎' : '';
-  return `<button class="btn btn-ghost btn-sm" style="padding:0 4px;color:#f59e0b" title="${
+  return `<button class="btn btn-ghost btn-sm" style="padding:0 4px;color:#b45309" title="${
     L('Correct this check-in time', 'แก้ไขเวลาเข้างานนี้')}" onclick="openCheckinEditModal('${escapeJsAttr(row.date)}')">✎${edited}</button>`;
 }
 // The modal itself is built here rather than living in index.html: it is admin-only, opened from
@@ -10755,7 +10755,7 @@ function buildRowActions(row, readOnly, actionUser) {
 
   // ✏️ แก้ไขเวลา — วันทำงานทั่วไป (ไม่ใช่วันหยุด/อนาคต/เสาร์อาทิตย์)
   if (!row.isFuture && !row.isWeekend && row.status !== 'holiday') {
-    html += `<button class="btn btn-ghost btn-sm" style="color:#f59e0b;margin-left:4px" title="${L('Edit check-in/out time', 'แก้ไขเวลาเข้า-เลิกงาน')}" onclick="openTimeCorrectionModal('${escapeJsAttr(row.date)}','${escapeJsAttr(row.checkIn||'')}','${escapeJsAttr(row.checkOut||'')}')">✏️</button>`;
+    html += `<button class="btn btn-ghost btn-sm" style="color:#b45309;margin-left:4px" title="${L('Edit check-in/out time', 'แก้ไขเวลาเข้า-เลิกงาน')}" onclick="openTimeCorrectionModal('${escapeJsAttr(row.date)}','${escapeJsAttr(row.checkIn||'')}','${escapeJsAttr(row.checkOut||'')}')">✏️</button>`;
   }
 
   // สำหรับวันทำงานจริง (ไม่ใช่ลา/หยุด/เสาร์อาทิตย์/อนาคต/Company Trip)
@@ -11587,13 +11587,13 @@ function renderAttendanceTable() {
         ? buildPartialLeaveChip(row.partialLeave)
         : (row.checkIn
           ? `<span class="time-chip in">⬆️ ${escapeHtml(row.checkIn)}</span>${checkinEditBtnHtml(row, targetUser)}${earlyWarnBadge}${inSrc}${abroadLocalTimeHtml(row, 'in')}${gpsInBtn}`
-          : (row.checkOut ? `<span style="color:#f59e0b;font-size:11px">⚠️ ${L('No check-in', 'ไม่มีข้อมูลเข้า')}</span>` : '<span style="color:#cbd5e1">—</span>'))
+          : (row.checkOut ? `<span style="color:#b45309;font-size:11px">⚠️ ${L('No check-in', 'ไม่มีข้อมูลเข้า')}</span>` : '<span style="color:#cbd5e1">—</span>'))
       }</td>
       <td>${row.partialLeave && row.partialLeave.coverage === 'pm' && !row.checkOut
         ? buildPartialLeaveChip(row.partialLeave)
         : (row.checkOut
           ? `<span class="time-chip out">⬇️ ${escapeHtml(row.checkOut)}</span>${outSrc}${abroadLocalTimeHtml(row, 'out')}${gpsOutBtn}${buildReturnSubline(row)}${checkoutReviewHtml}`
-          : (row.checkIn ? `<span style="color:#f59e0b;font-size:11px">⚠️ ${L('No check-out', 'ไม่มีข้อมูลออก')}</span>` : '<span style="color:#cbd5e1">—</span>'))
+          : (row.checkIn ? `<span style="color:#b45309;font-size:11px">⚠️ ${L('No check-out', 'ไม่มีข้อมูลออก')}</span>` : '<span style="color:#cbd5e1">—</span>'))
       }</td>
       <td class="col-hide-mobile"${hasAnyAllowanceTarget ? '' : ' style="display:none"'}>${allowIconsHtml}</td>
       <td style="white-space:nowrap">${buildRowActions(row, attActionsReadOnly, qaAttendanceInspectUser(targetUser))}</td>`;
@@ -13724,7 +13724,7 @@ function renderDoorAuditTable(rows) {
   const rowHtml = rows.map(r => {
     const badge = (label, ok) => `<span style="padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600;background:${ok===null?'#f1f5f9':(ok?'#dcfce7':'#fee2e2')};color:${ok===null?'#64748b':(ok?'#166534':'#991b1b')}">${label}</span>`;
     const status = r.onDeviceOnly
-      ? `<span style="color:#f59e0b">👁️ ${L('On device only (not in app)', 'มีในเครื่องสแกนเท่านั้น ไม่มีในแอป')}</span>`
+      ? `<span style="color:#b45309">👁️ ${L('On device only (not in app)', 'มีในเครื่องสแกนเท่านั้น ไม่มีในแอป')}</span>`
       : r.inAppOnly
         ? `<span style="color:#94a3b8">— ${L('Not enrolled on device', 'ยังไม่ลงทะเบียนในเครื่องสแกน')}</span>`
         : (r.mismatch ? `<span style="color:#dc2626;font-weight:600">⚠️ ${L('Mismatch', 'ไม่ตรงกัน')}</span>` : `<span style="color:#16a34a">✅ ${L('OK', 'ตรงกัน')}</span>`);
@@ -22235,7 +22235,7 @@ function showCheckinStatusModal() {
       <div style="text-align:right">
         <div style="font-weight:800;font-size:14px;color:${item.isLate ? '#d97706' : '#059669'}">${item.isLate ? '🟡' : '🟢'} ${escapeHtml(item.time)}${scanSourceIconHtml(item.checkInSource)}</div>
         ${item.isLate ? `<div style="font-size:11px;color:#d97706;font-weight:600">⏰ ${L('Late', 'มาสาย')}</div>` : ''}
-        ${item.checkOut ? `<div style="font-size:11px;color:#94a3b8">${L('Out', 'ออก')} ${escapeHtml(item.checkOut)}${scanSourceIconHtml(item.checkOutSource)}</div>` : `<div style="font-size:11px;color:#f59e0b">${L('Not out', 'ยังไม่ออก')}</div>`}
+        ${item.checkOut ? `<div style="font-size:11px;color:#94a3b8">${L('Out', 'ออก')} ${escapeHtml(item.checkOut)}${scanSourceIconHtml(item.checkOutSource)}</div>` : `<div style="font-size:11px;color:#b45309">${L('Not out', 'ยังไม่ออก')}</div>`}
       </div>
     </div>`).join('');
 
@@ -22765,7 +22765,7 @@ function fixStaticText() {
               <div style="font-size:11px;color:#94a3b8" id="dash-late-threshold">${L('After 08:30', 'เกิน 08:30 น.')}</div>
             </div>
             <div class="stat-card dash-stat-click" style="flex-direction:column;text-align:center;gap:6px;cursor:pointer" onclick="showDashPeriodDetail('leave')" title="${L('Click to view days', 'คลิกเพื่อดูวันที่')}">
-              <div style="font-size:32px;font-weight:800;color:#f59e0b" id="dash-leave-days">—</div>
+              <div style="font-size:32px;font-weight:800;color:#b45309" id="dash-leave-days">—</div>
               <div style="font-size:12px;color:#718096">${L('Leave', 'วันลา')}</div>
               <div style="font-size:11px;color:#94a3b8">${L('All types', 'ทุกประเภท')}</div>
             </div>
@@ -24202,7 +24202,7 @@ async function loadDoorEvents(dateStr, targetEmpNo) {
           <div style="font-size:40px;margin-bottom:12px">🚪</div>
           <div style="font-size:15px;font-weight:600;color:#475569">${L('No scan data', 'ไม่มีข้อมูลการสแกน')}</div>
           <div style="font-size:13px;margin-top:4px">${dayLabel}</div>
-          ${!ownEmpNo && effTarget === ownEmpNo ? `<div style="font-size:12px;margin-top:8px;color:#f59e0b">${L('⚠️ This account is not linked to Hikvision', '⚠️ บัญชีนี้ยังไม่ผูกกับ Hikvision')}</div>` : ''}
+          ${!ownEmpNo && effTarget === ownEmpNo ? `<div style="font-size:12px;margin-top:8px;color:#b45309">${L('⚠️ This account is not linked to Hikvision', '⚠️ บัญชีนี้ยังไม่ผูกกับ Hikvision')}</div>` : ''}
         </div>
       </div>`;
     return;
