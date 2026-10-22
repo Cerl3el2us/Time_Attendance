@@ -3,7 +3,10 @@
   --primary-light: #1a3a5c;
   --secondary: #1d4ed8;
   --accent: #c9a227;
-  --success: #0f9f6e;
+  /* 2026-10-22 (light sweep): was #0f9f6e, measured 3.38:1 on the white card. Every use is text
+     (the dashboard sub-lines), none is a background, and #047857 is the dark green this app
+     already uses on buttons: 5.04:1. */
+  --success: #047857;
   --danger: #dc2626;
   --warning: #ea580c;
   --info: #0891b2;
@@ -4642,3 +4645,34 @@ tr.finalize-row-confirmed:hover td {
 [data-theme="dark"] .card .role-accounting { color: #c4b5fd; }     /* 4.05 -> 6.2 */
 [data-theme="dark"] .role-marketing,
 [data-theme="dark"] .card .role-marketing { color: #f9a8d4; }      /* 4.15 -> 6.4 */
+
+/* ===== LIGHT-THEME CONTRAST SWEEP (2026-10-22, owner: "กวาดธีมสว่างต่อเลย") =====
+   Measured in the running page, all 21 pages, backgrounds composited. These mirror the dark-theme
+   block above: the app writes these colours inline, they were chosen against white, and they fall
+   under 4.5:1 as soon as they sit on a tinted box. Scoped so the dark theme cannot be touched. */
+/* #10b981 -> #047857: 2.54 on white (leave/profile detail lines) */
+:root:not([data-theme="dark"]) [style^="color:#10b981"],
+:root:not([data-theme="dark"]) [style*=";color:#10b981"] { color: #047857 !important; }
+/* #059669 -> #047857: 3.60-3.77 on the near-white cards */
+:root:not([data-theme="dark"]) [style^="color:#059669"],
+:root:not([data-theme="dark"]) [style*=";color:#059669"] { color: #047857 !important; }
+/* #3b82f6 -> #1d4ed8: 3.38 on the blue day cells of the calendar (37 of them) */
+:root:not([data-theme="dark"]) [style^="color:#3b82f6"],
+:root:not([data-theme="dark"]) [style*=";color:#3b82f6"] { color: #1d4ed8 !important; }
+/* #ef4444 -> #b91c1c: 3.44-3.76 on the red day cells and on near-white rows */
+:root:not([data-theme="dark"]) [style^="color:#ef4444"],
+:root:not([data-theme="dark"]) [style*=";color:#ef4444"] { color: #b91c1c !important; }
+/* #dc2626 -> #b91c1c: 3.95 on the red day cells */
+:root:not([data-theme="dark"]) [style^="color:#dc2626"],
+:root:not([data-theme="dark"]) [style*=";color:#dc2626"] { color: #b91c1c !important; }
+/* #718096 -> #475569: 3.29-4.02 wherever this grey lands on a tinted box */
+:root:not([data-theme="dark"]) [style^="color:#718096"],
+:root:not([data-theme="dark"]) [style*=";color:#718096"] { color: #475569 !important; }
+/* #64748b -> #475569: 4.07-4.46 on tinted boxes */
+:root:not([data-theme="dark"]) [style^="color:#64748b"],
+:root:not([data-theme="dark"]) [style*=";color:#64748b"] { color: #475569 !important; }
+/* #8b5cf6 -> #6d28d9: 4.23 on the leave-summary cards */
+:root:not([data-theme="dark"]) [style^="color:#8b5cf6"],
+:root:not([data-theme="dark"]) [style*=";color:#8b5cf6"] { color: #6d28d9 !important; }
+/* the door-log time, #059669 on the near-white card: 3.60 */
+:root:not([data-theme="dark"]) .log-info .time { color: #047857; }
