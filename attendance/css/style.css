@@ -3130,6 +3130,13 @@ tr.finalize-row-confirmed:hover td {
 [data-theme="dark"] .cal-month-title { color: #93c5fd; }
 /* Second-pass audit — CSS class rules (not inline styles) with hardcoded light backgrounds */
 [data-theme="dark"] .approval-card { background: var(--bg-card); }
+/* 2026-10-22 (owner): the approval card title read 3.98:1 on the dark card -- measured in the live
+   page, and the same on every card because .approval-header h4 takes var(--primary), which the dark
+   theme sets to #3b82f6. The VARIABLE is deliberately left alone: 29 of its 30 uses are text, but
+   the 30th is the login button gradient under white text, so lightening it there would trade one
+   unreadable thing for another. #93c5fd is the light blue this file already uses for blue text in
+   the dark theme, and measures 8.1:1 here. */
+[data-theme="dark"] .approval-header h4 { color: #93c5fd; }
 [data-theme="dark"] .btn-ghost { background: var(--border); }
 [data-theme="dark"] .btn-ghost:hover { background: rgba(255,255,255,0.1); }
 [data-theme="dark"] .btn-icon { background: #0f172a; border-color: var(--border); }
