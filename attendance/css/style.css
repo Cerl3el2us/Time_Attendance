@@ -2845,8 +2845,18 @@ tr.finalize-row-confirmed:hover td {
   --text: #e2e8f0;
   --text-muted: #94a3b8;
   --border: #334155;
-  --primary: #3b82f6;
+  /* 2026-10-22 (owner: "กวาดทั้งแอปเลย"): was #3b82f6, which is 3.98:1 against the dark card.
+     29 of the 30 uses of --primary are text -- card titles, modal titles, date cells, section
+     headings -- so the whole family sat under the 4.5:1 this project holds text to. #93c5fd is
+     the light blue already used for blue text in this theme and measures 8.11:1 on a card.
+     The one use that is NOT text (the login button gradient, white text on top) is pinned to the
+     old colours below, so that button does not get lighter under its white label. */
+  --primary: #93c5fd;
   --primary-light: #2563eb;
+  /* 2026-10-22: #0f9f6e measured 4.32:1 on the dark card. All three uses of --success are text
+     and none is a background, so the variable can move; #6ee7b7 is the green this theme already
+     uses for text and lands at 8.4:1. */
+  --success: #6ee7b7;
   --secondary: #60a5fa;
   --shadow-sm: 0 1px 3px rgba(0,0,0,0.4), 0 1px 2px rgba(0,0,0,0.3);
   --shadow-md: 0 4px 16px rgba(0,0,0,0.4), 0 2px 6px rgba(0,0,0,0.3);
@@ -2976,8 +2986,11 @@ tr.finalize-row-confirmed:hover td {
 /* Inline color:#XXXXXX values used as literal text colors in app.js template strings */
 [data-theme="dark"] [style^="color:#64748b"],
 [data-theme="dark"] [style*=";color:#64748b"] { color: #94a3b8 !important; }
+/* 2026-10-22: was #94a3b8, which is 5.7:1 on a plain dark card but only 4.37:1 where this inline
+   grey sits on a tinted box (the amber "late" box on the attendance page). #cbd5e1 clears the bar
+   in both places. */
 [data-theme="dark"] [style^="color:#718096"],
-[data-theme="dark"] [style*=";color:#718096"] { color: #94a3b8 !important; }
+[data-theme="dark"] [style*=";color:#718096"] { color: #cbd5e1 !important; }
 [data-theme="dark"] [style^="color:#1e293b"],
 [data-theme="dark"] [style*=";color:#1e293b"] { color: #e2e8f0 !important; }
 [data-theme="dark"] [style^="color:#374151"],
@@ -3130,13 +3143,27 @@ tr.finalize-row-confirmed:hover td {
 [data-theme="dark"] .cal-month-title { color: #93c5fd; }
 /* Second-pass audit — CSS class rules (not inline styles) with hardcoded light backgrounds */
 [data-theme="dark"] .approval-card { background: var(--bg-card); }
-/* 2026-10-22 (owner): the approval card title read 3.98:1 on the dark card -- measured in the live
-   page, and the same on every card because .approval-header h4 takes var(--primary), which the dark
-   theme sets to #3b82f6. The VARIABLE is deliberately left alone: 29 of its 30 uses are text, but
-   the 30th is the login button gradient under white text, so lightening it there would trade one
-   unreadable thing for another. #93c5fd is the light blue this file already uses for blue text in
-   the dark theme, and measures 8.1:1 here. */
-[data-theme="dark"] .approval-header h4 { color: #93c5fd; }
+/* 2026-10-22: the only place --primary is a BACKGROUND. It keeps the blues it had before the
+   variable was lightened, because the label on it is white: following --primary here would have
+   traded a readable title for an unreadable button. */
+[data-theme="dark"] .btn-login { background: linear-gradient(135deg, #3b82f6, #60a5fa); }
+/* 2026-10-22 (dark sweep): the map popup belongs to maplibre and stays white in both themes,
+   while the rules above rewrite the text the app puts inside it to light colours -- so the two
+   met on a white box and the GPS readout measured 1.52-2.56:1. The popup follows the theme now;
+   its little arrow is drawn with border colours, which is why each anchor needs its own line. */
+[data-theme="dark"] .maplibregl-popup-content { background: #1e293b; color: var(--text); }
+[data-theme="dark"] .maplibregl-popup-close-button { color: var(--text); }
+[data-theme="dark"] .maplibregl-popup-anchor-top .maplibregl-popup-tip,
+[data-theme="dark"] .maplibregl-popup-anchor-top-left .maplibregl-popup-tip,
+[data-theme="dark"] .maplibregl-popup-anchor-top-right .maplibregl-popup-tip { border-bottom-color: #1e293b; }
+[data-theme="dark"] .maplibregl-popup-anchor-bottom .maplibregl-popup-tip,
+[data-theme="dark"] .maplibregl-popup-anchor-bottom-left .maplibregl-popup-tip,
+[data-theme="dark"] .maplibregl-popup-anchor-bottom-right .maplibregl-popup-tip { border-top-color: #1e293b; }
+[data-theme="dark"] .maplibregl-popup-anchor-left .maplibregl-popup-tip { border-right-color: #1e293b; }
+[data-theme="dark"] .maplibregl-popup-anchor-right .maplibregl-popup-tip { border-left-color: #1e293b; }
+/* the remaining measured failures, each named with what it was */
+[data-theme="dark"] .ma-today-label { color: #94a3b8; }            /* 3.07 -> 5.71 */
+[data-theme="dark"] .pay-row .amount.plus { color: #6ee7b7; }      /* 3.88 -> 8.44 */
 [data-theme="dark"] .btn-ghost { background: var(--border); }
 [data-theme="dark"] .btn-ghost:hover { background: rgba(255,255,255,0.1); }
 [data-theme="dark"] .btn-icon { background: #0f172a; border-color: var(--border); }
@@ -4608,3 +4635,10 @@ tr.finalize-row-confirmed:hover td {
   .fin-gross-mobile { font-size: 14px !important; }
   #page-finalize .table-wrap table tbody td { vertical-align: middle; }
 }
+
+/* 2026-10-22 (dark sweep): these sit at the END on purpose. The .card variants of the same badges
+   are defined further up with equal specificity, so a rule placed earlier simply lost. */
+[data-theme="dark"] .role-accounting,
+[data-theme="dark"] .card .role-accounting { color: #c4b5fd; }     /* 4.05 -> 6.2 */
+[data-theme="dark"] .role-marketing,
+[data-theme="dark"] .card .role-marketing { color: #f9a8d4; }      /* 4.15 -> 6.4 */
