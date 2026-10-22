@@ -1817,6 +1817,50 @@
   </div>
 </div>
 
+<!-- Reject Reason Modal (2026-10-22, owner's decision: a rejection must say WHY) -->
+<!-- Every label and button text is set from app.js at open time (askRejectReason), not with
+     data-en/data-ja attributes: the same box serves one rejection and the "ถามทีละใบ" batch walk,
+     where the progress line and the Skip button appear and the Cancel button changes meaning. -->
+<div class="modal-overlay" id="reject-reason-modal" onclick="if(event.target===this)closeRejectReasonModal()">
+  <div class="modal" style="max-width:440px">
+    <div class="modal-header">
+      <h3 id="rr-title">❌</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeRejectReasonModal()">✕</button>
+    </div>
+    <div class="modal-body" style="padding:20px;display:flex;flex-direction:column;gap:12px">
+      <div id="rr-progress" style="font-size:12px;font-weight:700;color:#7c3aed"></div>
+      <div id="rr-summary" style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px 12px"></div>
+      <label id="rr-label" for="rr-text" style="font-size:12px;font-weight:700;color:var(--text)"></label>
+      <!-- 16px is deliberate: anything smaller makes iOS Safari zoom the page on focus. -->
+      <textarea id="rr-text" rows="4" maxlength="500" oninput="rejectReasonCount()"
+        style="width:100%;font-size:16px;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);resize:vertical"></textarea>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <div id="rr-error" style="font-size:12px;color:var(--danger);font-weight:700"></div>
+        <div id="rr-count" style="font-size:11px;color:var(--text-muted);white-space:nowrap"></div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button id="rr-submit" onclick="rejectReasonSubmit()"
+          style="flex:1;min-width:130px;padding:11px;border-radius:8px;background:#ef4444;color:#fff;border:none;font-size:14px;font-weight:700;cursor:pointer"></button>
+        <button id="rr-skip" onclick="rejectReasonChoose('skip')"
+          style="padding:11px 14px;border-radius:8px;background:#64748b;color:#fff;border:none;font-size:13px;font-weight:700;cursor:pointer;display:none"></button>
+        <button id="rr-cancel" onclick="closeRejectReasonModal()"
+          style="padding:11px 14px;border-radius:8px;background:transparent;color:var(--text);border:1px solid var(--border);font-size:13px;font-weight:700;cursor:pointer"></button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Upcountry day stops (2026-10-22, owner): read-only, opened by the 🗺️ icon on a timetable row -->
+<div class="modal-overlay" id="upcountry-day-modal" onclick="if(event.target===this)closeUpcountryDayModal()">
+  <div class="modal" style="max-width:380px">
+    <div class="modal-header">
+      <h3 id="ucd-title">🗺️</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeUpcountryDayModal()">✕</button>
+    </div>
+    <div class="modal-body" id="ucd-body" style="padding:18px 20px;display:flex;flex-direction:column;gap:12px"></div>
+  </div>
+</div>
+
 <!-- Upcountry Request Modal -->
 <div class="modal-overlay" id="upcountry-modal" onclick="if(event.target===this)closeUpcountryModal()">
   <div class="modal" style="max-width:420px">
@@ -2769,6 +2813,6 @@
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ja.js" integrity="sha384-mKor8U8jwukUkfxaFPCsxKF9S62PXq4gG7zcZ5yQ2x3KL1msprJZeFlKFEDeeb5V" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/th.js" integrity="sha384-E6OVFg1zUc/pckGxry0YZ6VeZ1E17l7Jl8ZQx58jbEfxxkz9LqknQhiIrA9zg/8b" crossorigin="anonymous"></script>
 
-<script src="js/app.js?v=20261021h"></script>
+<script src="js/app.js?v=20261022a"></script>
 </body>
 </html>

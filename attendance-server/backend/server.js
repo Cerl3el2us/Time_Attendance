@@ -638,15 +638,24 @@ function notifyLeaveStatusChange(oldStatus, leave) {
   }
   if (leave.status === 'approved' || leave.status === 'rejected') {
     const emp = users.find(u => u.id === leave.userId);
+    // 2026-10-22 (owner): a rejection says WHY in the notification itself -- the whole point of
+    // asking the approver for a reason is that the employee learns it without having to ask.
+    // The push body is plain text (no HTML, so nothing to escape) and is cut to keep the OS
+    // banner readable; the in-app notification renders the full reason from `params`.
+    const pushReason = leave.status === 'rejected' && leave.rejectReason
+      ? String(leave.rejectReason).replace(/\s+/g, ' ').slice(0, 120)
+      : '';
     sendPushToUser(leave.userId, {
       title: leave.status === 'approved' ? 'Request Approved' : 'Request Rejected',
-      body: `Your ${typeName} request has been ${leave.status}`,
+      body: `Your ${typeName} request has been ${leave.status}`
+        + (pushReason ? ` — reason: ${pushReason}` : ''),
       tag: 'ta-leave',
       url: '/',
       badge: badgeCountForUser(emp)
     }, {
       kind: leave.status === 'approved' ? 'request-approved' : 'request-rejected',
-      params: { leaveId: leave.id, type: leave.type, dateFrom: leave.dateFrom, dateTo: leave.dateTo || leave.dateFrom },
+      params: { leaveId: leave.id, type: leave.type, dateFrom: leave.dateFrom, dateTo: leave.dateTo || leave.dateFrom,
+        ...(leave.status === 'rejected' && leave.rejectReason ? { rejectReason: String(leave.rejectReason) } : {}) },
       link: { page: 'my-requests', leaveId: leave.id },
     });
     // Email is opt-in per user (emp.emailNotifyOnResult) — only fires on the FINAL outcome
@@ -772,6 +781,12 @@ async function sendResultEmail(leave, overrideTo, overrideLang, alsoRevoked) {
     ? fmtEmailDateLong(new Date(leave.dateFrom + 'T12:00:00').getTime(), lang)
     : `${fmtEmailDateLong(new Date(leave.dateFrom + 'T12:00:00').getTime(), lang)} \u2013 ${fmtEmailDateLong(new Date(leave.dateTo + 'T12:00:00').getTime(), lang)}`;
   const detailRows = [[t.lblDate, dateRange], ...buildResultDetailRows(leave, lang)];
+  // 2026-10-22 (owner): the rejection reason belongs in the result itself, the same way
+  // lblRevokeReason does below. The raw text goes in: every row value is escaped where
+  // detailHtml is built, so escaping here as well would show the employee &amp; and &#39;.
+  if (!approved && !revoked && leave.rejectReason) {
+    detailRows.push([t.lblRejectReason, String(leave.rejectReason)]);
+  }
   if (revoked) {
     detailRows.push([t.lblRevokedBy, String(leave.revokedBy || '—')]);
     if (leave.revokeReason) detailRows.push([t.lblRevokeReason, String(leave.revokeReason)]);
@@ -6145,7 +6160,44 @@ const UNIVERSAL_LEAVE_FIELDS = ['type', 'dateFrom', 'dateTo', 'days', 'timePart'
 // Never accepted from the client on POST or PUT -- always computed by the handler itself, after
 // the client body has been filtered through filterLeaveFields() below. Listed here (rather than
 // left implicit) so a future field addition has one obvious place to declare which bucket it's in.
-const SERVER_LEAVE_FIELDS = ['id', 'userId', 'serverCreatedAt', 'status', 'approvalRoute', 'approver', 'approvedAt', 'submittedAt', 'timezone'];
+// 2026-10-22 (owner's decision): a rejection must say WHY. Until today a rejected record carried
+// only `approver` and `approvedAt`, so the employee read "Rejected by X" and had to go and ask the
+// reason in person. The owner chose "บังคับทุกครั้ง": a reason is REQUIRED, so a blank one is a 400
+// and never an empty string on the record -- an empty string would be indistinguishable from a
+// record that predates this field, and the screens could not tell "no reason was given" from
+// "this request was rejected before the field existed".
+// `rejectReason` is listed in SERVER_LEAVE_FIELDS below: the approver sends it on the decision PUT
+// and this handler validates it there; the submitter can never set it on POST or on an owner edit.
+const REJECT_REASON_MAX = 500;
+// DUAL-SYNC (identical text): app.js / server.js normalizeRejectReason. The client must not be
+// able to show "too long" or trim differently from what the server stores.
+// Control characters are stripped (a BELL once travelled into this project's own files through a
+// heredoc) while \n and \t are kept -- a reason may be more than one line.
+function normalizeRejectReason(raw) {
+  if (typeof raw !== 'string') return '';
+  return raw.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim();
+}
+// Returns { value } when the reason may be stored, or { error } with the message the API answers
+// 400 with. `status` is what the approver ASKED for, not the resolved next status: a multi-step
+// approval resolves to a pending status, where a rejection reason has no meaning.
+// Sent with anything but a rejection it is an ERROR, not a dropped key: dropping it silently would
+// look to the approver exactly like it was saved.
+function validateRejectReason(status, raw) {
+  const given = raw !== undefined && raw !== null && raw !== '';
+  // Written as a positive test on purpose: tests/cancel-revoke.test.js scans both files for a
+  // bare negative status comparison, because every one of those is a place a future terminal
+  // status could slip through. Here the question really is "is this a rejection", so say that.
+  if (status === 'rejected') {
+    const value = normalizeRejectReason(raw);
+    if (!value) return { error: 'A reason is required when rejecting a request' };
+    if (value.length > REJECT_REASON_MAX) {
+      return { error: `A rejection reason may be at most ${REJECT_REASON_MAX} characters` };
+    }
+    return { value };
+  }
+  return given ? { error: 'rejectReason is only accepted when rejecting a request' } : {};
+}
+const SERVER_LEAVE_FIELDS = ['id', 'userId', 'serverCreatedAt', 'status', 'approvalRoute', 'approver', 'approvedAt', 'submittedAt', 'timezone', 'rejectReason'];
 const _leaveFieldSetCache = new Map();
 function allowedLeaveFieldsFor(type) {
   let set = _leaveFieldSetCache.get(type);
@@ -7370,7 +7422,7 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
     // `{...leave, ...updates}` merge let anyone set status:'approved' directly).
     const keys = Object.keys(updates);
     const looksLikeApprovalAction = keys.length > 0 && 'status' in updates &&
-      keys.every(k => ['status', 'approver', 'approvedAt'].includes(k));
+      keys.every(k => ['status', 'approver', 'approvedAt', 'rejectReason'].includes(k));
 
     if (looksLikeApprovalAction && !isOwner) {
       const oldStatus = leave.status;
@@ -7399,6 +7451,13 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
       const myTurn = (turnRole === live.role && routeArr.includes(live.role)) || isDelegate
         || (isSuperAdminUser(live) && routeArr.includes(turnRole));
       if (!myTurn) return res.status(403).json({ success:false, message:'Forbidden: not your turn to approve this request' });
+      // 2026-10-22 (owner): the rejection reason rides on this same decision PUT. Checked AFTER
+      // the turn check on purpose -- somebody without a turn must get the 403, not a 400 that
+      // would tell them their request shape was right. Validated against the status the approver
+      // ASKED for, before newStatus is resolved: on a multi-step route the next status is a
+      // pending one, where a reason has no meaning.
+      const reasonCheck = validateRejectReason(updates.status, updates.rejectReason);
+      if (reasonCheck.error) return res.status(400).json({ success:false, code:'reject-reason', message: reasonCheck.error });
 
       let newStatus;
       if (updates.status === 'rejected') {
@@ -7425,6 +7484,9 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
         return res.status(409).json({ success:false, message:'Payroll for this employee/period has already been approved by the Managing Director -- ask them to revoke approval first' });
       }
       leaves[idx] = { ...leave, status: newStatus, approver: live.name, approvedAt: new Date().toISOString() };
+      // 2026-10-22 (owner): only a rejection carries a reason, and validateRejectReason() has
+      // already refused a blank one, so this is never an empty string.
+      if (newStatus === 'rejected') leaves[idx].rejectReason = reasonCheck.value;
       saveLeaves(leaves);
       // 2026-09-23 (Opus audit M-2/M-3): an approval that changes this year's annual pool after
       // year-end carry-forward was already run must rewrite next year's snapshot too -- otherwise
@@ -11995,6 +12057,8 @@ const EMAIL_I18N = {
     resultRejected: 'คำขอนี้ไม่ได้รับการอนุมัติ',
     resultSubjectRevoked: '↩️ คำขอของคุณถูกเพิกถอนการอนุมัติ', resultRevoked: 'ถูกเพิกถอนการอนุมัติ',
     lblRevokedBy: 'เพิกถอนโดย', lblRevokeReason: 'เหตุผลที่เพิกถอน', lblAlsoRevoked: 'เพิกถอนพร้อมกัน',
+    // 2026-10-22 (owner): a rejection carries a reason now, and the result email states it.
+    lblRejectReason: 'เหตุผลที่ไม่อนุมัติ',
     lblDate: 'วันที่', lblReturnTime: 'เวลาที่กลับ', lblLocation: 'สถานที่ / ลูกค้า',
     lblMileage: 'เลขไมล์', lblDistance: 'ระยะทาง', lblWorkedDate: 'วันที่ไปทำงาน',
     lblCorrectedTime: 'เวลาที่แก้ไข', lblOtHours: 'ชั่วโมง OT', lblRate: 'อัตรา', lblReason: 'เหตุผล', lblRequestedBy: 'ผู้ขอ',
@@ -12020,6 +12084,7 @@ const EMAIL_I18N = {
     resultRejected: 'This request was not approved.',
     resultSubjectRevoked: '↩️ The approval of your request was revoked', resultRevoked: 'Approval revoked',
     lblRevokedBy: 'Revoked by', lblRevokeReason: 'Reason for revoking', lblAlsoRevoked: 'Also revoked',
+    lblRejectReason: 'Reason for rejection',
     lblDate: 'Date', lblReturnTime: 'Return time', lblLocation: 'Location / Client',
     lblMileage: 'Mileage', lblDistance: 'Distance', lblWorkedDate: 'Worked on',
     lblCorrectedTime: 'Corrected time', lblOtHours: 'OT hours', lblRate: 'Rate', lblReason: 'Reason', lblRequestedBy: 'Requested by',
@@ -12045,6 +12110,7 @@ const EMAIL_I18N = {
     resultRejected: 'この申請は承認されませんでした。',
     resultSubjectRevoked: '↩️ 申請の承認が取り消されました', resultRevoked: '承認取り消し',
     lblRevokedBy: '取り消した人', lblRevokeReason: '取り消しの理由', lblAlsoRevoked: '同時に取り消された申請',
+    lblRejectReason: '却下の理由',
     lblDate: '日付', lblReturnTime: '帰宅時間', lblLocation: '場所 / 訪問先',
     lblMileage: '走行距離', lblDistance: '距離', lblWorkedDate: '出勤日',
     lblCorrectedTime: '修正後の時刻', lblOtHours: '残業時間', lblRate: 'レート', lblReason: '理由', lblRequestedBy: '申請者',
