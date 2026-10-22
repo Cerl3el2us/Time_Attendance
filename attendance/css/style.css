@@ -2996,6 +2996,15 @@ tr.finalize-row-confirmed:hover td {
 [data-theme="dark"] [style*=";color:#ef4444"] { color: #fca5a5 !important; }
 [data-theme="dark"] [style^="color:#991b1b"],
 [data-theme="dark"] [style*=";color:#991b1b"] { color: #fca5a5 !important; }
+/* 2026-10-22 (owner asked after a contrast check): the two places that read the red from
+   var(--danger) instead of writing #dc2626 into a style attribute, which is why the rules
+   above cannot reach them. style.css declares --danger once (#dc2626) for both themes;
+   measured on the live site in dark mode, the payslip minus amount rendered 3.03:1 against
+   the dark card. Same light red as the rules above: 7.7:1. --danger itself is deliberately
+   left alone -- six of its eight uses are backgrounds and borders, and repainting those was
+   not asked for. */
+[data-theme="dark"] .pay-row .amount.minus { color: #fca5a5; }
+[data-theme="dark"] .log-item.late-in .log-info .time { color: #fca5a5; }
 [data-theme="dark"] [style^="color:#059669"],
 [data-theme="dark"] [style*=";color:#059669"] { color: #6ee7b7 !important; }
 [data-theme="dark"] [style^="color:#166534"],
