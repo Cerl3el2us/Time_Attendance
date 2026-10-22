@@ -459,6 +459,35 @@ test('sync.log: DIRTY n with copied=0, push=ok and marker=written warns; no othe
   }
 });
 
+// 2026-10-22: the warning above fired on the healthy path too. `verified=n` (added to the line on
+// 2026-10-13) is the push's own per-file proof that each dirty file is in step on the NAS, so a run
+// that copied nothing BECAUSE nothing needed copying carries its own explanation -- and the two real
+// lines of 2026-10-21 (DIRTY 5 and DIRTY 3, both copied=0 with verified=n) were called a defect under
+// a heading that also counted them as "1 warning(s)". A content-hash comparison of all 134 synced
+// files that day found differ=0, so that alarm was false. The warning must still fire when the proof
+// is absent, shorter than the dirty count, unreadable, or negative.
+test('sync.log: copied=0 is explained, not warned, when the line proves every dirty file is in step', () => {
+  const proven = LOG_CLEAN.replace('copied=3', 'copied=0').replace('failed=0', 'failed=0  verified=3');
+  const r = withLogAt('log-nothing-to-copy', proven + '\n', AGE_NOW);
+  assert.deepStrictEqual(warnings(r), [], r.lines.join('\n'));
+  const said = r.lines.find(l => l.includes('nothing needed copying'));
+  assert.ok(said, r.lines.join('\n'));
+  // the push's proof is size-only, and this line must not be read as more than it is
+  assert.ok(said.includes('verified=3') && /size/i.test(said), said);
+  // proof absent, short, unreadable or negative -> the warning stays
+  for (const [name, line] of [
+    ['no-verified-field', proven.replace('  verified=3', '')],
+    ['fewer-verified-than-dirty', proven.replace('verified=3', 'verified=2')],
+    ['verify-unreadable', proven.replace('verified=3', 'verify=UNREADABLE')],
+    ['not-in-step', proven.replace('verified=3', 'verified=2  not-in-step=MEMORY.md')],
+    ['unsynced', proven.replace('verified=3', 'verified=3  unsynced=lesson_x.md')],
+  ]) {
+    const hit = withLogAt(`log-ntc-${name}`, line + '\n', AGE_NOW);
+    const w = warnings(hit).filter(x => x.includes('copied=0'));
+    assert.strictEqual(w.length, 1, `${name}: ${hit.lines.join('\n')}`);
+  }
+});
+
 test('sync.log: a long log is read from its tail, and a missing or empty one is unmeasured', () => {
   const body = Array.from({ length: 400 }, (_, i) => `${LOG_CLEAN} #${i}`).join('\n');
   const r = withLog('log-long', `${BOM}${body}\n${LOG_CLEAN.replace('conflict=0', 'conflict=7')}\n`);
