@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 147;
+const APP_BUILD = 150;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -2577,6 +2577,181 @@ function isVoidLeaveStatus(s) {
 // 2026-09-24: cancelled/revoked rows stay in history lists, greyed and struck through.
 function isWithdrawnLeaveStatus(s) {
   return s === 'cancelled' || s === 'revoked';
+}
+// ===== REJECTION REASON (2026-10-22, owner's decision) =====
+// Rejecting a request now requires a reason. Until today a rejected record carried only `approver`
+// and `approvedAt`, so the employee read "❌ ปฏิเสธโดย X" with no idea why and had to go and ask in
+// person. The owner's decisions, in their own words: the reason is REQUIRED ("บังคับทุกครั้ง"), and
+// when several requests are rejected in one press it is asked PER REQUEST ("ถามทีละใบ") -- one
+// shared reason would be pinned on requests it was never written about.
+// The field is server-controlled (`SERVER_LEAVE_FIELDS` in server.js): the approver sends it on the
+// decision PUT and the server validates it there, so the submitter can never set or edit it, and a
+// colleague never receives it (rejected records are already filtered out of their /api/leaves).
+const REJECT_REASON_MAX = 500;
+// DUAL-SYNC (identical text): app.js / server.js normalizeRejectReason. If these two drift, the
+// screen can show "too long" for text the server accepts, or trim differently than it stores.
+// Control characters are stripped (a BELL once travelled into this project's own files through a
+// heredoc) while \n and \t are kept -- a reason may be more than one line.
+function normalizeRejectReason(raw) {
+  if (typeof raw !== 'string') return '';
+  return raw.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim();
+}
+// null when the text may be sent; otherwise which problem to show. Same verdicts as the server's
+// validateRejectReason(), which is the one that actually guards the record.
+function rejectReasonProblem(raw) {
+  const value = normalizeRejectReason(raw);
+  if (!value) return 'empty';
+  if (value.length > REJECT_REASON_MAX) return 'too-long';
+  return null;
+}
+function rejectReasonProblemText(problem) {
+  if (problem === 'empty') {
+    return currentLang === 'ja' ? '理由を入力してください' : L('Please give a reason', 'กรุณากรอกเหตุผล');
+  }
+  return currentLang === 'ja'
+    ? `${REJECT_REASON_MAX}文字以内で入力してください`
+    : L(`At most ${REJECT_REASON_MAX} characters`, `ไม่เกิน ${REJECT_REASON_MAX} ตัวอักษร`);
+}
+// What the approver is about to reject, shown above the box so a per-request reason in a batch is
+// written about the right request.
+function rejectReasonSummaryHtml(l) {
+  if (!l) return '';
+  const who = (DATA_USERS.find(u => Number(u.id) === Number(l.userId)) || {}).name || '';
+  const type = getApprovalTypeLabels()[l.type] || l.type;
+  const dates = (l.dateTo && l.dateTo !== l.dateFrom)
+    ? `${fmtDate(l.dateFrom)} – ${fmtDate(l.dateTo)}`
+    : fmtDate(l.dateFrom);
+  return `<div style="font-size:13px;font-weight:700;color:var(--text)">${escapeHtml(type)}</div>`
+    + `<div style="font-size:12px;color:var(--text-muted)">${escapeHtml(who)}${who ? ' · ' : ''}${escapeHtml(dates || '')}</div>`;
+}
+// Resolves { action:'submit', reason } | { action:'skip' } | { action:'cancel' }. `progress` and the
+// skip button belong to the batch path only: a single rejection has nothing to skip to.
+let _rejectReasonResolve = null;
+function askRejectReason(opts) {
+  const o = opts || {};
+  const modal = document.getElementById('reject-reason-modal');
+  const ta = document.getElementById('rr-text');
+  if (!modal || !ta) return Promise.resolve({ action: 'cancel' });
+  document.getElementById('rr-title').textContent = currentLang === 'ja'
+    ? '❌ 申請を却下' : L('❌ Reject request', '❌ ปฏิเสธคำขอ');
+  document.getElementById('rr-summary').innerHTML = o.summary || '';
+  document.getElementById('rr-label').textContent = currentLang === 'ja'
+    ? '却下の理由（申請者に通知されます）'
+    : L('Reason for rejection (the employee is notified)', 'เหตุผลที่ไม่อนุมัติ (ผู้ยื่นจะได้รับแจ้ง)');
+  const prog = document.getElementById('rr-progress');
+  prog.textContent = o.progress || '';
+  prog.style.display = o.progress ? '' : 'none';
+  // 2026-10-22: measured in the page, #7c3aed is 2.57:1 on the dark card -- the same failure as
+  // the buttons fixed on 2026-10-21 (#10b981 at 2.54:1), and under the >= 3:1 this project holds
+  // secondary text to. Read the theme here, like the other colour-setting lines in this file do:
+  // the dark-mode CSS rules only rewrite inline styles that sit in the HTML, not ones JS sets.
+  prog.style.color = document.documentElement.getAttribute('data-theme') === 'dark' ? '#a78bfa' : '#6d28d9';
+  const skip = document.getElementById('rr-skip');
+  skip.style.display = o.progress ? '' : 'none';
+  skip.textContent = currentLang === 'ja' ? 'この申請はスキップ' : L('Skip this one', 'ข้ามใบนี้');
+  ta.value = '';
+  ta.maxLength = REJECT_REASON_MAX;
+  ta.placeholder = currentLang === 'ja'
+    ? '例：その日は別の予定が入っています'
+    : L('e.g. another job is already scheduled that day', 'เช่น วันนั้นมีงานอื่นอยู่แล้ว');
+  const errEl = document.getElementById('rr-error');
+  errEl.textContent = '';
+  errEl.style.color = rejectReasonDangerColor();
+  document.getElementById('rr-submit').textContent = currentLang === 'ja' ? '❌ 却下する' : L('❌ Reject', '❌ ปฏิเสธ');
+  document.getElementById('rr-cancel').textContent = o.progress
+    ? (currentLang === 'ja' ? '残りをやめる' : L('Stop here', 'หยุดที่นี่'))
+    : (currentLang === 'ja' ? 'キャンセル' : L('Cancel', 'ยกเลิก'));
+  rejectReasonCount();
+  modal.classList.add('show');
+  setTimeout(() => { try { ta.focus(); } catch (e) {} }, 50);
+  return new Promise(resolve => { _rejectReasonResolve = resolve; });
+}
+function rejectReasonCount() {
+  const ta = document.getElementById('rr-text');
+  const out = document.getElementById('rr-count');
+  if (!ta || !out) return;
+  out.textContent = `${normalizeRejectReason(ta.value).length} / ${REJECT_REASON_MAX}`;
+}
+// One exit for every way the modal can close, so a dangling promise can never leave the batch loop
+// waiting forever (the ✕, the overlay click, Stop here and Skip all land here).
+function rejectReasonChoose(action) {
+  const modal = document.getElementById('reject-reason-modal');
+  const ta = document.getElementById('rr-text');
+  const reason = normalizeRejectReason(ta ? ta.value : '');
+  if (modal) modal.classList.remove('show');
+  const done = _rejectReasonResolve;
+  _rejectReasonResolve = null;
+  if (done) done(action === 'submit' ? { action, reason } : { action });
+}
+function rejectReasonSubmit() {
+  const ta = document.getElementById('rr-text');
+  const problem = rejectReasonProblem(ta ? ta.value : '');
+  if (problem) {
+    document.getElementById('rr-error').textContent = rejectReasonProblemText(problem);
+    return;
+  }
+  rejectReasonChoose('submit');
+}
+function closeRejectReasonModal() { rejectReasonChoose('cancel'); }
+// 2026-10-22: --danger is #dc2626 in BOTH themes (style.css declares it once), measured at
+// 3.03:1 against the dark card. showApprovalDetail() already carries the project's answer to
+// that -- the #fca5a5 / #dc2626 pair -- so the rejection surfaces reuse it rather than add a
+// third red, and a reader on a dark screen gets 7.7:1 instead of 3.0:1.
+function rejectReasonDangerColor() {
+  return document.documentElement.getAttribute('data-theme') === 'dark' ? '#fca5a5' : '#dc2626';
+}
+// The line shown wherever a rejected record is listed. Records rejected before 2026-10-22 have no
+// reason at all, and must print nothing rather than an empty "Reason:" label.
+function rejectReasonLineHtml(l, opts) {
+  const reason = l && typeof l.rejectReason === 'string' ? l.rejectReason.trim() : '';
+  if (!reason) return '';
+  const o = opts || {};
+  const label = currentLang === 'ja' ? '理由' : L('Reason', 'เหตุผล');
+  const shown = o.max && reason.length > o.max ? reason.slice(0, o.max) + '…' : reason;
+  return `<div style="font-size:${o.small ? 11 : 13}px;color:${rejectReasonDangerColor()};margin-top:${o.small ? 4 : 6}px;white-space:pre-wrap">`
+    + `❌ ${label}: ${escapeHtml(shown)}</div>`;
+}
+
+// ===== UPCOUNTRY: WHERE DID THE DAY GO (2026-10-22, owner's decision) =====
+// The stops (time + place) are collected when the request is filed, but after approval the employee
+// had nowhere to read them back: the 🗺️ icon on their own timetable row was a plain <span> with a
+// tooltip that said only "Upcountry". The owner asked for the icon itself to open the list.
+// No new data and no new permission: the record is the approved upcountry request that already
+// decides whether that icon is drawn at all, and `upcountryLocationsOf()` already turns it into
+// {time, name} entries (including the pre-2026-08-06 single-string shape).
+function upcountryDayRecord(userId, dateStr) {
+  return DATA_LEAVES.find(l =>
+    Number(l.userId) === Number(userId) && l.type === 'upcountry' &&
+    l.dateFrom === dateStr && l.status === 'approved') || null;
+}
+// The entries to show for that day, or [] when there is nothing to show -- which is also the signal
+// not to make the icon clickable, so a press can never open an empty popup.
+function upcountryDayStops(userId, dateStr) {
+  const rec = upcountryDayRecord(userId, dateStr);
+  return rec ? upcountryLocationsOf(rec) : [];
+}
+function openUpcountryDayModal(userId, dateStr) {
+  const stops = upcountryDayStops(userId, dateStr);
+  if (!stops.length) return;
+  const modal = document.getElementById('upcountry-day-modal');
+  if (!modal) return;
+  document.getElementById('ucd-title').textContent = currentLang === 'ja'
+    ? `🗺️ 出張先（${fmtDate(dateStr)}）`
+    : L(`🗺️ Upcountry stops (${fmtDate(dateStr)})`, `🗺️ ไปที่ไหนบ้าง (${fmtDate(dateStr)})`);
+  const noTime = currentLang === 'ja' ? '時刻なし' : L('no time given', 'ไม่ได้ระบุเวลา');
+  document.getElementById('ucd-body').innerHTML = stops.map((s, i) => `
+    <div style="display:flex;gap:10px;align-items:flex-start">
+      <div style="min-width:22px;height:22px;border-radius:50%;background:#7c3aed;color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center">${i + 1}</div>
+      <div style="flex:1">
+        <div style="font-size:13px;font-weight:700;color:var(--text)">${escapeHtml(s.name || '')}</div>
+        <div style="font-size:12px;color:var(--text-muted)">🕐 ${s.time ? escapeHtml(s.time) : noTime}</div>
+      </div>
+    </div>`).join('');
+  modal.classList.add('show');
+}
+function closeUpcountryDayModal() {
+  const modal = document.getElementById('upcountry-day-modal');
+  if (modal) modal.classList.remove('show');
 }
 function withdrawnStatusBadgeHtml(status) {
   if (status === 'cancelled') return `<span class="badge badge-gray">🚫 ${L('Cancelled', 'ยกเลิกแล้ว')}</span>`;
@@ -10626,6 +10801,12 @@ function onPeriodChange(val) {
 function attAllowIcon(emoji, title) {
   return `<span class="att-allow-icon" title="${escapeHtml(title)}">${emoji}</span>`;
 }
+// 2026-10-22 (owner): the clickable twin of attAllowIcon -- same look in the row, but it opens
+// something. A <button> rather than a <span onclick> so it is reachable by keyboard and reads as
+// an action to a screen reader; the class is shared so the icon row keeps its single layout rule.
+function attAllowIconButton(emoji, title, onclick) {
+  return `<button type="button" class="att-allow-icon" title="${escapeHtml(title)}" onclick="${onclick}" style="cursor:pointer;background:none;border:none;padding:0;font:inherit;line-height:inherit">${emoji}</button>`;
+}
 
 // ===== WEB CHECK-OUT LATE NIGHT REVIEW (2026-09-23) =====
 // Buttons only for an MD/Accounting view of SOMEONE ELSE's record, never for observers.
@@ -11532,8 +11713,16 @@ function renderAttendanceTable() {
         : L('Annual leave +1 day', 'ลาพักร้อน +1 วัน');
       holidayWorkBadge = attAllowIcon('🔄', `${L('Holiday Work', 'ทำงานวันหยุด')} (${hwMode})`);
     }
-    const upcountryBadge = (canUpcountryTarget && row.upcountry && row.status !== 'company-trip')
-      ? attAllowIcon('🗺️', L('Upcountry', 'Upcountry')) : '';
+    // 2026-10-22 (owner): the icon opens the stops of that day. With none stored (a record from
+    // before the structured stops, or one filed with the fields left empty) it stays the plain
+    // icon: a clickable icon that opens an empty box is a worse answer than no click at all.
+    const upcountryShown = canUpcountryTarget && row.upcountry && row.status !== 'company-trip';
+    const upcountryStops = upcountryShown ? upcountryDayStops(targetUserId, row.date) : [];
+    const upcountryBadge = !upcountryShown
+      ? ''
+      : upcountryStops.length
+        ? attAllowIconButton('🗺️', (currentLang === 'ja' ? '出張先を見る' : L('Upcountry — see the stops', 'Upcountry — ดูว่าไปที่ไหน')), `openUpcountryDayModal(${targetUserId}, '${row.date}')`)
+        : attAllowIcon('🗺️', L('Upcountry', 'Upcountry'));
     const ldBadge = (canLongDistTarget && row.longDistance)
       ? attAllowIcon('🚗', `${L('Long Distance', 'Long Distance')} ${Number(row.longDistanceKm) || 0} ${L('km', 'กม.')}${row.longDistanceAllowance > 0 ? ` (+฿${row.longDistanceAllowance})` : ''}`)
       : '';
@@ -12644,6 +12833,7 @@ function renderUserRequestsPanel(panel) {
               ${metaExtra}
             </div>
             <div style="font-size:13px;color:#64748b;margin-top:8px">📝 ${escapeHtml(r.reason)}</div>
+            ${rejectReasonLineHtml(r.leaf)}
           </div>`;
       }).join('')
     : `<div style="text-align:center;padding:30px;color:#94a3b8;font-size:13px">${L('No requests yet', 'ยังไม่มีคำขอ')}</div>`;
@@ -12750,7 +12940,8 @@ function openMyRequestsModal() {
       stepHtml = `<div style="margin-top:6px;font-size:11px;color:#64748b">${withdrawnLeaveNoteHtml(r.leaf)}</div>`;
     } else {
       statusBadge = `<span class="badge badge-danger">❌ ${L('Rejected', 'ถูกปฏิเสธ')}</span>`;
-      if (r.approver) stepHtml = `<div style="margin-top:6px;font-size:11px;color:#dc2626">❌ ${L('Rejected by', 'ปฏิเสธโดย')} ${escapeHtml(r.approver)}</div>`;
+      if (r.approver) stepHtml = `<div style="margin-top:6px;font-size:11px;color:#dc2626">❌ ${L('Rejected by', 'ปฏิเสธโดย')} ${escapeHtml(r.approver)}</div>`
+        + rejectReasonLineHtml(r.leaf, { small: true });
     }
     return `<div class="approval-card ${r.status.includes('pending') ? 'pending' : escapeHtml(r.status)}" style="${withdrawnRowStyle(r)}">
       <div class="approval-header"><h4 style="font-size:13px">${r.typeLabel}</h4>${statusBadge}</div>
@@ -17036,9 +17227,31 @@ async function rejectSelected() {
   if (blockIfObserver()) return;
   const ids = [..._approvalSelected];
   if (!ids.length) return;
+  // 2026-10-22 (owner chose "ถามทีละใบ"): one reason per request. A single shared reason would be
+  // stored on requests it was never written about, and the employee would read someone else's
+  // reason as their own. "Stop here" leaves the rest of the selection untouched, and the count in
+  // the toast is of the ones actually attempted -- not of the selection, which would report
+  // skipped requests as failures.
   let ok = 0;
-  for (const id of ids) { try { if (await rejectMockLeaveInternal(id)) ok++; } catch(e) {} }
-  toastBatchLeaveResult(ok, ids.length, 'rejected', 'ปฏิเสธ');
+  let attempted = 0;
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i];
+    const asked = await askRejectReason({
+      summary: rejectReasonSummaryHtml(DATA_LEAVES.find(x => x.id === id)),
+      progress: currentLang === 'ja' ? `${i + 1} / ${ids.length} 件目`
+        : L(`Request ${i + 1} of ${ids.length}`, `ใบที่ ${i + 1} จาก ${ids.length}`),
+    });
+    if (asked.action === 'cancel') break;
+    if (asked.action === 'skip') continue;
+    attempted++;
+    try { if (await rejectMockLeaveInternal(id, asked.reason)) ok++; } catch(e) {}
+  }
+  if (attempted) {
+    toastBatchLeaveResult(ok, attempted, 'rejected', 'ปฏิเสธ');
+  } else {
+    showToast(currentLang === 'ja' ? '却下した申請はありません'
+      : L('Nothing was rejected', 'ไม่มีใบไหนถูกปฏิเสธ'), 'info');
+  }
   _approvalSelected.clear();
   renderApprovals();
   renderDashboard();
@@ -17146,9 +17359,17 @@ async function approveMockLeaveInternal(id) {
   return true;
 }
 
-async function rejectMockLeaveInternal(id) {
+async function rejectMockLeaveInternal(id, reason) {
   const l = DATA_LEAVES.find(x => x.id === id);
   if (!l) return false;
+  // 2026-10-22 (owner): the server refuses a rejection with no reason (400), so it is checked
+  // here too -- an approver must never meet a raw API error for a rule the UI knows. Every
+  // caller asks first through askRejectReason().
+  if (rejectReasonProblem(reason)) {
+    showToast(currentLang === 'ja' ? '❌ 却下の理由を入力してください'
+      : L('❌ A reason is required to reject', '❌ ต้องกรอกเหตุผลก่อนปฏิเสธ'), 'warning');
+    return false;
+  }
   if (l.dateFrom) {
     const ps = getPeriodStartForDate(l.dateFrom);
     if (isPeriodLocked(ps)) {
@@ -17158,7 +17379,7 @@ async function rejectMockLeaveInternal(id) {
   }
   const res = await apiFetch(`/api/leaves/${id}`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ status: 'rejected', approver: currentUser.name, approvedAt: fmtDateTime(new Date()) })
+    body: JSON.stringify({ status: 'rejected', approver: currentUser.name, approvedAt: fmtDateTime(new Date()), rejectReason: normalizeRejectReason(reason) })
   });
   const data = await res.json();
   if (!data.success) throw new Error(data.message);
@@ -17552,10 +17773,15 @@ const NOTIFICATION_RENDERERS = {
     ? `${notifTypeLabel(p.type)}の申請（${notifDateRange(p.dateFrom, p.dateTo)}）が承認されました`
     : L(`Your ${notifTypeLabel(p.type)} request (${notifDateRange(p.dateFrom, p.dateTo)}) was approved`,
         `คำขอ${notifTypeLabel(p.type)} (${notifDateRange(p.dateFrom, p.dateTo)}) ของคุณได้รับการอนุมัติแล้ว`) }),
-  'request-rejected': p => ({ icon: '❌', text: currentLang === 'ja'
+  // 2026-10-22 (owner): the reason travels in the notification params, so the employee learns WHY
+  // from the notification itself instead of opening the request to find out. A notification stored
+  // before today has no reason in its params and reads exactly as it did.
+  'request-rejected': p => ({ icon: '❌', text: (currentLang === 'ja'
     ? `${notifTypeLabel(p.type)}の申請（${notifDateRange(p.dateFrom, p.dateTo)}）は却下されました`
     : L(`Your ${notifTypeLabel(p.type)} request (${notifDateRange(p.dateFrom, p.dateTo)}) was rejected`,
-        `คำขอ${notifTypeLabel(p.type)} (${notifDateRange(p.dateFrom, p.dateTo)}) ของคุณไม่ได้รับการอนุมัติ`) }),
+        `คำขอ${notifTypeLabel(p.type)} (${notifDateRange(p.dateFrom, p.dateTo)}) ของคุณไม่ได้รับการอนุมัติ`))
+    + (p.rejectReason ? (currentLang === 'ja' ? `（理由: ${p.rejectReason}）`
+      : L(` (reason: ${p.rejectReason})`, ` (เหตุผล: ${p.rejectReason})`)) : '') }),
   'approval-needed': p => ({ icon: '📝', text: currentLang === 'ja'
     ? `${p.employeeName || ''}さんの${notifTypeLabel(p.type)}申請（${notifDateRange(p.dateFrom, p.dateTo)}）があなたの承認待ちです`
     : L(`${p.employeeName || ''}: ${notifTypeLabel(p.type)} request (${notifDateRange(p.dateFrom, p.dateTo)}) needs your approval`,
@@ -17804,8 +18030,12 @@ async function approveMockLeave(id) {
 
 async function rejectMockLeave(id) {
   if (blockIfObserver()) return;
+  // 2026-10-22 (owner): ask BEFORE anything is sent. Closing the box rejects nothing, which is
+  // why the ask cannot sit after a successful PUT.
+  const asked = await askRejectReason({ summary: rejectReasonSummaryHtml(DATA_LEAVES.find(x => x.id === id)) });
+  if (asked.action !== 'submit') return;
   try {
-    const did = await rejectMockLeaveInternal(id);
+    const did = await rejectMockLeaveInternal(id, asked.reason);
     if (!did) return;
   } catch(e) {
     showToast(L('❌ Could not save: ', '❌ ไม่สามารถบันทึกได้: ') + e.message, 'danger');
@@ -18183,6 +18413,7 @@ function showApprovalDetail(id) {
         </div>
         ${row(L('Handled by', 'ผู้ดำเนินการ'), escapeHtml(l.approver))}
         ${l.approvedAt ? row(L('Handled at', 'เวลาดำเนินการ'), escapeHtml(_fmtDtStr(l.approvedAt))) : ''}
+        ${l.status === 'rejected' && l.rejectReason ? row(currentLang === 'ja' ? '理由' : L('Reason', 'เหตุผล'), escapeHtml(l.rejectReason)) : ''}
       </div>`
     : `<div style="background:${_isDarkDetail?'rgba(245,158,11,0.15)':'#fffbeb'};border:1px solid ${_isDarkDetail?'rgba(245,158,11,0.3)':'#fcd34d'};border-radius:10px;padding:12px 16px;font-size:13px;color:${_isDarkDetail?'#fcd34d':'#b45309'};font-weight:600">${statusMap[l.status] || ''} ${L('still pending', 'ยังรออนุมัติอยู่')}</div>`;
 
@@ -23023,6 +23254,7 @@ function renderMyRequests() {
       ? `<span style="color:#94a3b8">• ${withdrawnLeaveNoteHtml(l)}</span>`
       : (l.status === 'approved' || l.status === 'rejected') && l.approver
       ? `<span style="color:#94a3b8">• ${l.status === 'approved' ? L('Approved', 'อนุมัติ') : L('Rejected', 'ปฏิเสธ')} ${L('by', 'โดย')} ${escapeHtml(l.approver)}</span>`
+        + (l.status === 'rejected' && l.rejectReason ? rejectReasonLineHtml(l, { small: true, max: 70 }) : '')
       : l.status === 'pending-md'
       ? `<span style="color:#94a3b8">• ${L('Pending Managing Director', 'รอ Managing Director')}</span>`
       : l.status === 'pending-accounting'
