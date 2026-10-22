@@ -4676,3 +4676,10 @@ tr.finalize-row-confirmed:hover td {
 :root:not([data-theme="dark"]) [style*=";color:#8b5cf6"] { color: #6d28d9 !important; }
 /* the door-log time, #059669 on the near-white card: 3.60 */
 :root:not([data-theme="dark"]) .log-info .time { color: #047857; }
+/* found only on the live site, where an accountant sees amounts and buttons the test data had no
+   rows for -- a reminder that the audit has to run against real content too, not just a fixture. */
+/* the payslip plus amounts, #059669 on the near-white card: 3.77 */
+:root:not([data-theme="dark"]) .pay-row .amount.plus { color: #047857; }
+/* the late-night-out button, #0891b2 on white: 3.68 (9 of them in a timetable) */
+:root:not([data-theme="dark"]) [style^="color:#0891b2"],
+:root:not([data-theme="dark"]) [style*=";color:#0891b2"] { color: #0e7490 !important; }
