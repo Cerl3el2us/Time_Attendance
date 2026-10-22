@@ -291,14 +291,22 @@ function logSection(nasDir, deps, out) {
   if (line.includes('FAILED')) {
     out.lines.push('WARNING: the last sync.log line contains FAILED');
   }
-  // The one run shape the owner's open item (sync-push-false-success) is about, read from the line's
-  // own fields and nothing else: it does not say WHY nothing was copied, and the judgement of the
-  // code behind it stays in backlog-checks.js. Without this the same line that item calls a false
-  // success sat under a "0 warning(s)" heading.
+  // The one run shape the item sync-push-false-success was about (closed 2026-10-13), read from the
+  // line's own fields and nothing else. 2026-10-22: `verified=n` is the push's own per-file check
+  // that each dirty file is in step on the NAS, so the healthy "nothing needed copying" run can be
+  // told apart from "nothing got copied" -- before this, every such run was a WARNING, which is how
+  // the two real lines of 2026-10-21 (copied=0 with verified=5 and verified=3) were reported as a
+  // defect while a hash comparison of all 134 synced files that day found none differing.
   const dirty = line.match(/\bDIRTY (\d+)\b/);
   if (dirty && Number(dirty[1]) > 0 && /\bcopied=0\b/.test(line) && /\bpush=ok\b/.test(line) && /\bmarker=written\b/.test(line)) {
-    out.lines.push(`WARNING: the last sync.log line records DIRTY ${dirty[1]} with copied=0, push=ok and marker=written: nothing was copied to the NAS, yet the folder was marked clean (the open item sync-push-false-success; this line cannot say why nothing was copied)`);
+    const verified = line.match(/\bverified=(\d+)\b/);
+    const proven = verified && Number(verified[1]) >= Number(dirty[1])
+      && !/\bnot-in-step=/.test(line) && !/\bunsynced=/.test(line);
+    out.lines.push(proven
+      ? `sync.log: nothing needed copying on that run: DIRTY ${dirty[1]} with copied=0 and verified=${verified[1]}, which is the push checking each dirty file against its NAS copy -- by size only, so it is not proof of equal content`
+      : `WARNING: the last sync.log line records DIRTY ${dirty[1]} with copied=0, push=ok and marker=written: nothing was copied to the NAS, yet the folder was marked clean, and the line does not prove the dirty files are in step there (no verified= count at least as high as DIRTY ${dirty[1]}, or a not-in-step=/unsynced= field beside it); this line cannot say why nothing was copied`);
   }
+
   const eyes = line.match(/\bneeds-eyes=(.*?)(?:\s+snapshot=|$)/);
   if (eyes && eyes[1].trim() !== '' && eyes[1].trim() !== 'none') {
     out.lines.push(`WARNING: the last sync.log line has needs-eyes=${ascii(eyes[1].trim())}`);
