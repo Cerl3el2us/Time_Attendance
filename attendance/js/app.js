@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 148;
+const APP_BUILD = 150;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -2641,6 +2641,11 @@ function askRejectReason(opts) {
   const prog = document.getElementById('rr-progress');
   prog.textContent = o.progress || '';
   prog.style.display = o.progress ? '' : 'none';
+  // 2026-10-22: measured in the page, #7c3aed is 2.57:1 on the dark card -- the same failure as
+  // the buttons fixed on 2026-10-21 (#10b981 at 2.54:1), and under the >= 3:1 this project holds
+  // secondary text to. Read the theme here, like the other colour-setting lines in this file do:
+  // the dark-mode CSS rules only rewrite inline styles that sit in the HTML, not ones JS sets.
+  prog.style.color = document.documentElement.getAttribute('data-theme') === 'dark' ? '#a78bfa' : '#6d28d9';
   const skip = document.getElementById('rr-skip');
   skip.style.display = o.progress ? '' : 'none';
   skip.textContent = currentLang === 'ja' ? 'この申請はスキップ' : L('Skip this one', 'ข้ามใบนี้');
@@ -2649,7 +2654,9 @@ function askRejectReason(opts) {
   ta.placeholder = currentLang === 'ja'
     ? '例：その日は別の予定が入っています'
     : L('e.g. another job is already scheduled that day', 'เช่น วันนั้นมีงานอื่นอยู่แล้ว');
-  document.getElementById('rr-error').textContent = '';
+  const errEl = document.getElementById('rr-error');
+  errEl.textContent = '';
+  errEl.style.color = rejectReasonDangerColor();
   document.getElementById('rr-submit').textContent = currentLang === 'ja' ? '❌ 却下する' : L('❌ Reject', '❌ ปฏิเสธ');
   document.getElementById('rr-cancel').textContent = o.progress
     ? (currentLang === 'ja' ? '残りをやめる' : L('Stop here', 'หยุดที่นี่'))
@@ -2686,6 +2693,13 @@ function rejectReasonSubmit() {
   rejectReasonChoose('submit');
 }
 function closeRejectReasonModal() { rejectReasonChoose('cancel'); }
+// 2026-10-22: --danger is #dc2626 in BOTH themes (style.css declares it once), measured at
+// 3.03:1 against the dark card. showApprovalDetail() already carries the project's answer to
+// that -- the #fca5a5 / #dc2626 pair -- so the rejection surfaces reuse it rather than add a
+// third red, and a reader on a dark screen gets 7.7:1 instead of 3.0:1.
+function rejectReasonDangerColor() {
+  return document.documentElement.getAttribute('data-theme') === 'dark' ? '#fca5a5' : '#dc2626';
+}
 // The line shown wherever a rejected record is listed. Records rejected before 2026-10-22 have no
 // reason at all, and must print nothing rather than an empty "Reason:" label.
 function rejectReasonLineHtml(l, opts) {
@@ -2694,7 +2708,7 @@ function rejectReasonLineHtml(l, opts) {
   const o = opts || {};
   const label = currentLang === 'ja' ? '理由' : L('Reason', 'เหตุผล');
   const shown = o.max && reason.length > o.max ? reason.slice(0, o.max) + '…' : reason;
-  return `<div style="font-size:${o.small ? 11 : 13}px;color:var(--danger);margin-top:${o.small ? 4 : 6}px;white-space:pre-wrap">`
+  return `<div style="font-size:${o.small ? 11 : 13}px;color:${rejectReasonDangerColor()};margin-top:${o.small ? 4 : 6}px;white-space:pre-wrap">`
     + `❌ ${label}: ${escapeHtml(shown)}</div>`;
 }
 

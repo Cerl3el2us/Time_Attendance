@@ -1828,7 +1828,9 @@
       <button class="btn btn-ghost btn-sm" onclick="closeRejectReasonModal()">✕</button>
     </div>
     <div class="modal-body" style="padding:20px;display:flex;flex-direction:column;gap:12px">
-      <div id="rr-progress" style="font-size:12px;font-weight:700;color:#7c3aed"></div>
+      <!-- the colour is set by askRejectReason() from the live theme: a fixed one here would be
+           unreadable in the other theme, which tests/theme-aware-colors.test.js checks for -->
+      <div id="rr-progress" style="font-size:12px;font-weight:700"></div>
       <div id="rr-summary" style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px 12px"></div>
       <label id="rr-label" for="rr-text" style="font-size:12px;font-weight:700;color:var(--text)"></label>
       <!-- 16px is deliberate: anything smaller makes iOS Safari zoom the page on focus. -->
@@ -2813,6 +2815,6 @@
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ja.js" integrity="sha384-mKor8U8jwukUkfxaFPCsxKF9S62PXq4gG7zcZ5yQ2x3KL1msprJZeFlKFEDeeb5V" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/th.js" integrity="sha384-E6OVFg1zUc/pckGxry0YZ6VeZ1E17l7Jl8ZQx58jbEfxxkz9LqknQhiIrA9zg/8b" crossorigin="anonymous"></script>
 
-<script src="js/app.js?v=20261022a"></script>
+<script src="js/app.js?v=20261022c"></script>
 </body>
 </html>
