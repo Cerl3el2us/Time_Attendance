@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 150;
+const APP_BUILD = 153;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -16302,6 +16302,265 @@ function switchApprovalTab(id) {
   renderApprovals();
 }
 
+// ===== DRIVER OT: ONE APPROVAL CARD PER DAY (2026-10-22, owner's decision) =====
+// A driver files OT one record per rate, so a holiday with 8 hours at ×2 and 2 hours at ×3 arrived
+// as two approval cards, each stating only its own slice and neither saying what the day came to.
+// The owner asked for one card per day that lists the hours per rate and is approved in one press.
+// The records stay separate on purpose: the two rates are paid differently and payroll reads them
+// one at a time. ONLY the card view groups, and only for driver OT -- a regular employee cannot
+// have two OT records on one date (submitOT refuses it), so grouping there would change a path
+// nobody asked about. Quick Mode's table is deliberately left per-record: its checkboxes and
+// select-all are a per-record tool.
+function isDriverOtLeave(l) {
+  if (!l || l.type !== 'ot') return false;
+  if (l.isDriverOT) return true;
+  const u = DATA_USERS.find(x => Number(x.id) === Number(l.userId));
+  return !!u && u.role === 'driver';
+}
+// Pending records as the card view should show them: { kind:'single', leave } for everything, and
+// { kind:'day', ... } for a driver's day that carries more than one rate.
+// The grouping key carries the status as well as the person and the date, because one card acts on
+// everything it shows: two records in different states must never end up under one button.
+// A group takes the position of its first record, so the list does not reorder itself.
+function groupApprovalItems(pending) {
+  const entries = [];
+  const byKey = new Map();
+  (pending || []).forEach(l => {
+    if (!isDriverOtLeave(l)) { entries.push({ leaves: [l] }); return; }
+    const key = `${l.userId}|${l.dateFrom}|${l.status}`;
+    const seen = byKey.get(key);
+    if (seen) { seen.leaves.push(l); return; }
+    const entry = { leaves: [l] };
+    byKey.set(key, entry);
+    entries.push(entry);
+  });
+  return entries.map(e => {
+    if (e.leaves.length < 2) return { kind: 'single', leave: e.leaves[0] };
+    const leaves = e.leaves.slice().sort((a, b) => effectiveOtMultiplier(a) - effectiveOtMultiplier(b));
+    return {
+      kind: 'day',
+      userId: leaves[0].userId,
+      dateFrom: leaves[0].dateFrom,
+      status: leaves[0].status,
+      leaves,
+      totalHours: leaves.reduce((sum, x) => sum + (Number(x.otHours) || 0), 0),
+      tiers: leaves.map(x => ({ multiplier: effectiveOtMultiplier(x), hours: Number(x.otHours) || 0 })),
+    };
+  });
+}
+// The day card. Same classes and shape as buildApprovalCard so the two read as one list.
+// It deliberately does NOT open showApprovalDetail on click: that modal describes ONE record, and a
+// card that says "the whole day" must not open a box that quietly shows half of it.
+// The toolbar counts records (that is what Approve All acts on, and what every badge means).
+// Once a driver's day is one card, that number can exceed the cards on screen, so the line says
+// both -- and says nothing extra when nothing was grouped, which is the usual case.
+function approvalCardCountSuffix(pending) {
+  const cards = groupApprovalItems(pending).length;
+  if (cards === (pending || []).length) return '';
+  return currentLang === 'ja'
+    ? ` ・${cards}枚のカード`
+    : L(` · shown as ${cards} cards`, ` · แสดงเป็น ${cards} การ์ด`);
+}
+// One line for a table row: every rate, then what the day came to. The card lists the rates on
+// their own lines; a table cell has one line, and dropping the total there would make the row say
+// less than the card it is supposed to mirror.
+function driverOtDayDetailText(group) {
+  const unit = L('h', 'ชม.');
+  const parts = group.tiers.map(t => `${otMultiplierLabel(t.multiplier)} ${t.hours} ${unit}`);
+  const total = currentLang === 'ja'
+    ? `合計 ${group.totalHours} 時間`
+    : L(`${group.totalHours} ${unit} total`, `รวม ${group.totalHours} ${unit}`);
+  return `${parts.join(` + `)} · ${total}`;
+}
+// Batch reject walks DAYS, not records: a driver's day is one question with one reason, exactly
+// as pressing Reject on its card. Without this, selecting a day in Quick Mode would ask for the
+// same reason once per rate, which contradicts the decision the card view implements.
+// An id whose record has gone (someone else acted first) is dropped rather than asked about.
+function groupSelectedForReject(ids) {
+  const leaves = (ids || [])
+    .map(id => DATA_LEAVES.find(l => Number(l.id) === Number(id)))
+    .filter(Boolean);
+  return groupApprovalItems(leaves).map(item => item.kind === 'day'
+    ? item.leaves.map(l => l.id)
+    : [item.leave.id]);
+}
+// What a row says about a request in one line. Quick Mode had this inline; the info boxes and the
+// approval history had nothing at all, so a row there was a name, a date and a badge, and the only
+// way to learn what it was about was to open it. One function for all four lists means they cannot
+// drift into describing the same record differently.
+function approvalSummaryText(item) {
+  if (item.kind === 'day') return driverOtDayDetailText(item);
+  const l = item.leave;
+  if (l.days > 0) return `${Number(l.days)} ${L('days', 'วัน')}`;
+  if (l.type === 'ot') return otHoursRateDetail(l);
+  if (l.type === 'long-distance') {
+    // Number() first: mileage is client-supplied and .toLocaleString() is only safe on a number
+    return `${Number(l.mileageStart || 0).toLocaleString()} → ${Number(l.mileageEnd || 0).toLocaleString()}`
+      + ` (${Number(l.distanceKm || 0).toLocaleString()} ${L('km', 'กม.')})`;
+  }
+  return formatTimePart(l) || l.reason || '—';
+}
+// A read-only row for the info boxes and the approval history: icon, who, what it is about, when,
+// and the badge the caller supplies. A day group opens nothing on click, because showApprovalDetail
+// describes ONE record and the row stands for several.
+function approvalInfoRowHtml(item, badgeHtml) {
+  const isDay = item.kind === 'day';
+  const l = isDay ? item.leaves[0] : item.leave;
+  const emp = DATA_USERS.find(u => Number(u.id) === Number(l.userId));
+  const icon = LEAVE_TYPE_ICON[l.type] || '📋';
+  const dateLine = l.dateFrom === l.dateTo || isDay
+    ? fmtDate(new Date(l.dateFrom + 'T12:00:00'))
+    : `${fmtDate(new Date(l.dateFrom + 'T12:00:00'))} – ${fmtDate(new Date(l.dateTo + 'T12:00:00'))}`;
+  const typeLabel = escapeHtml(getLEAVE_TYPE_CFG()[l.type]?.label || l.type);
+  const summary = escapeHtml(approvalSummaryText(item));
+  // the note is shown only when it is not already the summary, so a row never says it twice
+  const noteRaw = isDay
+    ? [...new Set(item.leaves.map(x => String(x.reason || '').trim()).filter(Boolean))].join(' · ')
+    : String(l.reason || '').trim();
+  const note = noteRaw && noteRaw !== approvalSummaryText(item)
+    ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">📝 ${escapeHtml(noteRaw)}</div>`
+    : '';
+  const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+  const bg = dark ? '#0f172a' : '#f8fafc';
+  const hover = dark ? '#334155' : '#f1f5f9';
+  const click = isDay ? '' : ` onclick="showApprovalDetail(${l.id})"`;
+  return `<div${click} style="${withdrawnRowStyle(l)}background:${bg};border:1px solid var(--border);border-radius:10px;padding:10px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;cursor:${isDay ? 'default' : 'pointer'}"
+    onmouseover="this.style.background='${hover}'" onmouseout="this.style.background='${bg}'">
+      <span>${icon}</span>
+      <div style="flex:1;min-width:160px">
+        <div style="font-size:13px;font-weight:600;color:var(--text)">${escapeHtml(emp?.name || '—')}</div>
+        <div style="font-size:12px;color:var(--text-muted)"><strong>${typeLabel}</strong>${summary ? ` — ${summary}` : ''}</div>
+        ${note}
+      </div>
+      <span style="font-size:12px;color:var(--text-muted)">${dateLine}</span>
+      ${badgeHtml}
+    </div>`;
+}
+// 2026-10-22 (owner asked whether this page keeps rejections): it does -- the history is every
+// decided record, and isVoidLeaveStatus() covers rejected as well as cancelled and revoked. What
+// it could not do was SHOW them: only the newest 20 are rendered, production already had 66, and
+// the one rejection sat at position 27. These buckets filter before that window.
+function decidedOutcomeCounts(list) {
+  const out = { all: 0, approved: 0, rejected: 0, withdrawn: 0 };
+  (list || []).forEach(l => {
+    out.all++;
+    if (l.status === 'approved') out.approved++;
+    else if (l.status === 'rejected') out.rejected++;
+    else if (isWithdrawnLeaveStatus(l.status)) out.withdrawn++;
+  });
+  return out;
+}
+function filterDecidedByOutcome(list, bucket) {
+  const all = list || [];
+  if (bucket === 'approved') return all.filter(l => l.status === 'approved');
+  if (bucket === 'rejected') return all.filter(l => l.status === 'rejected');
+  if (bucket === 'withdrawn') return all.filter(l => isWithdrawnLeaveStatus(l.status));
+  return all;
+}
+let _approvalHistoryFilter = 'all';
+function setApprovalHistoryFilter(bucket) {
+  _approvalHistoryFilter = bucket || 'all';
+  renderApprovals();
+}
+function buildDriverOtDayCard(group) {
+  const emp = DATA_USERS.find(u => Number(u.id) === Number(group.userId));
+  const empName = emp ? emp.name : `User #${group.userId}`;
+  const dateLine = fmtDate(new Date(group.dateFrom + 'T12:00:00'));
+  const ids = group.leaves.map(l => l.id).join(',');
+  const hoursUnit = L('h', 'ชม.');
+  const title = currentLang === 'ja'
+    ? `運転手の残業 — ${dateLine} · 合計 ${group.totalHours} 時間`
+    : L(`Driver OT — ${dateLine} · ${group.totalHours} ${hoursUnit} total`,
+        `ขอ OT — ${dateLine} · รวม ${group.totalHours} ${hoursUnit}`);
+  const tierLines = group.tiers.map(t =>
+    `<div style="font-size:13px;color:var(--text);margin-top:4px">⏱️ ${otMultiplierLabel(t.multiplier)} — <strong>${t.hours} ${hoursUnit}</strong></div>`
+  ).join('');
+  // One note per distinct text: the rates are filed in one sitting and usually carry the same note,
+  // and repeating it twice under one card reads like two different notes.
+  const notes = [...new Set(group.leaves.map(l => String(l.reason || '').trim()).filter(Boolean))];
+  const noteLines = notes.map(r =>
+    `<div style="font-size:13px;color:var(--text-muted);margin-top:4px">📝 ${escapeHtml(r)}</div>`
+  ).join('');
+  const submitted = group.leaves.map(l => l.submittedAt).filter(Boolean).sort()[0];
+  // Every record under this card must be actionable by this viewer, or the button would silently
+  // do nothing to part of what it shows.
+  const canAct = group.leaves.every(l => isMyTurnNow(l, 'driver-ot'));
+  const actionHtml = canAct
+    ? `<div class="approval-actions" onclick="event.stopPropagation()">
+         <button class="btn btn-success btn-sm" onclick="approveDriverOtDay('${ids}')">${L('✅ Approve the day', '✅ อนุมัติทั้งวัน')}</button>
+         <button class="btn btn-danger btn-sm" onclick="rejectDriverOtDay('${ids}')">${L('✕ Reject the day', '✕ ปฏิเสธทั้งวัน')}</button>
+       </div>` : '';
+  const card = document.createElement('div');
+  card.className = 'approval-card pending';
+  card.style.cssText = 'margin-bottom:10px';
+  card.innerHTML = `
+    <div class="approval-header" style="margin-bottom:6px">
+      <h4>⏱️ ${escapeHtml(title)}</h4>
+    </div>
+    <div class="approval-meta">
+      <span style="font-weight:600;color:var(--text)">👤 ${escapeHtml(empName)}</span>
+      <span>📅 ${dateLine}</span>
+      ${submitted ? `<span style="color:var(--text-muted);font-size:12px">${L('Submitted', 'ยื่นเมื่อ')} ${escapeHtml(_fmtDtStr(submitted))}</span>` : ''}
+    </div>
+    ${tierLines}
+    ${noteLines}
+    ${actionHtml}`;
+  return card;
+}
+// Approve every rate of that day. The count is reported honestly: a locked period, a payroll that
+// was approved in the meantime, or a race with the other machine can stop one of them, and a
+// silent partial success here would read as "the day is approved".
+async function approveDriverOtDay(idsCsv) {
+  if (blockIfObserver()) return;
+  const ids = String(idsCsv).split(',').map(Number).filter(n => Number.isFinite(n) && n > 0);
+  if (!ids.length) return;
+  let ok = 0;
+  for (const id of ids) {
+    try { if (await approveMockLeaveInternal(id)) ok++; } catch (e) { /* counted as not done */ }
+  }
+  driverOtDayToast(ok, ids.length, 'approved');
+  renderApprovals();
+  renderDashboard();
+  if (currentPage === 'my-requests') renderMyRequests();
+}
+// Reject every rate of that day under ONE reason (the owner's choice: "ปฏิเสธทั้งวัน เหตุผลเดียว").
+async function rejectDriverOtDay(idsCsv) {
+  if (blockIfObserver()) return;
+  const ids = String(idsCsv).split(',').map(Number).filter(n => Number.isFinite(n) && n > 0);
+  if (!ids.length) return;
+  const first = DATA_LEAVES.find(l => l.id === ids[0]);
+  const extra = currentLang === 'ja'
+    ? `この日のすべての区分（${ids.length}件）に適用されます`
+    : L(`applies to all ${ids.length} rates of this day`, `ใช้กับทุกอัตราของวันนี้ (${ids.length} รายการ)`);
+  const asked = await askRejectReason({
+    summary: rejectReasonSummaryHtml(first)
+      + `<div style="font-size:12px;color:var(--text-muted);margin-top:4px">${escapeHtml(extra)}</div>`,
+  });
+  if (asked.action !== 'submit') return;
+  let ok = 0;
+  for (const id of ids) {
+    try { if (await rejectMockLeaveInternal(id, asked.reason)) ok++; } catch (e) { /* counted as not done */ }
+  }
+  driverOtDayToast(ok, ids.length, 'rejected');
+  renderApprovals();
+  renderDashboard();
+  if (currentPage === 'my-requests') renderMyRequests();
+}
+function driverOtDayToast(ok, total, what) {
+  const done = what === 'approved'
+    ? (currentLang === 'ja' ? '承認' : L('approved', 'อนุมัติ'))
+    : (currentLang === 'ja' ? '却下' : L('rejected', 'ปฏิเสธ'));
+  if (ok === total) {
+    showToast(currentLang === 'ja'
+      ? `✅ この日の${total}件すべてを${done}しました`
+      : L(`✅ All ${total} rates of the day were ${what}`, `✅ ${done}ทั้งวันแล้ว (${total} รายการ)`),
+    what === 'approved' ? 'success' : 'danger');
+    return;
+  }
+  showToast(currentLang === 'ja'
+    ? `⚠️ ${total}件中${ok}件のみ${done}しました`
+    : L(`⚠️ only ${ok} of ${total} were ${what}`, `⚠️ ${done}ได้ ${ok} จาก ${total} รายการ`), 'warning');
+}
 function buildApprovalCard(l, role) {
   const emp = DATA_USERS.find(u => u.id === l.userId);
   const empName = emp ? emp.name : `User #${l.userId}`;
@@ -16914,10 +17173,16 @@ function renderApprovals() {
   const matchTab   = l => !tabCfg.types || tabCfg.types.includes(l.type);
 
   const pendingFiltered = pendingAll.filter(matchTab).sort((a,b) => b.id - a.id);
-  const decidedFiltered = DATA_LEAVES
+  // 2026-10-22: the outcome bucket is applied BEFORE the 20-row window, so asking for rejections
+  // shows rejections rather than "the newest 20, none of which happen to be one".
+  const decidedAll = DATA_LEAVES
     .filter(l => (l.status === 'approved' || isVoidLeaveStatus(l.status)) && matchTab(l))
-    .sort((a,b) => b.id - a.id)
-    .slice(0, 20);
+    .sort((a,b) => b.id - a.id);
+  const decidedCounts = decidedOutcomeCounts(decidedAll);
+  // 40 rows, not 20 (owner, 2026-10-22): with 66 decided records in production the single
+  // rejection sat at position 27 and was kept but unreachable. The chips below still matter once
+  // the history outgrows 40 as well.
+  const decidedFiltered = filterDecidedByOutcome(decidedAll, _approvalHistoryFilter).slice(0, 40);
 
   // ── Summary bar: tab + toolbar ──
   if (summEl) {
@@ -16958,7 +17223,7 @@ function renderApprovals() {
       // needs the banner itself to span the page, or it collapses to the width of its buttons.
       toolbar.style.cssText = `display:flex;gap:8px;flex-wrap:wrap;align-items:center;align-self:stretch;margin-bottom:12px;padding:10px 14px;background:${_isDarkToolbar ? 'rgba(16,185,129,0.15)' : '#f0fdf4'};border:1px solid ${_isDarkToolbar ? 'rgba(16,185,129,0.3)' : '#bbf7d0'};border-radius:10px`;
       toolbar.innerHTML = `
-        <span style="font-size:13px;font-weight:600;color:${_isDarkToolbar ? '#6ee7b7' : '#166534'};flex:1">⚡ ${currentLang === 'ja' ? `このタブで保留中 ${pendingFiltered.length}件` : L(`${pendingFiltered.length} pending in this tab`, `รออนุมัติ ${pendingFiltered.length} รายการในแท็บนี้`)}</span>
+        <span style="font-size:13px;font-weight:600;color:${_isDarkToolbar ? '#6ee7b7' : '#166534'};flex:1">⚡ ${currentLang === 'ja' ? `このタブで保留中 ${pendingFiltered.length}件` : L(`${pendingFiltered.length} pending in this tab`, `รออนุมัติ ${pendingFiltered.length} รายการในแท็บนี้`)}${approvalCardCountSuffix(pendingFiltered)}</span>
         <button onclick="toggleQuickMode()" style="padding:6px 14px;border-radius:8px;border:2px solid ${_approvalQuickMode ? '#3b82f6' : 'var(--border)'};background:${_approvalQuickMode ? (_isDarkToolbar ? 'rgba(59,130,246,0.25)' : '#eff6ff') : 'var(--bg-card)'};color:${_approvalQuickMode ? (_isDarkToolbar ? '#93c5fd' : '#1d4ed8') : 'var(--text-muted)'};font-size:12px;font-weight:700;cursor:pointer">
           ${_approvalQuickMode ? '📋 Card View' : '⚡ Quick Mode'}
         </button>
@@ -17036,17 +17301,19 @@ function renderApprovals() {
           </tr>
         </thead>
         <tbody>
-          ${pendingFiltered.map(l => {
+          ${groupApprovalItems(pendingFiltered).map(item => {
+            // 2026-10-22 (owner): a driver's day is ONE row here too, selected and acted on as a day.
+            const isDay = item.kind === 'day';
+            const l = isDay ? item.leaves[0] : item.leave;
+            const rowIds = isDay ? item.leaves.map(x => x.id).join(',') : String(l.id);
             const emp = DATA_USERS.find(u => u.id === l.userId);
             const icon = LEAVE_TYPE_ICON[l.type] || '📋';
             const dateLine = l.dateFrom === l.dateTo
               ? fmtDate(new Date(l.dateFrom + 'T12:00:00'))
               : `${fmtDate(new Date(l.dateFrom + 'T12:00:00'))}–${fmtDate(new Date(l.dateTo + 'T12:00:00'))}`;
             const typeLabelShort = escapeHtml(getLEAVE_TYPE_CFG()[l.type]?.label || l.type);
-            const detailValueRaw = l.days > 0 ? `${Number(l.days)} ${L('days', 'วัน')}`
-              : l.type === 'ot' ? otHoursRateDetail(l)
-              : l.type === 'long-distance' ? `${Number(l.mileageStart||0).toLocaleString()} → ${Number(l.mileageEnd||0).toLocaleString()} (${Number(l.distanceKm||0).toLocaleString()} ${L('km','กม.')})`
-              : formatTimePart(l) || l.reason || '—';
+            // 2026-10-22: the same line every other list shows, from one place
+            const detailValueRaw = approvalSummaryText(item);
             // Prefixed with the type label so this cell is self-explanatory even when the
             // adjacent Type column scrolls out of view on narrow screens (table has
             // overflow-x:auto) — user reported not being able to tell what was requested from
@@ -17055,9 +17322,9 @@ function renderApprovals() {
             const detailReason = l.reason && detailValueRaw !== l.reason
               ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">${escapeHtml(l.reason)}</div>` : '';
             const detailDate = `<div class="approval-quick-date-mobile" style="font-size:11px;color:var(--text-muted);margin-top:2px">${dateLine}</div>`;
-            return `<tr onclick="showApprovalDetail(${l.id})" style="border-top:1px solid var(--border);cursor:pointer" onmouseover="this.style.background=document.documentElement.getAttribute('data-theme')==='dark'?'#1e293b':'#f8fafc'" onmouseout="this.style.background=''">
+            return `<tr ${isDay ? '' : `onclick="showApprovalDetail(${l.id})"`} style="border-top:1px solid var(--border);cursor:${isDay ? 'default' : 'pointer'}" onmouseover="this.style.background=document.documentElement.getAttribute('data-theme')==='dark'?'#1e293b':'#f8fafc'" onmouseout="this.style.background=''">
               <td onclick="event.stopPropagation()" style="padding:10px 12px;text-align:center">
-                <input type="checkbox" class="chk-item" data-id="${l.id}" onchange="onItemCheck()" style="width:16px;height:16px">
+                <input type="checkbox" class="chk-item" data-ids="${rowIds}" onchange="onItemCheck()" style="width:16px;height:16px">
               </td>
               <td style="padding:10px 12px;font-weight:600;color:var(--text)">${escapeHtml(emp?.name || '—')}</td>
               <td class="col-hide-mobile" style="padding:10px 12px;color:var(--text)">${icon} ${escapeHtml(getLEAVE_TYPE_CFG()[l.type]?.label || l.type)}</td>
@@ -17068,8 +17335,8 @@ function renderApprovals() {
                      buttons. An emoji carries its own colour and ignores `color:#fff`, so a red
                      cross sat on a red button and all but vanished. Plain glyphs take the white
                      the button already asks for. */}
-                <button onclick="approveMockLeave(${l.id})" style="padding:4px 10px;border-radius:6px;background:#047857;color:#fff;border:none;font-size:13px;font-weight:700;line-height:1;cursor:pointer;margin-right:4px" title="${escapeHtml(L('Approve', 'อนุมัติ'))}">✓</button>
-                <button onclick="rejectMockLeave(${l.id})" style="padding:4px 10px;border-radius:6px;background:#ef4444;color:#fff;border:none;font-size:13px;font-weight:700;line-height:1;cursor:pointer" title="${escapeHtml(L('Reject', 'ปฏิเสธ'))}">✕</button>
+                <button onclick="${isDay ? `approveDriverOtDay('${rowIds}')` : `approveMockLeave(${l.id})`}" style="padding:4px 10px;border-radius:6px;background:#047857;color:#fff;border:none;font-size:13px;font-weight:700;line-height:1;cursor:pointer;margin-right:4px" title="${escapeHtml(isDay ? L('Approve the day', 'อนุมัติทั้งวัน') : L('Approve', 'อนุมัติ'))}">✓</button>
+                <button onclick="${isDay ? `rejectDriverOtDay('${rowIds}')` : `rejectMockLeave(${l.id})`}" style="padding:4px 10px;border-radius:6px;background:#ef4444;color:#fff;border:none;font-size:13px;font-weight:700;line-height:1;cursor:pointer" title="${escapeHtml(isDay ? L('Reject the day', 'ปฏิเสธทั้งวัน') : L('Reject', 'ปฏิเสธ'))}">✕</button>
               </td>
             </tr>`;
           }).join('')}
@@ -17078,7 +17345,9 @@ function renderApprovals() {
       </div>`;
     catEl.appendChild(table);
   } else {
-    pendingFiltered.forEach(l => catEl.appendChild(buildApprovalCard(l, role)));
+    // 2026-10-22 (owner): driver OT of the same day is one card, everything else is unchanged.
+  groupApprovalItems(pendingFiltered).forEach(item => catEl.appendChild(
+    item.kind === 'day' ? buildDriverOtDayCard(item) : buildApprovalCard(item.leave, role)));
   }
 
   // ── Manager Info Section: คำขอที่ MD กำลังพิจารณา ──
@@ -17094,19 +17363,9 @@ function renderApprovals() {
           📋 ${currentLang === 'ja' ? `Managing Director審査中の項目（${infoItems.length}件）— 参考情報` : L(`Items under Managing Director review (${infoItems.length}) — for your information`, `รายการที่อยู่ระหว่าง Managing Director พิจารณา (${infoItems.length} รายการ) — ข้อมูลเพื่อทราบ`)}
         </div>
         <div style="display:flex;flex-direction:column;gap:6px">
-          ${infoItems.map(l => {
-            const emp  = DATA_USERS.find(u => u.id === l.userId);
-            const icon = LEAVE_TYPE_ICON[l.type] || '📋';
-            const dateLine = l.dateFrom === l.dateTo
-              ? fmtDate(new Date(l.dateFrom + 'T12:00:00'))
-              : `${fmtDate(new Date(l.dateFrom + 'T12:00:00'))} – ${fmtDate(new Date(l.dateTo + 'T12:00:00'))}`;
-            return `<div onclick="showApprovalDetail(${l.id})" style="background:${document.documentElement.getAttribute('data-theme')==='dark'?'#0f172a':'#f8fafc'};border:1px solid var(--border);border-radius:10px;padding:10px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;cursor:pointer" onmouseover="this.style.background=document.documentElement.getAttribute('data-theme')==='dark'?'#334155':'#f1f5f9'" onmouseout="this.style.background=document.documentElement.getAttribute('data-theme')==='dark'?'#0f172a':'#f8fafc'">
-              <span>${icon}</span>
-              <span style="font-size:13px;font-weight:600;color:var(--text);flex:1">${escapeHtml(emp?.name || '—')}</span>
-              <span style="font-size:12px;color:var(--text-muted)">${dateLine}</span>
-              <span class="badge badge-info" style="font-size:11px">⏳ ${L('Pending Managing Director', 'รอ Managing Director')}</span>
-            </div>`;
-          }).join('')}
+          ${groupApprovalItems(infoItems).map(item => approvalInfoRowHtml(item,
+            `<span class="badge badge-info" style="font-size:11px">⏳ ${L('Pending Managing Director', 'รอ Managing Director')}</span>`
+          )).join('')}
         </div>`;
     }
   }
@@ -17124,19 +17383,9 @@ function renderApprovals() {
           💼 ${currentLang === 'ja' ? `Accounting審査中の項目（${acctItems.length}件）— 参考情報` : L(`Items under Accounting review (${acctItems.length}) — for your information`, `รายการที่อยู่ระหว่าง Accounting พิจารณา (${acctItems.length} รายการ) — ข้อมูลเพื่อทราบ`)}
         </div>
         <div style="display:flex;flex-direction:column;gap:6px">
-          ${acctItems.map(l => {
-            const emp  = DATA_USERS.find(u => u.id === l.userId);
-            const icon = LEAVE_TYPE_ICON[l.type] || '📋';
-            const dateLine = l.dateFrom === l.dateTo
-              ? fmtDate(new Date(l.dateFrom + 'T12:00:00'))
-              : `${fmtDate(new Date(l.dateFrom + 'T12:00:00'))} – ${fmtDate(new Date(l.dateTo + 'T12:00:00'))}`;
-            return `<div onclick="showApprovalDetail(${l.id})" style="background:${document.documentElement.getAttribute('data-theme')==='dark'?'#0f172a':'#f8fafc'};border:1px solid var(--border);border-radius:10px;padding:10px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;cursor:pointer" onmouseover="this.style.background=document.documentElement.getAttribute('data-theme')==='dark'?'#334155':'#f1f5f9'" onmouseout="this.style.background=document.documentElement.getAttribute('data-theme')==='dark'?'#0f172a':'#f8fafc'">
-              <span>${icon}</span>
-              <span style="font-size:13px;font-weight:600;color:var(--text);flex:1">${escapeHtml(emp?.name || '—')}</span>
-              <span style="font-size:12px;color:var(--text-muted)">${dateLine}</span>
-              <span class="badge badge-info" style="font-size:11px">⏳ ${L('Pending Accounting', 'รอ Accounting')}</span>
-            </div>`;
-          }).join('')}
+          ${groupApprovalItems(acctItems).map(item => approvalInfoRowHtml(item,
+            `<span class="badge badge-info" style="font-size:11px">⏳ ${L('Pending Accounting', 'รอ Accounting')}</span>`
+          )).join('')}
         </div>`;
     }
   }
@@ -17149,21 +17398,31 @@ function renderApprovals() {
         📂 ${currentLang === 'ja' ? `承認履歴（${decidedFiltered.length}件）` : L(`Approval History (${decidedFiltered.length})`, `ประวัติการอนุมัติ (${decidedFiltered.length} รายการ)`)} ▾
       </button>
       <div id="approval-history-list" style="display:none;margin-top:8px;flex-direction:column;gap:6px">
-        ${decidedFiltered.map(l => {
-          const emp = DATA_USERS.find(u => u.id === l.userId);
-          const icon = LEAVE_TYPE_ICON[l.type] || '📋';
-          const dateLine = l.dateFrom === l.dateTo
-            ? fmtDate(new Date(l.dateFrom + 'T12:00:00'))
-            : `${fmtDate(new Date(l.dateFrom + 'T12:00:00'))} – ${fmtDate(new Date(l.dateTo + 'T12:00:00'))}`;
+        ${(() => {
+          // one chip per outcome, each carrying its own count so an empty bucket is visibly empty
+          // rather than a button that leads to a blank list
+          const chip = (key, label, count) => '<button onclick="setApprovalHistoryFilter(\'' + key + '\')" style="'
+            + 'padding:5px 12px;border-radius:20px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;'
+            + 'border:1px solid ' + (_approvalHistoryFilter === key ? 'transparent' : 'var(--border)') + ';'
+            + 'background:' + (_approvalHistoryFilter === key ? '#1e3a5f' : 'var(--bg-card)') + ';'
+            + 'color:' + (_approvalHistoryFilter === key ? '#fff' : 'var(--text)') + '">'
+            + label + ' <span style="opacity:.75">' + count + '</span></button>';
+          return '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px">'
+            + chip('all', currentLang === 'ja' ? 'すべて' : L('All', 'ทั้งหมด'), decidedCounts.all)
+            + chip('approved', currentLang === 'ja' ? '✅ 承認' : L('✅ Approved', '✅ อนุมัติ'), decidedCounts.approved)
+            + chip('rejected', currentLang === 'ja' ? '❌ 却下' : L('❌ Rejected', '❌ ปฏิเสธ'), decidedCounts.rejected)
+            + chip('withdrawn', currentLang === 'ja' ? '↩️ 取消' : L('↩️ Cancelled / revoked', '↩️ ยกเลิก / เพิกถอน'), decidedCounts.withdrawn)
+            + '</div>';
+        })()}
+        ${groupApprovalItems(decidedFiltered).map(item => {
+          // 2026-10-22 (owner): history reads per day for a driver too, and every row says what it
+          // was about. The badge still comes from the record, which is safe because a group only
+          // ever holds records of ONE status (the grouping key includes it).
+          const l = item.kind === 'day' ? item.leaves[0] : item.leave;
           const ok = l.status === 'approved';
           const histBadge = isWithdrawnLeaveStatus(l.status) ? withdrawnStatusBadgeHtml(l.status)
             : `<span class="badge ${ok ? 'badge-success' : 'badge-danger'}">${ok ? L('✅ Approved', '✅ อนุมัติ') : L('❌ Rejected', '❌ ปฏิเสธ')}</span>`;
-          return `<div onclick="showApprovalDetail(${l.id})" style="${withdrawnRowStyle(l)}background:${document.documentElement.getAttribute('data-theme')==='dark'?'#0f172a':'#f8fafc'};border:1px solid var(--border);border-radius:10px;padding:10px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;cursor:pointer" onmouseover="this.style.background=document.documentElement.getAttribute('data-theme')==='dark'?'#334155':'#f1f5f9'" onmouseout="this.style.background=document.documentElement.getAttribute('data-theme')==='dark'?'#0f172a':'#f8fafc'">
-            <span>${icon}</span>
-            <span style="font-size:13px;font-weight:600;color:var(--text);flex:1">${escapeHtml(emp?.name || '—')}</span>
-            <span style="font-size:12px;color:var(--text-muted)">${dateLine}</span>
-            ${histBadge}
-          </div>`;
+          return approvalInfoRowHtml(item, histBadge);
         }).join('')}
       </div>`;
   }
@@ -17177,7 +17436,13 @@ function toggleQuickMode() {
 
 function onItemCheck() {
   _approvalSelected.clear();
-  document.querySelectorAll('.chk-item:checked').forEach(c => _approvalSelected.add(parseInt(c.dataset.id)));
+  // 2026-10-22: a row can stand for a whole day, so a checkbox carries one or more ids.
+  document.querySelectorAll('.chk-item:checked').forEach(c => {
+    String(c.dataset.ids || c.dataset.id || '').split(',').forEach(v => {
+      const n = parseInt(v, 10);
+      if (Number.isFinite(n) && n > 0) _approvalSelected.add(n);
+    });
+  });
   const n = _approvalSelected.size;
   const bb = document.getElementById('approval-batch-bar');
   const ba = document.getElementById('btn-approve-sel');
@@ -17234,17 +17499,29 @@ async function rejectSelected() {
   // skipped requests as failures.
   let ok = 0;
   let attempted = 0;
-  for (let i = 0; i < ids.length; i++) {
-    const id = ids[i];
+  // 2026-10-22 (owner): the walk is over DAYS, not records -- a driver's day carrying two rates is
+  // one question with one reason, the same as its card. groupSelectedForReject() also drops an id
+  // whose record has gone, so a vanished request cannot stop the walk with a blank box.
+  const groups = groupSelectedForReject(ids);
+  for (let i = 0; i < groups.length; i++) {
+    const g = groups[i];
+    const first = DATA_LEAVES.find(x => x.id === g[0]);
+    const manyNote = g.length > 1
+      ? `<div style="font-size:12px;color:var(--text-muted);margin-top:4px">${escapeHtml(currentLang === 'ja'
+        ? `この日のすべての区分（${g.length}件）に適用されます`
+        : L(`applies to all ${g.length} rates of this day`, `ใช้กับทุกอัตราของวันนี้ (${g.length} รายการ)`))}</div>`
+      : '';
     const asked = await askRejectReason({
-      summary: rejectReasonSummaryHtml(DATA_LEAVES.find(x => x.id === id)),
-      progress: currentLang === 'ja' ? `${i + 1} / ${ids.length} 件目`
-        : L(`Request ${i + 1} of ${ids.length}`, `ใบที่ ${i + 1} จาก ${ids.length}`),
+      summary: rejectReasonSummaryHtml(first) + manyNote,
+      progress: currentLang === 'ja' ? `${i + 1} / ${groups.length} 件目`
+        : L(`Request ${i + 1} of ${groups.length}`, `ใบที่ ${i + 1} จาก ${groups.length}`),
     });
     if (asked.action === 'cancel') break;
     if (asked.action === 'skip') continue;
-    attempted++;
-    try { if (await rejectMockLeaveInternal(id, asked.reason)) ok++; } catch(e) {}
+    for (const id of g) {
+      attempted++;
+      try { if (await rejectMockLeaveInternal(id, asked.reason)) ok++; } catch(e) {}
+    }
   }
   if (attempted) {
     toastBatchLeaveResult(ok, attempted, 'rejected', 'ปฏิเสธ');
@@ -23165,6 +23442,30 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 // ===== MY REQUESTS PAGE =====
+// 2026-10-22 (owner): "อยากให้มีปุ่มที่สามารถคลิกดูเฉพาะหมวดได้เช่น all upcountry". This page lists
+// every request the employee has ever filed -- there is no limit here and none on the server --
+// so finding their own upcountry history meant scrolling past everything else.
+let _myRequestsType = 'all';
+// Only the categories this person actually has, busiest first: a button for an empty category
+// would be a dead end, and sorting by name would bury the one they file most.
+function myRequestsTypeCounts(items) {
+  const counts = new Map();
+  (items || []).forEach(l => counts.set(l.type, (counts.get(l.type) || 0) + 1));
+  return [...counts.entries()]
+    .map(([type, count]) => ({ type, count }))
+    .sort((a, b) => b.count - a.count || String(a.type).localeCompare(String(b.type)));
+}
+// A stale selection (the last request of a category was withdrawn, or the data reloaded) shows
+// everything rather than an empty page with no way back.
+function filterMyRequests(items, type) {
+  if (!type || type === 'all') return items || [];
+  const out = (items || []).filter(l => l.type === type);
+  return out.length ? out : (items || []);
+}
+function setMyRequestsType(type) {
+  _myRequestsType = type || 'all';
+  renderMyRequests();
+}
 function renderMyRequests() {
   const container = document.getElementById('my-requests-container');
   if (!container) return;
@@ -23216,7 +23517,26 @@ function renderMyRequests() {
     'revoked':    { badge: withdrawnStatusBadgeHtml('revoked'),   dot:'#94a3b8' },
   };
 
-  container.innerHTML = items.map(l => {
+  // the bar is built from `items` (everything) so the counts do not shift as you click around
+  const typeCounts = myRequestsTypeCounts(items);
+  const activeType = typeCounts.some(c => c.type === _myRequestsType) ? _myRequestsType : 'all';
+  const shown = filterMyRequests(items, activeType);
+  const chip = (type, label, count, active) =>
+    '<button onclick="setMyRequestsType(\'' + type + '\')" style="'
+    + 'padding:7px 14px;border-radius:24px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;'
+    + 'border:1px solid ' + (active ? 'transparent' : 'var(--border)') + ';'
+    + 'background:' + (active ? '#1e3a5f' : 'var(--bg-card)') + ';'
+    + 'color:' + (active ? '#fff' : 'var(--text)') + '">'
+    + label + ' <span style="opacity:.75">' + count + '</span></button>';
+  const filterBar = '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">'
+    + chip('all', currentLang === 'ja' ? 'すべて' : L('All', 'ทั้งหมด'), items.length, activeType === 'all')
+    + typeCounts.map(c => {
+        const cfg = getLEAVE_TYPE_CFG()[c.type];
+        const label = cfg ? cfg.icon + ' ' + cfg.label : c.type;
+        return chip(c.type, escapeHtml(label), c.count, activeType === c.type);
+      }).join('')
+    + '</div>';
+  container.innerHTML = filterBar + shown.map(l => {
     const cfg  = TYPE_CFG[l.type] || { color:'#475569', bg:'#f8fafc', border:'#e2e8f0' };
     const label = leaveTypeLabel(l);
     const sc   = statusCfg[l.status] || statusCfg.pending;
