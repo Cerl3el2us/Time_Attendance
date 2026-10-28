@@ -230,4 +230,105 @@ test('ป้ายหักพักเที่ยงตรงกับกา�
   }
 });
 
+console.log('T4 รูปแบบเวลาที่อ่านแล้วไม่เข้าใจผิด');
+
+// ที่มา: เจ้าของอ่าน "6.33 ชม." บนหน้าจอตัวเองแล้วถามว่า "ทำไมถึงขึ้นว่า 6ชั่วโมง33นาที ถ้า
+// 09-16.20 มันควรจะเป็น 6ชั่วโมง20 นาทีไม่ใช่เหรอ หักพักเที่ยงแล้ว" · ตัวเลขถูก (380 นาที = 6.33
+// ชั่วโมง) แต่ป๊อปอัปเดียวกันเขียน "7 ชั่วโมง 23 นาที" อยู่สองบรรทัดเหนือมัน ⇒ ตาอ่านทศนิยมต่อ
+// เป็นนาทีทันที · คนออกแบบกฎเงินเองยังอ่านผิด คนอนุมัติที่เทียบกับใบ working report ยิ่งอ่านผิด
+const dctx = { currentLang: 'th', L: (en, th) => th, console };
+vm.createContext(dctx);
+vm.runInContext(extractFunction(APP_SRC, 'holidayWorkDurationLabel'), dctx);
+
+test('380 นาที (เคสของเจ้าของ) อ่านว่า 6 ชม. 20 น. และยังบอกทศนิยม 6.33 ไว้เทียบสลิป', () => {
+  const d = dctx.holidayWorkDurationLabel(380);
+  assert.strictEqual(d.hm, '6 ชม. 20 น.');
+  assert.strictEqual(d.dec, '6.33');
+});
+
+test('ชั่วโมงลงตัวไม่ต้องมีคำว่านาที', () => {
+  assert.strictEqual(dctx.holidayWorkDurationLabel(480).hm, '8 ชม.');
+  assert.strictEqual(dctx.holidayWorkDurationLabel(480).dec, '8.00');
+});
+
+test('เศษน้อยๆ ก็ยังอ่านเป็นนาทีจริง ไม่ใช่ทศนิยม', () => {
+  assert.strictEqual(dctx.holidayWorkDurationLabel(68).hm, '1 ชม. 8 น.');
+  assert.strictEqual(dctx.holidayWorkDurationLabel(68).dec, '1.13');
+  // ท่อนที่สั้นกว่าหนึ่งชั่วโมงอ่านว่า "52 น." ไม่ใช่ "0 ชม. 52 น."
+  assert.strictEqual(dctx.holidayWorkDurationLabel(52).hm, '52 น.');
+  assert.strictEqual(dctx.holidayWorkDurationLabel(52).dec, '0.87');
+  assert.strictEqual(dctx.holidayWorkDurationLabel(0).hm, '0 น.');
+});
+
+// นาทีกับทศนิยมมาจากจำนวนนาทีชุดเดียวกัน จึงแตกกันไม่ได้ · ข้อนี้กันไม่ให้ใครแยกสองค่านี้
+// ไปคำนวณคนละทางในอนาคต
+test('ชั่วโมง-นาที กับ ทศนิยม ตรงกันเสมอทุกค่า', () => {
+  for (let m = 0; m <= 20 * 60; m++) {
+    const d = dctx.holidayWorkDurationLabel(m);
+    const back = Math.round(Number(d.dec) * 60);
+    assert.ok(Math.abs(back - m) <= 1, `${m} นาที -> ทศนิยม ${d.dec} ซึ่งกลับมาเป็น ${back} นาที`);
+  }
+});
+
+test('ญี่ปุ่นใช้รูปแบบของตัวเอง', () => {
+  const jctx = { currentLang: 'ja', L: (en) => en, console };
+  vm.createContext(jctx);
+  vm.runInContext(extractFunction(APP_SRC, 'holidayWorkDurationLabel'), jctx);
+  assert.strictEqual(jctx.holidayWorkDurationLabel(380).hm, '6時間20分');
+  assert.strictEqual(jctx.holidayWorkDurationLabel(480).hm, '8時間');
+  assert.strictEqual(jctx.holidayWorkDurationLabel(52).hm, '52分');
+});
+
+console.log('T5 ทศนิยมบนจอต้องเป็นเลขเดียวกับที่สลิปจ่าย');
+
+// พบตอนรีวิว 2026-10-28: ถ้าใส่ทศนิยมไว้ทีละแถว แต่ละแถวจะปัดของตัวเอง ขณะที่ payroll ปัด
+// **ผลรวมของอัตรานั้น** (`round2(otMins30)`) ⇒ กะที่เลยทั้ง 08:30 และ 17:30 จะมี ×3 สองท่อน
+// แล้วสองการปัดนั้นไม่ตรงกัน · วัดแล้ว: มีคู่เวลาที่ไม่ตรงอยู่หลายหมื่นคู่ · ข้อนี้พิสูจน์ว่าปัญหา
+// มีอยู่จริง และพิสูจน์ว่าโค้ดเลิกทำแบบนั้นแล้ว
+test('การปัดทีละท่อนไม่ตรงกับการปัดผลรวม — ปัญหามีจริง ไม่ใช่ความกังวลลอยๆ', () => {
+  const round2 = n => Math.round(n / 60 * 100) / 100;
+  let bad = 0, eg = null;
+  for (let s = 0; s < 1440; s += 1) {
+    for (let e = 0; e < 1440; e += 7) {
+      const a = hhmm(s), b = hhmm(e);
+      const money = ctx.splitHolidayWorkOtMinutes(a, b, S);
+      const segs = Array.from(ctx.holidayWorkOtSegments(a, b, S)).filter(x => x.rate === 30);
+      if (segs.length < 2) continue;
+      const perRow = segs.reduce((t, x) => t + round2(x.mins), 0);
+      if (Math.abs(perRow - money.otHours30) > 1e-9) {
+        bad++;
+        if (!eg) eg = `${a}–${b}: ทีละท่อนรวมได้ ${perRow.toFixed(2)} แต่สลิปจ่าย ${money.otHours30.toFixed(2)}`;
+      }
+    }
+  }
+  assert.ok(bad > 0, 'ไม่เจอคู่ที่ต่างกันเลย — สมมติฐานของข้อนี้ผิด ให้ตรวจใหม่');
+  console.log(`        (คู่ที่ปัดทีละท่อนแล้วเพี้ยน: ${bad} · ตัวอย่าง ${eg})`);
+});
+
+// เจ้าของสั่งเรื่องนี้ซ้ำเป็นครั้งที่สอง ("อย่าลืมแก้ว่ากี่ชั่วโมง กี่นาที ไม่ใช่แสดงตัวเลขแบบนี้")
+// เพราะรอบแรกผมแก้แถวอัตราแล้วเผลอใส่ทศนิยมกลับเข้าไปในบรรทัดเงินที่เพิ่งเพิ่ม ⇒ ยามข้อนี้จึงห้าม
+// `.toFixed(2)` กับ **ชั่วโมง** ทั้งฟังก์ชัน ไม่ใช่ห้ามเฉพาะแถว · จำนวนเงินยังใช้ fmt2dp ได้ตามปกติ
+test('ไม่มีทศนิยมของชั่วโมงหลงเหลือในบล็อกนี้เลย ทุกที่เป็นชั่วโมง-นาที', () => {
+  const fn = extractFunction(APP_SRC, 'holidayWorkDetailBlockHtml');
+  assert.ok(!/\bh2[03]\.toFixed\(2\)|\bx\.h\.toFixed\(2\)|\.mins \/ 60/.test(fn),
+    'ยังมีการแสดงชั่วโมงเป็นทศนิยมอยู่');
+  assert.ok(/hw-ot-hours">\$\{holidayWorkDurationLabel\(s\.mins\)\.hm\}/.test(fn),
+    'แถวอัตราต้องบอกชั่วโมง-นาที');
+  assert.ok(/holidayWorkDurationLabel\(Math\.round\(x\.h \* 60\)\)\.hm/.test(fn),
+    'แถวเงินต้องบอกชั่วโมง-นาที ไม่ใช่ทศนิยม');
+  assert.ok(/Number\(l\.otHours20\) \|\| 0.*Number\(l\.otHours30\) \|\| 0/s.test(fn),
+    'บรรทัดสรุปต้องอ่าน otHours20/otHours30 ที่เก็บไว้ ไม่ใช่คำนวณใหม่');
+});
+
+// เงินต้องมาจากฟังก์ชันเดียวกับที่ไอคอน OT บนแถวตารางใช้ ไม่งั้นสองที่จะบอกคนละเลขบนวันเดียวกัน
+test('เงินคิดด้วยสูตรเดียวกับ otPayAmountFromLeave (ปัดทีละ bucket แล้วรวม)', () => {
+  const fn = extractFunction(APP_SRC, 'holidayWorkDetailBlockHtml');
+  assert.ok(/round2HalfUp\(hourlyRate \* 2 \* h20\)/.test(fn), '×2 ต้องปัดแบบเดียวกัน');
+  assert.ok(/round2HalfUp\(hourlyRate \* 3 \* h30\)/.test(fn), '×3 ต้องปัดแบบเดียวกัน');
+  const ref = extractFunction(APP_SRC, 'otPayAmountFromLeave');
+  assert.ok(/round2HalfUp\(hourlyRate \* 2 \* hrs20\)/.test(ref) && /round2HalfUp\(hourlyRate \* 3 \* hrs30\)/.test(ref),
+    'สูตรอ้างอิงเปลี่ยนไปแล้ว ⇒ ต้องตามให้ตรงกันใหม่');
+  assert.ok(/ประมาณการ|Estimate/.test(fn), 'ต้องกำกับว่าเป็นประมาณการ เพราะ OT จ่ายตามยอดรวมทั้งงวด');
+});
+
 console.log(`\n${passed} passed, ${process.exitCode ? 'มีข้อที่ล้มเหลว' : '0 failed'}`);

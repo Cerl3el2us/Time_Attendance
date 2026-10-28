@@ -52,7 +52,7 @@ function between(src, startMarker, endMarker) {
 // and targetUser. The marker moved with it; the cases below cover BOTH ways in.
 const BADGE_SNIPPET = between(
   APP_SRC,
-  "    const upcountryShown = (canUpcountryTarget && row.upcountry && row.status !== 'company-trip')",
+  "    const upcountryShown = (canUpcountryTarget && row.upcountry && row.status !== 'company-trip' && !hwRow)",
   "        : attAllowIcon('🗺️', L('Upcountry', 'Upcountry'));");
 
 // ค่าคงที่หลายบรรทัดที่ isAllowanceEligible() อ่าน — ดึงประกาศจริงออกมา ไม่พิมพ์ซ้ำในเทสต์
@@ -223,6 +223,29 @@ test('a role with no Upcountry right sees no icon from a Holiday Work record eit
   assert.strictEqual(noUpc.badgeFor(true, REST_ROW, 7, HW, USER7), '');
   const noHw = makeSandbox([], { upcountry: ['user'], holidayWork: ['md'] });
   assert.strictEqual(noHw.badgeFor(true, REST_ROW, 7, HW, USER7), '');
+});
+
+// 2026-10-28, found in review: payroll hands the whole day to an approved Holiday Work record
+// (upcountryCount skips every date in holidayWorkDates) and then counts the record. A record with
+// no location takes the day and claims nothing, so the day's own flag must not light the icon --
+// and that flag is sticky: attendanceLog[..].upcountry stays true after an approval is revoked.
+test('a Holiday Work record with no location takes the day: the row flag must not light it alone', () => {
+  const s = makeSandbox([]);
+  const blank = { ...HW, dateFrom: '2026-10-20', locations: [] };
+  assert.strictEqual(s.badgeFor(true, { ...ROW, upcountry: true }, 7, blank, USER7), '',
+    'payroll pays ฿0 for this day — the icon must not claim otherwise');
+});
+
+test('with no Holiday Work record the day flag still works exactly as before', () => {
+  const s = makeSandbox([APPROVED]);
+  assert.ok(s.badgeFor(true, { ...ROW, upcountry: true }, 7, null, USER7).includes('🗺️'));
+});
+
+// สิทธิ์ holidayWork ปิดอยู่ ⇒ payroll ไม่ได้ยกวันให้ใบ (approvedHolidayWork ว่าง) ⇒ ธงรายวันยังนับ
+// ⇒ ไอคอนต้องยังขึ้นตามธง · ฝั่งแถวใช้ hwRow ซึ่งถูกปิดด้วยสิทธิ์เดียวกันอยู่แล้ว
+test('a role that cannot claim Holiday Work keeps the plain upcountry flag behaviour', () => {
+  const s = makeSandbox([APPROVED], { upcountry: ['user'], holidayWork: ['md'] });
+  assert.ok(s.badgeFor(true, { ...ROW, upcountry: true }, 7, null, USER7).includes('🗺️'));
 });
 
 test('one icon, not two, when the day qualifies both ways', () => {

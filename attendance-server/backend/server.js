@@ -7547,7 +7547,17 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
     }
     // 2026-08-06: same locations validation as POST /api/leaves -- this owner-edit path can also
     // set/change an upcountry request's locations (saveLeaveEdit()).
-    const locErr = validateUpcountryLocations(updates.locations);
+    // 2026-10-28: and the same holiday-work exemption as POST, for the same reason and found the
+    // same way -- by missing it. POST was exempted when the location became optional; this copy,
+    // 80 lines above the holiday-work branch that has its own validator, was not. The result was
+    // live: editing a holiday-work request filed with the box empty sent `locations: []` and came
+    // back "locations must be an array of 1-6 entries", an upcountry message on a form that is not
+    // upcountry, and the one shape `[]` was introduced to make possible was the one it refused.
+    // The type is resolved inline rather than reusing `newType`, which is declared ~75 lines BELOW
+    // this point: referencing it here is a TDZ ReferenceError at runtime that `node --check` and
+    // eslint both pass over in silence. Same expression, evaluated where it is needed.
+    const locErr = (updates.type || leave.type) === 'holiday-work'
+      ? null : validateUpcountryLocations(updates.locations);
     if (locErr) return res.status(400).json({ success:false, message:locErr });
     const freeFieldErr = validateLeaveFreeFields(updates);
     if (freeFieldErr) return res.status(400).json({ success:false, message:freeFieldErr });

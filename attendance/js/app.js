@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 158;
+const APP_BUILD = 163;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -3000,6 +3000,27 @@ function holidayWorkSegmentTimeLabel(mins) {
   const m = ((mins % 1440) + 1440) % 1440;
   return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
 }
+// 2026-10-28 (owner, reading his own screen): "ทำไมถึงขึ้นว่า 6ชั่วโมง33นาที ถ้า09-16.20 มันควรจะ
+// เป็น 6ชั่วโมง20 นาทีไม่ใช่เหรอ หักพักเที่ยงแล้ว" — the figure was right (380 minutes IS 6.33
+// hours) and read wrong, which is the same failure as being wrong. The popup showed "7 ชั่วโมง 23
+// นาที" two lines above "6.33 ชม.", so the eye carried the h/m reading straight into the decimal.
+// If the person who designed the pay rules misreads it, an approver comparing it against a working
+// report certainly will.
+// Hours and minutes lead, because that is what every other duration on this screen says; the
+// decimal stays in brackets because THAT is the number the payslip pays and the one to compare
+// against. Both come from the same minutes, so they can never drift apart.
+function holidayWorkDurationLabel(mins) {
+  const total = Math.max(0, Math.round(mins));
+  const h = Math.floor(total / 60), m = total % 60;
+  const dec = (Math.round(total / 60 * 100) / 100).toFixed(2);
+  // A piece shorter than an hour reads as "52 น.", not "0 ชม. 52 น." — the ×3 tails either side of
+  // a shift are usually minutes, and a leading zero hour is noise on the row that matters least.
+  const hm = currentLang === 'ja'
+    ? (h === 0 ? `${m}分` : m > 0 ? `${h}時間${m}分` : `${h}時間`)
+    : h === 0 ? L(`${m}m`, `${m} น.`)
+      : m > 0 ? L(`${h}h ${m}m`, `${h} ชม. ${m} น.`) : L(`${h}h`, `${h} ชม.`);
+  return { hm, dec };
+}
 // 2026-10-28 (owner): the detail block under the Holiday Work badges in the day-detail popup.
 //
 // Why: the popup said `🎌 ทำงานวันหยุด 8 ชม.` and nothing else -- one number with the ×2 and ×3
@@ -3015,7 +3036,8 @@ function holidayWorkSegmentTimeLabel(mins) {
 // predate the location field, and a record with no usable start/end gets no rate rows at all.
 // annual-leave mode has no ×2/×3 split (submitHolidayWork sets both to 0 without calling the
 // splitter), so it shows location and claimed times only -- the approver still needs those.
-function holidayWorkDetailBlockHtml(l) {
+function holidayWorkDetailBlockHtml(l, hourlyRate) {
+  hourlyRate = Number(hourlyRate) || 0;
   const loc = holidayWorkLocationLabel(l);
   const times = holidayWorkTimesLabel(l);
   if (!loc && !times) return '';
@@ -3042,9 +3064,53 @@ function holidayWorkDetailBlockHtml(l) {
       const span = `${holidayWorkSegmentTimeLabel(s.startMin)}–${holidayWorkSegmentTimeLabel(s.endMin)}`;
       return `<div class="hw-ot-row"><span class="hw-ot-rate">×${s.rate / 10}</span>` +
         `<span class="hw-ot-span">${span}${nextDay}${note}</span>` +
-        `<span class="hw-ot-hours">${(Math.round(s.mins / 60 * 100) / 100).toFixed(2)} ${L('h', 'ชม.')}</span></div>`;
+        `<span class="hw-ot-hours">${holidayWorkDurationLabel(s.mins).hm}</span></div>`;
     }).join('');
-    if (rows) out += `<div class="hw-ot-rows">${rows}</div>`;
+    if (rows) {
+      // The decimal belongs here, once per rate, and NOT on each row. Payroll rounds the SUM of a
+      // rate's minutes (round2(otMins30)); rounding each piece on its own disagrees with that
+      // whenever a rate has two pieces -- a shift reaching past 08:30 and 17:30 at both ends has
+      // two ×3 tails, and 57,400 start/end pairs produce a different total that way. So the row
+      // carries only hours and minutes, which are exact, and the payslip figure is read straight
+      // off the record's own otHours20/otHours30 -- the numbers the server pinned at approval and
+      // the payslip actually pays, not a recomputation that could drift from them.
+      const h20 = Number(l.otHours20) || 0, h30 = Number(l.otHours30) || 0;
+      // 2026-10-28 (owner): "กรณีเลือกรับเป็นเงิน ... (ด้วยว่ากี่บาท) มาจาก x2 กี่ชั่วโมง กี่บาท
+      // x3 กี่ชั่วโมง กี่บาท" — the hours alone do not answer the question the popup is opened
+      // with. The arithmetic is the same one otPayAmountFromLeave() does for the row's OT icon
+      // (each bucket rounded, then the sum), so the two screens cannot show different money.
+      // It is an ESTIMATE and says so: payroll pays each multiplier bucket once on the PERIOD's
+      // total hours (owner, 2026-09-24 round 7), so a single day's share can differ by satang.
+      // hourlyRate 0 (no salary on the record, or none readable) simply drops the money and
+      // leaves the hours, rather than printing ฿0.
+      const money = [];
+      if (hourlyRate > 0 && h20 > 0) money.push({ r: '×2', h: h20, amt: round2HalfUp(hourlyRate * 2 * h20) });
+      if (hourlyRate > 0 && h30 > 0) money.push({ r: '×3', h: h30, amt: round2HalfUp(hourlyRate * 3 * h30) });
+      let total = '';
+      if (money.length) {
+        const sum = round2HalfUp(money.reduce((t, x) => t + x.amt, 0));
+        // Hours and minutes here too (owner, twice): no decimal hours anywhere on this block.
+        // The figure that ties a row to the payslip is the baht, which is the number he asked
+        // for, so nothing is lost by dropping the decimal that caused the misreading.
+        total = `<div class="hw-ot-total">` +
+          money.map(x => `<div class="hw-ot-row"><span class="hw-ot-rate">${x.r}</span>` +
+            `<span class="hw-ot-span">${holidayWorkDurationLabel(Math.round(x.h * 60)).hm}</span>` +
+            `<span class="hw-ot-hours">≈ ฿${fmt2dp(x.amt)}</span></div>`).join('') +
+          `<div class="hw-ot-row hw-ot-sum"><span class="hw-ot-span">${L('Total for this day', 'รวมของวันนี้')}</span>` +
+          `<span class="hw-ot-hours">≈ ฿${fmt2dp(sum)}</span></div>` +
+          `<div class="hw-ot-note">${L('Estimate — OT is paid on the period total, so the payslip can differ by satang',
+            'ประมาณการ — OT จ่ายตามยอดรวมทั้งงวด สลิปจริงอาจต่างระดับสตางค์')}</div>`;
+      } else {
+        // No salary readable: the hours still get their own line, still as hours and minutes.
+        const paid = [];
+        if (h20 > 0) paid.push(`×2 ${holidayWorkDurationLabel(Math.round(h20 * 60)).hm}`);
+        if (h30 > 0) paid.push(`×3 ${holidayWorkDurationLabel(Math.round(h30 * 60)).hm}`);
+        if (paid.length) {
+          total = `<div class="hw-ot-total">${L('Paid on the payslip', 'ที่จ่ายจริงตามสลิป')}: ${paid.join(' · ')}</div>`;
+        }
+      }
+      out += `<div class="hw-ot-rows">${rows}${total}</div>`;
+    }
   }
   return `<div class="hw-ot-detail">${out}</div>`;
 }
@@ -11857,7 +11923,13 @@ function renderAttendanceTable() {
     // modes), so the row now shows 🗺️ for it too. The money is untouched: payroll already pays
     // such a day once. hwRow above is the same record, already gated on eligibility and Company
     // Trip, so the icon can never appear on a day the payslip pays nothing for.
-    const upcountryShown = (canUpcountryTarget && row.upcountry && row.status !== 'company-trip')
+    // `&& !hwRow` is the half that was missing and that the comment above wrongly swore was safe:
+    // payroll hands the WHOLE day to the Holiday Work record (upcountryCount skips any date in
+    // holidayWorkDates) and then counts the record. While every record carried a location those
+    // were the same answer. A record with the box left empty hands the day over and claims
+    // nothing, so without this the day's own sticky `row.upcountry` flag -- which survives a
+    // revoked approval -- lights the icon on a day the payslip pays ฿0 for.
+    const upcountryShown = (canUpcountryTarget && row.upcountry && row.status !== 'company-trip' && !hwRow)
       || holidayWorkEarnsUpcountry(hwRow, APP_SETTINGS, targetUser.role, row.status === 'abroad');
     const upcountryStops = upcountryShown ? upcountryDayStops(targetUserId, row.date) : [];
     const upcountryBadge = !upcountryShown
@@ -16733,15 +16805,19 @@ function buildApprovalCard(l, role) {
     detail     = `<div style="font-size:13px;color:var(--text);margin-top:6px">🚗 ${L('Mileage','เลขไมล์')}: <strong>${Number(l.mileageStart||0).toLocaleString()}</strong> → <strong>${Number(l.mileageEnd||0).toLocaleString()}</strong> | ${L('Distance','ระยะทาง')}: <strong>${Number(l.distanceKm||0).toLocaleString()} ${L('km','กม.')}</strong></div>`;
     reasonLine = `<div style="font-size:13px;color:${l.longDistanceAllowance > 0 ? (document.documentElement.getAttribute('data-theme')==='dark' ? '#4ade80' : '#166534') : 'var(--text-muted)'};margin-top:4px">${l.longDistanceAllowance > 0 ? `✅ ${L('Allowance','เบี้ยเลี้ยง')} +฿${l.longDistanceAllowance}` : `❌ ${(()=>{const th=APP_SETTINGS.allowances.longDistanceThresholdKm||LONG_DISTANCE_THRESHOLD_KM; return currentLang === 'ja' ? `${th}km未満` : L(`Under ${th} km`,`ไม่ถึง ${th} กม.`);})()}`}</div>`;
   } else {
-    // 2026-10-05 (owner): a holiday-work card must say WHERE the work was, and when. The location
-    // is required at submit time (l.locations[0].name) but the card never showed it.
+    // 2026-10-05 (owner): a holiday-work card must say WHERE the work was, and when.
+    // 2026-10-28: the location stopped being required, so a bare "—" here would leave the approver
+    // unable to tell "worked at the office" from "forgot to fill it in" -- on the very card where
+    // that distinction decides money. It says what the blank MEANS for pay instead, without
+    // claiming to know where the person actually was.
     if (l.type === 'holiday-work') {
       const hwLoc = holidayWorkLocationLabel(l);
       // holidayWorkTimesLabel() returns HTML it has already escaped -- escaping it again here would
       // double-encode anything it adds (the "(next day)" suffix), and reads as though the helper
       // returned raw text.
       const hwTimes = (l.workStartTime && l.workEndTime) ? holidayWorkTimesLabel(l) : '';
-      detail = `<div style="font-size:13px;color:var(--text);margin-top:6px">📍 ${L('Location', 'สถานที่')}: <strong>${hwLoc || '—'}</strong>${hwTimes ? ` &nbsp;·&nbsp; ⏱️ ${hwTimes}` : ''}</div>`;
+      const hwNoLoc = L('not given — no Upcountry allowance', 'ไม่ได้ระบุ — ไม่มีเบี้ย Upcountry');
+      detail = `<div style="font-size:13px;color:var(--text);margin-top:6px">📍 ${L('Location', 'สถานที่')}: <strong>${hwLoc || hwNoLoc}</strong>${hwTimes ? ` &nbsp;·&nbsp; ⏱️ ${hwTimes}` : ''}</div>`;
     }
     reasonLine  = `<div style="font-size:13px;color:var(--text-muted);margin-top:4px">📝 ${escapeHtml(l.reason)}</div>`;
   }
@@ -18758,7 +18834,10 @@ function showApprovalDetail(id) {
     const mode = l.compensationMode === 'paid'
       ? L('Paid compensation (OT + transport)', 'ชดเชยเป็นเงิน (OT + ค่าเดินทาง)')
       : L('➕ Add 1 annual leave day', '➕ เพิ่ม 1 วันลาพักร้อน');
-    const loc = holidayWorkLocationLabel(l) || '—';
+    // 2026-10-28: same wording as the approval card above — the two are read by the same person
+    // about the same request, and an unexplained dash on one of them is the gap this change exists
+    // to close. A blank location is a real answer ("no Upcountry claim"), not missing data.
+    const loc = holidayWorkLocationLabel(l) || L('not given — no Upcountry allowance', 'ไม่ได้ระบุ — ไม่มีเบี้ย Upcountry');
     const times = (l.workStartTime && l.workEndTime) ? holidayWorkTimesLabel(l) : '—';
     detailHtml = row(L('Worked Time', 'เวลาทำงาน'), `⏱️ ${times}`)
       + row(L('Location', 'สถานที่'), loc)
@@ -21531,7 +21610,14 @@ async function submitHolidayWork() {
   // The report is what an approver checks an upcountry claim against, and the location is what
   // turns that claim on, so the two are demanded together or not at all. Mirrors the server's
   // rule exactly (server.js, both the POST and PUT holiday-work branches).
-  if (location && !attachment && !editingLeaveId) {
+  // The exemption is "this record already HAS a report", not "this is an edit". Until the location
+  // became optional those were the same thing, because every record was filed with one. Now a day
+  // worked at the office is filed with neither -- and editing that record to add a location would
+  // have sailed past this check and been refused by the server in raw English instead. Asking the
+  // same question the server asks keeps the refusal here, in the user's language.
+  const _hwEditing = editingLeaveId ? DATA_LEAVES.find(l => l.id === editingLeaveId) : null;
+  const _hwStoredFile = !!(_hwEditing && (_hwEditing.attachment || Number(_hwEditing.fileCount) > 0));
+  if (location && !attachment && !_hwStoredFile) {
     showToast(L('⚠️ Working Report is required when a work location is given', '⚠️ กรอกสถานที่แล้วต้องแนบ Working Report'), 'warning');
     return;
   }
@@ -22734,12 +22820,17 @@ function showAttendanceDetail(date) {
   // ONE badge, not a second one beside it: payroll pays the day once (its upcountryCount skips
   // dates that have Holiday Work and counts the record instead), so two 🗺️ on one day would read
   // as double pay -- the exact thing he said to avoid.
-  const _hwUpcountry = holidayWorkEarnsUpcountry(
-    DATA_LEAVES.find(l => l.userId === targetUserId && l.type === 'holiday-work' &&
-      l.dateFrom === date && l.status === 'approved'),
-    APP_SETTINGS, targetRole, row.status === 'abroad');
+  const _hwUpcRec = DATA_LEAVES.find(l => l.userId === targetUserId && l.type === 'holiday-work' &&
+    l.dateFrom === date && l.status === 'approved');
+  const _hwUpcountry = holidayWorkEarnsUpcountry(_hwUpcRec, APP_SETTINGS, targetRole, row.status === 'abroad');
+  // Does payroll hand this whole day to the record? Same three conditions it uses to build
+  // approvedHolidayWork / holidayWorkDates. When it does, the day's own upcountry flag is not
+  // counted at all, so it must not light this badge either -- a record filed with no location
+  // takes the day and claims nothing, and the flag can outlive a revoked approval.
+  const _hwTakesDay = !!_hwUpcRec && !isCompanyTripDay(date) &&
+    isAllowanceEligible(APP_SETTINGS.allowanceEligibility, targetRole, 'holidayWork');
   if (_hwUpcountry ||
-      (row.upcountry && row.status !== 'company-trip' && isAllowanceEligible(APP_SETTINGS.allowanceEligibility, targetRole, 'upcountry'))) {
+      (!_hwTakesDay && row.upcountry && row.status !== 'company-trip' && isAllowanceEligible(APP_SETTINGS.allowanceEligibility, targetRole, 'upcountry'))) {
     tagsEl.innerHTML += `<span class="badge badge-purple">🗺️ ${L('Upcountry', 'Upcountry')} (+฿${_dA.upcountry || 240})</span>`;
   }
   const approvedOT = DATA_LEAVES.find(l =>
@@ -22803,7 +22894,18 @@ function showAttendanceDetail(date) {
       const paid = hwRec.compensationMode === 'paid';
       const hwHrs = (Number(hwRec.otHours20) || 0) + (Number(hwRec.otHours30) || 0);
       const mode = paid ? L('paid', 'รับเป็นเงิน') : L('day off in lieu', 'แลกวันหยุด');
-      tagsEl.innerHTML += `<span class="badge" style="background:#ffedd5;color:#9a3412">🎌 ${L('Holiday Work', 'ทำงานวันหยุด')} ${hwHrs ? hwHrs + L('h', ' ชม.') + ' ' : ''}— ${mode}</span>`;
+      // 2026-10-28: hours and minutes, not a bare decimal. The owner read "6.33 ชม." on this badge
+      // as six hours thirty-three minutes, two lines under a "7 ชั่วโมง 23 นาที" that had taught
+      // his eye to read it that way. Same minutes, said the way the rest of this popup says them.
+      const hwDur = hwHrs ? holidayWorkDurationLabel(Math.round(hwHrs * 60)) : null;
+      // 2026-10-28 (owner): the badge says "รับเป็นเงิน" and never said how much. Same estimate as
+      // the breakdown below it and as the row's OT icon -- one function, otPayAmountFromLeave(),
+      // so three places cannot quote three numbers. No salary readable -> the badge just omits it.
+      const _hwSalary = Number(targetUserObj && targetUserObj.salary) || 0;
+      const _hwHourly = _hwSalary > 0 ? _hwSalary / 30 / 8 : 0;
+      const _hwAmt = (paid && _hwHourly > 0) ? otPayAmountFromLeave(hwRec, _hwHourly) : 0;
+      const hwModeText = _hwAmt > 0 ? `${mode} ≈ ฿${fmt2dp(_hwAmt)}` : mode;
+      tagsEl.innerHTML += `<span class="badge" style="background:#ffedd5;color:#9a3412">🎌 ${L('Holiday Work', 'ทำงานวันหยุด')} ${hwDur ? hwDur.hm + ' ' : ''}— ${hwModeText}</span>`;
       // The transport follows the upcountry field as of today, so it is read through the same
       // function payroll uses rather than assumed from the mode. The abroad set must carry this
       // date when the day IS abroad -- passing an empty set would have shown +500 on a day payroll
@@ -22815,7 +22917,9 @@ function showAttendanceDetail(date) {
       }
       // Below the badges, not inside them (owner, 2026-10-27): the badges stay exactly as they
       // are, so no other day type and no other request type is touched by this.
-      tagsEl.innerHTML += holidayWorkDetailBlockHtml(hwRec);
+      // The hourly rate is read the same way the row's OT icon reads it (salary / 30 / 8), so the
+      // two places that put a baht figure on this day cannot disagree.
+      tagsEl.innerHTML += holidayWorkDetailBlockHtml(hwRec, _hwHourly);
     }
 
     const ldRec = dayLeave('long-distance');
