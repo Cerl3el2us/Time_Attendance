@@ -240,6 +240,40 @@ console.log('T3 Holiday Work — the two modes, side by side');
 // cases below that are about a trip add `locations` themselves.
 const HW = { date: '2026-09-27', hwStartTime: '08:30', hwEndTime: '17:30' };
 
+// 2026-10-28 (ต่อจากกฎที่เจ้าของบอกเรื่องสลิป: "ถ้าได้รับเงินก็จะโชว์"): ชั่วโมง ×2/×3 ของทำงาน
+// วันหยุด payroll จ่ายใต้สิทธิ์ `holidayWork` ไม่ใช่ `ot` · ของเดิมการ์ดนี้เอา `canOt` คลุมทั้งก้อน
+// ⇒ คนที่มีสิทธิ์ทำงานวันหยุดแต่ไม่มีสิทธิ์ OT ปกติ เห็นการ์ดบอกว่าได้ ฿0 ทั้งที่สลิปจ่าย
+// และนี่คือการ์ดที่เจ้าของใช้ตัดสินใจระหว่าง "รับเป็นเงิน" กับ "แลกวันหยุด"
+test('ไม่มีสิทธิ์ OT ปกติ แต่มีสิทธิ์ทำงานวันหยุด ⇒ การ์ดยังบอกเงินของชั่วโมงวันหยุด', () => {
+  const s = SETTINGS();
+  s.allowanceEligibility.ot = [];                       // ถอดสิทธิ์ OT ปกติออกหมด
+  s.allowanceEligibility.holidayWork = EVERY_ROLE;      // แต่ยังทำงานวันหยุดได้
+  const W = makeWorld({ date: HW.date, settings: s });
+  const est = W.estimateDayEarnings({ ...HW, user: STAFF, mode: 'paid' });
+  assert.strictEqual(amountOf(est, 'ot'), 1600,
+    'สลิปจ่ายชั่วโมงนี้ใต้สิทธิ์ holidayWork ⇒ การ์ดต้องบอกเงินก้อนเดียวกัน ไม่ใช่ ฿0');
+});
+
+test('ไม่มีสิทธิ์ทำงานวันหยุด ⇒ การ์ดไม่บอกเงินของชั่วโมงวันหยุด', () => {
+  const s = SETTINGS();
+  s.allowanceEligibility.ot = EVERY_ROLE;               // มีสิทธิ์ OT ปกติ
+  s.allowanceEligibility.holidayWork = [];              // แต่ทำงานวันหยุดไม่ได้
+  const W = makeWorld({ date: HW.date, settings: s });
+  const est = W.estimateDayEarnings({ ...HW, user: STAFF, mode: 'paid' });
+  assert.strictEqual(amountOf(est, 'ot'), null,
+    'payroll ไม่จ่ายชั่วโมงวันหยุดให้ role นี้ (approvedHolidayWork ว่าง) ⇒ การ์ดต้องไม่บอกเงิน');
+});
+
+test('ใบ OT ออฟฟิศยังผูกกับสิทธิ์ ot ตามเดิม ไม่ถูกเปลี่ยนไปใช้ holidayWork', () => {
+  const s = SETTINGS();
+  s.allowanceEligibility.ot = [];
+  s.allowanceEligibility.holidayWork = EVERY_ROLE;
+  const W = makeWorld({ date: '2026-09-28', settings: s });
+  const est = W.estimateDayEarnings({ date: '2026-09-28', user: STAFF, otEndTime: '19:30' });
+  assert.strictEqual(amountOf(est, 'ot'), null,
+    'ไม่มีสิทธิ์ ot ⇒ ใบ OT ออฟฟิศต้องไม่มีเงิน แม้จะมีสิทธิ์ holidayWork');
+});
+
 test('paid mode with no upcountry location pays the x2 hours and no transport', () => {
   const W = makeWorld({ date: HW.date });
   const est = W.estimateDayEarnings({ ...HW, user: STAFF, mode: 'paid' });
