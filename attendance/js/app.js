@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 156;
+const APP_BUILD = 158;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -20884,6 +20884,15 @@ function selectHwCompMode(mode) {
   refreshHolidayWorkCompHint();
 }
 function refreshHolidayWorkPayCompare() {
+  // 2026-10-28 (owner): "ถ้ากรอกสถานที่ถึงจะต้องแนบ" — the Working Report's red * follows the
+  // location box instead of standing there permanently. Done here because this function already
+  // runs on every edit of that box (its oninput) and on every open of the form; kept ABOVE the
+  // early return below so a missing pay-compare block can never leave the star stale.
+  const _reportStar = document.getElementById('hw-report-star');
+  if (_reportStar) {
+    const _loc = (document.getElementById('holiday-work-location')?.value || '').trim();
+    _reportStar.style.display = _loc ? '' : 'none';
+  }
   const wrap = document.getElementById('hw-pay-compare');
   if (!wrap) return;
   // 2026-10-05 (owner): a role with only one mode available still has to be told what that mode
@@ -21518,8 +21527,12 @@ async function submitHolidayWork() {
       return;
     }
   }
-  if (!attachment && !editingLeaveId) {
-    showToast(L('⚠️ Working Report attachment is required', '⚠️ ต้องแนบ Working Report'), 'warning');
+  // 2026-10-28 (owner): "ถ้าทำงานที่ office ไม่ต้องแนบ working report แต่ถ้ากรอกสถานที่ถึงจะต้องแนบ".
+  // The report is what an approver checks an upcountry claim against, and the location is what
+  // turns that claim on, so the two are demanded together or not at all. Mirrors the server's
+  // rule exactly (server.js, both the POST and PUT holiday-work branches).
+  if (location && !attachment && !editingLeaveId) {
+    showToast(L('⚠️ Working Report is required when a work location is given', '⚠️ กรอกสถานที่แล้วต้องแนบ Working Report'), 'warning');
     return;
   }
 
@@ -21535,13 +21548,13 @@ async function submitHolidayWork() {
     dateTo: date,
     workStartTime,
     workEndTime,
-    // 2026-10-28: with the location now optional, the key has to disappear entirely when it is
-    // blank -- it cannot be sent empty. server.js validateUpcountryLocations() accepts `undefined`
-    // and nothing else that is empty: `[]` fails on "an array of 1-6 entries" and `[{name:''}]`
-    // on "each location entry needs a non-empty name", so either one would 400 the whole request
-    // and the person would be unable to file a holiday they worked at the office. JSON.stringify
-    // drops an undefined value, which is exactly the shape the server treats as "not provided".
-    ...(location ? { locations: [{ name: location }] } : {}),
+    // 2026-10-28: always sent, never omitted, and `[]` is how "worked at the office" is said.
+    // Omitting it looked tidier and was wrong twice over: holiday-work is validated by
+    // validateHolidayWorkLocation(), not the upcountry validator, and an absent key on the PUT
+    // path means "keep what is already there" -- so an edit could never take a location back off
+    // a record, and the Upcountry allowance would keep being paid for a place the person had
+    // just removed. An explicit empty list says the thing the record needs to say.
+    locations: location ? [{ name: location }] : [],
     compensationMode,
     days: compensationMode === 'annual-leave' ? 1 : 0,
     otHours20: otSplit.otHours20,

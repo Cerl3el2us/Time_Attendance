@@ -1597,4 +1597,7 @@ window.LANG_JA = {
   // 2026-10-28: the location field stopped being mandatory -- it names an upcountry site, so a
   // holiday worked at the office is exactly the case for leaving it blank.
   "Fill this in only if you worked upcountry. Worked at the office? Leave it blank — blank means no Upcountry allowance and no holiday transport.": "地方出張で勤務した場合のみ入力してください。事務所で勤務した場合は空欄のままにしてください — 空欄の場合、地方出張手当と休日交通費は支給されません。",
+  // 2026-10-28: the Working Report backs an upcountry claim, so it follows the location field.
+  "Required only when a work location is given — a holiday worked at the office needs no attachment.": "勤務場所を入力した場合のみ必須です — 事務所で勤務した休日出勤には添付は不要です。",
+  "⚠️ Working Report is required when a work location is given": "⚠️ 勤務場所を入力した場合は Working Report の添付が必要です",
 };

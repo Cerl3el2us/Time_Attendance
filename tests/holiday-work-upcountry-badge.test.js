@@ -229,28 +229,78 @@ console.log('T3 ช่องสถานที่ไม่ใช่ช่อง�
 // เจ้าของสั่ง 2026-10-28: "ตอนนี้บังคับกรอกสถานที่ จริงๆแล้วไม่ได้บังคับ แต่ถ้าไม่กรอก จะไม่ได้
 // เบี้ยเลี้ยง upcountry กับ เงินค่าเดินทางวันหยุด" และ "ถ้าทำงานที่ office ไม่ให้กรอกช่องสถานที่"
 //
-// กับดักที่ทำให้ข้อนี้ต้องมี: เอาการบล็อกฝั่งเว็บออกเฉยๆ แล้วปล่อยให้ payload ส่ง
-// `locations: [{ name: '' }]` ต่อไป จะโดนเซิร์ฟเวอร์ตอบ 400 ทั้งใบ — คนที่ทำงานวันหยุดที่ออฟฟิศ
-// จะยื่นคำขอไม่ได้เลย ซึ่งแย่กว่าเดิม · มีแค่ `undefined` เท่านั้นที่ผ่าน
+// **ความผิดพลาดที่ไฟล์นี้เกิดมาเพื่อไม่ให้เกิดซ้ำ (2026-10-28):** รอบแรกผมเทสต์
+// `validateUpcountryLocations` แล้วสรุปว่าเซิร์ฟเวอร์ไม่บังคับสถานที่ · **ผิดตัว** — เส้นทาง
+// holiday-work ถูกตรวจด้วย `validateHolidayWorkLocation` ซึ่งตอนนั้นบังคับ "ต้องมีพอดี 1 รายการ"
+// ⇒ ของที่ขึ้นเว็บไปแล้วทำให้ยื่นแบบไม่กรอกสถานที่ได้ 400 · บทเรียน: หาให้ครบว่าใครตรวจ
+// เส้นทางนี้บ้าง ไม่ใช่เจอตัวแรกแล้วหยุด
 const SERVER_SRC = fs.readFileSync(path.join(ROOT, 'attendance-server/backend/server.js'), 'utf8');
 const vctx = { HHMM_RE, LOCATION_NAME_MAX: 200, console };
 vm.createContext(vctx);
-vm.runInContext(extractFunction(SERVER_SRC, 'validateUpcountryLocations'), vctx);
+vm.runInContext(extractFunction(SERVER_SRC, 'validateHolidayWorkLocation') + '\n' +
+  extractFunction(SERVER_SRC, 'validateUpcountryLocations'), vctx);
 
-test('เซิร์ฟเวอร์รับเฉพาะ undefined เมื่อไม่มีสถานที่ — ของว่างแบบอื่นถูกปฏิเสธ', () => {
-  assert.strictEqual(vctx.validateUpcountryLocations(undefined), null, 'undefined ต้องผ่าน');
-  assert.ok(vctx.validateUpcountryLocations([]), '[] ต้องถูกปฏิเสธ');
-  assert.ok(vctx.validateUpcountryLocations([{ name: '' }]), "[{name:''}] ต้องถูกปฏิเสธ");
-  assert.ok(vctx.validateUpcountryLocations([{ name: '   ' }]), 'ชื่อที่มีแต่ช่องว่างต้องถูกปฏิเสธ');
-  assert.strictEqual(vctx.validateUpcountryLocations([{ name: 'NGK' }]), null, 'ชื่อจริงต้องผ่าน');
+test('ตัวตรวจของ holiday-work ยอมรับ "ไม่มีสถานที่" ทุกรูปแบบที่ฝั่งเว็บส่งได้', () => {
+  assert.strictEqual(vctx.validateHolidayWorkLocation([]), null, '[] (ทำงานที่ออฟฟิศ) ต้องผ่าน');
+  assert.strictEqual(vctx.validateHolidayWorkLocation(undefined), null, 'undefined ต้องผ่าน');
+  assert.strictEqual(vctx.validateHolidayWorkLocation(null), null, 'null ต้องผ่าน');
 });
 
-test('submitHolidayWork ตัดคีย์ locations ทิ้งเมื่อเว้นว่าง ไม่ได้ส่งของว่าง', () => {
+test('ตัวตรวจของ holiday-work ยังปฏิเสธสถานที่ที่กรอกมาครึ่งๆ', () => {
+  assert.ok(vctx.validateHolidayWorkLocation([{ name: '' }]), 'ชื่อว่างต้องถูกปฏิเสธ');
+  assert.ok(vctx.validateHolidayWorkLocation([{ name: '   ' }]), 'ชื่อที่มีแต่ช่องว่างต้องถูกปฏิเสธ');
+  assert.ok(vctx.validateHolidayWorkLocation([{ name: 'A' }, { name: 'B' }]), 'สองรายการต้องถูกปฏิเสธ');
+  assert.ok(vctx.validateHolidayWorkLocation([{ name: 'x'.repeat(201) }]), 'ชื่อยาวเกินต้องถูกปฏิเสธ');
+  assert.strictEqual(vctx.validateHolidayWorkLocation([{ name: 'NGK' }]), null, 'ชื่อจริงต้องผ่าน');
+});
+
+// ตัวตรวจของ upcountry ยังเข้มเท่าเดิม — การผ่อนของ holiday-work ต้องไม่รั่วไปหามัน
+test('ตัวตรวจของ upcountry ยังไม่ยอมรับของว่าง (ไม่ถูกผ่อนตามไปด้วย)', () => {
+  assert.ok(vctx.validateUpcountryLocations([]), 'upcountry ยังต้องปฏิเสธ []');
+  assert.ok(vctx.validateUpcountryLocations([{ name: '' }]), "upcountry ยังต้องปฏิเสธ [{name:''}]");
+  assert.strictEqual(vctx.validateUpcountryLocations(undefined), null, 'undefined ยังผ่านเหมือนเดิม');
+});
+
+test('POST ไม่เอาตัวตรวจของ upcountry มาตรวจ holiday-work', () => {
+  assert.ok(/const locErr = type === 'holiday-work' \? null : validateUpcountryLocations\(body\.locations\);/.test(SERVER_SRC),
+    'ตัวตรวจรวมยังตรวจ holiday-work อยู่ ⇒ [] ของ "ทำงานที่ออฟฟิศ" จะถูกปฏิเสธ');
+});
+
+test('submitHolidayWork ส่ง locations เสมอ และใช้ [] แทนการตัดคีย์ทิ้ง', () => {
   const fn = extractFunction(APP_SRC, 'submitHolidayWork');
-  assert.ok(/\.\.\.\(location \? \{ locations: \[\{ name: location \}\] \} : \{\}\)/.test(fn),
-    'payload ต้อง spread แบบมีเงื่อนไข ไม่ใช่ `locations: [{ name: location }]` ตรงๆ');
-  assert.ok(!/^\s*locations: \[\{ name: location \}\],\s*$/m.test(fn),
-    'ยังมีบรรทัดเดิมที่ส่ง locations เสมออยู่');
+  assert.ok(/locations: location \? \[\{ name: location \}\] : \[\],/.test(fn),
+    'ต้องส่ง locations เสมอ ([] เมื่อเว้นว่าง) ไม่งั้นตอนแก้ไขจะลบสถานที่ออกไม่ได้');
+  assert.ok(!/\.\.\.\(location \? \{ locations:/.test(fn),
+    'ยังมีการตัดคีย์ทิ้งแบบเดิมอยู่');
+});
+
+console.log('T4 Working Report แนบเฉพาะเมื่อกรอกสถานที่');
+
+test('เซิร์ฟเวอร์บังคับแนบเฉพาะเมื่อมีสถานที่ ทั้ง POST และ PUT', () => {
+  const hits = SERVER_SRC.match(/hasUpcountryLocation\(\{ locations: [^}]+\}\)\s*&&\s*\n\s*!\w+(?:\.attachment)?/g) || [];
+  assert.strictEqual(hits.length, 2, `ต้องผูกกับ hasUpcountryLocation ทั้งสองเส้นทาง แต่เจอ ${hits.length}`);
+  assert.ok(!/if \(!body\.attachment && !\(Number\(body\.fileCount\) > 0\)\)/.test(SERVER_SRC),
+    'POST ยังบังคับแนบทุกกรณีอยู่');
+  assert.ok(!/if \(!resolvedAttachment && !\(Number\(resolvedFileCount\) > 0\)\)/.test(SERVER_SRC),
+    'PUT ยังบังคับแนบทุกกรณีอยู่');
+});
+
+test('ฝั่งเว็บบังคับแนบเฉพาะเมื่อกรอกสถานที่ (ตรงกับเซิร์ฟเวอร์)', () => {
+  const fn = extractFunction(APP_SRC, 'submitHolidayWork');
+  assert.ok(/if \(location && !attachment && !editingLeaveId\)/.test(fn),
+    'ด่านแนบไฟล์ต้องมีเงื่อนไข location');
+});
+
+test('ฟอร์ม: ดอกจันของ Working Report ซ่อนไว้ก่อน และผูกกับช่องสถานที่', () => {
+  const HTML = fs.readFileSync(path.join(ROOT, 'attendance/index.html'), 'utf8');
+  assert.ok(/id="hw-report-star"[^>]*display:none/.test(HTML), 'ดอกจันต้องซ่อนเป็นค่าตั้งต้น');
+  const fn = extractFunction(APP_SRC, 'refreshHolidayWorkPayCompare');
+  assert.ok(/hw-report-star/.test(fn) && /holiday-work-location/.test(fn),
+    'ต้องมีตัวสลับดอกจันตามช่องสถานที่ในฟังก์ชันที่รันตอนพิมพ์');
+  const JA = fs.readFileSync(path.join(ROOT, 'attendance/lang/ja.js'), 'utf8');
+  const en = /data-en="(Required only when a work location is given[^"]*)"/.exec(HTML);
+  assert.ok(en, 'ไม่พบคำอธิบายภาษาอังกฤษใต้ช่องแนบไฟล์');
+  assert.ok(JA.includes(en[1]), 'คำอธิบายนี้ยังไม่มีคำแปลญี่ปุ่น');
 });
 
 test('ไม่มีการบล็อกการยื่นเมื่อสถานที่ว่างแล้ว', () => {
