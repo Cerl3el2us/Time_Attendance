@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 153;
+const APP_BUILD = 154;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -2529,6 +2529,50 @@ function splitHolidayWorkOtMinutes(workStartTime, workEndTime, S) {
   const round2 = n => Math.round(n / 60 * 100) / 100;
   return { otMins20, otMins30, otHours20: round2(otMins20), otHours30: round2(otMins30) };
 }
+// 2026-10-28 (owner): the same ×2/×3 split as above, but as the TIME RANGES each rate covers --
+// for display only. Lives here, immediately under the money function, so nobody can edit one set
+// of boundaries without seeing the other.
+//
+// Why it exists: the Details popup showed a Holiday Work day as one number (`8 ชม.`), the ×2 and
+// ×3 hours already added together, with no times and no location. The owner sent a screenshot of
+// 18 Oct 2026 and said that is not enough to check a claim against the attached working report --
+// "ป้องกันพนักงานแอบยื่นเวลาเกิน". An approver needs to see WHICH hours were claimed at which rate.
+//
+// Why it does not share code with splitHolidayWorkOtMinutes: that function is payroll, it has a
+// DUAL-SYNC twin in server.js, and the project learned the hard way that editing one copy drifts
+// the numbers in silence (memory feedback_attendance_payroll_engine_dual_sync.md). Extracting
+// shared constants out of it would mean editing it, so the boundaries are restated here instead --
+// and tests/holiday-work-ot-segments.test.js sweeps EVERY start/end pair asserting that these
+// minutes sum to exactly otMins20/otMins30. Change the pay rule on one side only and that guard
+// goes red; it is what keeps the screen from confidently showing hours nobody is paid for.
+//
+// Returns [{ rate: 20|30, startMin, endMin, mins, lunchDeducted }] ordered by time, zero-length
+// pieces dropped, [] when the shift is unusable. startMin/endMin are minutes from 00:00 of the
+// WORK day and may pass 1440 on a shift running past midnight (20:00-02:00 ends at 1560) -- the
+// caller wraps them for display. On the ×2 piece, startMin–endMin is the span on the clock while
+// `mins` is what is actually paid: they differ by the lunch hour, which is exactly why
+// `lunchDeducted` is reported instead of letting the reader subtract 09:00-17:30 and get 8.5.
+function holidayWorkOtSegments(workStartTime, workEndTime, S) {
+  const startMin = parseHHMMToMins(workStartTime);
+  const endMin = holidayWorkEndMins(workStartTime, workEndTime);
+  if (!Number.isFinite(startMin) || !Number.isFinite(endMin)) return [];
+  const ws = (S && S.workSchedule) || {};
+  const stdStart = (ws.standardStartHour != null ? ws.standardStartHour : 8) * 60 +
+    (ws.standardStartMinute != null ? ws.standardStartMinute : 30);
+  const stdEnd = 17 * 60 + 30;
+  const x2Start = Math.max(startMin, stdStart), x2End = Math.min(endMin, stdEnd);
+  const lunchMins = endMin <= 13 * 60 ? 0
+    : Math.max(0, Math.min(x2End, 13 * 60) - Math.max(x2Start, 12 * 60));
+  const out = [
+    { rate: 30, startMin: Math.min(startMin, stdStart), endMin: Math.min(endMin, stdStart),
+      mins: Math.max(0, Math.min(endMin, stdStart) - Math.min(startMin, stdStart)), lunchDeducted: false },
+    { rate: 20, startMin: x2Start, endMin: x2End,
+      mins: Math.max(0, x2End - x2Start - lunchMins), lunchDeducted: lunchMins > 0 },
+    { rate: 30, startMin: Math.max(startMin, stdEnd), endMin,
+      mins: Math.max(0, endMin - Math.max(startMin, stdEnd)), lunchDeducted: false },
+  ];
+  return out.filter(r => r.mins > 0);
+}
 function officeOtStdStartHHMM(S) {
   const ws = (S && S.workSchedule) || {};
   const h = ws.standardStartHour != null ? ws.standardStartHour : 8;
@@ -2948,6 +2992,61 @@ function holidayWorkTimesLabel(l) {
 function holidayWorkLocationLabel(l) {
   const name = (Array.isArray(l?.locations) && l.locations[0] && l.locations[0].name) || '';
   return name ? escapeHtml(String(name).trim()) : '';
+}
+// 2026-10-28: a work-day minute count (which may pass 1440 on a shift running past midnight) as
+// HH:MM on the wall clock. holidayWorkOtSegments() returns the raw minutes on purpose so nothing
+// in the pay comparison has to undo a formatting decision; the wrapping belongs here.
+function holidayWorkSegmentTimeLabel(mins) {
+  const m = ((mins % 1440) + 1440) % 1440;
+  return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+}
+// 2026-10-28 (owner): the detail block under the Holiday Work badges in the day-detail popup.
+//
+// Why: the popup said `🎌 ทำงานวันหยุด 8 ชม.` and nothing else -- one number with the ×2 and ×3
+// hours already added together, no times, no location. The owner sent a screenshot of 18 Oct 2026
+// and said an approver cannot check that against the attached working report, which is the only
+// reason the popup is opened: "ป้องกันพนักงานแอบยื่นเวลาเกิน".
+//
+// Shown to everyone who can open the popup (owner, 2026-10-28). It is the requester's own claim,
+// not another person's data, and letting the employee see how the system reads their own times is
+// what stops the argument before it starts.
+//
+// Every line hides itself when its data is missing rather than printing `undefined`: older records
+// predate the location field, and a record with no usable start/end gets no rate rows at all.
+// annual-leave mode has no ×2/×3 split (submitHolidayWork sets both to 0 without calling the
+// splitter), so it shows location and claimed times only -- the approver still needs those.
+function holidayWorkDetailBlockHtml(l) {
+  const loc = holidayWorkLocationLabel(l);
+  const times = holidayWorkTimesLabel(l);
+  if (!loc && !times) return '';
+  let out = '';
+  if (loc) {
+    out += `<div class="hw-ot-line"><span class="hw-ot-label">📍 ${L('Location', 'สถานที่')}</span>` +
+      `<span class="hw-ot-value hw-ot-place">${loc}</span></div>`;
+  }
+  if (times) {
+    out += `<div class="hw-ot-line"><span class="hw-ot-label">🕐 ${L('Claimed hours', 'เวลาที่ยื่น')}</span>` +
+      `<span class="hw-ot-value">${times}</span></div>`;
+  }
+  if (times && l.compensationMode === 'paid') {
+    const rows = holidayWorkOtSegments(l.workStartTime, l.workEndTime, APP_SETTINGS).map(s => {
+      // The ×2 span on the clock is longer than the hours paid for it by exactly the lunch hour.
+      // Printing `08:30–17:30  8.00 ชม.` with no explanation is the one outcome the owner's
+      // request cannot survive: the reader subtracts, gets 9, and concludes the payroll is wrong.
+      // The note is attached only when the hour was really removed -- a shift ending by 13:00
+      // never loses it (owner, 2026-10-08).
+      const note = s.lunchDeducted
+        ? ` <span class="hw-ot-note">(${L('lunch deducted', 'หักพักเที่ยง')})</span>` : '';
+      const nextDay = s.endMin >= 24 * 60
+        ? ` <span class="hw-ot-note">(${L('next day', 'วันถัดไป')})</span>` : '';
+      const span = `${holidayWorkSegmentTimeLabel(s.startMin)}–${holidayWorkSegmentTimeLabel(s.endMin)}`;
+      return `<div class="hw-ot-row"><span class="hw-ot-rate">×${s.rate / 10}</span>` +
+        `<span class="hw-ot-span">${span}${nextDay}${note}</span>` +
+        `<span class="hw-ot-hours">${(Math.round(s.mins / 60 * 100) / 100).toFixed(2)} ${L('h', 'ชม.')}</span></div>`;
+    }).join('');
+    if (rows) out += `<div class="hw-ot-rows">${rows}</div>`;
+  }
+  return `<div class="hw-ot-detail">${out}</div>`;
 }
 // HTML-escaped OT end time, marked "next day" when it is after midnight.
 function otEndTimeLabel(hhmm) {
@@ -22636,6 +22735,9 @@ function showAttendanceDetail(date) {
       if (hwTransport > 0) {
         tagsEl.innerHTML += `<span class="badge" style="background:#ffedd5;color:#9a3412">🚐 ${L('Holiday transport', 'ค่าเดินทางวันหยุด')} (+฿${Number(hwTransport).toLocaleString()})</span>`;
       }
+      // Below the badges, not inside them (owner, 2026-10-27): the badges stay exactly as they
+      // are, so no other day type and no other request type is touched by this.
+      tagsEl.innerHTML += holidayWorkDetailBlockHtml(hwRec);
     }
 
     const ldRec = dayLeave('long-distance');
