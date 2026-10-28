@@ -240,7 +240,10 @@ const dctx = { currentLang: 'th', L: (en, th) => th, console };
 vm.createContext(dctx);
 vm.runInContext(extractFunction(APP_SRC, 'holidayWorkDurationLabel'), dctx);
 
-test('380 นาที (เคสของเจ้าของ) อ่านว่า 6 ชม. 20 น. และยังบอกทศนิยม 6.33 ไว้เทียบสลิป', () => {
+// ชื่อเดิมบอกว่า "ยังบอกทศนิยม 6.33 ไว้เทียบสลิป" ซึ่งไม่จริงอีกแล้วตั้งแต่ dba48c7 — จอไม่โชว์
+// ทศนิยมที่ไหนเลย (เจ้าของสั่งเอง) · `dec` ยังถูกคืนและยังตรวจอยู่ เพราะมันคือการแปลงนาที→ชั่วโมง
+// ที่ใช้เทียบกับ otHours ที่เก็บไว้ ไม่ใช่สิ่งที่แสดงผล
+test('380 นาที (เคสของเจ้าของ) อ่านว่า 6 ชม. 20 น. และแปลงเป็น 6.33 ชั่วโมงได้ถูก', () => {
   const d = dctx.holidayWorkDurationLabel(380);
   assert.strictEqual(d.hm, '6 ชม. 20 น.');
   assert.strictEqual(d.dec, '6.33');
@@ -305,30 +308,11 @@ test('การปัดทีละท่อนไม่ตรงกับก�
   console.log(`        (คู่ที่ปัดทีละท่อนแล้วเพี้ยน: ${bad} · ตัวอย่าง ${eg})`);
 });
 
-// เจ้าของสั่งเรื่องนี้ซ้ำเป็นครั้งที่สอง ("อย่าลืมแก้ว่ากี่ชั่วโมง กี่นาที ไม่ใช่แสดงตัวเลขแบบนี้")
-// เพราะรอบแรกผมแก้แถวอัตราแล้วเผลอใส่ทศนิยมกลับเข้าไปในบรรทัดเงินที่เพิ่งเพิ่ม ⇒ ยามข้อนี้จึงห้าม
-// `.toFixed(2)` กับ **ชั่วโมง** ทั้งฟังก์ชัน ไม่ใช่ห้ามเฉพาะแถว · จำนวนเงินยังใช้ fmt2dp ได้ตามปกติ
-test('ไม่มีทศนิยมของชั่วโมงหลงเหลือในบล็อกนี้เลย ทุกที่เป็นชั่วโมง-นาที', () => {
-  const fn = extractFunction(APP_SRC, 'holidayWorkDetailBlockHtml');
-  assert.ok(!/\bh2[03]\.toFixed\(2\)|\bx\.h\.toFixed\(2\)|\.mins \/ 60/.test(fn),
-    'ยังมีการแสดงชั่วโมงเป็นทศนิยมอยู่');
-  assert.ok(/hw-ot-hours">\$\{holidayWorkDurationLabel\(s\.mins\)\.hm\}/.test(fn),
-    'แถวอัตราต้องบอกชั่วโมง-นาที');
-  assert.ok(/holidayWorkDurationLabel\(Math\.round\(x\.h \* 60\)\)\.hm/.test(fn),
-    'แถวเงินต้องบอกชั่วโมง-นาที ไม่ใช่ทศนิยม');
-  assert.ok(/Number\(l\.otHours20\) \|\| 0.*Number\(l\.otHours30\) \|\| 0/s.test(fn),
-    'บรรทัดสรุปต้องอ่าน otHours20/otHours30 ที่เก็บไว้ ไม่ใช่คำนวณใหม่');
-});
-
-// เงินต้องมาจากฟังก์ชันเดียวกับที่ไอคอน OT บนแถวตารางใช้ ไม่งั้นสองที่จะบอกคนละเลขบนวันเดียวกัน
-test('เงินคิดด้วยสูตรเดียวกับ otPayAmountFromLeave (ปัดทีละ bucket แล้วรวม)', () => {
-  const fn = extractFunction(APP_SRC, 'holidayWorkDetailBlockHtml');
-  assert.ok(/round2HalfUp\(hourlyRate \* 2 \* h20\)/.test(fn), '×2 ต้องปัดแบบเดียวกัน');
-  assert.ok(/round2HalfUp\(hourlyRate \* 3 \* h30\)/.test(fn), '×3 ต้องปัดแบบเดียวกัน');
-  const ref = extractFunction(APP_SRC, 'otPayAmountFromLeave');
-  assert.ok(/round2HalfUp\(hourlyRate \* 2 \* hrs20\)/.test(ref) && /round2HalfUp\(hourlyRate \* 3 \* hrs30\)/.test(ref),
-    'สูตรอ้างอิงเปลี่ยนไปแล้ว ⇒ ต้องตามให้ตรงกันใหม่');
-  assert.ok(/ประมาณการ|Estimate/.test(fn), 'ต้องกำกับว่าเป็นประมาณการ เพราะ OT จ่ายตามยอดรวมทั้งงวด');
-});
+// **สองข้อที่เคยอยู่ตรงนี้ถูกถอดออกเมื่อ 2026-10-28** — รีวิวชี้ว่าชื่อมันอ้างมากกว่าที่ตรวจจริง:
+// ข้อ "ไม่มีทศนิยมหลงเหลือ" เป็น negative regex แค่ 3 รูปแบบ (ทศนิยมที่เขียนรูปอื่นผ่านฉลุย) และ
+// ข้อ "เงินคิดด้วยสูตรเดียวกับ otPayAmountFromLeave" ตรวจแค่ว่าซอร์สมีข้อความนั้น ไม่เคยเรียกสอง
+// ฟังก์ชันมาเทียบเลขเลย · ยามแบบนั้นเขียวต่อไปได้แม้พฤติกรรมเปลี่ยน และแดงเวลาแค่เปลี่ยนชื่อตัวแปร
+// ⇒ ของจริงย้ายไป `tests/holiday-work-detail-block.test.js` ซึ่งเรนเดอร์บล็อกจริงแล้วอ่านผลลัพธ์:
+// เทียบบาทกับ otPayAmountFromLeave 30 เคส · ตรวจว่าไม่มี "เลข.เลข ชม." โผล่บนจอ · และตรวจ 3 ภาษา
 
 console.log(`\n${passed} passed, ${process.exitCode ? 'มีข้อที่ล้มเหลว' : '0 failed'}`);

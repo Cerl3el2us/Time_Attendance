@@ -241,9 +241,11 @@ test('with no Holiday Work record the day flag still works exactly as before', (
   assert.ok(s.badgeFor(true, { ...ROW, upcountry: true }, 7, null, USER7).includes('🗺️'));
 });
 
-// สิทธิ์ holidayWork ปิดอยู่ ⇒ payroll ไม่ได้ยกวันให้ใบ (approvedHolidayWork ว่าง) ⇒ ธงรายวันยังนับ
-// ⇒ ไอคอนต้องยังขึ้นตามธง · ฝั่งแถวใช้ hwRow ซึ่งถูกปิดด้วยสิทธิ์เดียวกันอยู่แล้ว
-test('a role that cannot claim Holiday Work keeps the plain upcountry flag behaviour', () => {
+// ชื่อเดิมอ้างว่าทดสอบด่าน canHolidayWorkTarget ซึ่ง **ไม่จริง** (รีวิว 2026-10-28): harness รับ
+// hwRow เป็นพารามิเตอร์ ด่านนั้นอยู่นอก snippet ที่ยกมา ⇒ ส่ง null เข้าไปตรงๆ คือการจำลองผลของด่าน
+// ไม่ใช่การตรวจด่าน · ตั้งชื่อใหม่ให้ตรงกับสิ่งที่มันตรวจจริง ส่วนด่านตัวนั้นถูกตรวจแบบพฤติกรรม
+// ใน tests/holiday-work-upcountry-badge.test.js (T2b) ซึ่งเทียบกับ computePayroll จริง
+test('hwRow เป็น null (ไม่ว่าด้วยเหตุใด) ⇒ ไอคอนมาจากธงรายวันตามเดิม', () => {
   const s = makeSandbox([APPROVED], { upcountry: ['user'], holidayWork: ['md'] });
   assert.ok(s.badgeFor(true, { ...ROW, upcountry: true }, 7, null, USER7).includes('🗺️'));
 });

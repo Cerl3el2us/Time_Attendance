@@ -1602,4 +1602,11 @@ window.LANG_JA = {
   "⚠️ Working Report is required when a work location is given": "⚠️ 勤務場所を入力した場合は Working Report の添付が必要です",
   "not given — no Upcountry allowance": "未入力 — 地方出張手当なし",
   "Paid on the payslip": "給与明細の支給時間",
+  // 2026-10-28 (พบตอนรีวิว): สองบรรทัดนี้อยู่ในสาขา "มีเงินเดือนให้อ่าน" ซึ่งเป็นสาขาที่ md/accounting
+  // เห็นจริง ส่วน "Paid on the payslip" ข้างบนเป็นสาขาที่ไม่มีเงินเดือน ⇒ เพิ่มแต่ตัวนั้นตัวเดียว
+  // แปลว่าคนที่เห็นเงินจะเจออังกฤษคาอยู่กลางบล็อกญี่ปุ่น
+  "Total for this day": "この日の合計",
+  "lunch": "昼休み",
+  "The rows above follow the current work-schedule settings; the payslip follows what was recorded when this was approved. They no longer agree.": "上の行は現在の勤務時間設定で計算されています。給与明細は承認時に記録された値に従います。両者は一致しなくなっています。",
+  "Estimate — OT is paid on the period total, so the payslip can differ by satang": "概算 — 残業代は給与計算期間の合計に対して支給されるため、給与明細とは数サタン異なる場合があります",
 };

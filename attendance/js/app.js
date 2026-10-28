@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 163;
+const APP_BUILD = 164;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -2563,13 +2563,18 @@ function holidayWorkOtSegments(workStartTime, workEndTime, S) {
   const x2Start = Math.max(startMin, stdStart), x2End = Math.min(endMin, stdEnd);
   const lunchMins = endMin <= 13 * 60 ? 0
     : Math.max(0, Math.min(x2End, 13 * 60) - Math.max(x2Start, 12 * 60));
+  // `lunchMins` is reported, not just the boolean: the hour is only removed where the ×2 window
+  // actually covers it, so a shift starting at 12:30 loses 30 minutes and one starting at 13:00
+  // loses none. A note that only says "lunch deducted" reads as "an hour came out" in every case
+  // (review, 2026-10-28).
   const out = [
     { rate: 30, startMin: Math.min(startMin, stdStart), endMin: Math.min(endMin, stdStart),
-      mins: Math.max(0, Math.min(endMin, stdStart) - Math.min(startMin, stdStart)), lunchDeducted: false },
+      mins: Math.max(0, Math.min(endMin, stdStart) - Math.min(startMin, stdStart)),
+      lunchMins: 0, lunchDeducted: false },
     { rate: 20, startMin: x2Start, endMin: x2End,
-      mins: Math.max(0, x2End - x2Start - lunchMins), lunchDeducted: lunchMins > 0 },
+      mins: Math.max(0, x2End - x2Start - lunchMins), lunchMins, lunchDeducted: lunchMins > 0 },
     { rate: 30, startMin: Math.max(startMin, stdEnd), endMin,
-      mins: Math.max(0, endMin - Math.max(startMin, stdEnd)), lunchDeducted: false },
+      mins: Math.max(0, endMin - Math.max(startMin, stdEnd)), lunchMins: 0, lunchDeducted: false },
   ];
   return out.filter(r => r.mins > 0);
 }
@@ -3051,14 +3056,20 @@ function holidayWorkDetailBlockHtml(l, hourlyRate) {
       `<span class="hw-ot-value">${times}</span></div>`;
   }
   if (times && l.compensationMode === 'paid') {
-    const rows = holidayWorkOtSegments(l.workStartTime, l.workEndTime, APP_SETTINGS).map(s => {
+    const segs = holidayWorkOtSegments(l.workStartTime, l.workEndTime, APP_SETTINGS);
+    const rows = segs.map(s => {
       // The ×2 span on the clock is longer than the hours paid for it by exactly the lunch hour.
       // Printing `08:30–17:30  8.00 ชม.` with no explanation is the one outcome the owner's
       // request cannot survive: the reader subtracts, gets 9, and concludes the payroll is wrong.
       // The note is attached only when the hour was really removed -- a shift ending by 13:00
       // never loses it (owner, 2026-10-08).
+      // The amount, not just the fact: only the part of the hour the ×2 window covers comes out,
+      // so 12:30–17:30 loses 30 minutes. Saying "lunch deducted" alone made the reader subtract an
+      // hour from a span that had lost half of one, which is the same misreading the hours/minutes
+      // change was made to stop.
       const note = s.lunchDeducted
-        ? ` <span class="hw-ot-note">(${L('lunch deducted', 'หักพักเที่ยง')})</span>` : '';
+        ? ` <span class="hw-ot-note">(${L('lunch', 'หักพักเที่ยง')} −${holidayWorkDurationLabel(s.lunchMins).hm})</span>`
+        : '';
       const nextDay = s.endMin >= 24 * 60
         ? ` <span class="hw-ot-note">(${L('next day', 'วันถัดไป')})</span>` : '';
       const span = `${holidayWorkSegmentTimeLabel(s.startMin)}–${holidayWorkSegmentTimeLabel(s.endMin)}`;
@@ -3109,7 +3120,20 @@ function holidayWorkDetailBlockHtml(l, hourlyRate) {
           total = `<div class="hw-ot-total">${L('Paid on the payslip', 'ที่จ่ายจริงตามสลิป')}: ${paid.join(' · ')}</div>`;
         }
       }
-      out += `<div class="hw-ot-rows">${rows}${total}</div>`;
+      // The rows above are recomputed from the CURRENT settings; the money and the payslip come
+      // from otHours20/otHours30 pinned when the record was approved. Move workSchedule's standard
+      // start in Settings and the two stop describing the same day -- the spans shift, the money
+      // does not. The spec called that the main risk of this block ("หน้าจอโกหกอย่างมั่นใจ"), so
+      // when they disagree the block says so instead of showing both and letting the reader pick.
+      // 1 minute of slack absorbs the 2-decimal rounding of the stored hours.
+      const segMins = r => segs.filter(s => s.rate === r).reduce((t, s) => t + s.mins, 0);
+      const drift20 = Math.abs(segMins(20) - Math.round(h20 * 60));
+      const drift30 = Math.abs(segMins(30) - Math.round(h30 * 60));
+      const driftNote = (drift20 > 1 || drift30 > 1)
+        ? `<div class="hw-ot-drift">⚠️ ${L('The rows above follow the current work-schedule settings; the payslip follows what was recorded when this was approved. They no longer agree.',
+            'แถวด้านบนคิดตามค่าตั้งค่าเวลาทำงานปัจจุบัน ส่วนสลิปจ่ายตามที่บันทึกไว้ตอนอนุมัติ — ตอนนี้ไม่ตรงกันแล้ว')}</div>`
+        : '';
+      out += `<div class="hw-ot-rows">${rows}${total}${driftNote}</div>`;
     }
   }
   return `<div class="hw-ot-detail">${out}</div>`;
@@ -22889,7 +22913,20 @@ function showAttendanceDetail(date) {
       tagsEl.innerHTML += `<span class="badge badge-success">🌅 ${L('Early Morning (requested)', 'เบี้ยมาเช้า (ยื่นขอ)')} (+฿${Number(emAmt).toLocaleString()})</span>`;
     }
 
-    const hwRec = dayLeave('holiday-work');
+    // 2026-10-28 (found in review): payroll pays NOTHING out of this record unless the role may
+    // claim Holiday Work. computePayroll builds `approvedHolidayWork = canHolidayWork ? [...] : []`
+    // and sums BOTH the ×2/×3 hours and the holiday transport only over that list, so for a role
+    // without the right the whole day is ฿0. This block had no such gate -- only the Company Trip
+    // one -- so it showed the badge, the hours, the ฿500 transport and, once the money went in, a
+    // four-figure estimate for a day the payslip pays nothing for. The attendance row has always
+    // been gated (hwRow, attendanceDayOtRecord), so the row stayed silent while the popup promised
+    // money: the same "promising money that would never actually be paid" this file fixed once
+    // before, re-entered through a door nobody had locked.
+    // Reachable without any migration: the default eligibility table has no driver/accounting/
+    // marketing, and Settings lets the owner take the right off a role that already filed.
+    const hwRec = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, targetRole, 'holidayWork')
+      ? dayLeave('holiday-work')
+      : null;
     if (hwRec) {
       const paid = hwRec.compensationMode === 'paid';
       const hwHrs = (Number(hwRec.otHours20) || 0) + (Number(hwRec.otHours30) || 0);
