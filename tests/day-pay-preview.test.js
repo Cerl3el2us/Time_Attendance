@@ -49,6 +49,9 @@ const FNS = [
   'effectiveOtMultiplier', 'standardOtMultiplier', 'isNonWorkDayForComp', 'deriveOfficeOtFromEndTime',
   'holidayWorkEndMins', 'splitHolidayWorkOtMinutes', 'addOtHours', 'accumulateApprovedOtHours',
   'otPayFromHourBuckets', 'isAllowanceEligible', 'localDateStr',
+  // 2026-10-28 (รีวิวรอบ 6): การ์ดเทียบเงินเลิกพิมพ์ชั่วโมงทศนิยม ("6.33 ชม.") แล้วมาใช้ตัวจัด
+  // รูปแบบตัวเดียวกับที่ตารางเวลาและป๊อปอัปใช้ ⇒ มันเป็น dependency ของ estimateDayEarnings แล้ว
+  'holidayWorkDurationLabel',
   // the extraction that removed the last inline money rules from computePayroll
   'hasUpcountryLocation', 'holidayTransportForRecord',
   // the preview itself
@@ -177,9 +180,11 @@ test('the amount always matches the hours on the label — every half hour, ever
       const est = W.estimateDayEarnings({ date: '2026-09-28', user: STAFF, driverTiers: { [mult]: h } });
       const line = est.lines.find(l => l.key === 'ot');
       const expected = Math.round(hourly * mult * h * 100) / 100;
-      // the hours are the number right after "OT"; stripping every non-digit would glue the
-      // multiplier onto them ("0.5 ... ×1.5" -> 0.51.5)
-      const labelHours = parseFloat((String(line.label).match(/OT\s+([\d.]+)/) || [])[1]);
+      // 2026-10-28 (รีวิวรอบ 6): ป้ายเลิกพิมพ์ชั่วโมงทศนิยมแล้ว ("0.5 ชม." → "30 น.") ⇒ แกะเป็น
+      // ชั่วโมง-นาทีแล้วประกอบกลับเป็นชั่วโมง · ตัวแกะนี้ยังเข้มเท่าเดิมและเข้มขึ้นด้วย: ถ้าป้ายกลับ
+      // ไปพิมพ์ทศนิยม regex จะไม่ตรงและ labelHours เป็น NaN ⇒ ข้อนี้แดงทันที
+      const hm = /OT\s+(?:(\d+) ชม\.)?(?: )?(?:(\d+) น\.)?/.exec(String(line.label)) || [];
+      const labelHours = (hm[1] || hm[2]) ? ((Number(hm[1]) || 0) + (Number(hm[2]) || 0) / 60) : NaN;
       if (Math.abs(line.amount - expected) > 0.01) bad.push(`${h}h x${mult}: amount ${line.amount} != ${expected}`);
       if (Math.abs(labelHours - h) > 0.001) bad.push(`${h}h x${mult}: label says ${labelHours}`);
     });

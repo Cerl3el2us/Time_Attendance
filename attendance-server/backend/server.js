@@ -11397,7 +11397,9 @@ function getPayrollView(user, start, end, periodIndex, finalizeDataOverride) {
     calc, attendance, fin, eligibility,
     display: {
       otCount, personalCarRateDisplay, lateDeductMinutes, pvdRate,
-      rates: { upcountry: S.allowances.upcountry || 240, longDistance: S.allowances.longDistance, personalCar: S.allowances.personalCar },
+      // 2026-10-28 (รีวิวรอบ 6): ฝาแฝดของ app.js — ดูเหตุผลเต็มที่นั่น · `|| 240` ทำให้สลิปแสดง
+      // ฿240 ต่อครั้ง ขณะที่ยอดเงินคูณด้วยค่าจริงที่ตั้งไว้ (0 ได้) โดยไม่มีค่าสำรอง
+      rates: { upcountry: S.allowances.upcountry != null ? S.allowances.upcountry : 240, longDistance: S.allowances.longDistance, personalCar: S.allowances.personalCar },
       ssoDisplay: { rate: S.sso.rate || 5, maxAmount: S.sso.maxAmount || 875, minSalary: S.sso.minSalary || 1650 },
     },
     labels: { periodLabel, paymentDateLabel, paymentDate, company: { name: company.name, address: company.address, taxId: company.taxId } },
