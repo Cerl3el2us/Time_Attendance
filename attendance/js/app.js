@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 164;
+const APP_BUILD = 165;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -22938,7 +22938,13 @@ function showAttendanceDetail(date) {
       // 2026-10-28 (owner): the badge says "รับเป็นเงิน" and never said how much. Same estimate as
       // the breakdown below it and as the row's OT icon -- one function, otPayAmountFromLeave(),
       // so three places cannot quote three numbers. No salary readable -> the badge just omits it.
-      const _hwSalary = Number(targetUserObj && targetUserObj.salary) || 0;
+      // The record's OWN owner, looked up again rather than taken from targetUserObj: that one
+      // falls back to `currentUser` when the employee is not in DATA_USERS (the system account
+      // filters records out), which for a role label is a harmless default and for MONEY is not --
+      // it would price somebody else's day off the viewer's salary and show it as theirs. Not
+      // found means no salary to read, so the hours stay and the baht simply does not appear.
+      const _hwOwner = DATA_USERS.find(u => u.id === targetUserId);
+      const _hwSalary = Number(_hwOwner && _hwOwner.salary) || 0;
       const _hwHourly = _hwSalary > 0 ? _hwSalary / 30 / 8 : 0;
       const _hwAmt = (paid && _hwHourly > 0) ? otPayAmountFromLeave(hwRec, _hwHourly) : 0;
       const hwModeText = _hwAmt > 0 ? `${mode} ≈ ฿${fmt2dp(_hwAmt)}` : mode;
