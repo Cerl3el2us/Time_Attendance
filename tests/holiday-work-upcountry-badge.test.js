@@ -266,20 +266,52 @@ test('ไม่มีสิทธิ์ holidayWork ⇒ payroll จ่าย 0 �
 
 // รีวิวรอบ 4 หักล้างยามเดิมของข้อนี้ได้ด้วย mutation สองแบบ (เปิดด่านให้ผ่านหมด / กลับด้านเงื่อนไข
 // เจ้าของ) เพราะมันเป็นแค่ regex บนซอร์ส ⇒ ดึง "ตัวด่าน" ออกมารันจริงแล้วทดสอบพฤติกรรมแทน
-function makeOwnerGate(users, me, targetUserId, elig) {
+// 2026-10-28 (เจ้าของสั่ง "ไล่แก้ต่อ"): ด่านนี้เลิกอ่าน `.role` ดิบ แล้วไปถาม `gateRoleFor()`
+// ตามกฎของเจ้าของ (2026-10-08, AGENTS §7a: ด่านต้องถาม effectiveRole/gateRoleFor ไม่ใช่ role
+// ของบัญชี เพื่อให้ superadmin พรีวิว role อื่นได้) ⇒ กล่องต้องมี `gateRoleFor` + `effectiveRole`
+// ตัวจริง ไม่ใช่ stub และ `previewRole` / `isSuperAdmin` ส่งเข้าไปได้เพื่อทดสอบการพรีวิว
+function makeOwnerGate(users, me, targetUserId, elig, opts) {
+  const o = opts || {};
   const fn = extractFunction(APP_SRC, 'showAttendanceDetail');
   const m = fn.match(/const _ownerUser = [\s\S]*?const _ownerCan = [^\n]*\n/);
   assert.ok(m, 'หาบล็อกประกาศตัวด่านเจ้าของไม่เจอ ⇒ โครงเปลี่ยนไปแล้ว ให้ทบทวนยามนี้');
   const ctx = {
     DATA_USERS: users, currentUser: me, targetUserId,
     APP_SETTINGS: { allowanceEligibility: elig }, console,
+    previewRole: o.previewRole || null,
+    isSuperAdmin: () => !!o.superAdmin,
+    isImpersonatingPerson: () => !!o.impersonating,
   };
   vm.createContext(ctx);
   vm.runInContext(constDecl(APP_SRC, 'DEFAULT_ALLOWANCE_ELIGIBILITY') + '\n' +
-    extractFunction(APP_SRC, 'isAllowanceEligible') + '\n' + m[0] +
+    extractFunction(APP_SRC, 'isAllowanceEligible') + '\n' +
+    extractFunction(APP_SRC, 'effectiveRole') + '\n' +
+    extractFunction(APP_SRC, 'gateRoleFor') + '\n' + m[0] +
     '\nout = { role: _ownerRole, hw: _ownerCan("holidayWork"), upc: _ownerCan("upcountry") };', ctx);
   return ctx.out;
 }
+
+// 2026-10-28: เหตุที่ด่านต้องถาม gateRoleFor() ไม่ใช่ `.role` ดิบ — กฎของเจ้าของข้อ "ฟีเจอร์ใหม่
+// ต้องตรวจสอบผ่านบัญชี superadmin ได้ ทั้งในฐานะ role และในฐานะคน" · สองข้อนี้คือพฤติกรรมนั้น
+test('ด่านเจ้าของ: superadmin ดูของตัวเองพร้อมพรีวิว role ⇒ ด่านเดินตาม role ที่พรีวิว', () => {
+  const me = { id: 9, role: 'superadmin' };
+  const elig = { holidayWork: ['user'], upcountry: ['user'] };
+  const asUser = makeOwnerGate([me], me, 9, elig, { superAdmin: true, previewRole: 'user' });
+  assert.strictEqual(asUser.role, 'user', 'พรีวิวเป็น user ⇒ ด่านต้องเห็น role เป็น user');
+  assert.strictEqual(asUser.hw, true, 'พรีวิวเป็น user แล้วต้องเห็นสิ่งที่ user เห็น');
+  const asAcct = makeOwnerGate([me], me, 9, elig, { superAdmin: true, previewRole: 'accounting' });
+  assert.strictEqual(asAcct.role, 'accounting');
+  assert.strictEqual(asAcct.hw, false, 'พรีวิวเป็น accounting แล้วต้องไม่เห็นเบี้ยที่ accounting ไม่ได้');
+});
+
+test('ด่านเจ้าของ: superadmin สวมเป็น "คน" ⇒ ใช้ role จริงของบัญชี ไม่ใช่ role ที่พรีวิว', () => {
+  const me = { id: 9, role: 'superadmin' };
+  const g = makeOwnerGate([me], me, 9, { holidayWork: ['superadmin'], upcountry: [] },
+    { superAdmin: true, previewRole: 'user', impersonating: true });
+  assert.strictEqual(g.role, 'superadmin',
+    'effectiveRole() ให้คนมาก่อน role ⇒ สวมเป็นคนแล้วต้องใช้ rank จริงของบัญชี');
+  assert.strictEqual(g.hw, true);
+});
 
 test('ด่านเจ้าของ: หาเจ้าของเจอและมีสิทธิ์ ⇒ เปิด', () => {
   const g = makeOwnerGate([{ id: 7, role: 'user' }], { id: 1, role: 'md' }, 7,
@@ -434,6 +466,164 @@ test('ลิสต์ที่สร้าง holidayWorkDates ยังมี�
     'ซึ่งสะท้อนลิสต์นี้ กลายเป็นคนละเรื่องกับ payroll ให้กลับไปทบทวนทั้งสี่จอ');
   assert.ok(/holidayWorkDates\s*=\s*new Set\(approvedHolidayWork/.test(fn),
     'holidayWorkDates ไม่ได้สร้างจาก approvedHolidayWork แล้ว ⇒ ทบทวน takesDay');
+});
+
+// ───────────────────────────────────────────────────────────────────────────────────────────────
+// 2026-10-28 (เจ้าของสั่ง "ไล่แก้ต่อ"): ชุดวันที่ปลดล็อกเบี้ยเข้าเช้า/ดึกของวันหยุด · ของเดิมมี
+// สำเนา 11 ที่ และทุกที่สร้างแบบไม่มีด่านสิทธิ์ ขณะที่ payroll ส่งชุดที่ gate ด้วย `holidayWork`
+// ⇒ role ที่มี `earlyLate` แต่ไม่มี `holidayWork` เห็น 🌙 พร้อมเงิน แต่สลิปจ่าย ฿0
+function unlockDates({ leaves, trips = [], elig, role, userId = 7 }) {
+  const ctx = { DATA_LEAVES: leaves, DATA_COMPANY_TRIP_DATES: trips, console };
+  vm.createContext(ctx);
+  vm.runInContext(
+    constDecl(APP_SRC, 'DEFAULT_ALLOWANCE_ELIGIBILITY') + '\n' +
+    extractFunction(APP_SRC, 'isAllowanceEligible') + '\n' +
+    extractFunction(APP_SRC, 'isCompanyTripDay') + '\n' +
+    extractFunction(APP_SRC, 'holidayWorkUnlockDates') + '\n' +
+    'out = Array.from(holidayWorkUnlockDates(' + userId + ', ' + JSON.stringify(role) +
+    ', { allowanceEligibility: ' + JSON.stringify(elig) + ' })).sort();', ctx);
+  return Array.from(ctx.out);
+}
+const HW_DAYS = [
+  { userId: 7, type: 'holiday-work', status: 'approved', dateFrom: '2026-10-17' },
+  { userId: 7, type: 'holiday-work', status: 'approved', dateFrom: '2026-10-18' },
+  { userId: 8, type: 'holiday-work', status: 'approved', dateFrom: '2026-10-19' },
+  { userId: 7, type: 'holiday-work', status: 'pending', dateFrom: '2026-10-20' },
+];
+
+test('ชุดปลดล็อก: role มีสิทธิ์ holidayWork ⇒ ได้วันของคนนั้นที่อนุมัติแล้ว', () => {
+  assert.deepStrictEqual(
+    unlockDates({ leaves: HW_DAYS, elig: { holidayWork: ['user'] }, role: 'user' }),
+    ['2026-10-17', '2026-10-18'],
+    'ต้องได้เฉพาะวันของ userId นั้นที่สถานะ approved');
+});
+
+test('ชุดปลดล็อก: role ไม่มีสิทธิ์ holidayWork ⇒ ชุดว่าง (เหมือน payroll)', () => {
+  assert.deepStrictEqual(
+    unlockDates({ leaves: HW_DAYS, elig: { holidayWork: ['user'] }, role: 'driver' }), [],
+    'driver มีสิทธิ์ earlyLate แต่ไม่มี holidayWork ⇒ payroll ไม่ปลดล็อกให้ จอก็ต้องไม่ปลดล็อก');
+});
+
+test('ชุดปลดล็อก: หา role ไม่ได้ (null) ⇒ ชุดว่าง', () => {
+  assert.deepStrictEqual(unlockDates({ leaves: HW_DAYS, elig: { holidayWork: ['user'] }, role: null }), []);
+});
+
+test('ชุดปลดล็อก: วัน Company Trip ถูกตัดออก เหมือน approvedHolidayWork ของ payroll', () => {
+  assert.deepStrictEqual(
+    unlockDates({ leaves: HW_DAYS, trips: ['2026-10-18'], elig: { holidayWork: ['user'] }, role: 'user' }),
+    ['2026-10-17']);
+});
+
+// ยามเชิงโครงสร้าง: ห้ามมีจอไหนสร้างชุดนี้เองอีก · นับ "ชุดวัน holiday-work ที่สร้างจาก DATA_LEAVES"
+// ทั้งไฟล์ แล้วอนุญาตเฉพาะสองที่ — ตัวฟังก์ชันกลางเอง และ computePayroll
+test('ไม่มีจอไหนสร้างชุดวัน Holiday Work เองอีก นอกจากฟังก์ชันกลางและ payroll', () => {
+  const SRC = APP_SRC.replace(/^[ \t]*\/\/[^\n]*$/gm, '');
+  const sets = [...SRC.matchAll(/DATA_LEAVES\s*\n?\s*\.?filter\(l\s*=>[\s\S]{0,220}?'holiday-work'[\s\S]{0,220}?\)\s*\n?\s*\)?\s*\.map\(l\s*=>\s*l\.dateFrom\)/g)];
+  assert.ok(sets.length <= 2,
+    `เจอ ${sets.length} ที่ที่สร้างชุดวัน Holiday Work จาก DATA_LEAVES · อนุญาตได้ไม่เกิน 2 ` +
+    '(holidayWorkUnlockDates และ computePayroll) ⇒ มีจอที่สร้างกฎของตัวเองขึ้นมาใหม่:\n       ' +
+    sets.map(m => m[0].replace(/\s+/g, ' ').slice(0, 120)).join('\n       '));
+  // และทุกจอที่ใช้ชุดนี้ต้องเรียกฟังก์ชันกลาง
+  const calls = (SRC.match(/holidayWorkUnlockDates\(/g) || []).length;
+  assert.ok(calls >= 9,
+    `คาดว่ามีจุดเรียกฟังก์ชันกลางอย่างน้อย 9 จุด (แถว · ใบพิมพ์ · Dashboard · สรุปงวด · การ์ดรายงาน ` +
+    `· รายงานละเอียด 4 จุด · การ์ดเทียบเงิน) แต่เจอ ${calls} ⇒ มีจออะไรเลิกใช้มันไปแล้ว`);
+});
+
+// ───────────────────────────────────────────────────────────────────────────────────────────────
+// 2026-10-28 (เจ้าของสั่ง "ไล่แก้ต่อ"): badge ⏱️ OT และ 🚙 รถส่วนตัว ในป๊อปอัปรายวัน · ทั้งสอง
+// พิมพ์จำนวนเงิน และของเดิม ⏱️ มีด่านเดียว (Company Trip) ส่วน 🚙 **ไม่มีด่านเลย** ขณะที่ payroll
+// มีสี่ชั้นทั้งคู่ · ดึงตัวเงื่อนไขของ `if` ออกมารันกับค่าที่ฉีดเข้าไป จึงเป็นการตรวจพฤติกรรมจริง
+function popupCond(marker, vars, preludeRe) {
+  const fn = extractFunction(APP_SRC, 'showAttendanceDetail');
+  const i = fn.indexOf(marker);
+  assert.ok(i > 0, `หาเงื่อนไขของ badge ไม่เจอ (${marker}) ⇒ โครงเปลี่ยน ให้ทบทวนยามนี้`);
+  // ตัดจาก `if (` ถึงวงเล็บปิดที่สมดุล
+  const open = fn.indexOf('(', i);
+  let p = 0, end = -1;
+  for (let j = open; j < fn.length; j++) {
+    if (fn[j] === '(') p++;
+    else if (fn[j] === ')') { p--; if (p === 0) { end = j; break; } }
+  }
+  const expr = fn.slice(open + 1, end);
+  const ctx = Object.assign({
+    console,
+    isFullDayPersonalLeaveStatus: s => ['leave-annual', 'leave-sick', 'leave-business'].includes(s),
+  }, vars);
+  vm.createContext(ctx);
+  // บาง badge มีบรรทัดคำนวนอยู่ก่อน `if` ⇒ ดึงมาด้วย ไม่ใช่การฉีดค่าเอง
+  // (ฉีดค่าเอง = เขียนกฎนั้นซ้ำในเทสต์ แล้วเทสต์ก็จะเขียวแม้โค้ดจริงเปลี่ยน)
+  let prelude = '';
+  if (preludeRe) {
+    const pm = fn.match(preludeRe);
+    assert.ok(pm, 'หาบรรทัดคำนวณที่อยู่ก่อนเงื่อนไขไม่เจอ ⇒ โครงเปลี่ยน ให้ทบทวนยามนี้');
+    prelude = pm[0] + ';\n';
+  }
+  vm.runInContext(prelude + 'out = !!(' + expr + ');', ctx);
+  return { shown: ctx.out, expr };
+}
+const OT_MARK = 'if (approvedOT && row.status !== ';
+const PC_MARK = 'if (pcRecord && _ownerCan(';
+const PC_PRELUDE = /const _pcOwnerFlag = .*/;
+
+test('ป๊อปอัป ⏱️: เจ้าของไม่มีสิทธิ์ ot ⇒ ไม่ขึ้น badge เลย', () => {
+  const base = { approvedOT: { id: 1 }, row: { status: 'present' }, _hwDisp: { rec: null, takesDay: false } };
+  assert.strictEqual(popupCond(OT_MARK, Object.assign({}, base, { _ownerCan: () => true })).shown, true);
+  assert.strictEqual(popupCond(OT_MARK, Object.assign({}, base, { _ownerCan: () => false })).shown, false,
+    'payroll สร้าง approvedOTs เป็น [] เมื่อไม่มีสิทธิ์ ot ⇒ จอต้องไม่ขึ้น badge ที่พิมพ์ชั่วโมงและอัตรา');
+});
+
+test('ป๊อปอัป ⏱️: วัน Company Trip ไม่ขึ้น', () => {
+  assert.strictEqual(popupCond(OT_MARK, {
+    approvedOT: { id: 1 }, row: { status: 'company-trip' },
+    _hwDisp: { rec: null, takesDay: false }, _ownerCan: () => true }).shown, false);
+});
+
+// สองชั้นที่เหลือของ payroll ไม่ซ่อน badge แต่ต้องทำให้ไม่อ่านว่าได้เงิน ⇒ ตรวจที่ `_otNotCounted`
+function otNotCounted(vars) {
+  const fn = extractFunction(APP_SRC, 'showAttendanceDetail');
+  const m = fn.match(/const _otPaidHwDay = [^\n]*\n\s*const _otNotCounted = [\s\S]*?;\n/);
+  assert.ok(m, 'หาบล็อก _otNotCounted ไม่เจอ ⇒ โครงเปลี่ยน ให้ทบทวนยามนี้');
+  const ctx = Object.assign({
+    console,
+    isFullDayPersonalLeaveStatus: s => ['leave-annual', 'leave-sick', 'leave-business'].includes(s),
+  }, vars);
+  vm.createContext(ctx);
+  vm.runInContext(m[0] + '\nout = _otNotCounted;', ctx);
+  return ctx.out;
+}
+
+test('ป๊อปอัป ⏱️: วันลาเต็มวัน และวันหยุดโหมดรับเงิน ⇒ ต้องเขียนว่าไม่ถูกนับ', () => {
+  const noHw = { rec: null, takesDay: false };
+  const paidHw = { rec: { compensationMode: 'paid' }, takesDay: true };
+  const leaveHw = { rec: { compensationMode: 'annual-leave' }, takesDay: true };
+  assert.strictEqual(otNotCounted({ row: { status: 'present' }, approvedOT: { id: 1 }, _hwDisp: noHw }), false,
+    'วันปกติต้องนับตามเดิม');
+  assert.strictEqual(otNotCounted({ row: { status: 'leave-annual' }, approvedOT: { id: 1 }, _hwDisp: noHw }), true,
+    'payroll ตัดใบ OT ของวันลาเต็มวันออก (fullLeaveDates)');
+  assert.strictEqual(otNotCounted({ row: { status: 'present' }, approvedOT: { id: 1 }, _hwDisp: paidHw }), true,
+    'วันหยุดโหมดรับเงินกินทั้งวันไปแล้ว ⇒ ใบ OT ของออฟฟิศไม่ถูกนับซ้ำ');
+  assert.strictEqual(otNotCounted({ row: { status: 'present' }, approvedOT: { id: 1, isDriverOT: true }, _hwDisp: paidHw }), false,
+    'OT ของคนขับจ่ายแยกอิสระ — payroll ไม่ตัดมัน');
+  assert.strictEqual(otNotCounted({ row: { status: 'present' }, approvedOT: { id: 1 }, _hwDisp: leaveHw }), false,
+    'โหมดแลกวันหยุดไม่ได้จ่ายเงินของวันนั้น ⇒ ใบ OT ยังถูกนับปกติ');
+});
+
+test('ป๊อปอัป 🚙: ต้องผ่านทั้งสิทธิ์ role, ธงรายบุคคลของเจ้าของ, Company Trip และวันลาเต็มวัน', () => {
+  const ok = { pcRecord: { id: 5 }, _ownerCan: () => true, _ownerUser: { personalCarEligible: true },
+    row: { status: 'present' } };
+  assert.strictEqual(popupCond(PC_MARK, ok, PC_PRELUDE).shown, true);
+  assert.strictEqual(popupCond(PC_MARK, Object.assign({}, ok, { _ownerCan: () => false }), PC_PRELUDE).shown, false,
+    'ไม่มีสิทธิ์ personalCar ⇒ payroll จ่าย ฿0');
+  assert.strictEqual(popupCond(PC_MARK, Object.assign({}, ok, { _ownerUser: { personalCarEligible: false } }), PC_PRELUDE).shown, false,
+    'ธงรายบุคคลเป็น false ⇒ payroll จ่าย ฿0');
+  assert.strictEqual(popupCond(PC_MARK, Object.assign({}, ok, { _ownerUser: {} }), PC_PRELUDE).shown, false,
+    'ไม่มีธงเลย ⇒ payroll ใช้ === true จึงไม่จ่าย');
+  assert.strictEqual(popupCond(PC_MARK, Object.assign({}, ok, { _ownerUser: null }), PC_PRELUDE).shown, false,
+    'หาเจ้าของไม่เจอ ⇒ ไม่รู้ว่าสลิปจ่ายอะไร');
+  assert.strictEqual(popupCond(PC_MARK, Object.assign({}, ok, { row: { status: 'company-trip' } }), PC_PRELUDE).shown, false);
+  assert.strictEqual(popupCond(PC_MARK, Object.assign({}, ok, { row: { status: 'leave-sick' } }), PC_PRELUDE).shown, false,
+    'payroll ตัดวันลาเต็มวันออกจาก approvedPC');
 });
 
 test('การ์ดมือถือใช้ badge ชุดเดียวกับแถวบนจอ จึงไม่มีกฎของตัวเอง', () => {

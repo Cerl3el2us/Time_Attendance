@@ -1600,6 +1600,9 @@ window.LANG_JA = {
   "Required only when a work location is given — a holiday worked at the office needs no attachment.": "勤務場所を入力した場合のみ必須です — 事務所で勤務した休日出勤には添付は不要です。",
   "⚠️ Working Report is required when a work location is given": "⚠️ 勤務場所を入力した場合は Working Report の添付が必要です",
   "not given — no Upcountry allowance": "未入力 — 地方出張手当なし",
+  // 2026-10-28 (เจ้าของสั่ง "ไล่แก้ต่อ"): badge ⏱️ ในป๊อปอัปรายวัน เมื่อ payroll ไม่นับใบ OT ใบนั้น
+  // (วันลาเต็มวัน หรือวันทำงานวันหยุดโหมดรับเงิน) — ใบยังอยู่ แต่ต้องไม่อ่านว่าได้เงินเพิ่ม
+  "not counted — the payslip pays this day another way": "計上なし — この日は給与明細で別の方法で支給されます",
   "Paid on the payslip": "給与明細の支給時間",
   // 2026-10-28 (พบตอนรีวิว): สองบรรทัดนี้อยู่ในสาขา "มีเงินเดือนให้อ่าน" ซึ่งเป็นสาขาที่ md/accounting
   // เห็นจริง ส่วน "Paid on the payslip" ข้างบนเป็นสาขาที่ไม่มีเงินเดือน ⇒ เพิ่มแต่ตัวนั้นตัวเดียว

@@ -248,7 +248,7 @@ test('the printed sheet never looks up records by the viewer-fallback user', () 
   // และต้องใช้ ownerUserId จริงที่ทุกจุดที่ถาม "เรคอร์ดของใคร" — ไม่ใช่แค่ไม่มี targetUser.id
   for (const probe of [
     /hasHolidayWorkClaimOnDate\(row\.date, ownerUserId/,
-    /l\.userId === ownerUserId && l\.type === 'holiday-work'/,
+    /holidayWorkUnlockDates\(ownerUserId,/,
     /holidayWorkDisplayFor\(ownerUserId,/,
     /attendanceDayOtRecord\(ownerUserId,/,
     /l\.userId === ownerUserId && l\.type === 'personal-car'/,
@@ -267,8 +267,24 @@ test('the Holiday Work icon is gated by holidayWork eligibility', () => {
   // ของคนที่กำลังดู · ตอนนี้ผ่าน `_attOwnerCan()` ซึ่งผูกกับเจ้าของที่หาเจอจริง
   assert.ok(/canHolidayWorkTarget\s*=\s*_attOwnerCan\('holidayWork'\)/.test(fn),
     'no canHolidayWorkTarget gate — the icon would show for roles with no such entitlement');
-  assert.ok(/_attOwnerCan = key => !!_attOwner && isAllowanceEligible\(eligAtt, _attOwner\.role, key\)/.test(fn),
+  assert.ok(/_attOwnerCan = key => !!_attOwnerRole && isAllowanceEligible\(eligAtt, _attOwnerRole, key\)/.test(fn),
     'ด่านต้องผูกกับ role ของเจ้าของแถว ไม่ใช่ของคนที่กำลังดู');
+  // 2026-10-28 (เจ้าของสั่ง "ไล่แก้ต่อ"): รอบ 4 แก้ไว้สองด่าน และเขียนกำกับว่าด่านอื่นนอกขอบเขต ·
+  // รีวิวรอบ 6 ชี้ว่าด่านที่เหลือเป็นด่านเงินทั้งนั้น และสองอันถัดกันตัดสินด้วยคนละคน
+  // ⇒ ตอนนี้ทั้งลิสต์ต้องผ่าน `_attOwnerCan()` · ข้อนี้ไล่ทีละชื่อ ไม่ใช่นับจำนวน
+  for (const key of ['earlyLate', 'ot', 'upcountry', 'longDistance', 'personalCar', 'holidayWork']) {
+    assert.ok(new RegExp(`_attOwnerCan\\('${key}'\\)`).test(fn),
+      `the ${key} gate in renderAttendanceTable() no longer goes through _attOwnerCan()`);
+  }
+  // และห้ามมีด่านไหนอ่าน role จากอ็อบเจกต์ที่ถอยไปเป็นคนที่กำลังดูได้
+  const code = fn.replace(/^[ \t]*\/\/[^\n]*$/gm, '');
+  assert.ok(!/isAllowanceEligible\(eligAtt, targetUser\.role/.test(code),
+    'a gate in renderAttendanceTable() still reads targetUser.role, which becomes currentUser when\n' +
+    '       the row owner is not in DATA_USERS');
+  // ธงรายบุคคลก็ต้องอ่านจากเจ้าของ ไม่ใช่จาก targetUser
+  assert.ok(!/targetUser\.personalCarEligible/.test(code),
+    'the personal-car flag is read from targetUser, so the viewer\'s own flag can light the icon\n' +
+    '       on somebody else\'s row');
   assert.ok(/_attOwner = DATA_USERS\.find\(u => u\.id === targetUserId\)\s*\n\s*\|\| \(currentUser && currentUser\.id === targetUserId \? currentUser : null\)/.test(fn),
     'หาเจ้าของแถวต้องไม่ถอยไปใช้ currentUser เฉยๆ');
   // 2026-10-08 (review): this used to be /hasAnyAllowanceTarget[^;]*canHolidayWorkTarget/, and
