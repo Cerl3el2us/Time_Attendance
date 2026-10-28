@@ -305,14 +305,30 @@ test('การปัดทีละท่อนไม่ตรงกับก�
   console.log(`        (คู่ที่ปัดทีละท่อนแล้วเพี้ยน: ${bad} · ตัวอย่าง ${eg})`);
 });
 
-test('แถวอัตราไม่มีทศนิยมอยู่ในนั้นแล้ว และบรรทัดสรุปอ่านจากค่าที่เก็บไว้จริง', () => {
+// เจ้าของสั่งเรื่องนี้ซ้ำเป็นครั้งที่สอง ("อย่าลืมแก้ว่ากี่ชั่วโมง กี่นาที ไม่ใช่แสดงตัวเลขแบบนี้")
+// เพราะรอบแรกผมแก้แถวอัตราแล้วเผลอใส่ทศนิยมกลับเข้าไปในบรรทัดเงินที่เพิ่งเพิ่ม ⇒ ยามข้อนี้จึงห้าม
+// `.toFixed(2)` กับ **ชั่วโมง** ทั้งฟังก์ชัน ไม่ใช่ห้ามเฉพาะแถว · จำนวนเงินยังใช้ fmt2dp ได้ตามปกติ
+test('ไม่มีทศนิยมของชั่วโมงหลงเหลือในบล็อกนี้เลย ทุกที่เป็นชั่วโมง-นาที', () => {
   const fn = extractFunction(APP_SRC, 'holidayWorkDetailBlockHtml');
-  assert.ok(!/hw-ot-hours">\$\{[^}]*dec/.test(fn), 'ยังมีทศนิยมต่อแถวอยู่');
+  assert.ok(!/\bh2[03]\.toFixed\(2\)|\bx\.h\.toFixed\(2\)|\.mins \/ 60/.test(fn),
+    'ยังมีการแสดงชั่วโมงเป็นทศนิยมอยู่');
   assert.ok(/hw-ot-hours">\$\{holidayWorkDurationLabel\(s\.mins\)\.hm\}/.test(fn),
-    'แถวต้องบอกชั่วโมง-นาทีเท่านั้น');
+    'แถวอัตราต้องบอกชั่วโมง-นาที');
+  assert.ok(/holidayWorkDurationLabel\(Math\.round\(x\.h \* 60\)\)\.hm/.test(fn),
+    'แถวเงินต้องบอกชั่วโมง-นาที ไม่ใช่ทศนิยม');
   assert.ok(/Number\(l\.otHours20\) \|\| 0.*Number\(l\.otHours30\) \|\| 0/s.test(fn),
     'บรรทัดสรุปต้องอ่าน otHours20/otHours30 ที่เก็บไว้ ไม่ใช่คำนวณใหม่');
-  assert.ok(/hw-ot-total/.test(fn), 'ต้องมีบรรทัดสรุป');
+});
+
+// เงินต้องมาจากฟังก์ชันเดียวกับที่ไอคอน OT บนแถวตารางใช้ ไม่งั้นสองที่จะบอกคนละเลขบนวันเดียวกัน
+test('เงินคิดด้วยสูตรเดียวกับ otPayAmountFromLeave (ปัดทีละ bucket แล้วรวม)', () => {
+  const fn = extractFunction(APP_SRC, 'holidayWorkDetailBlockHtml');
+  assert.ok(/round2HalfUp\(hourlyRate \* 2 \* h20\)/.test(fn), '×2 ต้องปัดแบบเดียวกัน');
+  assert.ok(/round2HalfUp\(hourlyRate \* 3 \* h30\)/.test(fn), '×3 ต้องปัดแบบเดียวกัน');
+  const ref = extractFunction(APP_SRC, 'otPayAmountFromLeave');
+  assert.ok(/round2HalfUp\(hourlyRate \* 2 \* hrs20\)/.test(ref) && /round2HalfUp\(hourlyRate \* 3 \* hrs30\)/.test(ref),
+    'สูตรอ้างอิงเปลี่ยนไปแล้ว ⇒ ต้องตามให้ตรงกันใหม่');
+  assert.ok(/ประมาณการ|Estimate/.test(fn), 'ต้องกำกับว่าเป็นประมาณการ เพราะ OT จ่ายตามยอดรวมทั้งงวด');
 });
 
 console.log(`\n${passed} passed, ${process.exitCode ? 'มีข้อที่ล้มเหลว' : '0 failed'}`);

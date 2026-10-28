@@ -4809,3 +4809,11 @@ tr.finalize-row-confirmed:hover td {
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
+/* แถวสรุปเงินใต้บรรทัด "ที่จ่ายจริง" — ตัวหนาและมีเส้นคั่นบาง เพื่อให้แยกจากแถวรายอัตราข้างบน */
+.hw-ot-detail .hw-ot-sum {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+  font-weight: 700;
+  color: var(--text);
+}

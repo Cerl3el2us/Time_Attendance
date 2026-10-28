@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 162;
+const APP_BUILD = 163;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -3036,7 +3036,8 @@ function holidayWorkDurationLabel(mins) {
 // predate the location field, and a record with no usable start/end gets no rate rows at all.
 // annual-leave mode has no ×2/×3 split (submitHolidayWork sets both to 0 without calling the
 // splitter), so it shows location and claimed times only -- the approver still needs those.
-function holidayWorkDetailBlockHtml(l) {
+function holidayWorkDetailBlockHtml(l, hourlyRate) {
+  hourlyRate = Number(hourlyRate) || 0;
   const loc = holidayWorkLocationLabel(l);
   const times = holidayWorkTimesLabel(l);
   if (!loc && !times) return '';
@@ -3074,12 +3075,40 @@ function holidayWorkDetailBlockHtml(l) {
       // off the record's own otHours20/otHours30 -- the numbers the server pinned at approval and
       // the payslip actually pays, not a recomputation that could drift from them.
       const h20 = Number(l.otHours20) || 0, h30 = Number(l.otHours30) || 0;
-      const paid = [];
-      if (h20 > 0) paid.push(`×2 ${h20.toFixed(2)}`);
-      if (h30 > 0) paid.push(`×3 ${h30.toFixed(2)}`);
-      const total = paid.length
-        ? `<div class="hw-ot-total">${L('Paid on the payslip', 'ที่จ่ายจริงตามสลิป')}: ${paid.join(' · ')} ${L('h', 'ชม.')}</div>`
-        : '';
+      // 2026-10-28 (owner): "กรณีเลือกรับเป็นเงิน ... (ด้วยว่ากี่บาท) มาจาก x2 กี่ชั่วโมง กี่บาท
+      // x3 กี่ชั่วโมง กี่บาท" — the hours alone do not answer the question the popup is opened
+      // with. The arithmetic is the same one otPayAmountFromLeave() does for the row's OT icon
+      // (each bucket rounded, then the sum), so the two screens cannot show different money.
+      // It is an ESTIMATE and says so: payroll pays each multiplier bucket once on the PERIOD's
+      // total hours (owner, 2026-09-24 round 7), so a single day's share can differ by satang.
+      // hourlyRate 0 (no salary on the record, or none readable) simply drops the money and
+      // leaves the hours, rather than printing ฿0.
+      const money = [];
+      if (hourlyRate > 0 && h20 > 0) money.push({ r: '×2', h: h20, amt: round2HalfUp(hourlyRate * 2 * h20) });
+      if (hourlyRate > 0 && h30 > 0) money.push({ r: '×3', h: h30, amt: round2HalfUp(hourlyRate * 3 * h30) });
+      let total = '';
+      if (money.length) {
+        const sum = round2HalfUp(money.reduce((t, x) => t + x.amt, 0));
+        // Hours and minutes here too (owner, twice): no decimal hours anywhere on this block.
+        // The figure that ties a row to the payslip is the baht, which is the number he asked
+        // for, so nothing is lost by dropping the decimal that caused the misreading.
+        total = `<div class="hw-ot-total">` +
+          money.map(x => `<div class="hw-ot-row"><span class="hw-ot-rate">${x.r}</span>` +
+            `<span class="hw-ot-span">${holidayWorkDurationLabel(Math.round(x.h * 60)).hm}</span>` +
+            `<span class="hw-ot-hours">≈ ฿${fmt2dp(x.amt)}</span></div>`).join('') +
+          `<div class="hw-ot-row hw-ot-sum"><span class="hw-ot-span">${L('Total for this day', 'รวมของวันนี้')}</span>` +
+          `<span class="hw-ot-hours">≈ ฿${fmt2dp(sum)}</span></div>` +
+          `<div class="hw-ot-note">${L('Estimate — OT is paid on the period total, so the payslip can differ by satang',
+            'ประมาณการ — OT จ่ายตามยอดรวมทั้งงวด สลิปจริงอาจต่างระดับสตางค์')}</div>`;
+      } else {
+        // No salary readable: the hours still get their own line, still as hours and minutes.
+        const paid = [];
+        if (h20 > 0) paid.push(`×2 ${holidayWorkDurationLabel(Math.round(h20 * 60)).hm}`);
+        if (h30 > 0) paid.push(`×3 ${holidayWorkDurationLabel(Math.round(h30 * 60)).hm}`);
+        if (paid.length) {
+          total = `<div class="hw-ot-total">${L('Paid on the payslip', 'ที่จ่ายจริงตามสลิป')}: ${paid.join(' · ')}</div>`;
+        }
+      }
       out += `<div class="hw-ot-rows">${rows}${total}</div>`;
     }
   }
@@ -22869,7 +22898,14 @@ function showAttendanceDetail(date) {
       // as six hours thirty-three minutes, two lines under a "7 ชั่วโมง 23 นาที" that had taught
       // his eye to read it that way. Same minutes, said the way the rest of this popup says them.
       const hwDur = hwHrs ? holidayWorkDurationLabel(Math.round(hwHrs * 60)) : null;
-      tagsEl.innerHTML += `<span class="badge" style="background:#ffedd5;color:#9a3412">🎌 ${L('Holiday Work', 'ทำงานวันหยุด')} ${hwDur ? hwDur.hm + ' ' : ''}— ${mode}</span>`;
+      // 2026-10-28 (owner): the badge says "รับเป็นเงิน" and never said how much. Same estimate as
+      // the breakdown below it and as the row's OT icon -- one function, otPayAmountFromLeave(),
+      // so three places cannot quote three numbers. No salary readable -> the badge just omits it.
+      const _hwSalary = Number(targetUserObj && targetUserObj.salary) || 0;
+      const _hwHourly = _hwSalary > 0 ? _hwSalary / 30 / 8 : 0;
+      const _hwAmt = (paid && _hwHourly > 0) ? otPayAmountFromLeave(hwRec, _hwHourly) : 0;
+      const hwModeText = _hwAmt > 0 ? `${mode} ≈ ฿${fmt2dp(_hwAmt)}` : mode;
+      tagsEl.innerHTML += `<span class="badge" style="background:#ffedd5;color:#9a3412">🎌 ${L('Holiday Work', 'ทำงานวันหยุด')} ${hwDur ? hwDur.hm + ' ' : ''}— ${hwModeText}</span>`;
       // The transport follows the upcountry field as of today, so it is read through the same
       // function payroll uses rather than assumed from the mode. The abroad set must carry this
       // date when the day IS abroad -- passing an empty set would have shown +500 on a day payroll
@@ -22881,7 +22917,9 @@ function showAttendanceDetail(date) {
       }
       // Below the badges, not inside them (owner, 2026-10-27): the badges stay exactly as they
       // are, so no other day type and no other request type is touched by this.
-      tagsEl.innerHTML += holidayWorkDetailBlockHtml(hwRec);
+      // The hourly rate is read the same way the row's OT icon reads it (salary / 30 / 8), so the
+      // two places that put a baht figure on this day cannot disagree.
+      tagsEl.innerHTML += holidayWorkDetailBlockHtml(hwRec, _hwHourly);
     }
 
     const ldRec = dayLeave('long-distance');
