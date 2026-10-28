@@ -447,10 +447,44 @@ test('the attendance table badges use the viewed employee\'s rate', () => {
 
 test('the attendance detail modal uses the viewed employee\'s rate', () => {
   const modal = between(APP_SRC, "const _dA = APP_SETTINGS.allowances || {};", 'buildCheckoutReviewHtml(row, targetUserObj, false)', 400);
-  assert.ok(/earlyLateRateFor\(\s*targetRole/.test(modal) || /_elRateTarget\(/.test(modal),
-    'the attendance detail modal must take the rate for targetRole');
-  assert.ok(!/_dA\.(earlyMorning1|earlyMorning2|lateNight1|lateNight2)/.test(modal),
+  // 2026-10-28 (เจ้าของสั่ง "ไล่แก้ต่อ" หลังรีวิวรอบ 6): ของเดิมยอมรับ `targetRole` ซึ่งมาจาก
+  // `targetUserObj` ที่ **ถอยไปเป็น `currentUser`** เมื่อหาเจ้าของเรคอร์ดไม่เจอ ⇒ ยามนี้เขียวอยู่
+  // ขณะที่อัตราคิดจาก role ของคนที่กำลังดู ซึ่งตรงข้ามกับชื่อข้อของตัวเอง · ตอนนี้ยอมรับเฉพาะ
+  // `_ownerRole` และปฏิเสธชื่อที่ถอยได้อย่างชัดเจน
+  const code = modal.replace(/^[ \t]*\/\/[^\n]*$/gm, '');
+  assert.ok(/earlyLateRateFor\(\s*_ownerRole/.test(code) || /earlyMorningAllowanceForTier\([^,]+,\s*_ownerRole\)/.test(code),
+    'the attendance detail modal must take the rate for the record OWNER (_ownerRole)');
+  for (const bad of [/earlyLateRateFor\(\s*targetRole/, /earlyLateRateFor\(\s*targetUserObj/, /earlyLateRateFor\(\s*currentUser/]) {
+    assert.ok(!bad.test(code),
+      `the modal prices the allowance off a viewer-fallback role: ${bad}`);
+  }
+  assert.ok(!/_dA\.(earlyMorning1|earlyMorning2|lateNight1|lateNight2)/.test(code),
     'the modal still reads the company-wide amount directly');
+});
+
+// 2026-10-28: เดิมมีแต่ข้อที่ตรวจ "โมดัลใช้อัตราของพนักงานที่กำลังดู" ส่วน **ด่านสิทธิ์** ที่ตัดสินว่า
+// badge จะขึ้นหรือไม่ ไม่มียามเลย ⇒ ย้อนด่านกลับไปใช้ role ของคนดูได้โดยไม่มีอะไรแดง
+test('the attendance detail modal gates early/late on the owner, not the viewer', () => {
+  const fn = (() => {
+    const re = /^function showAttendanceDetail\(/m;
+    const m = re.exec(APP_SRC);
+    assert.ok(m, 'showAttendanceDetail not found');
+    const i = APP_SRC.indexOf('{', APP_SRC.indexOf(')', m.index));
+    let d = 0;
+    for (let j = i; j < APP_SRC.length; j++) {
+      if (APP_SRC[j] === '{') d++;
+      else if (APP_SRC[j] === '}') { d--; if (!d) return APP_SRC.slice(m.index, j + 1); }
+    }
+    throw new Error('unbalanced');
+  })().replace(/^[ \t]*\/\/[^\n]*$/gm, '');
+  const gates = fn.match(/isAllowanceEligible\(APP_SETTINGS\.allowanceEligibility,\s*([A-Za-z_$][\w$.]*)/g) || [];
+  assert.ok(gates.length >= 3, `expected the early/late and holiday-work gates, found ${gates.length}`);
+  gates.forEach(g => assert.ok(/_ownerRole/.test(g),
+    `a gate in showAttendanceDetail() judges with "${g}" instead of the record owner's role`));
+  // และตัวแปรที่ถอยได้ต้องไม่มีเหลือให้หยิบไปใช้โดยไม่ตั้งใจ
+  assert.ok(!/const targetRole = /.test(fn),
+    'targetRole is back in scope; it reads the viewer when the owner is missing, and it has been ' +
+    'picked up by mistake twice already');
 });
 
 test('the request detail shows the requester\'s rate, not the approver\'s', () => {

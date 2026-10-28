@@ -52,6 +52,9 @@ const FNS = [
   // 2026-10-28 (รีวิวรอบ 6): การ์ดเทียบเงินเลิกพิมพ์ชั่วโมงทศนิยม ("6.33 ชม.") แล้วมาใช้ตัวจัด
   // รูปแบบตัวเดียวกับที่ตารางเวลาและป๊อปอัปใช้ ⇒ มันเป็น dependency ของ estimateDayEarnings แล้ว
   'holidayWorkDurationLabel',
+  // 2026-10-28: ชุดวันที่ปลดล็อกเบี้ยเข้าเช้าย้ายไปอยู่ฟังก์ชันกลางที่ gate สิทธิ์เหมือน payroll
+  // ห้ามดึง isCompanyTripDay ตันจริงเข้ามา: sandbox stub มันไว้โดยเจตนา เทสต์คุมผ่าน opts.companyTrip
+  'holidayWorkUnlockDates',
   // the extraction that removed the last inline money rules from computePayroll
   'hasUpcountryLocation', 'holidayTransportForRecord',
   // the preview itself
@@ -68,7 +71,9 @@ const SETTINGS = () => ({
   workSchedule: { standardStartHour: 8, standardStartMinute: 30 },
   payroll: { periodStartDay: 21 },
   // Spelled out so the DEFAULT_ALLOWANCE_ELIGIBILITY fallback never silently decides a test.
-  allowanceEligibility: { ot: EVERY_ROLE, earlyLate: EVERY_ROLE, upcountry: EVERY_ROLE },
+  // 2026-10-28: ต้องมี `holidayWork` ด้วย — ชุดวันที่ปลดล็อกเบี้ยเข้าเช้าถามคีย์นี้แล้ว
+  // (สะท้อน payroll) · คีย์ที่หายทำให้ isAllowanceEligible() อ่าน undefined.includes แล้ว throw
+  allowanceEligibility: { ot: EVERY_ROLE, earlyLate: EVERY_ROLE, upcountry: EVERY_ROLE, holidayWork: EVERY_ROLE },
 });
 
 // A sandbox per test. generatePeriodDays is stubbed to one row -- the preview only ever reads that
@@ -88,7 +93,7 @@ function makeWorld(opts = {}) {
     // FORM'S employee rather than falling back to whoever is logged in.
     isApprovedAbroadDate: (d, uid) => { sandboxAbroadCalls.push(uid); return !!opts.abroad; },
     generatePeriodDays: () => [opts.row || { date: opts.date, status: 'absent' }],
-    DEFAULT_ALLOWANCE_ELIGIBILITY: { ot: EVERY_ROLE, earlyLate: EVERY_ROLE, upcountry: EVERY_ROLE },
+    DEFAULT_ALLOWANCE_ELIGIBILITY: { ot: EVERY_ROLE, earlyLate: EVERY_ROLE, upcountry: EVERY_ROLE, holidayWork: EVERY_ROLE },
     Number, Math, JSON, Object, Array, String, Set, Date, isNaN, parseInt, parseFloat, Boolean,
     console: { log() {}, error() {} },
   };

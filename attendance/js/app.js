@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 169;
+const APP_BUILD = 170;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -3251,6 +3251,31 @@ function isHolidayWorkOtRecord(l) {
   return !!l && l.type === 'holiday-work' && l.status === 'approved' && l.compensationMode === 'paid' &&
     ((Number(l.otHours20) || 0) + (Number(l.otHours30) || 0)) > 0;
 }
+// 2026-10-28 (เจ้าของสั่ง "ไล่แก้ต่อ" หลังรีวิวรอบ 6): ชุดวันที่ใช้ "ปลดล็อก" เบี้ยเข้าเช้า/ดึก
+// ของวันหยุด · deviceScanQualifiesForEarlyMorning() และ ...LateNight() รับชุดนี้เป็นตัวตัดสินว่า
+// วันพักวันนั้น "ถูกทำงาน" จริงไหม เพราะวันพักจ่ายเบี้ยอัตโนมัติได้เฉพาะเมื่อมีใบทำงานวันหยุด
+//
+// **ของเดิมมีสำเนาของชุดนี้กระจาย 11 ที่ และทุกที่สร้างมันแบบไม่มีด่านสิทธิ์เลย** ขณะที่
+// computePayroll ส่ง `holidayWorkDates` ซึ่งมาจาก `approvedHolidayWork` ที่ gate ด้วยสิทธิ์
+// `holidayWork` และตัดวัน Company Trip ออก (ดู computePayroll) ⇒ role ที่มีสิทธิ์ `earlyLate`
+// แต่ไม่มี `holidayWork` (ค่าที่ตั้งไว้วันนี้: driver, md, accounting, marketing) จะเห็น
+// 🌙 Late Night พร้อมจำนวนเงินบนจอ ในการ์ด Dashboard ในรายงาน และบนกระดาษ
+// **ขณะที่สลิปจ่าย ฿0** เพราะชุดของ payroll ว่างเปล่า
+//
+// ไม่ได้ใส่ขอบเขตงวดเหมือน payroll เพราะทุกผู้เรียกถามถึงวันที่อยู่ในงวดที่กำลังแสดงอยู่แล้ว
+// การเป็นสมาชิกของวันนั้นจึงไม่เปลี่ยน · `ownerRole` ต้องเป็น role ของ **เจ้าของเรคอร์ด**
+// หาไม่เจอ (null) ⇒ คืนชุดว่าง: ไม่รู้ว่าสลิปจ่ายอะไร ก็ไม่ปลดล็อกเงินให้
+//
+// ไม่มีฝาแฝดใน server.js: ฝั่งนั้นสร้าง holidayWorkDates ใน computePayroll อยู่แล้วและไม่มีจอ
+function holidayWorkUnlockDates(userId, ownerRole, S) {
+  if (!ownerRole || !isAllowanceEligible(S && S.allowanceEligibility, ownerRole, 'holidayWork')) {
+    return new Set();
+  }
+  return new Set(DATA_LEAVES.filter(l =>
+    l.userId === userId && l.type === 'holiday-work' && l.status === 'approved' &&
+    !isCompanyTripDay(l.dateFrom)
+  ).map(l => l.dateFrom));
+}
 function reportOtRecords(u, startStr, endStr) {
   if (!u) return [];
   const canOT = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'ot');
@@ -3496,8 +3521,9 @@ function estimateDayEarnings(opts) {
   if (canEarlyLate && !onAbroad) {
     const d0 = new Date(date + 'T12:00:00');
     const row = (generatePeriodDays(d0, d0, false, user.id) || [])[0];
-    const hwDates = new Set(DATA_LEAVES.filter(l => l.userId === user.id && l.type === 'holiday-work' &&
-      l.status === 'approved').map(l => l.dateFrom));
+    // 2026-10-28: ใช้ชุดกลางที่ gate สิทธิ์เหมือน payroll · `role` คือพนักงานของฟอร์ม
+    // (อาจไม่ใช่คนที่กดยื่น — แอดมินยื่นแทนได้) ไม่ใช่ currentUser
+    const hwDates = holidayWorkUnlockDates(user.id, role, APP_SETTINGS);
     // On the Holiday Work form the request being filled in IS what unlocks a rest day's early
     // morning, so treat this date as covered while previewing it.
     if (o.mode) hwDates.add(date);
@@ -11680,6 +11706,17 @@ function renderAttendanceTable() {
   const targetUserId = canViewOthers ? (selectedAttUserId || currentUser.id) : currentUser.id;
   const targetUser = canViewOthers ? (DATA_USERS.find(u => u.id === targetUserId) || currentUser) : currentUser;
   const isViewingSelf = targetUserId === currentUser.id;
+  // 2026-10-28 (เจ้าของสั่ง "ไล่แก้ต่อ"): เจ้าของแถวตัวจริง — ประกาศไว้ตรงนี้ เพราะทั้ง legend
+  // (บรรทัดล่างๆ) และด่านเบี้ยทั้งหมดต้องใช้มัน · `targetUser` ถอยไปเป็น `currentUser` เมื่อหา
+  // เจ้าของใน DATA_USERS ไม่เจอ ⇒ ทุกอย่างที่เป็น "ของพนักงานคนที่กำลังดูอยู่ในตาราง" ห้ามอ่านจากมัน
+  // หาไม่เจอ = null ⇒ ด่านปิดและอัตราเป็น 0 (เงียบดีกว่าทายผิด)
+  const _attOwner = DATA_USERS.find(u => u.id === targetUserId)
+    || (currentUser && currentUser.id === targetUserId ? currentUser : null);
+  // 2026-10-28: `gateRoleFor()` ไม่ใช่ `.role` ดิบ — กฎของเจ้าของ (2026-10-08, AGENTS §7a):
+  // ด่านต้องถาม role ที่ **มีผลจริง** ไม่ใช่ role ของบัชชี เพื่อให้ superadmin
+  // ที่กำลังพรีวิว role อื่น เห็นสิ่งที่ role นั้นเห็นจริง · id คนอื่นคืน role ของเขาตามปกติ
+  // tests/superadmin-reach.test.js จับ raw `currentUser.role` ที่เพิ่มใหม่ได้เอง
+  const _attOwnerRole = _attOwner ? gateRoleFor(_attOwner, targetUserId) : null;
 
   // 2026-07-31: legend used to hardcode the rates/thresholds directly in index.html.
   // Reads live from Settings so it cannot silently contradict the actual rates.
@@ -11689,7 +11726,9 @@ function renderAttendanceTable() {
   // ASSIGNS selectedAttUserId when it is still null, so reading it before that call makes an
   // admin's first render default to themselves instead of the first employee.
   const _legA = APP_SETTINGS.allowances;
-  const _elRateLegend = (key) => earlyLateRateFor(targetUser.role, key, APP_SETTINGS);
+  // 2026-10-28: `_attOwnerRole` ไม่ใช่ `targetUser.role` — legend นี้บอก "อัตราของพนักงานคนนี้"
+  // เป็นจำนวนเงิน ⇒ ห้ามคิดจาก role ของคนที่กำลังดู (ดูเหตุผลที่จุดประกาศ)
+  const _elRateLegend = (key) => earlyLateRateFor(_attOwnerRole, key, APP_SETTINGS);
   const elEarly = document.getElementById('att-legend-early');
   if (elEarly) elEarly.textContent = currentLang === 'ja'
     ? `🌅 早朝手当 ${_legA.earlyThreshold2Min}分前=฿${_elRateLegend('earlyMorning2')} | ${_legA.earlyThreshold1Min}分前=฿${_elRateLegend('earlyMorning1')}`
@@ -11716,16 +11755,18 @@ function renderAttendanceTable() {
   // 2026-10-28 (รีวิวรอบ 4): `targetUser` ถอยไปเป็น `currentUser` เมื่อหาเจ้าของแถวไม่เจอ ⇒ ด่าน
   // ที่ตัดสินเบี้ยจะใช้ role ของคนที่กำลังดู · ป๊อปอัปถูกแก้ให้ใช้เจ้าของจริงไปแล้ว ถ้าแถวไม่แก้ตาม
   // ทั้งสองจะพูดคนละเรื่องบนเรคอร์ดเดียวกัน (แถวโชว์ ⏱️ ส่วนป๊อปอัปขึ้นว่า "ไม่มีรายการพิเศษ")
-  // หาไม่เจอ = ไม่รู้ว่าสลิปจ่ายอะไร ⇒ ไม่โชว์เบี้ย · แก้เฉพาะสองด่านของตระกูล Holiday Work/Upcountry
-  // ที่งานนี้แตะ ส่วนด่านอื่นเป็นของเดิมและอยู่นอกขอบเขตรอบนี้
-  const _attOwner = DATA_USERS.find(u => u.id === targetUserId)
-    || (currentUser && currentUser.id === targetUserId ? currentUser : null);
-  const _attOwnerCan = key => !!_attOwner && isAllowanceEligible(eligAtt, _attOwner.role, key);
-  const canEarlyLateTarget   = isAllowanceEligible(eligAtt, targetUser.role, 'earlyLate');
-  const canOTTarget          = isAllowanceEligible(eligAtt, targetUser.role, 'ot');
+  // หาไม่เจอ = ไม่รู้ว่าสลิปจ่ายอะไร ⇒ ไม่โชว์เบี้ย
+  // 2026-10-28 (เจ้าของสั่ง "ไล่แก้ต่อ" หลังรีวิวรอบ 6): รอบ 4 แก้ไว้แค่สองด่านของตระกูล Holiday
+  // Work/Upcountry และเขียนกำกับว่าด่านอื่น "อยู่นอกขอบเขตรอบนั้น" · รีวิวรอบ 6 ชี้ว่าด่านที่เหลือ
+  // เป็นด่านเงินทั้งนั้น และสองอันถัดกันในลิสต์เดียวนี้ตัดสินด้วยคนละคน ซึ่งอ่านโค้ดแล้วเข้าใจผิดได้ง่าย
+  // ⇒ ตอนนี้ทุกด่านในลิสต์นี้ตัดสินด้วย role ของเจ้าของแถวเหมือนกันหมด ไม่มีข้อยกเว้น
+  // `personalCarEligible` เป็นธงรายบุคคล ไม่ใช่ role ⇒ ต้องอ่านจากเจ้าของด้วย ไม่ใช่จาก `targetUser`
+  const _attOwnerCan = key => !!_attOwnerRole && isAllowanceEligible(eligAtt, _attOwnerRole, key);
+  const canEarlyLateTarget   = _attOwnerCan('earlyLate');
+  const canOTTarget          = _attOwnerCan('ot');
   const canUpcountryTarget   = _attOwnerCan('upcountry');
-  const canLongDistTarget    = isAllowanceEligible(eligAtt, targetUser.role, 'longDistance');
-  const canPersonalCarTarget = isAllowanceEligible(eligAtt, targetUser.role, 'personalCar') && targetUser.personalCarEligible === true;
+  const canLongDistTarget    = _attOwnerCan('longDistance');
+  const canPersonalCarTarget = _attOwnerCan('personalCar') && !!_attOwner && _attOwner.personalCarEligible === true;
   // 2026-10-08 (owner): Holiday Work had no gate here at all, because the column had no icon for
   // it. Without this flag the column can also stay hidden for someone whose only entitlement is
   // Holiday Work -- hasAnyAllowanceTarget decides whether the whole column renders.
@@ -11874,7 +11915,8 @@ function renderAttendanceTable() {
     // 2026-10-13: the rate belongs to the EMPLOYEE WHOSE ROW THIS IS (targetUser), not to whoever
     // is looking. Accounting/MD browse other people here, and showing them their own rate on
     // someone else's row reads as the system miscalculating.
-    const _elRateTarget = (key) => earlyLateRateFor(targetUser.role, key, APP_SETTINGS);
+    // 2026-10-28: role ของเจ้าของแถว — ทูลทิปนี้พิมพ์จำนวนเงิน ⇒ ห้ามคิดจาก role ของคนที่กำลังดู
+    const _elRateTarget = (key) => earlyLateRateFor(_attOwnerRole, key, APP_SETTINGS);
     let earlyBadge = '';
     let earlyWarnBadge = '';
     if (canEarlyLateTarget && row.checkIn && row.status !== 'company-trip') {
@@ -11939,9 +11981,7 @@ function renderAttendanceTable() {
       }
     }
     let lateBadge = '';
-    const _lnHwDates = new Set(DATA_LEAVES.filter(l =>
-      l.userId === targetUserId && l.type === 'holiday-work' && l.status === 'approved'
-    ).map(l => l.dateFrom));
+    const _lnHwDates = holidayWorkUnlockDates(targetUserId, _attOwnerRole, APP_SETTINGS);
     if (canEarlyLateTarget && deviceScanQualifiesForLateNight(row, _lnHwDates)) {
       const _ln2Thr = lateNightThresholdHourOf(_ATallowances, 2);
       const bonus = lateNightPoints(row.lateOut, _ln2Thr) === 2 ? `฿${_elRateTarget('lateNight2')}` : `฿${_elRateTarget('lateNight1')}`;
@@ -12227,9 +12267,8 @@ function buildAttendancePrintView({ targetUser, days, start, end, workDays, late
       const [h, m] = row.checkIn.split(':').map(Number);
       if (h * 60 + m <= earlyThresholdMinsOf(_pA, 1)) badges.push('🌅');
     }
-    if (canEarlyLateTarget && deviceScanQualifiesForLateNight(row, new Set(DATA_LEAVES.filter(l =>
-      l.userId === ownerUserId && l.type === 'holiday-work' && l.status === 'approved'
-    ).map(l => l.dateFrom)))) badges.push('🌙');
+    if (canEarlyLateTarget && deviceScanQualifiesForLateNight(row,
+      holidayWorkUnlockDates(ownerUserId, ownerRole, APP_SETTINGS))) badges.push('🌙');
     // 2026-10-08 (review): this carried the old `type === 'ot'` filter verbatim and had no 🔄 at
     // all, so the printout contradicted the screen beside it on an approved Holiday Work day. The
     // paper is what gets filed and signed, and a payroll dispute is settled from the paper.
@@ -12434,9 +12473,8 @@ function renderDashboard() {
   const _S = APP_SETTINGS.allowances;
   const _ln2Thr = lateNightThresholdHourOf(_S, 2);
   let earlyCount = 0, lateNightCount = 0;
-  const _dashHwDates = new Set(DATA_LEAVES.filter(l =>
-    l.userId === currentUser.id && l.type === 'holiday-work' && l.status === 'approved'
-  ).map(l => l.dateFrom));
+  // 2026-10-28: `effectiveRole()` — การ์ดนี้เป็นของตัวเอง แต่ต้องเคารพ role ที่ superadmin กำลังพรีวิว
+  const _dashHwDates = holidayWorkUnlockDates(currentUser.id, effectiveRole(), APP_SETTINGS);
   days.forEach(d => {
     if (deviceScanQualifiesForEarlyMorning(d, _dashHwDates)) {
       const [h, m] = d.checkIn.split(':').map(Number);
@@ -12827,9 +12865,8 @@ function showDashPeriodDetail(kind) {
   const startStr = localDateStr(start);
   const endStr = localDateStr(end);
   const uid = currentUser.id;
-  const _dashHwDates = new Set(DATA_LEAVES.filter(l =>
-    l.userId === uid && l.type === 'holiday-work' && l.status === 'approved'
-  ).map(l => l.dateFrom));
+  // 2026-10-28: `uid` คือ `currentUser.id` อยู่แล้ว ⇒ ใช้ effectiveRole() เหมือน Dashboard
+  const _dashHwDates = holidayWorkUnlockDates(uid, effectiveRole(), APP_SETTINGS);
   const _S = APP_SETTINGS.allowances || {};
   const STD_START_MIN = (APP_SETTINGS.workSchedule?.standardStartHour ?? 8) * 60 + (APP_SETTINGS.workSchedule?.standardStartMinute ?? 30);
   const fmtLate = min => currentLang === 'ja' ? (min < 60 ? `${min}分` : `${Math.floor(min / 60)}時間${min % 60}分`) : (min < 60 ? L(`${min}m`, `${min} น.`) : L(`${Math.floor(min / 60)}h ${min % 60}m`, `${Math.floor(min / 60)} ชม. ${min % 60} น.`));
@@ -12901,10 +12938,7 @@ function showDashPeriodDetail(kind) {
     const t2 = earlyThresholdMinsOf(_S, 2);
     let tot = 0;
     rows = days.filter(d => {
-      const hwDates = new Set(DATA_LEAVES.filter(l =>
-        l.userId === uid && l.type === 'holiday-work' && l.status === 'approved'
-      ).map(l => l.dateFrom));
-      if (!deviceScanQualifiesForEarlyMorning(d, hwDates)) return false;
+      if (!deviceScanQualifiesForEarlyMorning(d, _dashHwDates)) return false;
       const [h, m] = d.checkIn.split(':').map(Number);
       return h * 60 + m <= t1;
     }).map(d => {
@@ -14702,9 +14736,7 @@ function computeReportPeriodStats(u, start, end, periodIndex) {
 
   const canEarlyLateRow = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'earlyLate');
   const _SA = APP_SETTINGS.allowances;
-  const _rptHwDates = new Set(DATA_LEAVES.filter(l =>
-    l.userId === u.id && l.type === 'holiday-work' && l.status === 'approved'
-  ).map(l => l.dateFrom));
+  const _rptHwDates = holidayWorkUnlockDates(u.id, gateRoleFor(u, u.id), APP_SETTINGS);
   let earlyCount = 0;
   if (canEarlyLateRow) days.filter(d => deviceScanQualifiesForEarlyMorning(d, _rptHwDates)).forEach(d => {
     const [h, m] = d.checkIn.split(':').map(Number);
@@ -15198,7 +15230,7 @@ function buildReportDetailTables(u, days, startStr, endStr) {
   const earlyThr1 = earlyThresholdMinsOf(_rdA, 1);
   const earlyThr2 = earlyThresholdMinsOf(_rdA, 2);
   const lnThr2 = lateNightThresholdHourOf(_rdA, 2);
-  const earlyDays=canEarlyLateRpt?days.filter(d=>{const hwDates=new Set(DATA_LEAVES.filter(l=>l.userId===u.id&&l.type==='holiday-work'&&l.status==='approved').map(l=>l.dateFrom));if(!deviceScanQualifiesForEarlyMorning(d,hwDates))return false;const[h,m]=d.checkIn.split(':').map(Number);return h*60+m<=earlyThr1;}):[];
+  const earlyDays=canEarlyLateRpt?days.filter(d=>{const hwDates=holidayWorkUnlockDates(u.id,gateRoleFor(u,u.id),APP_SETTINGS);if(!deviceScanQualifiesForEarlyMorning(d,hwDates))return false;const[h,m]=d.checkIn.split(':').map(Number);return h*60+m<=earlyThr1;}):[];
   if (earlyDays.length>0) {
     let tot=0;
     const rows=earlyDays.map(d=>{const[h,m]=d.checkIn.split(':').map(Number);const p=h*60+m<=earlyThr2?2:1;tot+=p;return`<tr style="border-bottom:1px solid #f1f5f9"><td style="padding:9px 14px;font-weight:600">${fmtDate(new Date(d.date+'T12:00:00'))}</td><td style="padding:9px 14px;text-align:center">${escapeHtml(d.checkIn)}</td><td style="padding:9px 14px;text-align:center;color:#d97706;font-weight:700">${p} ${L('times','ครั้ง')}</td></tr>`;}).join('');
@@ -15207,7 +15239,7 @@ function buildReportDetailTables(u, days, startStr, endStr) {
     <tfoot><tr style="background:#fffbeb"><td colspan="2" style="padding:8px 14px;font-weight:700;color:#92400e">${L('Total','รวม')}</td><td style="padding:8px 14px;text-align:center;font-weight:700;color:#d97706">${tot} ${L('times','ครั้ง')}</td></tr></tfoot></table>`;
   }
 
-  const lnDays=canEarlyLateRpt?days.filter(d=>{const hwDates=new Set(DATA_LEAVES.filter(l=>l.userId===u.id&&l.type==='holiday-work'&&l.status==='approved').map(l=>l.dateFrom));return deviceScanQualifiesForLateNight(d,hwDates);}):[];
+  const lnDays=canEarlyLateRpt?days.filter(d=>{const hwDates=holidayWorkUnlockDates(u.id,gateRoleFor(u,u.id),APP_SETTINGS);return deviceScanQualifiesForLateNight(d,hwDates);}):[];
   if (lnDays.length>0) {
     let tot=0;
     const rows=lnDays.map(d=>{const p=lateNightPoints(d.lateOut,lnThr2);tot+=p;return`<tr style="border-bottom:1px solid #f1f5f9"><td style="padding:9px 14px;font-weight:600">${fmtDate(new Date(d.date+'T12:00:00'))}</td><td style="padding:9px 14px;text-align:center">${escapeHtml(d.lateOut)}</td><td style="padding:9px 14px;text-align:center;color:#1d4ed8;font-weight:700">${p} ${L('times','ครั้ง')}</td></tr>`;}).join('');
@@ -15261,13 +15293,13 @@ function showReportDetail(userId) {
   const annual    = days.filter(d => d.status==='leave-annual').length;
   const sick      = days.filter(d => d.status==='leave-sick').length;
   const upcountry   = canUpcountryRpt ? days.filter(d => d.upcountry && d.status !== 'company-trip').length : 0;
-  const _rdSA=APP_SETTINGS.allowances; let earlyCount=0; if (canEarlyLateRpt) { const hwDates=new Set(DATA_LEAVES.filter(l=>l.userId===u.id&&l.type==='holiday-work'&&l.status==='approved').map(l=>l.dateFrom)); days.filter(d=>deviceScanQualifiesForEarlyMorning(d,hwDates)).forEach(d=>{const[h,m]=d.checkIn.split(':').map(Number);const mins=h*60+m;const p=mins<=earlyThresholdMinsOf(_rdSA, 2)?2:mins<=earlyThresholdMinsOf(_rdSA, 1)?1:0;earlyCount+=p;}); }
+  const _rdSA=APP_SETTINGS.allowances; let earlyCount=0; if (canEarlyLateRpt) { const hwDates=holidayWorkUnlockDates(u.id,gateRoleFor(u,u.id),APP_SETTINGS); days.filter(d=>deviceScanQualifiesForEarlyMorning(d,hwDates)).forEach(d=>{const[h,m]=d.checkIn.split(':').map(Number);const mins=h*60+m;const p=mins<=earlyThresholdMinsOf(_rdSA, 2)?2:mins<=earlyThresholdMinsOf(_rdSA, 1)?1:0;earlyCount+=p;}); }
   // 2026-09-24 (Opus review): the one site the lateNightThresholdHourOf() migration missed. With
   // `||` a configured 00:00 fell through to 20:00, so this detail modal counted ×2 Late Night from
   // 20:00 while the Reports table beside it (already migrated) counted from midnight -- two
   // different Late Night totals for the same employee and period on the same screen.
   const _cardLn2=lateNightThresholdHourOf(APP_SETTINGS.allowances,2);
-  let lateNightCount=0; if (canEarlyLateRpt) { const hwDates=new Set(DATA_LEAVES.filter(l=>l.userId===u.id&&l.type==='holiday-work'&&l.status==='approved').map(l=>l.dateFrom)); days.filter(d=>deviceScanQualifiesForLateNight(d,hwDates)).forEach(d=>{lateNightCount+=lateNightPoints(d.lateOut,_cardLn2);}); }
+  let lateNightCount=0; if (canEarlyLateRpt) { const hwDates=holidayWorkUnlockDates(u.id,gateRoleFor(u,u.id),APP_SETTINGS); days.filter(d=>deviceScanQualifiesForLateNight(d,hwDates)).forEach(d=>{lateNightCount+=lateNightPoints(d.lateOut,_cardLn2);}); }
   const pad2=(n)=>String(n).padStart(2,'0');
   const startStr=`${start.getFullYear()}-${pad2(start.getMonth()+1)}-${pad2(start.getDate())}`;
   const endStr  =`${end.getFullYear()}-${pad2(end.getMonth()+1)}-${pad2(end.getDate())}`;
@@ -22722,9 +22754,11 @@ function showAttendanceDetail(date) {
   const targetUserId = canViewOthers ? (selectedAttUserId || currentUser.id) : currentUser.id;
   const isViewingSelf = targetUserId === currentUser.id;
   const targetUserObj = canViewOthers ? (DATA_USERS.find(u => u.id === targetUserId) || currentUser) : currentUser;
-  const targetRole = targetUserObj.role;
+  // 2026-10-28 (เจ้าของสั่ง "ไล่แก้ต่อ"): `const targetRole = targetUserObj.role` ถูกลบทิ้งแล้ว
+  // เพราะทุกด่านในฟังก์ชันนี้ย้ายไปใช้ `_ownerRole` ครบ และการทิ้งตัวแปรที่ "ใช้ได้แต่ไม่ควรใช้"
+  // ไว้ในขอบเขตเดียวกัน คือวิธีที่มันกลับมาถูกใช้อีกครั้งโดยไม่มีใครตั้งใจ (เกิดมาแล้วสองรอบ)
   // 2026-10-28 (รีวิวรอบ 4): `targetUserObj` ถอยไปเป็น `currentUser` เมื่อหาเจ้าของเรคอร์ดไม่เจอ
-  // ⇒ `targetRole` อาจเป็น role ของ "คนที่กำลังดู" · สำหรับป้ายชื่อนั้นไม่เป็นไร แต่ทุกด่านที่
+  // ⇒ role ของมันอาจเป็นของ "คนที่กำลังดู" · สำหรับป้ายชื่อนั้นไม่เป็นไร แต่ทุกด่านที่
   // ตัดสิน **เงิน** ต้องใช้ role ของเจ้าของเรคอร์ดจริงเท่านั้น ไม่งั้นจะโชว์เบี้ยของวันที่สลิปจ่าย ฿0
   // รอบก่อนผมแก้แค่ด่านเดียว แล้วทิ้งด่านของ 🗺️ ไว้ข้างบนมัน ซึ่งก็พิมพ์เงินเหมือนกัน
   // ⇒ คราวนี้หาเจ้าของให้เสร็จตรงนี้ที่เดียว แล้วให้ทุกด่านเงินอ้างตัวเดียวกัน
@@ -22733,7 +22767,8 @@ function showAttendanceDetail(date) {
   // หาไม่เจอ = ไม่รู้ว่าสลิปจ่ายอะไร ⇒ ไม่โชว์เบี้ยใดๆ (เงียบดีกว่าทายผิด)
   const _ownerUser = DATA_USERS.find(u => u.id === targetUserId)
     || (currentUser && currentUser.id === targetUserId ? currentUser : null);
-  const _ownerRole = _ownerUser ? _ownerUser.role : null;
+  // 2026-10-28: `gateRoleFor()` — เหตุเดียวกับแถวตาราง (กฎของเจ้าของ 2026-10-08)
+  const _ownerRole = _ownerUser ? gateRoleFor(_ownerUser, targetUserId) : null;
   const _ownerCan = key => !!_ownerRole && isAllowanceEligible(APP_SETTINGS.allowanceEligibility, _ownerRole, key);
   const { start, end, isCurrent } = getPeriodBounds(selectedPeriodIndex);
   const days = generatePeriodDays(start, end, isCurrent, targetUserId);
@@ -22927,21 +22962,27 @@ function showAttendanceDetail(date) {
   // does — this modal used to show a bonus badge to roles that Settings excludes from earlyLate/
   // upcountry, promising money that would never actually be paid.
   const _dA = APP_SETTINGS.allowances || {};
-  if (row.checkIn && row.status !== 'company-trip' && isAllowanceEligible(APP_SETTINGS.allowanceEligibility, targetRole, 'earlyLate')) {
+  // 2026-10-28: ด่านเงิน ⇒ `_ownerRole` (ดูเหตุที่จุดประกาศ) · `targetRole` ถอยไปเป็นคนที่กำลังดูได้
+  if (row.checkIn && row.status !== 'company-trip' && !!_ownerRole && isAllowanceEligible(APP_SETTINGS.allowanceEligibility, _ownerRole, 'earlyLate')) {
     const [eh, em] = row.checkIn.split(':').map(Number);
     const mins = eh * 60 + em;
     if (mins <= (_dA.earlyThreshold1Min ?? 450) && isDeviceScanSource(row.checkInSource)
         && (!isRestAttendanceDay(row) || hasHolidayWorkClaimOnDate(row.date, targetUserId, false))) {
       // 2026-10-13: targetRole is the row owner, already used by the eligibility gate above.
-      const bonus = `฿${mins <= (_dA.earlyThreshold2Min ?? 390) ? earlyLateRateFor(targetRole, 'earlyMorning2', APP_SETTINGS) : earlyLateRateFor(targetRole, 'earlyMorning1', APP_SETTINGS)}`;
+      // 2026-10-28 (เจ้าของสั่ง "ไล่แก้ต่อ"): **คอมเมนต์บรรทัดบนไม่จริง** — `targetRole`
+      // มาจาก `targetUserObj` ที่ถอยไปเป็น `currentUser` เมื่อหาเจ้าของไม่เจอ (รอบ 4 พิสูจน์แล้ว)
+      // ⇒ ใช้ `_ownerRole` ตัวเดียวกับทุกด่านเงินอื่นในป๊อปอัปนี้
+      const bonus = `฿${mins <= (_dA.earlyThreshold2Min ?? 390) ? earlyLateRateFor(_ownerRole, 'earlyMorning2', APP_SETTINGS) : earlyLateRateFor(_ownerRole, 'earlyMorning1', APP_SETTINGS)}`;
       tagsEl.innerHTML += `<span class="badge badge-success">🌅 ${L('Early In', 'เข้าเช้า')} ${escapeHtml(row.checkIn)} (+${bonus})</span>`;
     }
   }
-  if (row.lateOut && row.status !== 'company-trip' && isAllowanceEligible(APP_SETTINGS.allowanceEligibility, targetRole, 'earlyLate')
+  // 2026-10-28: ด่านเงิน ⇒ `_ownerRole` · เหตุเดียวกันกับ badge เข้าเช้า
+  if (row.lateOut && row.status !== 'company-trip' && !!_ownerRole && isAllowanceEligible(APP_SETTINGS.allowanceEligibility, _ownerRole, 'earlyLate')
       && lateNightCheckoutOk(row)
       && (!isRestAttendanceDay(row) || hasHolidayWorkClaimOnDate(row.date, targetUserId, false))) {
     const _ln2Thr = lateNightThresholdHourOf(_dA, 2);
-    const bonus = `฿${lateNightPoints(row.lateOut, _ln2Thr) === 2 ? earlyLateRateFor(targetRole, 'lateNight2', APP_SETTINGS) : earlyLateRateFor(targetRole, 'lateNight1', APP_SETTINGS)}`;
+    // 2026-10-28: `_ownerRole` ไม่ใช่ `targetRole` — เหตุเดียวกับ badge เข้าเช้าข้างบน
+    const bonus = `฿${lateNightPoints(row.lateOut, _ln2Thr) === 2 ? earlyLateRateFor(_ownerRole, 'lateNight2', APP_SETTINGS) : earlyLateRateFor(_ownerRole, 'lateNight1', APP_SETTINGS)}`;
     const approved = row.lateApproved;
     tagsEl.innerHTML += `<span class="badge ${approved?'badge-success':'badge-warning'}">🌙 ${L('Late Night', 'ทำงานดึก')} ${escapeHtml(row.lateOut)} (+${bonus}) ${approved?L('✓ Approved','✓ อนุมัติแล้ว'):L('⏳ Pending','⏳ รออนุมัติ')}</span>`;
   }
@@ -22972,17 +23013,41 @@ function showAttendanceDetail(date) {
   const approvedOT = DATA_LEAVES.find(l =>
     l.userId === targetUserId && l.type === 'ot' && l.dateFrom === date && l.status === 'approved'
   );
-  if (approvedOT && row.status !== 'company-trip') {
+  // 2026-10-28 (เจ้าของสั่ง "ไล่แก้ต่อ" หลังรีวิวรอบ 6): badge นี้มีด่านเดียวคือ Company Trip
+  // ขณะที่ payroll มีสี่ชั้นก่อนจะนับใบ OT ใบหนึ่ง (ดู approvedOTs + ลูปของมัน):
+  //   1. `canOT` — สิทธิ์ `ot` ของเจ้าของเรคอร์ด
+  //   2. ไม่ใช่วัน Company Trip
+  //   3. ไม่ใช่วันลาเต็มวัน (`fullLeaveDates`)
+  //   4. ไม่ใช่วันทำงานวันหยุดโหมดรับเงิน — ยกเว้น OT ของคนขับ ซึ่งจ่ายแยกอิสระ
+  // ⇒ ของเดิม badge นี้ขึ้นว่า "✓ อนุมัติแล้ว" อยู่เหนือ 🎌 ที่บอกจำนวนเงินของวันหยุด
+  // **ให้คนอ่านบวกสองก้อนเข้าด้วยกัน** ทั้งที่สลิปจ่ายก้อนเดียว
+  // ข้อ 1 ⇒ ซ่อน (ไม่มีสิทธิ์ก็ไม่มี badge เหมือนเบี้ยอื่นทุกตัว) · ข้อ 3-4 ⇒ **ไม่ซ่อน** แต่เขียน
+  // ให้ชัดว่าไม่ถูกนับ เพราะใบนั้นถูกอนุมัติไปจริง ถ้าหายไปเฉยๆ คนยื่นจะหาไม่เจอว่าใบไปไหน
+  // (ฟอร์มเตือนตอนยื่นอยู่แล้ว — ที่นี่คือจอที่คนมาดูย้อนหลัง)
+  const _otPaidHwDay = !!_hwDisp.takesDay && !!_hwDisp.rec && _hwDisp.rec.compensationMode === 'paid';
+  const _otNotCounted = isFullDayPersonalLeaveStatus(row.status)
+    || (!approvedOT?.isDriverOT && _otPaidHwDay);
+  if (approvedOT && row.status !== 'company-trip' && _ownerCan('ot')) {
     const totHrs = otRecordTotalHours(approvedOT);
     const h = Math.floor(totHrs);
     const m = Math.round((totHrs - h) * 60);
     const dur = currentLang === 'ja' ? (m > 0 ? `${h}時間${m}分` : `${h}時間`) : (m > 0 ? L(`${h}h ${m}m`, `${h} ชม. ${m} น.`) : L(`${h}h`, `${h} ชม.`));
-    tagsEl.innerHTML += `<span class="badge badge-success">⏱️ ${L('OT', 'OT')} ${dur} ${otRateDisplay(approvedOT)} ${L('✓ Approved','✓ อนุมัติแล้ว')}</span>`;
+    const tail = _otNotCounted
+      ? `<span class="badge badge-warning">${L('not counted — the payslip pays this day another way', 'ไม่ถูกนับ — วันนี้สลิปจ่ายทางอื่น')}</span>`
+      : '';
+    tagsEl.innerHTML += `<span class="badge ${_otNotCounted ? 'badge-gray' : 'badge-success'}">⏱️ ${L('OT', 'OT')} ${dur} ${otRateDisplay(approvedOT)} ${_otNotCounted ? '' : L('✓ Approved','✓ อนุมัติแล้ว')}</span>${tail}`;
   }
   const pcRecord = DATA_LEAVES.find(l =>
     l.userId === targetUserId && l.type === 'personal-car' && l.dateFrom === date && l.status === 'approved'
   );
-  if (pcRecord) {
+  // 2026-10-28 (เจ้าของสั่ง "ไล่แก้ต่อ"): badge นี้พิมพ์จำนวนเงินโดย **ไม่มีด่านอะไรเลย** ขณะที่
+  // payroll (approvedPC) ต้องผ่านสี่ชั้น: สิทธิ์ `personalCar` ของเจ้าของ · ธง
+  // `personalCarEligible === true` ของตัวบุคคล · ไม่ใช่วัน Company Trip · ไม่ใช่วันลาเต็มวัน
+  // ⇒ ของเดิมสัญญา +฿1,000 ให้วันที่สลิปจ่าย ฿0 ได้ · ธงรายบุคคลต้องอ่านจาก `_ownerUser`
+  // ไม่ใช่ `targetUserObj` ที่ถอยไปเป็นคนที่กำลังดู
+  const _pcOwnerFlag = !!_ownerUser && _ownerUser.personalCarEligible === true;
+  if (pcRecord && _ownerCan('personalCar') && _pcOwnerFlag
+      && row.status !== 'company-trip' && !isFullDayPersonalLeaveStatus(row.status)) {
     const pcRate = pcRecord.personalCarRate != null ? pcRecord.personalCarRate : (APP_SETTINGS.allowances.personalCar != null ? APP_SETTINGS.allowances.personalCar : 1000);
     tagsEl.innerHTML += `<span class="badge" style="background:#fef9c3;color:#854d0e">🚙 ${L('Personal Car', 'รถส่วนตัว')} (+฿${pcRate.toLocaleString()})</span>`;
   }
@@ -23017,11 +23082,12 @@ function showAttendanceDetail(date) {
     // One question, asked once: earlyMorningRequestPaidTier() holds every gate computePayroll
     // applies to an approved request. Restating them here is what put "+฿555" on days the payslip
     // pays nothing for -- a full day of leave, an approved Abroad day, a rest day with no claim.
-    const emTier = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, targetRole, 'earlyLate')
+    // 2026-10-28: ด่านเงิน ⇒ `_ownerRole` · อัตราด้านล่างก็คิดจาก role เดียวกัน
+    const emTier = !!_ownerRole && isAllowanceEligible(APP_SETTINGS.allowanceEligibility, _ownerRole, 'earlyLate')
       ? earlyMorningRequestPaidTier(emRec, row, emHwDates(row.date, targetUserId))
       : 0;
     if (emTier) {
-      const emAmt = earlyMorningAllowanceForTier(emTier, targetRole);
+      const emAmt = earlyMorningAllowanceForTier(emTier, _ownerRole);
       tagsEl.innerHTML += `<span class="badge badge-success">🌅 ${L('Early Morning (requested)', 'เบี้ยมาเช้า (ยื่นขอ)')} (+฿${Number(emAmt).toLocaleString()})</span>`;
     }
 
