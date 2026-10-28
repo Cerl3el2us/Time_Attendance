@@ -43,18 +43,6 @@
 
 ## เปิดอยู่
 
-- **สลิปซ่อนเงิน OT ของวันหยุดไว้ใต้สิทธิ์ `ot` แต่ payroll จ่ายมันใต้สิทธิ์ `holidayWork`**
-  รีวิวรอบ 6 ชี้ (2026-10-28): `computePayroll` ใส่ชั่วโมง ×2/×3 ของวันหยุดเข้า `otHourBuckets`
-  โดยมีด่านเดียวคือ `holidayWork` แล้วยอดเข้า `grossIncome` · แต่ **บรรทัดที่แสดงบนสลิปทั้งเว็บและ
-  Excel ถูกซ่อนด้วยสิทธิ์ `ot`** (`rowVis('payslip-ot20-row', view.eligibility.ot)` และ
-  `canShow('ot')` ใน `payslipXlsx.js`) ⇒ role ที่มี `holidayWork`+`holidayWorkPaid` แต่ไม่มี `ot`
-  จะได้เงินก้อนนั้นใน gross **โดยไม่มีบรรทัดไหนอธิบาย — สลิปบวกไม่ลงตัว** · และการ์ด "รับเป็นเงิน"
-  บนฟอร์มก็ใช้ `canOt` เหมือนกัน ⇒ บอกว่าได้ ฿0 ทั้งที่จ่าย
-  · ตอนนี้ยังไม่เกิด เพราะค่าที่ตั้งไว้คือ `ot: [user, driver]` กับ `holidayWorkPaid: [user]`
-    ซึ่ง**ซ้อนกันพอดี** · เกิดทันทีที่ถอด role ใดออกจาก `ot` แต่ยังให้ `holidayWorkPaid`
-  · รอเจ้าของ: ตัดสินว่าบรรทัด OT ของวันหยุดบนสลิปควรขึ้นตามสิทธิ์ `holidayWork` (ตามที่ payroll
-    จ่าย) หรือยังตามสิทธิ์ `ot` ต่อ — เป็นกฎธุรกิจ ไม่ใช่เรื่องที่ผมควรเลือกเอง
-
 - **หน้า Reports / Dashboard นับ Upcountry ไม่เหมือนสลิป (ของเดิม ไม่ใช่ของงาน Holiday Work)**
   รีวิวรอบ 5 ชี้ (2026-10-28) ว่าสามที่ใน `app.js` — Reports, Dashboard และสรุปงวด —
   นับ `days.filter(d => d.upcountry && d.status !== 'company-trip')` เฉยๆ ไม่บวก
