@@ -21,7 +21,7 @@
   <meta name="theme-color" content="#2563eb">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/style.css?v=20261022g">
+  <link rel="stylesheet" href="css/style.css?v=20261028a">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css" integrity="sha384-MinO0mNliZ3vwppuPOUnGa+iq619pfMhLVUXfC4LHwSCvF9H+6P/KO4Q7qBOYV5V" crossorigin="anonymous"/>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css" integrity="sha384-RkASv+6KfBMW9eknReJIJ6b3UnjKOKC5bOUaNgIY778NFbQ8MtWq9Lr/khUgqtTt" crossorigin="anonymous">
 </head>
@@ -1674,9 +1674,21 @@
         </div>
       </div>
       <div class="form-group">
-        <label class="form-label"><span data-en="Location (Upcountry)">สถานที่ (Upcountry)</span> <span style="color:#ef4444">*</span></label>
+        <!-- 2026-10-28 (owner): NOT a required field, and the red * was wrong. This box means
+             "which upcountry site", so working at the office on a holiday is exactly the case
+             where it is left blank. Leaving it blank is allowed and simply forfeits the two
+             allowances that hang off it (hasUpcountryLocation gates both), which is what the
+             hint below now says instead of the form refusing to submit. -->
+        <label class="form-label"><span data-en="Location (Upcountry)">สถานที่ (Upcountry)</span></label>
         <input type="text" id="holiday-work-location" class="form-control" oninput="refreshHolidayWorkPayCompare()" placeholder="ระบุสถานที่ทำงาน..." data-en-ph="Specify work location..." />
+        <div style="font-size:12px;color:#94a3b8;margin-top:6px;line-height:1.5" data-en="Fill this in only if you worked upcountry. Worked at the office? Leave it blank — blank means no Upcountry allowance and no holiday transport.">กรอกเฉพาะเมื่อไปทำงานต่างจังหวัด · ทำงานที่ออฟฟิศให้เว้นว่างไว้ — เว้นว่างแปลว่าไม่ได้เบี้ยเลี้ยง Upcountry และไม่ได้ค่าเดินทางวันหยุด</div>
       </div>
+      <!-- 2026-10-28 (owner): the two time fields below are what an approver checks against the
+           attached Working Report, so the form says so before they are filled in. Kept above the
+           row, not under it, because it is an instruction and not a remark about what was typed.
+           The existing note UNDER the row (end before 05:30 = after midnight) is a different
+           thing and stays. Shown in both compensation modes -- the times are used by both. -->
+      <div class="hw-report-note">⚠️ <span data-en="Enter the working hours exactly as on the attached Working Report">ระบุเวลาทำงานให้ตรงกับใบ Working Report ที่แนบ</span></div>
       <div style="display:flex;gap:10px">
         <div class="form-group" style="flex:1">
           <label class="form-label"><span data-en="Work start (off-site)">เวลาเริ่มงาน (นอกสถานที่)</span> <span style="color:#ef4444">*</span></label>
@@ -2811,10 +2823,10 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js" integrity="sha384-SYKAG6cglRMN0RVvhNeBY0r3FYKNOJtznwA0v7B5Vp9tr31xAHsZC0DqkQ/pZDmj" crossorigin="anonymous"></script>
-<script src="lang/ja.js?v=20261017d"></script>  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js" integrity="sha384-5JqMv4L/Xa0hfvtF06qboNdhvuYXUku9ZrhZh3bSk8VXF0A/RuSLHpLsSV9Zqhl6" crossorigin="anonymous"></script>
+<script src="lang/ja.js?v=20261028b"></script>  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js" integrity="sha384-5JqMv4L/Xa0hfvtF06qboNdhvuYXUku9ZrhZh3bSk8VXF0A/RuSLHpLsSV9Zqhl6" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ja.js" integrity="sha384-mKor8U8jwukUkfxaFPCsxKF9S62PXq4gG7zcZ5yQ2x3KL1msprJZeFlKFEDeeb5V" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/th.js" integrity="sha384-E6OVFg1zUc/pckGxry0YZ6VeZ1E17l7Jl8ZQx58jbEfxxkz9LqknQhiIrA9zg/8b" crossorigin="anonymous"></script>
 
-<script src="js/app.js?v=20261022f"></script>
+<script src="js/app.js?v=20261028c"></script>
 </body>
 </html>
