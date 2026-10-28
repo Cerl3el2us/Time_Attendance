@@ -240,36 +240,37 @@ const dctx = { currentLang: 'th', L: (en, th) => th, console };
 vm.createContext(dctx);
 vm.runInContext(extractFunction(APP_SRC, 'holidayWorkDurationLabel'), dctx);
 
-// ชื่อเดิมบอกว่า "ยังบอกทศนิยม 6.33 ไว้เทียบสลิป" ซึ่งไม่จริงอีกแล้วตั้งแต่ dba48c7 — จอไม่โชว์
-// ทศนิยมที่ไหนเลย (เจ้าของสั่งเอง) · `dec` ยังถูกคืนและยังตรวจอยู่ เพราะมันคือการแปลงนาที→ชั่วโมง
-// ที่ใช้เทียบกับ otHours ที่เก็บไว้ ไม่ใช่สิ่งที่แสดงผล
-test('380 นาที (เคสของเจ้าของ) อ่านว่า 6 ชม. 20 น. และแปลงเป็น 6.33 ชั่วโมงได้ถูก', () => {
-  const d = dctx.holidayWorkDurationLabel(380);
-  assert.strictEqual(d.hm, '6 ชม. 20 น.');
-  assert.strictEqual(d.dec, '6.33');
+// 2026-10-28 (รีวิวรอบ 5): สี่ข้อที่นี่เคยตรวจฟิลด์ `dec` และคอมเมนต์เหนือมันเขียนว่า "`dec` ยังถูก
+// คืนและยังตรวจอยู่ เพราะมันคือการแปลงนาที→ชั่วโมงที่ใช้เทียบกับ otHours ที่เก็บไว้" — **ไม่จริง**
+// ไล่ทั้ง 7 จุดที่เรียก holidayWorkDurationLabel() แล้ว ทุกจุดอ่าน `.hm` และยามกันค่าเพี้ยนคำนวณ
+// นาทีของตัวเอง (`Math.round(h20 * 60)`) ไม่เคยแตะ `dec` ⇒ หกบรรทัดนั้นตรวจโค้ดตาย โดยมีคอมเมนต์
+// รับรองว่ามันสำคัญ · ฟิลด์ถูกลบออกจาก app.js แล้ว และแทนด้วยข้อล่างที่ตรวจของที่ผู้ใช้เห็นจริง
+test('380 นาที (เคสของเจ้าของ) อ่านว่า 6 ชม. 20 น.', () => {
+  assert.strictEqual(dctx.holidayWorkDurationLabel(380).hm, '6 ชม. 20 น.');
 });
 
 test('ชั่วโมงลงตัวไม่ต้องมีคำว่านาที', () => {
   assert.strictEqual(dctx.holidayWorkDurationLabel(480).hm, '8 ชม.');
-  assert.strictEqual(dctx.holidayWorkDurationLabel(480).dec, '8.00');
 });
 
 test('เศษน้อยๆ ก็ยังอ่านเป็นนาทีจริง ไม่ใช่ทศนิยม', () => {
   assert.strictEqual(dctx.holidayWorkDurationLabel(68).hm, '1 ชม. 8 น.');
-  assert.strictEqual(dctx.holidayWorkDurationLabel(68).dec, '1.13');
   // ท่อนที่สั้นกว่าหนึ่งชั่วโมงอ่านว่า "52 น." ไม่ใช่ "0 ชม. 52 น."
   assert.strictEqual(dctx.holidayWorkDurationLabel(52).hm, '52 น.');
-  assert.strictEqual(dctx.holidayWorkDurationLabel(52).dec, '0.87');
   assert.strictEqual(dctx.holidayWorkDurationLabel(0).hm, '0 น.');
 });
 
-// นาทีกับทศนิยมมาจากจำนวนนาทีชุดเดียวกัน จึงแตกกันไม่ได้ · ข้อนี้กันไม่ให้ใครแยกสองค่านี้
-// ไปคำนวณคนละทางในอนาคต
-test('ชั่วโมง-นาที กับ ทศนิยม ตรงกันเสมอทุกค่า', () => {
-  for (let m = 0; m <= 20 * 60; m++) {
-    const d = dctx.holidayWorkDurationLabel(m);
-    const back = Math.round(Number(d.dec) * 60);
-    assert.ok(Math.abs(back - m) <= 1, `${m} นาที -> ทศนิยม ${d.dec} ซึ่งกลับมาเป็น ${back} นาที`);
+// แทนข้อ "hm กับ dec ตรงกัน" ที่เทียบของที่ไม่มีใครเห็นกับของที่ไม่มีใครเห็น · ข้อนี้แกะสตริงที่
+// **ผู้ใช้อ่านจริง** กลับเป็นจำนวนนาที แล้วบังคับให้ตรงเป๊ะกับที่ส่งเข้าไป ⇒ ป้ายโกหกเรื่องเวลาไม่ได้
+// เลยแม้นาทีเดียว และยังกันทศนิยมหลุดกลับมาด้วย (รูปแบบที่แกะไม่ออกจะแดงทันที)
+test('สตริงที่ผู้ใช้อ่าน แกะกลับเป็นจำนวนนาทีเดิมได้ตรงเป๊ะทุกค่า และไม่มีทศนิยมโผล่', () => {
+  for (let m = 0; m <= 30 * 60; m++) {
+    const hm = dctx.holidayWorkDurationLabel(m).hm;
+    assert.ok(!/\d+\.\d+/.test(hm), `${m} นาที ได้สตริงที่มีทศนิยม: ${hm}`);
+    const mo = /^(?:(\d+) ชม\.)?(?: )?(?:(\d+) น\.)?$/.exec(hm);
+    assert.ok(mo, `${m} นาที ได้สตริงที่แกะไม่ออก: ${hm}`);
+    const back = (Number(mo[1]) || 0) * 60 + (Number(mo[2]) || 0);
+    assert.strictEqual(back, m, `${m} นาที อ่านออกมาเป็น ${back} นาที (${hm})`);
   }
 });
 

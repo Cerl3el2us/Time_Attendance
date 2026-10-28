@@ -241,12 +241,72 @@ test('ทุกสตริงอังกฤษในบล็อกมีค�
     Object.prototype.hasOwnProperty.call(dict, w), `ไม่มีคีย์ "${w}" ใน lang/ja.js`));
 });
 
-test('เงินในป๊อปอัปอ่านเงินเดือนจากเจ้าของเรคอร์ด ไม่ใช่จาก targetUserObj', () => {
-  // รีวิวรอบ 4: เปลี่ยนกลับเป็น targetUserObj แล้วทั้ง 65 ไฟล์ยังเขียว ⇒ บั๊กที่เคยแก้ไปกลับมาได้เงียบๆ
-  const fn = extractFunction(APP_SRC, 'showAttendanceDetail');
-  assert.ok(/const _hwSalary = Number\(_ownerUser && _ownerUser\.salary\) \|\| 0;/.test(fn),
-    'เงินเดือนต้องอ่านจาก _ownerUser เท่านั้น');
-  assert.ok(!/_hwSalary = Number\(targetUserObj/.test(fn), 'ยังอ่านจาก targetUserObj อยู่');
+// 2026-10-28 (รีวิวรอบ 5): ข้อนี้กับข้อ "badge แลกวันหยุดต้องไม่ติดเงิน" ด้านล่าง เคยเป็น regex
+// ตรึงข้อความของบรรทัดเป๊ะๆ — ในไฟล์ที่เขียนขึ้นมาเพื่อเลิกใช้วิธีนั้น · มันแดงเวลาแค่เปลี่ยนชื่อ
+// ตัวแปร และเขียวต่อได้ถ้าใครเพิ่มการอ่านเงินเดือนบรรทัดใหม่ ⇒ ดึง **บล็อกคิดเงินของ badge ตัวจริง**
+// ออกมารันในกล่อง พร้อมฟังก์ชันเงินตัวจริง (otPayAmountFromLeave / fmt2dp) แล้วอ่านป้ายที่ได้
+const BADGE_BLOCK = (() => {
+  const a = APP_SRC.indexOf("      const paid = hwRec.compensationMode === 'paid';");
+  assert.ok(a > 0, 'หาบล็อกคิดเงินของ badge ไม่เจอ ⇒ โครงเปลี่ยนไปแล้ว ให้ทบทวนยามนี้');
+  const endMark = '🎌 ${L(';
+  const b = APP_SRC.indexOf(endMark, a);
+  assert.ok(b > a, 'หาบรรทัดที่พิมพ์ badge 🎌 ไม่เจอ');
+  const eol = APP_SRC.indexOf('\n', b);
+  return APP_SRC.slice(a, eol);
+})();
+
+function badgeFor({ rec, ownerUser }) {
+  const ctx = {
+    hwRec: rec, _ownerUser: ownerUser, console,
+    L: (en, th) => th,
+    tagsEl: { innerHTML: '' },
+  };
+  vm.createContext(ctx);
+  vm.runInContext(
+    ['holidayWorkDurationLabel', 'round2HalfUp', 'otPayAmountFromLeave', 'effectiveOtMultiplier']
+      .map(n => extractFunction(APP_SRC, n)).join('\n') + '\n' +
+    extractFunction(APP_SRC, 'fmt2dp') + '\n' +
+    'const currentLang = "th";\n' + BADGE_BLOCK, ctx);
+  return ctx.tagsEl.innerHTML;
+}
+const HW_PAID = { type: 'holiday-work', status: 'approved', compensationMode: 'paid',
+  otHours20: 6.33, otHours30: 0 };
+
+test('badge: โหมดเงิน + อ่านเงินเดือนของเจ้าของได้ ⇒ ติดจำนวนเงินที่ตรงกับสูตรเงินจริง', () => {
+  const html = badgeFor({ rec: HW_PAID, ownerUser: { id: 7, salary: 30000 } });
+  assert.ok(/6 ชม\. 20 น\./.test(html), 'ต้องเป็นชั่วโมง-นาที ไม่ใช่ทศนิยม : ' + html);
+  const hourly = 30000 / 30 / 8;
+  const want = CTX.round2HalfUp(hourly * 2 * 6.33);
+  assert.ok(html.includes('฿' + CTX.fmt2dp(want)),
+    `ยอดบน badge ต้องเท่ากับสูตรเงินจริง (${CTX.fmt2dp(want)}) : ` + html);
+});
+
+test('badge: โหมดแลกวันหยุดต้องไม่ติดจำนวนเงิน แม้เรคอร์ดจะมี otHours ติดมา', () => {
+  const html = badgeFor({ rec: { ...HW_PAID, compensationMode: 'annual-leave' },
+    ownerUser: { id: 7, salary: 30000 } });
+  assert.ok(/แลกวันหยุด/.test(html), 'ต้องยังบอกว่าเป็นโหมดแลกวันหยุด : ' + html);
+  assert.ok(!/฿/.test(html), 'ใบแลกวันหยุดต้องไม่ขึ้น "แลกวันหยุด ≈ ฿…" : ' + html);
+});
+
+test('badge: หาเจ้าของไม่เจอ ⇒ ชั่วโมงยังอยู่ แต่เงินหายไปเฉยๆ ไม่ใช่ ฿0 หรือ NaN', () => {
+  for (const ownerUser of [null, undefined, { id: 7 }, { id: 7, salary: 0 }, { id: 7, salary: 'x' }]) {
+    const html = badgeFor({ rec: HW_PAID, ownerUser });
+    assert.ok(/6 ชม\. 20 น\./.test(html), 'ชั่วโมงต้องยังอยู่ : ' + html);
+    assert.ok(!/฿/.test(html), 'ไม่มีเงินเดือนที่อ่านได้ ⇒ ต้องไม่พิมพ์เงินเลย : ' + html);
+    assert.ok(!/NaN/.test(html), html);
+  }
+});
+
+// บล็อกที่ดึงมาข้างบนต้องไม่อ่านเงินเดือนจากอ็อบเจกต์ที่ถอยไปเป็น "คนที่กำลังดู" ได้
+// (harness ส่งให้แค่ `_ownerUser` ⇒ ถ้าโค้ดเปลี่ยนไปอ่านตัวอื่น กล่องจะพังทันที แต่ข้อนี้ทำให้
+//  ข้อความ error บอกตรงๆ ว่าเกิดอะไรขึ้น แทนที่จะเป็น ReferenceError ลอยๆ)
+test('badge: บล็อกคิดเงินไม่แตะอ็อบเจกต์ของคนที่กำลังดูเลย', () => {
+  // ตัดคอมเมนต์ออกก่อน — คอมเมนต์ในบล็อกนั้น *อธิบาย* ว่าทำไมห้ามใช้ targetUserObj/currentUser
+  // จึงเอ่ยชื่อทั้งสองตัวอยู่แล้ว ถ้าไม่ตัดก็จะฟ้องคอมเมนต์ของตัวเอง
+  const code = BADGE_BLOCK.replace(/^[ \t]*\/\/[^\n]*$/gm, '');
+  const bad = code.match(/\b(targetUserObj|targetUser|currentUser)\b/g) || [];
+  assert.deepStrictEqual(bad, [],
+    'บล็อกคิดเงินของ badge อ้างถึง ' + bad.join('/') + ' ⇒ อาจคิดเงินจากเงินเดือนคนที่กำลังดู');
 });
 
 console.log('T6 โหมดแลกวันหยุดต้องไม่มีเงินโผล่ แม้เรคอร์ดเก่าจะมีชั่วโมงติดมา');
@@ -262,11 +322,8 @@ test('เรคอร์ดแลกวันหยุดที่มี otHours
   assert.ok(/สถานที่|เวลาที่ยื่น/.test(t), 'แต่ยังต้องบอกสถานที่และเวลาที่ยื่น : ' + t);
 });
 
-test('badge ของโหมดแลกวันหยุดต้องไม่ติดจำนวนเงิน', () => {
-  const fn = extractFunction(APP_SRC, 'showAttendanceDetail');
-  assert.ok(/const _hwAmt = \(paid && _hwHourly > 0\)/.test(fn),
-    'ยอดเงินบน badge ต้องผูกกับโหมด paid ไม่งั้นใบแลกวันหยุดจะขึ้น "แลกวันหยุด ≈ ฿…"');
-});
+// (ข้อที่เคยจับข้อความ `const _hwAmt = (paid && _hwHourly > 0)` ถูกแทนด้วย badgeFor() ที่เรนเดอร์
+//  badge จริงทั้งสองโหมด อยู่ด้านบนในหัวข้อเดียวกับการอ่านเงินเดือนของเจ้าของ)
 
 console.log('T7 สีคำเตือนต้องผ่านเกณฑ์คอนทราสต์ทั้งสองธีม (ยามของ CSS แบบคลาส)');
 

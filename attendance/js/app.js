@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 167;
+const APP_BUILD = 168;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -3011,20 +3011,23 @@ function holidayWorkSegmentTimeLabel(mins) {
 // นาที" two lines above "6.33 ชม.", so the eye carried the h/m reading straight into the decimal.
 // If the person who designed the pay rules misreads it, an approver comparing it against a working
 // report certainly will.
-// Hours and minutes lead, because that is what every other duration on this screen says; the
-// decimal stays in brackets because THAT is the number the payslip pays and the one to compare
-// against. Both come from the same minutes, so they can never drift apart.
+// Hours and minutes, and ONLY hours and minutes.
+// 2026-10-28 (รีวิวรอบ 5): ตอนแรกฟังก์ชันนี้คืนค่าทศนิยมมาด้วย (`dec`) และคอมเมนต์ตรงนี้เขียนว่า
+// "เก็บทศนิยมในวงเล็บไว้ เพราะนั่นคือเลขที่สลิปจ่าย" — **ทั้งสองอย่างหมดอายุไปแล้ว** เจ้าของสั่งเอา
+// ทศนิยมออกจากหน้าจอ ("อย่าลืมแก้ว่ากี่โมงชั่ว กี่นาที ไม่ใช่แสดงตัวเลขแบบนี้") ⇒ ไม่มีใครอ่าน `dec`
+// เลยแม้จุดเดียว (ไล่ทั้ง 7 จุดที่เรียกฟังก์ชันนี้แล้ว) แต่คอมเมนต์ยังบอกคนอ่านคนต่อไปว่ามันสำคัญ
+// และเทสต์ยังตรวจมันอยู่ 6 บรรทัด ⇒ โค้ดตายที่มีป้ายบอกว่ายังมีชีวิต อันตรายกว่าโค้ดตายเฉยๆ
+// ยังคืนเป็น object แทนสตริงเปล่า เพื่อไม่ต้องแก้ทั้ง 7 จุดเรียกบนโค้ดที่แสดงเงิน หลังจากเพิ่ง deploy
 function holidayWorkDurationLabel(mins) {
   const total = Math.max(0, Math.round(mins));
   const h = Math.floor(total / 60), m = total % 60;
-  const dec = (Math.round(total / 60 * 100) / 100).toFixed(2);
   // A piece shorter than an hour reads as "52 น.", not "0 ชม. 52 น." — the ×3 tails either side of
   // a shift are usually minutes, and a leading zero hour is noise on the row that matters least.
   const hm = currentLang === 'ja'
     ? (h === 0 ? `${m}分` : m > 0 ? `${h}時間${m}分` : `${h}時間`)
     : h === 0 ? L(`${m}m`, `${m} น.`)
       : m > 0 ? L(`${h}h ${m}m`, `${h} ชม. ${m} น.`) : L(`${h}h`, `${h} ชม.`);
-  return { hm, dec };
+  return { hm };
 }
 // 2026-10-28 (owner): the detail block under the Holiday Work badges in the day-detail popup.
 //
@@ -3211,6 +3214,38 @@ function holidayWorkEarnsUpcountry(l, S, role, isAbroadDay) {
   if (!isAllowanceEligible(elig, role, 'holidayWork')) return false;
   if (!isAllowanceEligible(elig, role, 'upcountry')) return false;
   return hasUpcountryLocation(l);
+}
+// 2026-10-28 (รีวิวรอบ 5): เรคอร์ด Holiday Work ถูกแสดงอยู่ 4 ที่ — แถวบนจอ, การ์ดมือถือ, ใบพิมพ์
+// และป๊อปอัปรายวัน — และเงื่อนไขของมันเคยถูกเขียนแยกกัน 3 แบบ: ป๊อปอัปเช็กโหมดชดเชย แถวเช็ก
+// Company Trip ใบพิมพ์ไม่เช็กทั้งคู่ ⇒ รอบ 3 แก้ประตูโหมดวันลาที่ป๊อปอัปที่เดียว อีกสามที่จึงยัง
+// ซ่อนวันที่ให้วันลาไปจริง · ตอนนี้ทุกจอถามฟังก์ชันนี้ตัวเดียว
+//
+// **คืนสองค่า เพราะมันเป็นสองคำถามที่คำตอบไม่เหมือนกัน และนี่คือจุดที่แถวเคยพลาด:**
+//   `rec`      = เอาไว้แสดง 🔄 ว่า "วันนี้เขามาทำงานวันหยุด" · โหมด `annual-leave` ผ่านโดยไม่ดูสิทธิ์
+//                เพราะ getApprovedHolidayWorkDays() เครดิตวันลาให้โดยไม่มีด่าน role เลย (ตรวจแล้ว
+//                ทั้งสองฝั่ง: app.js และ getApprovedHolidayWorkAnnualLeaveDays ใน server.js)
+//                ⇒ ซ่อนไอคอน = ปฏิเสธวันลาที่ระบบให้ไปแล้วจริง
+//   `takesDay` = "วันนี้ถูกใบนี้ยึดไปแล้ว" ซึ่งสะท้อน `holidayWorkDates` ของ computePayroll ·
+//                payroll สร้างลิสต์นั้นจาก `approvedHolidayWork` ที่ gate ด้วยสิทธิ์ holidayWork
+//                ⇒ **role ที่ไม่มีสิทธิ์ ลิสต์นั้นว่าง แปลว่าธง upcountry ของวันนั้นยังถูกนับ**
+//                จึงห้ามเอา `rec` ไปใช้กดธงของวันทิ้ง ไม่งั้นจะซ่อนเงินที่สลิปจ่ายอยู่
+// เขียนรวมเป็นค่าเดียวเมื่อไหร่ บั๊กนั้นกลับมาทันที — แถวเคยรวมมันไว้ในตัวแปร `hwRow` ตัวเดียว
+function holidayWorkDisplayFor(userId, date, rowStatus, ownerRole, S) {
+  const none = { rec: null, takesDay: false };
+  // Company Trip: payroll ให้อะไรไม่ได้เลย (เจ้าของ 2026-09-24) และ getApprovedHolidayWorkDays()
+  // ก็กรองวันนั้นออกเอง · เช็กทั้งสถานะของแถวและ isCompanyTripDay() เพราะป๊อปอัปเดิมใช้ตัวหลัง
+  // ส่วนแถวใช้ตัวแรก — เอาทั้งคู่ไว้ให้ทุกจอตอบเหมือนกันไม่ว่าจะเรียกมาจากทางไหน
+  if (rowStatus === 'company-trip' || isCompanyTripDay(date)) return none;
+  const rec = DATA_LEAVES.find(l => l.userId === userId && l.type === 'holiday-work' &&
+    l.dateFrom === date && l.status === 'approved');
+  if (!rec) return none;
+  // `ownerRole` ต้องเป็น role ของ **เจ้าของเรคอร์ด** ไม่ใช่คนที่กำลังดู (รีวิวรอบ 4) · null = หาไม่เจอ
+  // ⇒ ไม่รู้ว่าสลิปจ่ายอะไร ⇒ ปิดทางเงินไว้ก่อน
+  const canMoney = !!ownerRole && isAllowanceEligible(S && S.allowanceEligibility, ownerRole, 'holidayWork');
+  return {
+    rec: (canMoney || rec.compensationMode === 'annual-leave') ? rec : null,
+    takesDay: canMoney,
+  };
 }
 function isHolidayWorkOtRecord(l) {
   return !!l && l.type === 'holiday-work' && l.status === 'approved' && l.compensationMode === 'paid' &&
@@ -11946,11 +11981,13 @@ function renderAttendanceTable() {
     // Work record covers, and blocks the approval from the other side too — but without it, if
     // that net were ever loosened, the row would claim Holiday Work on a day paying nothing while
     // the ⏱️ next to it correctly vanished. Agreeing with its neighbours costs nothing.
+    // 2026-10-28 (รีวิวรอบ 5): ย้ายมาถาม holidayWorkDisplayFor() · ของเดิมรวม "แสดงไหม" กับ
+    // "วันนี้ถูกยึดไปไหม" ไว้ในตัวแปรเดียว ทำให้ (ก) โหมดวันลาของ role ที่ไม่มีสิทธิ์หายไปจากแถว
+    // ทั้งที่ระบบให้วันลาไปแล้ว และ (ข) ถ้าแก้ (ก) ด้วยการปล่อยผ่านเฉยๆ ธง upcountry ของวันนั้น
+    // จะถูกกดทิ้งผิด เพราะ payroll ยังนับมันอยู่เมื่อ role ไม่มีสิทธิ์ holidayWork
     let holidayWorkBadge = '';
-    const hwRow = (canHolidayWorkTarget && row.status !== 'company-trip') ? DATA_LEAVES.find(l =>
-      l.userId === targetUserId &&
-      l.type === 'holiday-work' && l.dateFrom === row.date && l.status === 'approved'
-    ) : null;
+    const _hwDisp = holidayWorkDisplayFor(targetUserId, row.date, row.status, _attOwner ? _attOwner.role : null, APP_SETTINGS);
+    const hwRow = _hwDisp.rec;
     if (hwRow) {
       const hwMode = hwRow.compensationMode === 'paid'
         ? L('Paid compensation', 'ชดเชยเป็นเงิน')
@@ -11972,8 +12009,13 @@ function renderAttendanceTable() {
     // were the same answer. A record with the box left empty hands the day over and claims
     // nothing, so without this the day's own sticky `row.upcountry` flag -- which survives a
     // revoked approval -- lights the icon on a day the payslip pays ฿0 for.
-    const upcountryShown = (canUpcountryTarget && row.upcountry && row.status !== 'company-trip' && !hwRow)
-      || holidayWorkEarnsUpcountry(hwRow, APP_SETTINGS, targetUser.role, row.status === 'abroad');
+    // 2026-10-28 (รีวิวรอบ 5): `!hwRow` ⇒ `!_hwDisp.takesDay` · สองค่านี้ต่างกันเฉพาะ role ที่ไม่มี
+    // สิทธิ์ holidayWork แล้วยื่นโหมดวันลา: `rec` มีค่า (ต้องโชว์ 🔄) แต่ payroll ไม่ได้ยึดวันไป
+    // (`approvedHolidayWork` ว่าง) ⇒ ธงของวันนั้นยังถูกนับ และห้ามกดทิ้ง
+    // 2026-10-28 (รีวิวรอบ 5): `targetUser.role` ⇒ role ของเจ้าของแถว · `targetUser` ถอยไปเป็น
+    // `currentUser` เมื่อหาเจ้าของไม่เจอ ซึ่งเป็นด่านเงิน (ดู `_attOwner` ที่หัวฟังก์ชัน)
+    const upcountryShown = (canUpcountryTarget && row.upcountry && row.status !== 'company-trip' && !_hwDisp.takesDay)
+      || holidayWorkEarnsUpcountry(hwRow, APP_SETTINGS, _attOwner ? _attOwner.role : null, row.status === 'abroad');
     const upcountryStops = upcountryShown ? upcountryDayStops(targetUserId, row.date) : [];
     const upcountryBadge = !upcountryShown
       ? ''
@@ -12100,6 +12142,10 @@ function renderAttendanceTable() {
     workDays, lateDays, annualDays, sickDays,
     canEarlyLateTarget, canOTTarget, canUpcountryTarget, canPersonalCarTarget, canLongDistTarget,
     canHolidayWorkTarget,
+    // 2026-10-28 (รีวิวรอบ 5): ใบพิมพ์ตัดสิน 🗺️/🔄 เองด้วยกฎของมันเอง และเป็นกฎที่เก่าที่สุดในสาม
+    // จอ · ส่ง role ของ **เจ้าของแถว** เข้าไปให้มันถาม holidayWorkDisplayFor() ตัวเดียวกับที่นี่
+    // `targetUser` ที่มันมีอยู่แล้วใช้แทนไม่ได้ เพราะตัวนั้นถอยไปเป็น `currentUser` เมื่อหาไม่เจอ
+    ownerRole: _attOwner ? _attOwner.role : null,
   });
   syncAttendanceStickyHead();
 }
@@ -12110,7 +12156,7 @@ function renderAttendanceTable() {
 // 2026-08-02: rebuilt on feedback — plain "28 July 2026" date (fmtDateLong, no Thai
 // วัน...ที่ grammar prefix) + a separate explicit Status column (Present/Late/Not clocked
 // in/Holiday/...) instead of a stacked note under the date; cleaner font/spacing throughout.
-function buildAttendancePrintView({ targetUser, days, start, end, workDays, lateDays, annualDays, sickDays, canEarlyLateTarget, canOTTarget, canUpcountryTarget, canPersonalCarTarget, canLongDistTarget, canHolidayWorkTarget }) {
+function buildAttendancePrintView({ targetUser, days, start, end, workDays, lateDays, annualDays, sickDays, canEarlyLateTarget, canOTTarget, canUpcountryTarget, canPersonalCarTarget, canLongDistTarget, canHolidayWorkTarget, ownerRole }) {
   const el = document.getElementById('att-print-view');
   if (!el || !targetUser) return;
 
@@ -12164,12 +12210,16 @@ function buildAttendancePrintView({ targetUser, days, start, end, workDays, late
     // 2026-10-08 (review): this carried the old `type === 'ot'` filter verbatim and had no 🔄 at
     // all, so the printout contradicted the screen beside it on an approved Holiday Work day. The
     // paper is what gets filed and signed, and a payroll dispute is settled from the paper.
-    if (canHolidayWorkTarget && DATA_LEAVES.some(l =>
-      l.userId === targetUser.id && l.type === 'holiday-work' && l.dateFrom === row.date && l.status === 'approved')) {
-      badges.push('🔄');
-    }
+    // 2026-10-28 (รีวิวรอบ 5): สองไอคอนนี้เคยมีกฎของตัวเอง และเป็นจอเดียวที่ไม่ได้รับการแก้ของ
+    // รอบ 2 (`!hwRow` + holidayWorkEarnsUpcountry) กับรอบ 3 (ประตูโหมดวันลา) เลยทั้งสองรอบ ·
+    // วัดกับข้อมูลจริงวันที่แก้: 4 ใน 5 ใบที่อนุมัติแล้ว สลิปจ่าย Upcountry ฿240 จอขึ้น 🗺️
+    // **แต่กระดาษไม่ขึ้นอะไร** — และกระดาษคือสิ่งที่ถูกเซ็นและใช้เคลียร์ข้อพิพาท
+    // ⇒ ถามฟังก์ชันกลางตัวเดียวกับแถวและป๊อปอัป ไม่มีกฎของตัวเองอีก
+    const hwPrint = holidayWorkDisplayFor(targetUser.id, row.date, row.status, ownerRole, APP_SETTINGS);
+    if (hwPrint.rec) badges.push('🔄');
     if (attendanceDayOtRecord(targetUser.id, row.date, canOTTarget, canHolidayWorkTarget)) badges.push('⏱️');
-    if (canUpcountryTarget && row.upcountry) badges.push('🗺️');
+    if ((canUpcountryTarget && row.upcountry && row.status !== 'company-trip' && !hwPrint.takesDay)
+      || holidayWorkEarnsUpcountry(hwPrint.rec, APP_SETTINGS, ownerRole, row.status === 'abroad')) badges.push('🗺️');
     if (canLongDistTarget && row.longDistance) badges.push('🚗');
     if (canPersonalCarTarget) {
       const pcLv = DATA_LEAVES.find(l => l.userId === targetUser.id && l.type === 'personal-car' && l.dateFrom === row.date && l.status === 'approved');
@@ -22648,8 +22698,10 @@ function showAttendanceDetail(date) {
   // 2026-10-28 (รีวิวรอบ 4): `targetUserObj` ถอยไปเป็น `currentUser` เมื่อหาเจ้าของเรคอร์ดไม่เจอ
   // ⇒ `targetRole` อาจเป็น role ของ "คนที่กำลังดู" · สำหรับป้ายชื่อนั้นไม่เป็นไร แต่ทุกด่านที่
   // ตัดสิน **เงิน** ต้องใช้ role ของเจ้าของเรคอร์ดจริงเท่านั้น ไม่งั้นจะโชว์เบี้ยของวันที่สลิปจ่าย ฿0
-  // รอบก่อนผมแก้แค่ด่านเดียว (`_hwMoneyOk`) แล้วทิ้งด่านของ 🗺️ ไว้ข้างบนมัน ซึ่งก็พิมพ์เงินเหมือนกัน
+  // รอบก่อนผมแก้แค่ด่านเดียว แล้วทิ้งด่านของ 🗺️ ไว้ข้างบนมัน ซึ่งก็พิมพ์เงินเหมือนกัน
   // ⇒ คราวนี้หาเจ้าของให้เสร็จตรงนี้ที่เดียว แล้วให้ทุกด่านเงินอ้างตัวเดียวกัน
+  // (รอบ 5: ด่านของ Holiday Work เองย้ายออกไปอยู่ holidayWorkDisplayFor() ซึ่งรับ role ตัวนี้ไปใช้
+  //  ร่วมกับแถวบนจอ การ์ดมือถือ และใบพิมพ์ — `_ownerRole` ยังเป็นที่มาเดียวของมันเหมือนเดิม)
   // หาไม่เจอ = ไม่รู้ว่าสลิปจ่ายอะไร ⇒ ไม่โชว์เบี้ยใดๆ (เงียบดีกว่าทายผิด)
   const _ownerUser = DATA_USERS.find(u => u.id === targetUserId)
     || (currentUser && currentUser.id === targetUserId ? currentUser : null);
@@ -22873,19 +22925,21 @@ function showAttendanceDetail(date) {
   // ONE badge, not a second one beside it: payroll pays the day once (its upcountryCount skips
   // dates that have Holiday Work and counts the record instead), so two 🗺️ on one day would read
   // as double pay -- the exact thing he said to avoid.
-  const _hwUpcRec = DATA_LEAVES.find(l => l.userId === targetUserId && l.type === 'holiday-work' &&
-    l.dateFrom === date && l.status === 'approved');
+  // 2026-10-28 (รีวิวรอบ 5): ทั้งสองคำถามนี้ย้ายไปอยู่ใน holidayWorkDisplayFor() ซึ่งแถวบนจอ
+  // การ์ดมือถือ และใบพิมพ์ ใช้ตัวเดียวกัน · ของเดิมที่นี่ถูก (มันแยก takesDay ออกจากการแสดงอยู่แล้ว)
+  // แต่เป็นสำเนาที่สามจอที่เหลือไม่ได้ลอกตาม ⇒ เอาสำเนาออกให้หมด
+  const _hwDisp = holidayWorkDisplayFor(targetUserId, date, row.status, _ownerRole, APP_SETTINGS);
   // `_ownerRole` ไม่ใช่ `targetRole` — ดูเหตุผลที่จุดประกาศ · ถ้าหาเจ้าของไม่เจอ ส่ง null เข้าไป
   // ซึ่งทำให้ holidayWorkEarnsUpcountry() ตอบ false ที่ด่านสิทธิ์ของมันเอง
-  const _hwUpcountry = holidayWorkEarnsUpcountry(_hwUpcRec, APP_SETTINGS, _ownerRole, row.status === 'abroad');
-  // Does payroll hand this whole day to the record? Same three conditions it uses to build
-  // approvedHolidayWork / holidayWorkDates. When it does, the day's own upcountry flag is not
-  // counted at all, so it must not light this badge either -- a record filed with no location
-  // takes the day and claims nothing, and the flag can outlive a revoked approval.
-  const _hwTakesDay = !!_hwUpcRec && !isCompanyTripDay(date) && _ownerCan('holidayWork');
+  const _hwUpcountry = holidayWorkEarnsUpcountry(_hwDisp.rec, APP_SETTINGS, _ownerRole, row.status === 'abroad');
   if (_hwUpcountry ||
-      (!_hwTakesDay && row.upcountry && row.status !== 'company-trip' && _ownerCan('upcountry'))) {
-    tagsEl.innerHTML += `<span class="badge badge-purple">🗺️ ${L('Upcountry', 'Upcountry')} (+฿${_dA.upcountry || 240})</span>`;
+      (!_hwDisp.takesDay && row.upcountry && row.status !== 'company-trip' && _ownerCan('upcountry'))) {
+    // 2026-10-28 (รีวิวรอบ 5): `|| 240` ทำให้ตั้งค่าเบี้ย Upcountry เป็น 0 แล้ว badge ยังสัญญา ฿240
+    // ขณะที่ payroll คูณด้วย 0 ตรงๆ ไม่มีค่าสำรอง (`S.allowances.upcountry * totalUpcountryCount`)
+    // ⇒ ป้ายโกหกเรื่องเงิน · กฎของโปรเจกต์ห้าม `setting || default` เพราะ 0 เป็นค่าที่ตั้งได้จริง ·
+    // พี่น้องในบล็อกเดียวกันเขียนถูกอยู่แล้ว (`rate != null ? rate : 500`)
+    const _upcAmt = _dA.upcountry != null ? _dA.upcountry : 240;
+    tagsEl.innerHTML += `<span class="badge badge-purple">🗺️ ${L('Upcountry', 'Upcountry')} (+฿${_upcAmt})</span>`;
   }
   const approvedOT = DATA_LEAVES.find(l =>
     l.userId === targetUserId && l.type === 'ot' && l.dateFrom === date && l.status === 'approved'
@@ -22959,13 +23013,10 @@ function showAttendanceDetail(date) {
     // getApprovedHolidayWorkDays() ซึ่งไม่มีด่าน role เลยสักตัว (ทั้งฝั่งเว็บและฝาแฝดใน server.js)
     // ⇒ วันที่เพิ่งให้วันลาไปจริงๆ จะขึ้นว่า "ไม่มีรายการพิเศษ" ถ้าสิทธิ์ถูกปลดทีหลัง
     // ⇒ ปิดเฉพาะทางที่เป็นเงิน ปล่อยทางที่เป็นวันลาไว้ (โหมดนั้นไม่มีทั้งแถวอัตรา เงิน และ ฿500 อยู่แล้ว)
-    const _hwAny = dayLeave('holiday-work');
-    // ใช้ `_ownerCan` ตัวเดียวกับด่าน 🗺️ ข้างบน (ประกาศไว้ใกล้ targetRole พร้อมเหตุผล) — รอบก่อน
-    // ที่นี่หาเจ้าของเองซ้ำอีกรอบ ทำให้ด่านข้างบนกับด่านนี้แยกจากกันและหลุดไปคนละทาง
-    const _hwMoneyOk = _ownerCan('holidayWork');
-    const hwRec = (_hwAny && (_hwMoneyOk || _hwAny.compensationMode === 'annual-leave'))
-      ? _hwAny
-      : null;
+    // 2026-10-28 (รีวิวรอบ 5): กฎนี้ย้ายเข้า holidayWorkDisplayFor() แล้ว และ `_hwDisp` ข้างบนก็คือ
+    // คำตอบของวันเดียวกันคนเดียวกัน · เดิมที่นี่คำนวณซ้ำด้วย `dayLeave()` + `_ownerCan()` ของตัวเอง
+    // ซึ่งเป็นสำเนาที่สองในฟังก์ชันเดียว — และสำเนาคือวิธีที่สามจอที่เหลือหลุดออกจากกันมาแล้ว
+    const hwRec = _hwDisp.rec;
     if (hwRec) {
       const paid = hwRec.compensationMode === 'paid';
       const hwHrs = (Number(hwRec.otHours20) || 0) + (Number(hwRec.otHours30) || 0);

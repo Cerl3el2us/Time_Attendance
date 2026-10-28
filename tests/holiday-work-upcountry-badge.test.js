@@ -23,11 +23,24 @@ const assert = require('assert');
 const ROOT = path.join(__dirname, '..');
 const APP_SRC = fs.readFileSync(path.join(ROOT, 'attendance/js/app.js'), 'utf8');
 
+// 2026-10-28 (รีวิวรอบ 5): ของเดิมหาเนื้อฟังก์ชันด้วย `src.indexOf('{', m.index)` ซึ่งกับฟังก์ชันที่
+// รับพารามิเตอร์แบบ destructuring — `function f({ a, b })` — จะไปเจอปีกกาของ **พารามิเตอร์** ก่อน
+// แล้วนับจบที่นั่น ⇒ คืนมาแค่บรรทัดลายเซ็น · `buildAttendancePrintView` เป็นแบบนั้นทั้งตัว
+// ⇒ ยามใดที่ assert ว่า "ไม่มีสิ่งนี้ในหน้าพิมพ์" จึงเขียวฟรี เพราะมันไม่เคยเห็นหน้าพิมพ์
+// ตอนนี้เดินจากวงเล็บ `(` ของพารามิเตอร์ไปหาตัวปิดของมันก่อน แล้วจึงเริ่มนับที่ปีกกาถัดไป
 function extractFunction(src, name) {
   const re = new RegExp(`^(?:async )?function ${name}\\(`, 'm');
   const m = re.exec(src);
   assert.ok(m, `ไม่พบฟังก์ชัน ${name} ใน attendance/js/app.js`);
-  const i = src.indexOf('{', m.index);
+  const open = src.indexOf('(', m.index);
+  let p = 0, afterParams = -1;
+  for (let j = open; j < src.length; j++) {
+    if (src[j] === '(') p++;
+    else if (src[j] === ')') { p--; if (p === 0) { afterParams = j + 1; break; } }
+  }
+  assert.ok(afterParams > 0, `หาวงเล็บปิดของพารามิเตอร์ ${name} ไม่เจอ`);
+  const i = src.indexOf('{', afterParams);
+  assert.ok(i > 0, `หาเนื้อฟังก์ชัน ${name} ไม่เจอ`);
   let depth = 0;
   for (let j = i; j < src.length; j++) {
     if (src[j] === '{') depth++;
@@ -297,29 +310,109 @@ test('ด่านเจ้าของ: ดูของตัวเองแม
   assert.strictEqual(g.hw, true);
 });
 
-test('บล็อก hwRec ผูกกับด่านเจ้าของ และยังปล่อยโหมดแลกวันหยุดผ่าน', () => {
-  const fn = extractFunction(APP_SRC, 'showAttendanceDetail');
-  assert.ok(/const _hwMoneyOk = _ownerCan\('holidayWork'\);/.test(fn),
-    'ด่านเงินต้องใช้ตัวเดียวกับด่านของ 🗺️ ไม่ใช่หาเจ้าของเองซ้ำ');
-  assert.ok(/_hwMoneyOk \|\| _hwAny\.compensationMode === 'annual-leave'/.test(fn),
-    'ต้องปล่อยโหมดแลกวันหยุดผ่าน เพราะวันลาได้จริงโดยไม่มีด่าน role');
-  assert.ok(!/const hwRec = dayLeave\('holiday-work'\);/.test(fn),
-    'ยังมีบรรทัดเดิมที่ไม่มีด่านอยู่');
-  // 🗺️ ต้องใช้ด่านเดียวกัน ไม่ใช่ targetRole ซึ่งถอยไปเป็น role ของคนดูได้
-  assert.ok(!/holidayWorkEarnsUpcountry\(_hwUpcRec, APP_SETTINGS, targetRole,/.test(fn),
-    'badge Upcountry ยังตัดสินด้วย targetRole อยู่');
-  assert.ok(/holidayWorkEarnsUpcountry\(_hwUpcRec, APP_SETTINGS, _ownerRole,/.test(fn));
+// ───────────────────────────────────────────────────────────────────────────────────────────────
+// 2026-10-28 (รีวิวรอบ 5): สองข้อที่นี่เคยเป็น regex บนซอร์สของป๊อปอัป ซึ่ง (ก) เขียวต่อไปได้แม้
+// พฤติกรรมเปลี่ยน (ข) ตรวจแค่จอเดียวจากสี่จอ — และนั่นคือเหตุที่รอบ 3 แก้ป๊อปอัปแล้วแถว/การ์ด/
+// ใบพิมพ์ยังซ่อนวันที่ให้วันลาไปจริง · ตอนนี้กฎอยู่ใน holidayWorkDisplayFor() ตัวเดียว ⇒ รันตัวจริง
+function makeDisplayFor({ leaves, trips = [], elig, ownerRole, rowStatus = 'holiday',
+  date = '2026-10-18', userId = 7 }) {
+  const ctx = { DATA_LEAVES: leaves, DATA_COMPANY_TRIP_DATES: trips, console };
+  vm.createContext(ctx);
+  vm.runInContext(
+    constDecl(APP_SRC, 'DEFAULT_ALLOWANCE_ELIGIBILITY') + '\n' +
+    extractFunction(APP_SRC, 'isAllowanceEligible') + '\n' +
+    extractFunction(APP_SRC, 'isCompanyTripDay') + '\n' +
+    extractFunction(APP_SRC, 'holidayWorkDisplayFor') + '\n' +
+    'out = holidayWorkDisplayFor(' + userId + ', ' + JSON.stringify(date) + ', ' +
+    JSON.stringify(rowStatus) + ', ' + JSON.stringify(ownerRole) + ', { allowanceEligibility: ' +
+    JSON.stringify(elig) + ' });', ctx);
+  return { rec: ctx.out.rec, takesDay: ctx.out.takesDay };
+}
+const REC_PAID = { userId: 7, type: 'holiday-work', dateFrom: '2026-10-18', status: 'approved', compensationMode: 'paid' };
+const REC_LEAVE = { ...REC_PAID, compensationMode: 'annual-leave' };
+const ELIG_USER = { holidayWork: ['user'], upcountry: ['user'] };
+
+test('จอรวม: โหมดเงิน + เจ้าของมีสิทธิ์ ⇒ แสดง และวันถูกใบยึดไป', () => {
+  const r = makeDisplayFor({ leaves: [REC_PAID], elig: ELIG_USER, ownerRole: 'user' });
+  assert.ok(r.rec, 'ต้องแสดง');
+  assert.strictEqual(r.takesDay, true);
+});
+
+test('จอรวม: โหมดเงิน + เจ้าของไม่มีสิทธิ์ ⇒ ไม่แสดง (สลิปจ่าย ฿0)', () => {
+  const r = makeDisplayFor({ leaves: [REC_PAID], elig: ELIG_USER, ownerRole: 'accounting' });
+  assert.strictEqual(r.rec, null);
+  assert.strictEqual(r.takesDay, false);
+});
+
+// หัวใจของรอบ 5 — และเป็นครึ่งที่แถวเคยพลาดเพราะรวมสองค่าไว้ในตัวแปรเดียว:
+// โหมดแลกวันหยุดต้อง **แสดง** เพราะ getApprovedHolidayWorkDays() ให้วันลาโดยไม่มีด่าน role
+// แต่ต้อง **ไม่ยึดวัน** เพราะ payroll สร้าง holidayWorkDates จาก approvedHolidayWork ที่ gate
+// ด้วยสิทธิ์ holidayWork ⇒ role ที่ไม่มีสิทธิ์ ลิสต์นั้นว่าง แปลว่าธง upcountry ของวันนั้นยังถูกนับ
+test('จอรวม: โหมดแลกวันหยุด + เจ้าของไม่มีสิทธิ์ ⇒ แสดง แต่ห้ามยึดวัน', () => {
+  const r = makeDisplayFor({ leaves: [REC_LEAVE], elig: ELIG_USER, ownerRole: 'accounting' });
+  assert.ok(r.rec, 'วันลาได้จริงโดยไม่มีด่าน role ⇒ ซ่อน = ปฏิเสธวันลาที่ระบบให้ไปแล้ว');
+  assert.strictEqual(r.takesDay, false,
+    'payroll ไม่ได้ยึดวันนี้ (approvedHolidayWork ว่าง) ⇒ ธง upcountry ของวันนั้นยังถูกนับ ห้ามกดทิ้ง');
+  assert.notStrictEqual(r.rec !== null, r.takesDay,
+    'สองค่านี้ต่างกันในเคสนี้ — ถ้าใครรวมกลับเป็นค่าเดียว บั๊กของรอบ 5 กลับมาทันที');
+});
+
+test('จอรวม: โหมดแลกวันหยุด + เจ้าของมีสิทธิ์ ⇒ แสดง และยึดวัน', () => {
+  const r = makeDisplayFor({ leaves: [REC_LEAVE], elig: ELIG_USER, ownerRole: 'user' });
+  assert.ok(r.rec);
+  assert.strictEqual(r.takesDay, true);
+});
+
+test('จอรวม: หาเจ้าของไม่เจอ (role = null) ⇒ ปิดทางเงิน แต่วันลายังแสดง', () => {
+  const paid = makeDisplayFor({ leaves: [REC_PAID], elig: ELIG_USER, ownerRole: null });
+  assert.strictEqual(paid.rec, null);
+  assert.strictEqual(paid.takesDay, false);
+  const leave = makeDisplayFor({ leaves: [REC_LEAVE], elig: ELIG_USER, ownerRole: null });
+  assert.ok(leave.rec, 'โหมดวันลาไม่ต้องรู้ role');
+  assert.strictEqual(leave.takesDay, false);
+});
+
+test('จอรวม: Company Trip ปิดทั้งสองค่า ทั้งทางสถานะแถวและทางรายการวันทริป', () => {
+  const byStatus = makeDisplayFor({ leaves: [REC_PAID], elig: ELIG_USER, ownerRole: 'user', rowStatus: 'company-trip' });
+  assert.strictEqual(byStatus.rec, null);
+  assert.strictEqual(byStatus.takesDay, false);
+  const byList = makeDisplayFor({ leaves: [REC_PAID], elig: ELIG_USER, ownerRole: 'user', trips: ['2026-10-18'] });
+  assert.strictEqual(byList.rec, null, 'ป๊อปอัปเดิมถามผ่าน isCompanyTripDay() ส่วนแถวถามผ่าน row.status ⇒ ต้องรับทั้งสองทาง');
+  assert.strictEqual(byList.takesDay, false);
+});
+
+test('จอรวม: ไม่มีเรคอร์ด / ยังไม่อนุมัติ / คนละวัน ⇒ ไม่แสดง', () => {
+  assert.strictEqual(makeDisplayFor({ leaves: [], elig: ELIG_USER, ownerRole: 'user' }).rec, null);
+  assert.strictEqual(makeDisplayFor({ leaves: [{ ...REC_PAID, status: 'pending' }], elig: ELIG_USER, ownerRole: 'user' }).rec, null);
+  assert.strictEqual(makeDisplayFor({ leaves: [{ ...REC_PAID, dateFrom: '2026-10-17' }], elig: ELIG_USER, ownerRole: 'user' }).rec, null);
+  assert.strictEqual(makeDisplayFor({ leaves: [{ ...REC_PAID, userId: 8 }], elig: ELIG_USER, ownerRole: 'user' }).rec, null);
+});
+
+// ข้อนี้เป็นยามเชิงโครงสร้าง ไม่ใช่คำกล่าวอ้างเรื่องพฤติกรรม: พฤติกรรมถูกตรวจข้างบนแล้ว ที่นี่กัน
+// ไม่ให้จอใดจอหนึ่ง **งอกกฎของตัวเองขึ้นมาใหม่** ซึ่งคือวิธีที่สามจอหลุดออกจากกันมาแล้วสองรอบ
+test('ทั้งสี่จอถามฟังก์ชันกลางตัวเดียว และมีนิยามเดียวในไฟล์', () => {
+  const defs = APP_SRC.match(/^function holidayWorkDisplayFor\(/gm) || [];
+  assert.strictEqual(defs.length, 1, 'ต้องมีนิยามเดียว');
+  // แถวบนจอ + การ์ดมือถือใช้สตริง badge ชุดเดียวกัน จึงนับเป็นจอเดียวกันที่นี่ (ยืนยันด้วยข้อถัดไป)
+  for (const fname of ['renderAttendanceTable', 'buildAttendancePrintView', 'showAttendanceDetail']) {
+    assert.ok(/holidayWorkDisplayFor\(/.test(extractFunction(APP_SRC, fname)),
+      fname + ' ไม่ได้ถามฟังก์ชันกลาง ⇒ มันกำลังตัดสินเอง');
+  }
+});
+
+test('การ์ดมือถือใช้ badge ชุดเดียวกับแถวบนจอ จึงไม่มีกฎของตัวเอง', () => {
+  const row = extractFunction(APP_SRC, 'renderAttendanceTable');
+  const uses = (row.match(/\[holidayWorkBadge, earlyBadge, lateBadge, otBadge, upcountryBadge,/g) || []);
+  assert.strictEqual(uses.length, 2,
+    'ต้องมีสองที่ (ตารางเดสก์ท็อปและการ์ดมือถือ) ที่ต่อ badge ชุดเดียวกัน — ถ้าเหลือหนึ่ง การ์ดแยกไปสร้างเองแล้ว');
 });
 
 // รีวิวรอบ 3 (C2): ด่านนั้นปิดเกิน — getApprovedHolidayWorkDays() ให้วันลาโดย **ไม่มีด่าน role เลย**
-// ⇒ โหมดแลกวันหยุดต้องผ่านด่านเสมอ ไม่งั้นวันที่ให้วันลาไปจริงจะขึ้นว่า "ไม่มีรายการพิเศษ"
-test('วันลาที่ได้จากโหมดแลกวันหยุดไม่มีด่าน role ⇒ ด่านของป๊อปอัปต้องไม่ปิดโหมดนั้น', () => {
+// ⇒ โหมดแลกวันหยุดต้องผ่านด่านเสมอ · ถ้าวันหนึ่งตัวให้วันลามีด่าน role ข้อนี้จะแดงเพื่อให้กลับมาคิดใหม่
+test('ตัวให้วันลายังไม่มีด่าน role ⇒ สมมติฐานของฟังก์ชันกลางยังใช้ได้', () => {
   const credit = extractFunction(APP_SRC, 'getApprovedHolidayWorkDays');
   assert.ok(!/isAllowanceEligible|canHolidayWork|allowanceEligibility/.test(credit),
-    'ถ้าวันหนึ่งตัวให้วันลามีด่าน role แล้ว ให้กลับมาทบทวนด่านของป๊อปอัปด้วย');
-  const fn = extractFunction(APP_SRC, 'showAttendanceDetail');
-  assert.ok(/_hwMoneyOk \|\| _hwAny\.compensationMode === 'annual-leave'/.test(fn),
-    'ด่านต้องปล่อยโหมดแลกวันหยุดผ่านเสมอ ปิดเฉพาะทางที่เป็นเงิน');
+    'ถ้าวันหนึ่งตัวให้วันลามีด่าน role แล้ว ให้กลับมาทบทวน holidayWorkDisplayFor() ด้วย');
 });
 
 // รีวิวรอบ 3 (C1): แถวตารางกับป๊อปอัปเป็น "เรคอร์ดเดียวกัน เงินก้อนเดียวกัน" ⇒ ต้องหาเจ้าของแบบเดียวกัน
@@ -327,8 +420,20 @@ test('ทั้งสองที่ที่คิดเงินของว�
   assert.ok(!/DATA_USERS\.find\(u => u\.id == uid\) \|\| currentUser/.test(APP_SRC),
     'แถวตารางยังถอยไปใช้ currentUser อยู่ ⇒ คิดเงินจากเงินเดือนคนดู');
   const row = extractFunction(APP_SRC, 'renderAttendanceTable');
+  // 2026-10-28 (รีวิวรอบ 5): เกณฑ์เดิมคือ `>= 2` ขณะที่ของจริงมี 3 จุด ⇒ ถอยจุดใดจุดหนึ่งกลับไปเป็น
+  // `|| currentUser` ก็ยังเหลือ 2 และเทสต์ทั้งชุดยังเขียว — คือ regression ที่ข้อนี้ตั้งใจกันไว้
+  // กลับมาได้เงียบๆ · ตอนนี้ตรึงทั้งจำนวนและ **ชื่อตัวแปรของแต่ละจุด** แยกกัน
   const both = (APP_SRC.match(/\|\| \(currentUser && currentUser\.id === (uid|targetUserId) \? currentUser : null\)/g) || []);
-  assert.ok(both.length >= 2, `ต้องใช้สำนวนเดียวกันทั้งสองที่ แต่เจอ ${both.length}`);
+  assert.strictEqual(both.length, 3,
+    `ต้องมี 3 จุดที่หาเจ้าของด้วยสำนวนนี้ (_attOwner, empUser, _ownerUser) แต่เจอ ${both.length} ⇒ ` +
+    'ถ้าเพิ่มจุดใหม่จริง ให้เพิ่มชื่อมันในข้อนี้ด้วย ไม่ใช่ผ่อนตัวเลข');
+  for (const [name, re] of [
+    ['_attOwner (แถวตาราง)', /const _attOwner = DATA_USERS\.find\(u => u\.id === targetUserId\)\s*\n\s*\|\| \(currentUser/],
+    ['empUser (ทูลทิป OT ของแถว)', /const empUser = DATA_USERS\.find\(u => u\.id === uid\)\s*\n\s*\|\| \(currentUser/],
+    ['_ownerUser (ป๊อปอัป)', /const _ownerUser = DATA_USERS\.find\(u => u\.id === targetUserId\)\s*\n\s*\|\| \(currentUser/],
+  ]) {
+    assert.ok(re.test(APP_SRC), `${name} ไม่ได้หาเจ้าของด้วยสำนวนนี้แล้ว ⇒ อาจถอยไปใช้ currentUser`);
+  }
 });
 
 console.log('T3 ช่องสถานที่ไม่ใช่ช่องบังคับ และรูปแบบที่ส่งต้องเป็นรูปแบบที่เซิร์ฟเวอร์รับ');
@@ -373,11 +478,46 @@ test('ตัวตรวจของ upcountry ยังไม่ยอมรั
 // ⇒ ยามนี้จึงนับว่า "ทุกที่ที่เรียกตัวตรวจของ upcountry ต้องยกเว้น holiday-work" ไม่ใช่เช็กทีละบรรทัด
 test('ไม่มีที่ไหนเอาตัวตรวจของ upcountry มาตรวจ holiday-work — ทั้ง POST และ PUT', () => {
   // จับทั้งประโยคจนถึง `;` เพราะฝั่ง PUT เขียนเป็น ternary สองบรรทัด
-  const calls = SERVER_SRC.match(/const locErr =[\s\S]*?;/g) || [];
-  assert.strictEqual(calls.length, 2, `คาดว่ามีจุดเรียกแบบรวม 2 จุด (POST/PUT) แต่เจอ ${calls.length}`);
-  calls.forEach(stmt => {
-    assert.ok(/'holiday-work'/.test(stmt), 'จุดเรียกนี้ไม่ได้ยกเว้น holiday-work: ' + stmt.replace(/\s+/g, ' ').trim());
-  });
+  // 2026-10-28 (รีวิวรอบ 5): ของเดิมนับด้วย `const locErr =` คือนับ **ชื่อตัวแปร** ไม่ใช่จุดเรียก ⇒
+  // มองไม่เห็นจุดที่สามที่ชื่อ `const upcountryLocErr = …` ซึ่งเป็นจุดที่ถูกเพิ่มทีหลังด้วยชื่ออื่น
+  // และนั่นคือรูปแบบเดียวกับที่ทำให้จุด PUT หลุดไปตั้งแต่ต้น · ตอนนี้นับจาก **ชื่อฟังก์ชันที่ถูกเรียก**
+  // แล้วไล่ดูทุกจุดว่าจุดนั้นเอื้อม holiday-work ได้หรือไม่ ⇒ จุดที่สี่ชื่ออะไรก็หลุดไม่ได้
+  // ตัดคอมเมนต์บรรทัดออกก่อน ไม่งั้นจะนับประโยคที่แค่ *พูดถึง* ตัวตรวจ (มีสองแห่ง) และตัดนิยาม
+  // ของฟังก์ชันเองออกด้วย · เหลือแต่จุดที่ "เรียกมันจริง"
+  const SRC_NOCMT = SERVER_SRC.replace(/^[ \t]*\/\/[^\n]*$/gm, '');
+  const sites = [];
+  const callRe = /validateUpcountryLocations\(/g;
+  let mm;
+  while ((mm = callRe.exec(SRC_NOCMT)) !== null) {
+    const before = SRC_NOCMT.slice(Math.max(0, mm.index - 9), mm.index);
+    if (before.endsWith('function ')) continue;            // นิยาม ไม่ใช่จุดเรียก
+    // เอา **ประโยคทั้งประโยค** ไม่ใช่แค่บรรทัดที่มีการเรียก: จุด PUT เขียนเงื่อนไข
+    // `(updates.type || leave.type) === 'holiday-work'` ไว้บรรทัดก่อนหน้า ⇒ ถ้าตัดแค่บรรทัดเดียว
+    // จะมองไม่เห็นการยกเว้น แล้วข้อนี้จะฟ้องผิดว่า PUT ไม่ยกเว้น holiday-work
+    const stStart = Math.max(
+      SRC_NOCMT.lastIndexOf(';', mm.index),
+      SRC_NOCMT.lastIndexOf('{', mm.index),
+      SRC_NOCMT.lastIndexOf('}', mm.index)) + 1;
+    const end = SRC_NOCMT.indexOf(';', mm.index);
+    sites.push({ idx: mm.index, stmt: SRC_NOCMT.slice(stStart, end + 1).trim() });
+  }
+  assert.strictEqual(sites.length, 3,
+    `จำนวนจุดเรียก validateUpcountryLocations เปลี่ยนไป (เจอ ${sites.length}) ⇒ ไล่ดูทุกจุดใหม่ ` +
+    'ว่าจุดใหม่ holiday-work เอื้อมถึงไหม แล้วอัปเดตข้อนี้พร้อมเหตุผล');
+  // สองจุดที่ holiday-work เดินผ่านได้ (POST, PUT) ต้องยกเว้นมันที่ตัวประโยคเอง
+  const exempt = sites.filter(s => /'holiday-work'/.test(s.stmt));
+  assert.strictEqual(exempt.length, 2,
+    'จุดที่ holiday-work เดินผ่านได้ต้องยกเว้นมันเอง — เจอ ' + exempt.length + ' จุด:\n       ' +
+    sites.map(s => s.stmt.replace(/\s+/g, ' ')).join('\n       '));
+  // จุดที่สาม (resolvedLocations) ไม่ต้องยกเว้น เพราะมันอยู่ใต้ `if (newType === 'upcountry')`
+  // holiday-work จึงเอื้อมไม่ถึง · ถ้าวันหนึ่งกำแพงนั้นหาย ข้อนี้ต้องแดง
+  const third = sites.find(s => !/'holiday-work'/.test(s.stmt));
+  assert.ok(/validateUpcountryLocations\(resolvedLocations\)/.test(third.stmt),
+    'จุดที่ไม่ยกเว้น holiday-work เปลี่ยนไปจากที่เคยไล่ไว้: ' + third.stmt.replace(/\s+/g, ' '));
+  const guard = SRC_NOCMT.lastIndexOf("if (newType === 'upcountry')", third.idx);
+  assert.ok(guard > 0 && third.idx - guard < 1200,
+    'จุด resolvedLocations ไม่ได้อยู่ใต้ `if (newType === \'upcountry\')` อีกแล้ว ⇒ holiday-work ' +
+    'เอื้อมถึงตัวตรวจของ upcountry ได้ ต้องยกเว้นที่จุดนั้นด้วย');
   assert.ok(/\(updates\.type \|\| leave\.type\) === 'holiday-work'/.test(SERVER_SRC),
     'PUT ต้องคำนวณชนิดเอง ไม่ใช้ newType ซึ่งประกาศอยู่ใต้จุดนั้น (TDZ)');
 });
@@ -402,8 +542,13 @@ test('submitHolidayWork ส่ง locations เสมอ และใช้ [] �
 console.log('T4 Working Report แนบเฉพาะเมื่อกรอกสถานที่');
 
 test('เซิร์ฟเวอร์บังคับแนบเฉพาะเมื่อมีสถานที่ ทั้ง POST และ PUT', () => {
-  const hits = SERVER_SRC.match(/hasUpcountryLocation\(\{ locations: [^}]+\}\)\s*&&\s*\n\s*!\w+(?:\.attachment)?/g) || [];
-  assert.strictEqual(hits.length, 2, `ต้องผูกกับ hasUpcountryLocation ทั้งสองเส้นทาง แต่เจอ ${hits.length}`);
+  // 2026-10-28 (รีวิวรอบ 5): ของเดิมบังคับให้มี `\n` คั่นระหว่างสองเงื่อนไข ⇒ ถ้าใครรวมเป็นบรรทัด
+  // เดียว (พฤติกรรมเท่าเดิมทุกประการ) ข้อนี้จะแดง · ตอนนี้ยุบช่องว่างทั้งหมดก่อนเทียบ แล้วเทียบ
+  // ที่ *ตัวเงื่อนไข* ไม่ใช่ที่การจัดบรรทัด
+  const flat = SERVER_SRC.replace(/\s+/g, ' ');
+  const hits = flat.match(/hasUpcountryLocation\(\{ locations: [^}]+\}\) && !\w+(?:\.attachment)?/g) || [];
+  assert.strictEqual(hits.length, 2,
+    `ต้องผูกกับ hasUpcountryLocation ทั้งสองเส้นทาง (POST/PUT) แต่เจอ ${hits.length}`);
   assert.ok(!/if \(!body\.attachment && !\(Number\(body\.fileCount\) > 0\)\)/.test(SERVER_SRC),
     'POST ยังบังคับแนบทุกกรณีอยู่');
   assert.ok(!/if \(!resolvedAttachment && !\(Number\(resolvedFileCount\) > 0\)\)/.test(SERVER_SRC),

@@ -215,6 +215,22 @@ test('all three renderings of the timesheet show Holiday Work, not just the desk
   assert.ok(/attendanceDayOtRecord\(/.test(print),
     'the printed sheet still decides OT with its own filter instead of the shared rule, so it can\n' +
     '       disagree with the screen it was printed from');
+
+  // 2026-10-28 (รีวิวรอบ 5): ข้อนี้ตรวจ 🔄 บนกระดาษไว้แต่ไม่เคยตรวจ 🗺️ ⇒ หน้าพิมพ์พลาดทั้งการแก้
+  // ของรอบ 2 (`!takesDay` + holidayWorkEarnsUpcountry) และรอบ 3 (ประตูโหมดวันลา) ไปทั้งสองรอบ
+  // วัดกับข้อมูลจริงวันที่พบ: 4 ใน 5 ใบที่อนุมัติ สลิปจ่าย Upcountry ฿240 จอขึ้น 🗺️ กระดาษว่าง
+  assert.ok(/holidayWorkEarnsUpcountry\(/.test(print),
+    'the printed sheet decides 🗺️ with the day\'s own flag alone, so a Holiday Work day that earns\n' +
+    '       the ฿240 Upcountry prints blank while the screen beside it shows the badge');
+  assert.ok(/takesDay/.test(print),
+    'the printed sheet does not suppress the day\'s own sticky upcountry flag when the Holiday Work\n' +
+    '       record has taken the day, so it can print 🗺️ for a day the payslip pays ฿0 for');
+  // ทั้งสามจอต้องถามฟังก์ชันกลางตัวเดียว ไม่มีใครเก็บกฎของตัวเองไว้ (พฤติกรรมของฟังก์ชันนั้นถูก
+  // ตรวจเชิงพฤติกรรมใน tests/holiday-work-upcountry-badge.test.js)
+  for (const [label, fn] of [['the desktop table', table], ['the printed sheet', print]]) {
+    assert.ok(/holidayWorkDisplayFor\(/.test(fn),
+      `${label} decides Holiday Work with its own rule instead of the shared holidayWorkDisplayFor()`);
+  }
 });
 
 test('the Holiday Work icon is gated by holidayWork eligibility', () => {
