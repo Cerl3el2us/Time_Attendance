@@ -1601,4 +1601,5 @@ window.LANG_JA = {
   "Required only when a work location is given — a holiday worked at the office needs no attachment.": "勤務場所を入力した場合のみ必須です — 事務所で勤務した休日出勤には添付は不要です。",
   "⚠️ Working Report is required when a work location is given": "⚠️ 勤務場所を入力した場合は Working Report の添付が必要です",
   "not given — no Upcountry allowance": "未入力 — 地方出張手当なし",
+  "Paid on the payslip": "給与明細の支給時間",
 };

@@ -4797,3 +4797,15 @@ tr.finalize-row-confirmed:hover td {
   background: var(--bg-card) !important;
   border-color: #fca5a5 !important;
 }
+
+/* บรรทัดสรุปใต้แถวอัตรา: ทศนิยมที่สลิปจ่ายจริง บอกครั้งเดียวต่ออัตรา (2026-10-28)
+   เหตุที่ไม่ใส่ทศนิยมไว้ทีละแถว: payroll ปัดผลรวมของอัตรา ไม่ได้ปัดทีละท่อน ⇒ กะที่มี ×3 สองท่อน
+   จะได้คนละค่า (วัดแล้ว 57,400 คู่เวลา) · แถวจึงบอกชั่วโมง-นาทีซึ่งแม่นเสมอ ส่วนเลขที่เอาไปเทียบ
+   สลิปอยู่บรรทัดนี้บรรทัดเดียว และอ่านจาก otHours20/otHours30 ที่เก็บไว้ในเรคอร์ดโดยตรง */
+.hw-ot-detail .hw-ot-total {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}

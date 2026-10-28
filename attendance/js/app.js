@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 161;
+const APP_BUILD = 162;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -3061,12 +3061,27 @@ function holidayWorkDetailBlockHtml(l) {
       const nextDay = s.endMin >= 24 * 60
         ? ` <span class="hw-ot-note">(${L('next day', 'วันถัดไป')})</span>` : '';
       const span = `${holidayWorkSegmentTimeLabel(s.startMin)}–${holidayWorkSegmentTimeLabel(s.endMin)}`;
-      const dur = holidayWorkDurationLabel(s.mins);
       return `<div class="hw-ot-row"><span class="hw-ot-rate">×${s.rate / 10}</span>` +
         `<span class="hw-ot-span">${span}${nextDay}${note}</span>` +
-        `<span class="hw-ot-hours">${dur.hm} <span class="hw-ot-note">(${dur.dec})</span></span></div>`;
+        `<span class="hw-ot-hours">${holidayWorkDurationLabel(s.mins).hm}</span></div>`;
     }).join('');
-    if (rows) out += `<div class="hw-ot-rows">${rows}</div>`;
+    if (rows) {
+      // The decimal belongs here, once per rate, and NOT on each row. Payroll rounds the SUM of a
+      // rate's minutes (round2(otMins30)); rounding each piece on its own disagrees with that
+      // whenever a rate has two pieces -- a shift reaching past 08:30 and 17:30 at both ends has
+      // two ×3 tails, and 57,400 start/end pairs produce a different total that way. So the row
+      // carries only hours and minutes, which are exact, and the payslip figure is read straight
+      // off the record's own otHours20/otHours30 -- the numbers the server pinned at approval and
+      // the payslip actually pays, not a recomputation that could drift from them.
+      const h20 = Number(l.otHours20) || 0, h30 = Number(l.otHours30) || 0;
+      const paid = [];
+      if (h20 > 0) paid.push(`×2 ${h20.toFixed(2)}`);
+      if (h30 > 0) paid.push(`×3 ${h30.toFixed(2)}`);
+      const total = paid.length
+        ? `<div class="hw-ot-total">${L('Paid on the payslip', 'ที่จ่ายจริงตามสลิป')}: ${paid.join(' · ')} ${L('h', 'ชม.')}</div>`
+        : '';
+      out += `<div class="hw-ot-rows">${rows}${total}</div>`;
+    }
   }
   return `<div class="hw-ot-detail">${out}</div>`;
 }
@@ -11879,7 +11894,13 @@ function renderAttendanceTable() {
     // modes), so the row now shows 🗺️ for it too. The money is untouched: payroll already pays
     // such a day once. hwRow above is the same record, already gated on eligibility and Company
     // Trip, so the icon can never appear on a day the payslip pays nothing for.
-    const upcountryShown = (canUpcountryTarget && row.upcountry && row.status !== 'company-trip')
+    // `&& !hwRow` is the half that was missing and that the comment above wrongly swore was safe:
+    // payroll hands the WHOLE day to the Holiday Work record (upcountryCount skips any date in
+    // holidayWorkDates) and then counts the record. While every record carried a location those
+    // were the same answer. A record with the box left empty hands the day over and claims
+    // nothing, so without this the day's own sticky `row.upcountry` flag -- which survives a
+    // revoked approval -- lights the icon on a day the payslip pays ฿0 for.
+    const upcountryShown = (canUpcountryTarget && row.upcountry && row.status !== 'company-trip' && !hwRow)
       || holidayWorkEarnsUpcountry(hwRow, APP_SETTINGS, targetUser.role, row.status === 'abroad');
     const upcountryStops = upcountryShown ? upcountryDayStops(targetUserId, row.date) : [];
     const upcountryBadge = !upcountryShown
@@ -22770,12 +22791,17 @@ function showAttendanceDetail(date) {
   // ONE badge, not a second one beside it: payroll pays the day once (its upcountryCount skips
   // dates that have Holiday Work and counts the record instead), so two 🗺️ on one day would read
   // as double pay -- the exact thing he said to avoid.
-  const _hwUpcountry = holidayWorkEarnsUpcountry(
-    DATA_LEAVES.find(l => l.userId === targetUserId && l.type === 'holiday-work' &&
-      l.dateFrom === date && l.status === 'approved'),
-    APP_SETTINGS, targetRole, row.status === 'abroad');
+  const _hwUpcRec = DATA_LEAVES.find(l => l.userId === targetUserId && l.type === 'holiday-work' &&
+    l.dateFrom === date && l.status === 'approved');
+  const _hwUpcountry = holidayWorkEarnsUpcountry(_hwUpcRec, APP_SETTINGS, targetRole, row.status === 'abroad');
+  // Does payroll hand this whole day to the record? Same three conditions it uses to build
+  // approvedHolidayWork / holidayWorkDates. When it does, the day's own upcountry flag is not
+  // counted at all, so it must not light this badge either -- a record filed with no location
+  // takes the day and claims nothing, and the flag can outlive a revoked approval.
+  const _hwTakesDay = !!_hwUpcRec && !isCompanyTripDay(date) &&
+    isAllowanceEligible(APP_SETTINGS.allowanceEligibility, targetRole, 'holidayWork');
   if (_hwUpcountry ||
-      (row.upcountry && row.status !== 'company-trip' && isAllowanceEligible(APP_SETTINGS.allowanceEligibility, targetRole, 'upcountry'))) {
+      (!_hwTakesDay && row.upcountry && row.status !== 'company-trip' && isAllowanceEligible(APP_SETTINGS.allowanceEligibility, targetRole, 'upcountry'))) {
     tagsEl.innerHTML += `<span class="badge badge-purple">🗺️ ${L('Upcountry', 'Upcountry')} (+฿${_dA.upcountry || 240})</span>`;
   }
   const approvedOT = DATA_LEAVES.find(l =>

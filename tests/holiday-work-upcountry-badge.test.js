@@ -261,9 +261,27 @@ test('ตัวตรวจของ upcountry ยังไม่ยอมรั
   assert.strictEqual(vctx.validateUpcountryLocations(undefined), null, 'undefined ยังผ่านเหมือนเดิม');
 });
 
-test('POST ไม่เอาตัวตรวจของ upcountry มาตรวจ holiday-work', () => {
-  assert.ok(/const locErr = type === 'holiday-work' \? null : validateUpcountryLocations\(body\.locations\);/.test(SERVER_SRC),
-    'ตัวตรวจรวมยังตรวจ holiday-work อยู่ ⇒ [] ของ "ทำงานที่ออฟฟิศ" จะถูกปฏิเสธ');
+// **ทั้ง POST และ PUT** — ข้อนี้เคยเขียนไว้ตรวจแต่ POST แล้วปล่อย PUT หลุดไปขึ้นเว็บจริง
+// ซึ่งเป็นความผิดพลาดแบบเดียวกับที่ไฟล์นี้เขียนบทเรียนไว้ข้างบน ห่างกันไม่กี่ชั่วโมง
+// ⇒ ยามนี้จึงนับว่า "ทุกที่ที่เรียกตัวตรวจของ upcountry ต้องยกเว้น holiday-work" ไม่ใช่เช็กทีละบรรทัด
+test('ไม่มีที่ไหนเอาตัวตรวจของ upcountry มาตรวจ holiday-work — ทั้ง POST และ PUT', () => {
+  // จับทั้งประโยคจนถึง `;` เพราะฝั่ง PUT เขียนเป็น ternary สองบรรทัด
+  const calls = SERVER_SRC.match(/const locErr =[\s\S]*?;/g) || [];
+  assert.strictEqual(calls.length, 2, `คาดว่ามีจุดเรียกแบบรวม 2 จุด (POST/PUT) แต่เจอ ${calls.length}`);
+  calls.forEach(stmt => {
+    assert.ok(/'holiday-work'/.test(stmt), 'จุดเรียกนี้ไม่ได้ยกเว้น holiday-work: ' + stmt.replace(/\s+/g, ' ').trim());
+  });
+  assert.ok(/\(updates\.type \|\| leave\.type\) === 'holiday-work'/.test(SERVER_SRC),
+    'PUT ต้องคำนวณชนิดเอง ไม่ใช้ newType ซึ่งประกาศอยู่ใต้จุดนั้น (TDZ)');
+});
+
+// newType ประกาศหลังจุดที่ใช้ ⇒ อ้างถึงที่นั่นจะเป็น ReferenceError ตอนรัน ซึ่ง node --check กับ
+// eslint ผ่านทั้งคู่ · ข้อนี้ตรึงลำดับไว้ไม่ให้ใครเผลอ "ทำให้สั้นลง" ภายหลัง
+test('PUT ไม่อ้าง newType ก่อนที่มันจะถูกประกาศ', () => {
+  const useIdx = SERVER_SRC.search(/const locErr = \(updates\.type \|\| leave\.type\)/);
+  const declIdx = SERVER_SRC.search(/^\s*const newType = /m);
+  assert.ok(useIdx > 0 && declIdx > 0, 'หาจุดใช้/จุดประกาศไม่เจอ');
+  assert.ok(useIdx < declIdx, 'จุดใช้ต้องอยู่ก่อนจุดประกาศ newType จริง (ยืนยันว่าห้ามใช้ newType ที่นั่น)');
 });
 
 test('submitHolidayWork ส่ง locations เสมอ และใช้ [] แทนการตัดคีย์ทิ้ง', () => {

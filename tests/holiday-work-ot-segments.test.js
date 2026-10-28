@@ -279,4 +279,40 @@ test('ญี่ปุ่นใช้รูปแบบของตัวเอ�
   assert.strictEqual(jctx.holidayWorkDurationLabel(52).hm, '52分');
 });
 
+console.log('T5 ทศนิยมบนจอต้องเป็นเลขเดียวกับที่สลิปจ่าย');
+
+// พบตอนรีวิว 2026-10-28: ถ้าใส่ทศนิยมไว้ทีละแถว แต่ละแถวจะปัดของตัวเอง ขณะที่ payroll ปัด
+// **ผลรวมของอัตรานั้น** (`round2(otMins30)`) ⇒ กะที่เลยทั้ง 08:30 และ 17:30 จะมี ×3 สองท่อน
+// แล้วสองการปัดนั้นไม่ตรงกัน · วัดแล้ว: มีคู่เวลาที่ไม่ตรงอยู่หลายหมื่นคู่ · ข้อนี้พิสูจน์ว่าปัญหา
+// มีอยู่จริง และพิสูจน์ว่าโค้ดเลิกทำแบบนั้นแล้ว
+test('การปัดทีละท่อนไม่ตรงกับการปัดผลรวม — ปัญหามีจริง ไม่ใช่ความกังวลลอยๆ', () => {
+  const round2 = n => Math.round(n / 60 * 100) / 100;
+  let bad = 0, eg = null;
+  for (let s = 0; s < 1440; s += 1) {
+    for (let e = 0; e < 1440; e += 7) {
+      const a = hhmm(s), b = hhmm(e);
+      const money = ctx.splitHolidayWorkOtMinutes(a, b, S);
+      const segs = Array.from(ctx.holidayWorkOtSegments(a, b, S)).filter(x => x.rate === 30);
+      if (segs.length < 2) continue;
+      const perRow = segs.reduce((t, x) => t + round2(x.mins), 0);
+      if (Math.abs(perRow - money.otHours30) > 1e-9) {
+        bad++;
+        if (!eg) eg = `${a}–${b}: ทีละท่อนรวมได้ ${perRow.toFixed(2)} แต่สลิปจ่าย ${money.otHours30.toFixed(2)}`;
+      }
+    }
+  }
+  assert.ok(bad > 0, 'ไม่เจอคู่ที่ต่างกันเลย — สมมติฐานของข้อนี้ผิด ให้ตรวจใหม่');
+  console.log(`        (คู่ที่ปัดทีละท่อนแล้วเพี้ยน: ${bad} · ตัวอย่าง ${eg})`);
+});
+
+test('แถวอัตราไม่มีทศนิยมอยู่ในนั้นแล้ว และบรรทัดสรุปอ่านจากค่าที่เก็บไว้จริง', () => {
+  const fn = extractFunction(APP_SRC, 'holidayWorkDetailBlockHtml');
+  assert.ok(!/hw-ot-hours">\$\{[^}]*dec/.test(fn), 'ยังมีทศนิยมต่อแถวอยู่');
+  assert.ok(/hw-ot-hours">\$\{holidayWorkDurationLabel\(s\.mins\)\.hm\}/.test(fn),
+    'แถวต้องบอกชั่วโมง-นาทีเท่านั้น');
+  assert.ok(/Number\(l\.otHours20\) \|\| 0.*Number\(l\.otHours30\) \|\| 0/s.test(fn),
+    'บรรทัดสรุปต้องอ่าน otHours20/otHours30 ที่เก็บไว้ ไม่ใช่คำนวณใหม่');
+  assert.ok(/hw-ot-total/.test(fn), 'ต้องมีบรรทัดสรุป');
+});
+
 console.log(`\n${passed} passed, ${process.exitCode ? 'มีข้อที่ล้มเหลว' : '0 failed'}`);
