@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 166;
+const APP_BUILD = 167;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -11666,15 +11666,23 @@ function renderAttendanceTable() {
   // eligible by default, but this view hid those and only showed OT+Long Distance) -- with
   // independent per-allowance-type eligibility flags so all applicable badges show together.
   const eligAtt = APP_SETTINGS.allowanceEligibility;
+  // 2026-10-28 (รีวิวรอบ 4): `targetUser` ถอยไปเป็น `currentUser` เมื่อหาเจ้าของแถวไม่เจอ ⇒ ด่าน
+  // ที่ตัดสินเบี้ยจะใช้ role ของคนที่กำลังดู · ป๊อปอัปถูกแก้ให้ใช้เจ้าของจริงไปแล้ว ถ้าแถวไม่แก้ตาม
+  // ทั้งสองจะพูดคนละเรื่องบนเรคอร์ดเดียวกัน (แถวโชว์ ⏱️ ส่วนป๊อปอัปขึ้นว่า "ไม่มีรายการพิเศษ")
+  // หาไม่เจอ = ไม่รู้ว่าสลิปจ่ายอะไร ⇒ ไม่โชว์เบี้ย · แก้เฉพาะสองด่านของตระกูล Holiday Work/Upcountry
+  // ที่งานนี้แตะ ส่วนด่านอื่นเป็นของเดิมและอยู่นอกขอบเขตรอบนี้
+  const _attOwner = DATA_USERS.find(u => u.id === targetUserId)
+    || (currentUser && currentUser.id === targetUserId ? currentUser : null);
+  const _attOwnerCan = key => !!_attOwner && isAllowanceEligible(eligAtt, _attOwner.role, key);
   const canEarlyLateTarget   = isAllowanceEligible(eligAtt, targetUser.role, 'earlyLate');
   const canOTTarget          = isAllowanceEligible(eligAtt, targetUser.role, 'ot');
-  const canUpcountryTarget   = isAllowanceEligible(eligAtt, targetUser.role, 'upcountry');
+  const canUpcountryTarget   = _attOwnerCan('upcountry');
   const canLongDistTarget    = isAllowanceEligible(eligAtt, targetUser.role, 'longDistance');
   const canPersonalCarTarget = isAllowanceEligible(eligAtt, targetUser.role, 'personalCar') && targetUser.personalCarEligible === true;
   // 2026-10-08 (owner): Holiday Work had no gate here at all, because the column had no icon for
   // it. Without this flag the column can also stay hidden for someone whose only entitlement is
   // Holiday Work -- hasAnyAllowanceTarget decides whether the whole column renders.
-  const canHolidayWorkTarget = isAllowanceEligible(eligAtt, targetUser.role, 'holidayWork');
+  const canHolidayWorkTarget = _attOwnerCan('holidayWork');
   const hasAnyAllowanceTarget = canEarlyLateTarget || canOTTarget || canUpcountryTarget || canLongDistTarget || canPersonalCarTarget || canHolidayWorkTarget;
   const thAllowances = tbody.closest('table')?.querySelector('thead th#att-th-allowances');
   if (thAllowances) { thAllowances.style.display = hasAnyAllowanceTarget ? '' : 'none'; }
@@ -22637,6 +22645,16 @@ function showAttendanceDetail(date) {
   const isViewingSelf = targetUserId === currentUser.id;
   const targetUserObj = canViewOthers ? (DATA_USERS.find(u => u.id === targetUserId) || currentUser) : currentUser;
   const targetRole = targetUserObj.role;
+  // 2026-10-28 (รีวิวรอบ 4): `targetUserObj` ถอยไปเป็น `currentUser` เมื่อหาเจ้าของเรคอร์ดไม่เจอ
+  // ⇒ `targetRole` อาจเป็น role ของ "คนที่กำลังดู" · สำหรับป้ายชื่อนั้นไม่เป็นไร แต่ทุกด่านที่
+  // ตัดสิน **เงิน** ต้องใช้ role ของเจ้าของเรคอร์ดจริงเท่านั้น ไม่งั้นจะโชว์เบี้ยของวันที่สลิปจ่าย ฿0
+  // รอบก่อนผมแก้แค่ด่านเดียว (`_hwMoneyOk`) แล้วทิ้งด่านของ 🗺️ ไว้ข้างบนมัน ซึ่งก็พิมพ์เงินเหมือนกัน
+  // ⇒ คราวนี้หาเจ้าของให้เสร็จตรงนี้ที่เดียว แล้วให้ทุกด่านเงินอ้างตัวเดียวกัน
+  // หาไม่เจอ = ไม่รู้ว่าสลิปจ่ายอะไร ⇒ ไม่โชว์เบี้ยใดๆ (เงียบดีกว่าทายผิด)
+  const _ownerUser = DATA_USERS.find(u => u.id === targetUserId)
+    || (currentUser && currentUser.id === targetUserId ? currentUser : null);
+  const _ownerRole = _ownerUser ? _ownerUser.role : null;
+  const _ownerCan = key => !!_ownerRole && isAllowanceEligible(APP_SETTINGS.allowanceEligibility, _ownerRole, key);
   const { start, end, isCurrent } = getPeriodBounds(selectedPeriodIndex);
   const days = generatePeriodDays(start, end, isCurrent, targetUserId);
   const row = days.find(d => d.date === date);
@@ -22857,15 +22875,16 @@ function showAttendanceDetail(date) {
   // as double pay -- the exact thing he said to avoid.
   const _hwUpcRec = DATA_LEAVES.find(l => l.userId === targetUserId && l.type === 'holiday-work' &&
     l.dateFrom === date && l.status === 'approved');
-  const _hwUpcountry = holidayWorkEarnsUpcountry(_hwUpcRec, APP_SETTINGS, targetRole, row.status === 'abroad');
+  // `_ownerRole` ไม่ใช่ `targetRole` — ดูเหตุผลที่จุดประกาศ · ถ้าหาเจ้าของไม่เจอ ส่ง null เข้าไป
+  // ซึ่งทำให้ holidayWorkEarnsUpcountry() ตอบ false ที่ด่านสิทธิ์ของมันเอง
+  const _hwUpcountry = holidayWorkEarnsUpcountry(_hwUpcRec, APP_SETTINGS, _ownerRole, row.status === 'abroad');
   // Does payroll hand this whole day to the record? Same three conditions it uses to build
   // approvedHolidayWork / holidayWorkDates. When it does, the day's own upcountry flag is not
   // counted at all, so it must not light this badge either -- a record filed with no location
   // takes the day and claims nothing, and the flag can outlive a revoked approval.
-  const _hwTakesDay = !!_hwUpcRec && !isCompanyTripDay(date) &&
-    isAllowanceEligible(APP_SETTINGS.allowanceEligibility, targetRole, 'holidayWork');
+  const _hwTakesDay = !!_hwUpcRec && !isCompanyTripDay(date) && _ownerCan('holidayWork');
   if (_hwUpcountry ||
-      (!_hwTakesDay && row.upcountry && row.status !== 'company-trip' && isAllowanceEligible(APP_SETTINGS.allowanceEligibility, targetRole, 'upcountry'))) {
+      (!_hwTakesDay && row.upcountry && row.status !== 'company-trip' && _ownerCan('upcountry'))) {
     tagsEl.innerHTML += `<span class="badge badge-purple">🗺️ ${L('Upcountry', 'Upcountry')} (+฿${_dA.upcountry || 240})</span>`;
   }
   const approvedOT = DATA_LEAVES.find(l =>
@@ -22941,12 +22960,9 @@ function showAttendanceDetail(date) {
     // ⇒ วันที่เพิ่งให้วันลาไปจริงๆ จะขึ้นว่า "ไม่มีรายการพิเศษ" ถ้าสิทธิ์ถูกปลดทีหลัง
     // ⇒ ปิดเฉพาะทางที่เป็นเงิน ปล่อยทางที่เป็นวันลาไว้ (โหมดนั้นไม่มีทั้งแถวอัตรา เงิน และ ฿500 อยู่แล้ว)
     const _hwAny = dayLeave('holiday-work');
-    // เจ้าของเรคอร์ดตัวจริง: targetUserObj ถอยไปเป็น currentUser เมื่อหาไม่เจอ ซึ่งพอด่านนี้กลายเป็น
-    // ด่านเงิน การตัดสินด้วย role ของ "คนที่กำลังดู" ก็เปิดประตูที่ด่านนี้ตั้งใจจะปิด (รีวิว S1)
-    const _hwOwnerUser = DATA_USERS.find(u => u.id === targetUserId)
-      || (currentUser && currentUser.id === targetUserId ? currentUser : null);
-    const _hwMoneyOk = !!_hwOwnerUser &&
-      isAllowanceEligible(APP_SETTINGS.allowanceEligibility, _hwOwnerUser.role, 'holidayWork');
+    // ใช้ `_ownerCan` ตัวเดียวกับด่าน 🗺️ ข้างบน (ประกาศไว้ใกล้ targetRole พร้อมเหตุผล) — รอบก่อน
+    // ที่นี่หาเจ้าของเองซ้ำอีกรอบ ทำให้ด่านข้างบนกับด่านนี้แยกจากกันและหลุดไปคนละทาง
+    const _hwMoneyOk = _ownerCan('holidayWork');
     const hwRec = (_hwAny && (_hwMoneyOk || _hwAny.compensationMode === 'annual-leave'))
       ? _hwAny
       : null;
@@ -22961,11 +22977,11 @@ function showAttendanceDetail(date) {
       // 2026-10-28 (owner): the badge says "รับเป็นเงิน" and never said how much. Same estimate as
       // the breakdown below it and as the row's OT icon -- one function, otPayAmountFromLeave(),
       // so three places cannot quote three numbers. No salary readable -> the badge just omits it.
-      // `_hwOwnerUser` (resolved above) is the record's OWN owner, never the targetUserObj
-      // fallback: that one becomes `currentUser` when the employee is not in DATA_USERS, which
-      // would price somebody else's day off the viewer's salary and present it as theirs. Owner
-      // unresolved means no salary to read, so the hours stay and the baht simply does not appear.
-      const _hwSalary = Number(_hwOwnerUser && _hwOwnerUser.salary) || 0;
+      // `_ownerUser` is the record's OWN owner, never the targetUserObj fallback: that one becomes
+      // `currentUser` when the employee is not in DATA_USERS, which would price somebody else's
+      // day off the viewer's salary and present it as theirs. Owner unresolved means no salary to
+      // read, so the hours stay and the baht simply does not appear.
+      const _hwSalary = Number(_ownerUser && _ownerUser.salary) || 0;
       const _hwHourly = _hwSalary > 0 ? _hwSalary / 30 / 8 : 0;
       const _hwAmt = (paid && _hwHourly > 0) ? otPayAmountFromLeave(hwRec, _hwHourly) : 0;
       const hwModeText = _hwAmt > 0 ? `${mode} ≈ ฿${fmt2dp(_hwAmt)}` : mode;

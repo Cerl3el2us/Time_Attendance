@@ -219,8 +219,15 @@ test('all three renderings of the timesheet show Holiday Work, not just the desk
 
 test('the Holiday Work icon is gated by holidayWork eligibility', () => {
   const fn = extractFunction(APP_SRC, 'renderAttendanceTable');
-  assert.ok(/canHolidayWorkTarget\s*=\s*isAllowanceEligible\([^)]*'holidayWork'\)/.test(fn),
+  // 2026-10-28 (รีวิวรอบ 4): ด่านนี้เคยเขียนเป็น isAllowanceEligible(eligAtt, targetUser.role, …)
+  // ตรงๆ แต่ `targetUser` ถอยไปเป็น `currentUser` เมื่อหาเจ้าของแถวไม่เจอ ⇒ ตัดสินเบี้ยด้วย role
+  // ของคนที่กำลังดู · ตอนนี้ผ่าน `_attOwnerCan()` ซึ่งผูกกับเจ้าของที่หาเจอจริง
+  assert.ok(/canHolidayWorkTarget\s*=\s*_attOwnerCan\('holidayWork'\)/.test(fn),
     'no canHolidayWorkTarget gate — the icon would show for roles with no such entitlement');
+  assert.ok(/_attOwnerCan = key => !!_attOwner && isAllowanceEligible\(eligAtt, _attOwner\.role, key\)/.test(fn),
+    'ด่านต้องผูกกับ role ของเจ้าของแถว ไม่ใช่ของคนที่กำลังดู');
+  assert.ok(/_attOwner = DATA_USERS\.find\(u => u\.id === targetUserId\)\s*\n\s*\|\| \(currentUser && currentUser\.id === targetUserId \? currentUser : null\)/.test(fn),
+    'หาเจ้าของแถวต้องไม่ถอยไปใช้ currentUser เฉยๆ');
   // 2026-10-08 (review): this used to be /hasAnyAllowanceTarget[^;]*canHolidayWorkTarget/, and
   // [^;]* crosses newlines — so the COMMENT sitting above the declaration satisfied it. Deleting
   // `|| canHolidayWorkTarget` from the assignment left the suite green. Anchor on the assignment.
