@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 172;
+const APP_BUILD = 173;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -3275,6 +3275,53 @@ function holidayWorkUnlockDates(userId, ownerRole, S) {
     l.userId === userId && l.type === 'holiday-work' && l.status === 'approved' &&
     !isCompanyTripDay(l.dateFrom)
   ).map(l => l.dateFrom));
+}
+// 2026-10-28 (เจ้าของสั่ง: "แก้ให้ตรง เดี๋ยวพนักงานดูแล้วเข้าใจผิดว่าได้เงินไม่ครบ"):
+// วันที่ Upcountry **ได้เงินจริง** ตามที่สลิปนับ · คืนเป็น **รายการวัน** ไม่ใช่แค่จำนวน เพื่อให้
+// ตัวเลขบนการ์ดและรายการวันที่กดดูมาจากที่เดียวกัน — แบบเดียวกับที่ `reportOtRecords()` ด้านล่าง
+// ทำไว้ให้ลิสต์ OT เมื่อ 2026-09-24 ("the list uses the tile's own records so the list matches
+// the count")
+//
+// **ของเดิมมีสามสูตรในสี่ที่ และไม่มีที่ไหนตรงกับสลิป:**
+//   · การ์ด Dashboard นับ **เรคอร์ด** `type === 'upcountry'` (ตัดวันทริปและวันลาเต็มวัน)
+//   · รายการวันที่กดดูจากการ์ดนั้น นับ **ธงรายวัน** `d.upcountry` ⇒ ตัวเลขกับรายการต่างกันได้เอง
+//   · หน้า Reports (สถิติรายคน + ป๊อปอัปรายละเอียด) นับธงรายวันเหมือนกัน
+//   · ทั้งสามแบบ **ไม่เคยนับใบทำงานวันหยุดที่กรอกสถานที่** ซึ่งสลิปจ่าย ฿240 ให้
+// วัดกับข้อมูลจริงงวด 21 ก.ย.–20 ต.ค. 2026: 4 คนจาก 10 คน รายงานบอกน้อยกว่าสลิป 1 ครั้ง
+// = ฿240 ต่อคน ⇒ พนักงานอ่านรายงานแล้วคิดว่าได้เงินไม่ครบ
+//
+// **ที่มาของความต่าง เป็นเรื่องลำดับเวลา ไม่ใช่กฎขัดกัน:** กฎ "ใบทำงานวันหยุดที่กรอกสถานที่ได้
+// เบี้ย Upcountry" เข้า payroll เมื่อ 2026-09-21 (`holidayWorkUpcountryCount`) ส่วนสูตรสั้นของ
+// รายงานมีมาตั้งแต่ initial commit ⇒ กฎถูกเพิ่มแล้วไม่มีใครกลับไปอัปเดตรายงาน
+//
+// เงื่อนไขลอกจาก computePayroll ตรงตัว (`upcountryCount` + `holidayWorkUpcountryCount`):
+//   ก้อน 1  ธงของวันนั้นเอง − วันทริป − วันที่ใบทำงานวันหยุดยึดไป − วันลาเต็มวัน
+//   ก้อน 2  ใบทำงานวันหยุดที่กรอกสถานที่ − วันไปต่างประเทศ   (ไม่ตัดวันลาเต็มวัน: payroll ก็ไม่ตัด)
+// ทั้งก้อนปิดด้วยสิทธิ์ `upcountry` ของเจ้าของ ผ่าน gateRoleFor() ตามกฎของเจ้าของ 2026-10-08
+//
+// ไม่มีฝาแฝดใน server.js: ฝั่งนั้นนับใน computePayroll อยู่แล้วและไม่มีจอ
+function reportUpcountryDays(u, days, S) {
+  if (!u || !Array.isArray(days) || !days.length) return [];
+  const role = gateRoleFor(u, u.id);
+  if (!role || !isAllowanceEligible(S && S.allowanceEligibility, role, 'upcountry')) return [];
+  // ชุดวันที่ใบทำงานวันหยุดยึดไป = `holidayWorkDates` ของ payroll (gate ด้วย holidayWork,
+  // ตัดวันทริปออก) · ใช้ตัวเดียวกับที่ปลดล็อกเบี้ยเข้าเช้า/ดึก จึงไม่มีสำเนาให้หลุดกันได้
+  const hwTaken = holidayWorkUnlockDates(u.id, role, S);
+  const abroad = new Set(days.filter(d => d.status === 'abroad').map(d => d.date));
+  const first = days[0].date, last = days[days.length - 1].date;
+  const out = days
+    .filter(d => d.upcountry && d.status !== 'company-trip' && !hwTaken.has(d.date) &&
+      !isFullDayPersonalLeaveStatus(d.status))
+    .map(d => ({ date: d.date, fromHolidayWork: false }));
+  DATA_LEAVES.forEach(l => {
+    if (l.userId !== u.id || l.type !== 'holiday-work' || l.status !== 'approved') return;
+    if (!hwTaken.has(l.dateFrom)) return;                 // สิทธิ์ holidayWork + ไม่ใช่วันทริป
+    if (l.dateFrom < first || l.dateFrom > last) return;   // อยู่ในงวดที่กำลังแสดง
+    if (abroad.has(l.dateFrom)) return;                    // เบี้ยต่างประเทศคลุมวันนั้นแล้ว
+    if (!hasUpcountryLocation(l)) return;                  // ไม่กรอกสถานที่ = ไม่ได้เบี้ย
+    out.push({ date: l.dateFrom, fromHolidayWork: true });
+  });
+  return out.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 }
 function reportOtRecords(u, startStr, endStr) {
   if (!u) return [];
@@ -12497,11 +12544,11 @@ function renderDashboard() {
   const startStr = localDateStr(start);
   const endStr   = localDateStr(end);
   const fullLeaveDash = new Set(days.filter(d => isFullDayPersonalLeaveStatus(d.status)).map(d => d.date));
-  const upcountryCount = DATA_LEAVES.filter(l =>
-    l.userId === currentUser.id && l.type === 'upcountry' && l.status === 'approved' &&
-    l.dateFrom >= startStr && l.dateFrom <= endStr &&
-    !isCompanyTripDay(l.dateFrom) && !fullLeaveDash.has(l.dateFrom)
-  ).length;
+  // 2026-10-28 (เจ้าของสั่งให้ตรงกับสลิป): การ์ดนี้เคยนับ **เรคอร์ด** ขณะที่รายการ
+  // วันที่กดดูจากมันนับธงรายวัน ⇒ ตัวเลขกับรายการของตัวเองต่างกันได้ · ตอนนี้มาจากที่เดียวกัน
+  // (`fullLeaveDash` ยังใช้หลังจากนี้ต่อ จึงยังคงอยู่)
+  const upcountryPaidDays = reportUpcountryDays(currentUser, days, APP_SETTINGS);
+  const upcountryCount = upcountryPaidDays.length;
 
   // 2026-09-24: includes paid Holiday Work OT (reportOtRecords).
   const otCount = reportOtRecords(currentUser, startStr, endStr).length;
@@ -12976,10 +13023,12 @@ function showDashPeriodDetail(kind) {
     if (rows.length) foot = `<tfoot><tr style="background:#eff6ff"><td colspan="2" style="padding:8px 14px;font-weight:700;color:#1e40af">${L('Total', 'รวม')}</td><td style="padding:8px 14px;text-align:center;font-weight:700;color:#1d4ed8">${tot} ${L('times', 'ครั้ง')}</td></tr></tfoot>`;
   } else if (kind === 'upcountry') {
     headers = TH(L('Date', 'วันที่'), c) + THC(L('Type', 'ประเภท'), c);
-    rows = days.filter(d => d.upcountry && d.status !== 'company-trip').map(d =>
+    // 2026-10-28: รายการนี้มาจากฟังก์ชันเดียวกับตัวเลขบนการ์ด ⇒ สองอันต่างกันไม่ได้
+    // และวันที่เบี้มาจากใบทำงานวันหยุด เขียนกำกับไว้ ไม่ให้พนักงานสงสัยว่ามาจากไหน
+    rows = reportUpcountryDays(currentUser, days, APP_SETTINGS).map(x =>
       `<tr style="border-bottom:1px solid #f1f5f9">
-        <td style="padding:9px 14px;font-weight:600">${fmtDate(new Date(d.date + 'T12:00:00'))}</td>
-        <td style="padding:9px 14px;text-align:center">🗺️ Upcountry</td>
+        <td style="padding:9px 14px;font-weight:600">${fmtDate(new Date(x.date + 'T12:00:00'))}</td>
+        <td style="padding:9px 14px;text-align:center">🗺️ Upcountry${x.fromHolidayWork ? ` <span style="color:var(--text-muted);font-size:12px">(${L('from Holiday Work', 'จากใบทำงานวันหยุด')})</span>` : ''}</td>
       </tr>`);
   } else if (kind === 'ot' || kind === 'longdistance' || kind === 'personalcar') {
     const type = kind === 'ot' ? 'ot' : kind === 'longdistance' ? 'long-distance' : 'personal-car';
@@ -14740,7 +14789,8 @@ function computeReportPeriodStats(u, start, end, periodIndex) {
 
   const annual  = days.filter(d => d.status === 'leave-annual').length;
   const sick    = days.filter(d => d.status === 'leave-sick').length;
-  const upcountry = days.filter(d => d.upcountry && d.status !== 'company-trip').length;
+  // 2026-10-28: ตามสลิป — ดูเหตุเต็มที่ reportUpcountryDays()
+  const upcountry = reportUpcountryDays(u, days, APP_SETTINGS).length;
 
   const canEarlyLateRow = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, u.role, 'earlyLate');
   const _SA = APP_SETTINGS.allowances;
@@ -15300,7 +15350,8 @@ function showReportDetail(userId) {
   const lateCount = isDriverU ? 0 : days.filter(d => d.status==='late' && d.checkIn).length;
   const annual    = days.filter(d => d.status==='leave-annual').length;
   const sick      = days.filter(d => d.status==='leave-sick').length;
-  const upcountry   = canUpcountryRpt ? days.filter(d => d.upcountry && d.status !== 'company-trip').length : 0;
+  // 2026-10-28: ตามสลิป · ด่านสิทธิ์อยู่ในตัวฟังก์ชันแล้ว จึงไม่ต้อง canUpcountryRpt อีก
+  const upcountry   = reportUpcountryDays(u, days, APP_SETTINGS).length;
   const _rdSA=APP_SETTINGS.allowances; let earlyCount=0; if (canEarlyLateRpt) { const hwDates=holidayWorkUnlockDates(u.id,gateRoleFor(u,u.id),APP_SETTINGS); days.filter(d=>deviceScanQualifiesForEarlyMorning(d,hwDates)).forEach(d=>{const[h,m]=d.checkIn.split(':').map(Number);const mins=h*60+m;const p=mins<=earlyThresholdMinsOf(_rdSA, 2)?2:mins<=earlyThresholdMinsOf(_rdSA, 1)?1:0;earlyCount+=p;}); }
   // 2026-09-24 (Opus review): the one site the lateNightThresholdHourOf() migration missed. With
   // `||` a configured 00:00 fell through to 20:00, so this detail modal counted ×2 Late Night from
