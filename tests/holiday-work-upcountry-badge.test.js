@@ -287,8 +287,22 @@ test('เซิร์ฟเวอร์บังคับแนบเฉพา�
 
 test('ฝั่งเว็บบังคับแนบเฉพาะเมื่อกรอกสถานที่ (ตรงกับเซิร์ฟเวอร์)', () => {
   const fn = extractFunction(APP_SRC, 'submitHolidayWork');
-  assert.ok(/if \(location && !attachment && !editingLeaveId\)/.test(fn),
+  assert.ok(/if \(location && !attachment && !_hwStoredFile\)/.test(fn),
     'ด่านแนบไฟล์ต้องมีเงื่อนไข location');
+});
+
+// เคสที่เพิ่งเป็นไปได้เพราะสถานที่กลายเป็นช่องไม่บังคับ: ใบที่ยื่นตอนทำงานที่ออฟฟิศไม่มีไฟล์แนบเลย
+// ⇒ ถ้าแก้ไขใบนั้นเพิ่มสถานที่เข้าไป เงื่อนไขเดิม `!editingLeaveId` จะปล่อยผ่าน แล้วเซิร์ฟเวอร์
+// ตีกลับเป็นข้อความอังกฤษดิบ · ฝั่งเว็บต้องถามคำถามเดียวกับเซิร์ฟเวอร์ คือ "ใบนี้มีไฟล์อยู่แล้วไหม"
+// ไม่ใช่ "นี่เป็นการแก้ไขหรือเปล่า"
+test('ตอนแก้ไข ฝั่งเว็บดูว่าใบนั้นมีไฟล์อยู่แล้วไหม ไม่ใช่ยกเว้นเพราะเป็นการแก้ไข', () => {
+  const fn = extractFunction(APP_SRC, 'submitHolidayWork');
+  assert.ok(!/!attachment && !editingLeaveId/.test(fn),
+    'ยังยกเว้นทุกการแก้ไขอยู่ ⇒ เพิ่มสถานที่โดยไม่มีไฟล์จะหลุดไปโดนเซิร์ฟเวอร์ปฏิเสธ');
+  assert.ok(/_hwEditing[\s\S]*DATA_LEAVES\.find\(l => l\.id === editingLeaveId\)/.test(fn),
+    'ต้องหาเรคอร์ดที่กำลังแก้จาก DATA_LEAVES');
+  assert.ok(/_hwStoredFile = !!\(_hwEditing && \(_hwEditing\.attachment \|\| Number\(_hwEditing\.fileCount\) > 0\)\)/.test(fn),
+    'ต้องเช็กทั้ง attachment และ fileCount แบบเดียวกับที่เซิร์ฟเวอร์เช็ก resolvedAttachment/resolvedFileCount');
 });
 
 test('ฟอร์ม: ดอกจันของ Working Report ซ่อนไว้ก่อน และผูกกับช่องสถานที่', () => {

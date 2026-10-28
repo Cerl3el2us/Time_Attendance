@@ -230,4 +230,53 @@ test('ป้ายหักพักเที่ยงตรงกับกา�
   }
 });
 
+console.log('T4 รูปแบบเวลาที่อ่านแล้วไม่เข้าใจผิด');
+
+// ที่มา: เจ้าของอ่าน "6.33 ชม." บนหน้าจอตัวเองแล้วถามว่า "ทำไมถึงขึ้นว่า 6ชั่วโมง33นาที ถ้า
+// 09-16.20 มันควรจะเป็น 6ชั่วโมง20 นาทีไม่ใช่เหรอ หักพักเที่ยงแล้ว" · ตัวเลขถูก (380 นาที = 6.33
+// ชั่วโมง) แต่ป๊อปอัปเดียวกันเขียน "7 ชั่วโมง 23 นาที" อยู่สองบรรทัดเหนือมัน ⇒ ตาอ่านทศนิยมต่อ
+// เป็นนาทีทันที · คนออกแบบกฎเงินเองยังอ่านผิด คนอนุมัติที่เทียบกับใบ working report ยิ่งอ่านผิด
+const dctx = { currentLang: 'th', L: (en, th) => th, console };
+vm.createContext(dctx);
+vm.runInContext(extractFunction(APP_SRC, 'holidayWorkDurationLabel'), dctx);
+
+test('380 นาที (เคสของเจ้าของ) อ่านว่า 6 ชม. 20 น. และยังบอกทศนิยม 6.33 ไว้เทียบสลิป', () => {
+  const d = dctx.holidayWorkDurationLabel(380);
+  assert.strictEqual(d.hm, '6 ชม. 20 น.');
+  assert.strictEqual(d.dec, '6.33');
+});
+
+test('ชั่วโมงลงตัวไม่ต้องมีคำว่านาที', () => {
+  assert.strictEqual(dctx.holidayWorkDurationLabel(480).hm, '8 ชม.');
+  assert.strictEqual(dctx.holidayWorkDurationLabel(480).dec, '8.00');
+});
+
+test('เศษน้อยๆ ก็ยังอ่านเป็นนาทีจริง ไม่ใช่ทศนิยม', () => {
+  assert.strictEqual(dctx.holidayWorkDurationLabel(68).hm, '1 ชม. 8 น.');
+  assert.strictEqual(dctx.holidayWorkDurationLabel(68).dec, '1.13');
+  // ท่อนที่สั้นกว่าหนึ่งชั่วโมงอ่านว่า "52 น." ไม่ใช่ "0 ชม. 52 น."
+  assert.strictEqual(dctx.holidayWorkDurationLabel(52).hm, '52 น.');
+  assert.strictEqual(dctx.holidayWorkDurationLabel(52).dec, '0.87');
+  assert.strictEqual(dctx.holidayWorkDurationLabel(0).hm, '0 น.');
+});
+
+// นาทีกับทศนิยมมาจากจำนวนนาทีชุดเดียวกัน จึงแตกกันไม่ได้ · ข้อนี้กันไม่ให้ใครแยกสองค่านี้
+// ไปคำนวณคนละทางในอนาคต
+test('ชั่วโมง-นาที กับ ทศนิยม ตรงกันเสมอทุกค่า', () => {
+  for (let m = 0; m <= 20 * 60; m++) {
+    const d = dctx.holidayWorkDurationLabel(m);
+    const back = Math.round(Number(d.dec) * 60);
+    assert.ok(Math.abs(back - m) <= 1, `${m} นาที -> ทศนิยม ${d.dec} ซึ่งกลับมาเป็น ${back} นาที`);
+  }
+});
+
+test('ญี่ปุ่นใช้รูปแบบของตัวเอง', () => {
+  const jctx = { currentLang: 'ja', L: (en) => en, console };
+  vm.createContext(jctx);
+  vm.runInContext(extractFunction(APP_SRC, 'holidayWorkDurationLabel'), jctx);
+  assert.strictEqual(jctx.holidayWorkDurationLabel(380).hm, '6時間20分');
+  assert.strictEqual(jctx.holidayWorkDurationLabel(480).hm, '8時間');
+  assert.strictEqual(jctx.holidayWorkDurationLabel(52).hm, '52分');
+});
+
 console.log(`\n${passed} passed, ${process.exitCode ? 'มีข้อที่ล้มเหลว' : '0 failed'}`);
