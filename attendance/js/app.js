@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 165;
+const APP_BUILD = 166;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -3125,13 +3125,18 @@ function holidayWorkDetailBlockHtml(l, hourlyRate) {
       // start in Settings and the two stop describing the same day -- the spans shift, the money
       // does not. The spec called that the main risk of this block ("หน้าจอโกหกอย่างมั่นใจ"), so
       // when they disagree the block says so instead of showing both and letting the reader pick.
-      // 1 minute of slack absorbs the 2-decimal rounding of the stored hours.
+      // 2026-10-28 (รีวิวรอบ 3): เดิมผ่อนให้ 1 นาที โดยอ้างว่าเผื่อการปัดทศนิยม 2 ตำแหน่งของค่าที่
+      // เก็บไว้ · วัดทุกคู่เวลาที่ยื่นได้จริงแล้ว **ความคลาดสูงสุดคือ 0 นาที** (round2 ไม่เคยทำให้
+      // หายทั้งนาที และเซิร์ฟเวอร์ปักค่าเองทั้ง POST และ PUT) ⇒ ช่วงผ่อนนั้นไม่ได้เผื่ออะไรเลย
+      // มีแต่ซื้อโอกาสให้บล็อกโชว์ชั่วโมงสองค่าต่างกัน 1 นาทีโดยไม่เตือน ซึ่งเป็นสิ่งที่กฎนี้มีไว้กัน
       const segMins = r => segs.filter(s => s.rate === r).reduce((t, s) => t + s.mins, 0);
       const drift20 = Math.abs(segMins(20) - Math.round(h20 * 60));
       const drift30 = Math.abs(segMins(30) - Math.round(h30 * 60));
-      const driftNote = (drift20 > 1 || drift30 > 1)
-        ? `<div class="hw-ot-drift">⚠️ ${L('The rows above follow the current work-schedule settings; the payslip follows what was recorded when this was approved. They no longer agree.',
-            'แถวด้านบนคิดตามค่าตั้งค่าเวลาทำงานปัจจุบัน ส่วนสลิปจ่ายตามที่บันทึกไว้ตอนอนุมัติ — ตอนนี้ไม่ตรงกันแล้ว')}</div>`
+      // ข้อความไม่ชี้ไปที่หน้าตั้งค่า: การเปลี่ยนเวลาเริ่มงานมาตรฐานเป็นสาเหตุที่พบบ่อยที่สุด แต่ไม่ใช่
+      // สาเหตุเดียว (ค่าที่เก็บเพี้ยนเองก็ได้) ⇒ บอกข้อเท็จจริงที่ตรวจพบ ไม่ใช่เดาต้นเหตุให้คนอ่าน
+      const driftNote = (drift20 > 0 || drift30 > 0)
+        ? `<div class="hw-ot-drift">⚠️ ${L('The hours in these rows and the hours the payslip pays for this day no longer match. Check this record before approving or paying it.',
+            'ชั่วโมงในแถวด้านบนกับชั่วโมงที่สลิปจ่ายของวันนี้ไม่ตรงกันแล้ว — ตรวจเรคอร์ดนี้ก่อนอนุมัติหรือจ่าย')}</div>`
         : '';
       out += `<div class="hw-ot-rows">${rows}${total}${driftNote}</div>`;
     }
@@ -11900,8 +11905,14 @@ function renderAttendanceTable() {
       const m = Math.round((totHrs - h) * 60);
       const dur = currentLang === 'ja' ? (m > 0 ? `${h}時間${m}分` : `${h}時間`) : (m > 0 ? L(`${h}h${m}m`, `${h}ชม.${m}น.`) : L(`${h}h`, `${h}ชม.`));
       const uid = approvedOT.userId;
-      const empUser = DATA_USERS.find(u => u.id == uid) || currentUser;
-      const salary = empUser?.salary || 0;
+      // 2026-10-28 (รีวิวรอบ 3): เดิมเป็น `|| currentUser` ⇒ ถ้าหาเจ้าของเรคอร์ดไม่เจอ แถวนี้จะคิด
+      // เงินจากเงินเดือน "คนที่กำลังดู" แล้วแสดงเป็นของพนักงานคนนั้น · ป๊อปอัปถูกแก้ไปแล้วรอบก่อน
+      // แต่ **แถวนี้ถูกลืม** ทั้งที่เป็นเรคอร์ดเดียวกัน วันเดียวกัน เงินก้อนเดียวกัน — และคอมเมนต์
+      // ในป๊อปอัปก็ประกาศไว้ว่า "สองที่นี้บอกเลขต่างกันไม่ได้" ซึ่งกลายเป็นคำโกหกทันที
+      // ใช้สำนวนเดียวกับที่ไฟล์นี้ใช้อยู่แล้วตรงอื่น: ไม่เจอ = ไม่มีเงินเดือนให้อ่าน ไม่ใช่ถอยไปใช้ของคนอื่น
+      const empUser = DATA_USERS.find(u => u.id === uid)
+        || (currentUser && currentUser.id === uid ? currentUser : null);
+      const salary = (empUser && empUser.salary) || 0;
       const hourlyRate = salary > 0 ? salary / 30 / 8 : 0;
       const amount = hourlyRate > 0 ? otPayAmountFromLeave(approvedOT, hourlyRate) : 0;
       const amountStr = amount > 0 ? ` (฿${fmt2dp(amount)})` : '';
@@ -22924,8 +22935,20 @@ function showAttendanceDetail(date) {
     // before, re-entered through a door nobody had locked.
     // Reachable without any migration: the default eligibility table has no driver/accounting/
     // marketing, and Settings lets the owner take the right off a role that already filed.
-    const hwRec = isAllowanceEligible(APP_SETTINGS.allowanceEligibility, targetRole, 'holidayWork')
-      ? dayLeave('holiday-work')
+    // 2026-10-28 (รีวิวรอบ 3): ด่านนี้เคยปิดทั้งก้อน ซึ่ง **ปิดเกิน** — เหตุผลของมันคือ "payroll
+    // ไม่จ่ายอะไรเลยจากเรคอร์ดนี้" ซึ่งจริงเฉพาะ *เงิน* · โหมดแลกวันหยุดให้ **วันลาจริง** ผ่าน
+    // getApprovedHolidayWorkDays() ซึ่งไม่มีด่าน role เลยสักตัว (ทั้งฝั่งเว็บและฝาแฝดใน server.js)
+    // ⇒ วันที่เพิ่งให้วันลาไปจริงๆ จะขึ้นว่า "ไม่มีรายการพิเศษ" ถ้าสิทธิ์ถูกปลดทีหลัง
+    // ⇒ ปิดเฉพาะทางที่เป็นเงิน ปล่อยทางที่เป็นวันลาไว้ (โหมดนั้นไม่มีทั้งแถวอัตรา เงิน และ ฿500 อยู่แล้ว)
+    const _hwAny = dayLeave('holiday-work');
+    // เจ้าของเรคอร์ดตัวจริง: targetUserObj ถอยไปเป็น currentUser เมื่อหาไม่เจอ ซึ่งพอด่านนี้กลายเป็น
+    // ด่านเงิน การตัดสินด้วย role ของ "คนที่กำลังดู" ก็เปิดประตูที่ด่านนี้ตั้งใจจะปิด (รีวิว S1)
+    const _hwOwnerUser = DATA_USERS.find(u => u.id === targetUserId)
+      || (currentUser && currentUser.id === targetUserId ? currentUser : null);
+    const _hwMoneyOk = !!_hwOwnerUser &&
+      isAllowanceEligible(APP_SETTINGS.allowanceEligibility, _hwOwnerUser.role, 'holidayWork');
+    const hwRec = (_hwAny && (_hwMoneyOk || _hwAny.compensationMode === 'annual-leave'))
+      ? _hwAny
       : null;
     if (hwRec) {
       const paid = hwRec.compensationMode === 'paid';
@@ -22938,13 +22961,11 @@ function showAttendanceDetail(date) {
       // 2026-10-28 (owner): the badge says "รับเป็นเงิน" and never said how much. Same estimate as
       // the breakdown below it and as the row's OT icon -- one function, otPayAmountFromLeave(),
       // so three places cannot quote three numbers. No salary readable -> the badge just omits it.
-      // The record's OWN owner, looked up again rather than taken from targetUserObj: that one
-      // falls back to `currentUser` when the employee is not in DATA_USERS (the system account
-      // filters records out), which for a role label is a harmless default and for MONEY is not --
-      // it would price somebody else's day off the viewer's salary and show it as theirs. Not
-      // found means no salary to read, so the hours stay and the baht simply does not appear.
-      const _hwOwner = DATA_USERS.find(u => u.id === targetUserId);
-      const _hwSalary = Number(_hwOwner && _hwOwner.salary) || 0;
+      // `_hwOwnerUser` (resolved above) is the record's OWN owner, never the targetUserObj
+      // fallback: that one becomes `currentUser` when the employee is not in DATA_USERS, which
+      // would price somebody else's day off the viewer's salary and present it as theirs. Owner
+      // unresolved means no salary to read, so the hours stay and the baht simply does not appear.
+      const _hwSalary = Number(_hwOwnerUser && _hwOwnerUser.salary) || 0;
       const _hwHourly = _hwSalary > 0 ? _hwSalary / 30 / 8 : 0;
       const _hwAmt = (paid && _hwHourly > 0) ? otPayAmountFromLeave(hwRec, _hwHourly) : 0;
       const hwModeText = _hwAmt > 0 ? `${mode} ≈ ฿${fmt2dp(_hwAmt)}` : mode;

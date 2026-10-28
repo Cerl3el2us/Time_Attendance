@@ -87,6 +87,20 @@ test('บาทในบล็อกเท่ากับที่ otPayAmountFr
       // ตัวสุดท้ายคือ "รวมของวันนี้"
       assert.strictEqual(shown[shown.length - 1], CTX.round2HalfUp(expected),
         `salary=${salary} ×2=${h20} ×3=${h30}: บล็อกโชว์ ${shown[shown.length - 1]} แต่สูตรคืน ${expected}`);
+      // **แต่ละแถวเงินด้วย ไม่ใช่แค่ยอดรวม** — รีวิวรอบ 3 พิสูจน์ด้วย mutation ว่าถ้าตรวจแค่ยอดรวม
+      // การถอด round2HalfUp ออกจาก bucket ×2 หรือสลับชั่วโมงของแถว (×2 โชว์ชั่วโมงของ ×3)
+      // จะผ่านฉลุย เพราะยอดรวมถูกปัดซ้ำอีกครั้งจนกลบความต่าง
+      const rows = text(html).match(/×[23][^×]*?฿[\d,]+\.\d\d/g) || [];
+      rows.forEach(row => {
+        const rate = row[1] === '2' ? 2 : 3;
+        const hrs = rate === 2 ? h20 : h30;
+        const baht = Number((row.match(/฿([\d,]+\.\d\d)/) || [])[1].replace(/,/g, ''));
+        assert.strictEqual(baht, CTX.round2HalfUp(hourly * rate * hrs),
+          `แถว ×${rate} ของ salary=${salary}: โชว์ ${baht} แต่ควรเป็น ${CTX.round2HalfUp(hourly * rate * hrs)}`);
+        // ชั่วโมงบนแถวเงินต้องเป็นของอัตรานั้นจริง
+        const want = CTX.holidayWorkDurationLabel(Math.round(hrs * 60)).hm;
+        assert.ok(row.includes(want), `แถว ×${rate} ควรบอก "${want}" : ${row}`);
+      });
       checked++;
     });
   });
@@ -153,6 +167,35 @@ test('ค่าที่เก็บเพี้ยนจากของจร�
   assert.ok(/ไม่ตรงกันแล้ว/.test(t), 'ต้องเตือน : ' + t);
 });
 
+// รีวิวรอบ 3: mutation `(drift20 > 1 || drift30 > 1)` → `(drift20 > 1)` ผ่านทุกเทสต์ เพราะไม่มี
+// เคสไหนที่เพี้ยนเฉพาะ ×3 เลย ⇒ ครึ่งหนึ่งของเงื่อนไขไม่มียามคุ้ม
+test('เพี้ยนเฉพาะฝั่ง ×3 ก็ต้องเตือน (ไม่ใช่เตือนแต่ฝั่ง ×2)', () => {
+  // 18:00–22:00 เป็น ×3 ล้วน 4 ชม. แต่เก็บไว้ 0 ⇒ แถวโชว์ 4 ชม. สลิปจ่าย 0
+  const t = text(CTX.holidayWorkDetailBlockHtml(
+    rec({ workStartTime: '18:00', workEndTime: '22:00', otHours20: 0, otHours30: 0 }), 125));
+  assert.ok(/ไม่ตรงกันแล้ว/.test(t), 'ต้องเตือนทั้งที่ ×2 ตรงกันอยู่ : ' + t);
+});
+
+test('เพี้ยนแค่ 1 นาทีก็ต้องเตือน ไม่มีช่วงผ่อน', () => {
+  // 09:00–16:20 = 380 นาที · เก็บไว้ 6.35 ชม. = 381 นาที ⇒ ต่างกัน 1 นาที
+  const t = text(CTX.holidayWorkDetailBlockHtml(
+    rec({ workStartTime: '09:00', workEndTime: '16:20', otHours20: 6.35, otHours30: 0 }), 125));
+  assert.ok(/ไม่ตรงกันแล้ว/.test(t), 'ต่าง 1 นาทีก็ยังเป็นการโชว์สองค่าโดยไม่บอก : ' + t);
+});
+
+console.log('T4b แถวอัตราต้องบอก "ชั่วโมงที่จ่าย" ไม่ใช่ "ความยาวช่วงบนนาฬิกา"');
+
+// รีวิวรอบ 3: mutation `holidayWorkDurationLabel(s.mins)` → `(s.endMin - s.startMin)` ผ่านทุกเทสต์
+// ทั้งที่ทำให้แถวโชว์ 7 ชม. 20 น. (ความยาวช่วง) ขณะที่แถวเงินโชว์ 6 ชม. 20 น. (ที่จ่ายจริง)
+// ⇒ คือการอ่านผิดแบบเดิมที่งานนี้ทั้งงานมีไว้กัน
+test('09:00–16:20 แถวอัตราต้องเป็น 6 ชม. 20 น. ไม่ใช่ 7 ชม. 20 น.', () => {
+  const t = text(CTX.holidayWorkDetailBlockHtml(
+    rec({ workStartTime: '09:00', workEndTime: '16:20', otHours20: 6.33, otHours30: 0 }), 0));
+  assert.ok(/09:00–16:20 \(หักพักเที่ยง −1 ชม\.\) ?6 ชม\. 20 น\./.test(t),
+    'แถวอัตราต้องบอกชั่วโมงที่จ่าย ไม่ใช่ความยาวช่วง : ' + t);
+  assert.ok(!/7 ชม\. 20 น\./.test(t), 'ห้ามมีความยาวช่วงดิบโผล่เป็นชั่วโมง : ' + t);
+});
+
 console.log('T5 ครบ 3 ภาษา — ตรวจจากข้อความที่เรนเดอร์ในโหมด ja จริง');
 
 test('โหมดญี่ปุ่นไม่มีอังกฤษคาอยู่ในบล็อก', () => {
@@ -162,10 +205,19 @@ test('โหมดญี่ปุ่นไม่มีอังกฤษคา�
   vm.runInNewContext(JA_SRC + '\nout.d = window.LANG_JA;', { window: {}, out: dict });
   ja._ja = dict.d;
   const t = text(ja.holidayWorkDetailBlockHtml(rec({ otHours20: 6.33, otHours30: 2 }), 125));
-  // คำอังกฤษที่หลุดได้ถ้าลืมคีย์ — ตรวจด้วยคำจริงที่โค้ดใช้ ไม่ใช่ regex กว้างๆ
-  ['Total for this day', 'Estimate', 'lunch deducted', 'Claimed hours', 'Location']
+  // รายการนี้ต้องเป็น **คำที่โค้ดส่งเข้า L() จริงในวันนี้** · รีวิวรอบ 3 พิสูจน์ว่ารายการเดิมยังเขียน
+  // 'lunch deducted' ซึ่งถูกเปลี่ยนเป็น 'lunch' ไปแล้ว ⇒ ลบคีย์ "lunch" ออกจาก ja.js แล้วเทสต์ยังเขียว
+  // ⇒ สตริงเดียวที่คอมมิตนั้นเพิ่ม ไม่มียามคุ้มเลย
+  ['Total for this day', 'Estimate', 'lunch', 'Claimed hours', 'Location', 'no longer match']
     .forEach(w => assert.ok(!t.includes(w), `ยังมีอังกฤษหลุด "${w}" : ` + t));
   assert.ok(/合計|時間|分/.test(t), 'ควรมีญี่ปุ่นจริง : ' + t);
+});
+
+// ยามของยาม: รายการคำข้างบนต้องตรงกับคำที่โค้ดใช้จริง ไม่ใช่คำที่เคยใช้
+test('ทุกคำในรายการคำต้องห้ามยังถูกส่งเข้า L() จริงในโค้ดวันนี้', () => {
+  const fn = extractFunction(APP_SRC, 'holidayWorkDetailBlockHtml');
+  ['Total for this day', 'lunch', 'Claimed hours', 'Location']
+    .forEach(w => assert.ok(fn.includes(`L('${w}'`), `'${w}' ไม่ได้ถูกใช้ในโค้ดแล้ว ⇒ รายการคำล้าสมัย`));
 });
 
 console.log(`\n${passed} passed, ${process.exitCode ? 'มีข้อที่ล้มเหลว' : '0 failed'}`);

@@ -1592,7 +1592,6 @@ window.LANG_JA = {
   // reminder above the time fields in the request form. "Location", "h" and "next day" were
   // already in this file and are reused as they are.
   "Claimed hours": "申請時間",
-  "lunch deducted": "昼休み控除",
   "Enter the working hours exactly as on the attached Working Report": "勤務時間は添付の Working Report と一致させてください",
   // 2026-10-28: the location field stopped being mandatory -- it names an upcountry site, so a
   // holiday worked at the office is exactly the case for leaving it blank.
@@ -1607,6 +1606,6 @@ window.LANG_JA = {
   // แปลว่าคนที่เห็นเงินจะเจออังกฤษคาอยู่กลางบล็อกญี่ปุ่น
   "Total for this day": "この日の合計",
   "lunch": "昼休み",
-  "The rows above follow the current work-schedule settings; the payslip follows what was recorded when this was approved. They no longer agree.": "上の行は現在の勤務時間設定で計算されています。給与明細は承認時に記録された値に従います。両者は一致しなくなっています。",
+  "The hours in these rows and the hours the payslip pays for this day no longer match. Check this record before approving or paying it.": "これらの行の時間と、この日に給与明細が支給する時間が一致しなくなっています。承認または支払いの前にこの記録を確認してください。",
   "Estimate — OT is paid on the period total, so the payslip can differ by satang": "概算 — 残業代は給与計算期間の合計に対して支給されるため、給与明細とは数サタン異なる場合があります",
 };
