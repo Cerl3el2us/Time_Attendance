@@ -253,10 +253,30 @@ test('ไม่มีสิทธิ์ holidayWork ⇒ payroll จ่าย 0 �
 
 test('บล็อก hwRec ในป๊อปอัปผูกกับด่านนั้นจริง ไม่ใช่แค่ Company Trip', () => {
   const fn = extractFunction(APP_SRC, 'showAttendanceDetail');
-  assert.ok(/const hwRec = isAllowanceEligible\(APP_SETTINGS\.allowanceEligibility, targetRole, 'holidayWork'\)/.test(fn),
-    'hwRec ต้องถูกปิดด้วยสิทธิ์ holidayWork เหมือนที่ payroll ปิด approvedHolidayWork');
+  assert.ok(/isAllowanceEligible\(APP_SETTINGS\.allowanceEligibility, _hwOwnerUser\.role, 'holidayWork'\)/.test(fn),
+    'ด่านเงินต้องผูกกับสิทธิ์ holidayWork ของเจ้าของเรคอร์ด');
   assert.ok(!/const hwRec = dayLeave\('holiday-work'\);/.test(fn),
     'ยังมีบรรทัดเดิมที่ไม่มีด่านอยู่');
+});
+
+// รีวิวรอบ 3 (C2): ด่านนั้นปิดเกิน — getApprovedHolidayWorkDays() ให้วันลาโดย **ไม่มีด่าน role เลย**
+// ⇒ โหมดแลกวันหยุดต้องผ่านด่านเสมอ ไม่งั้นวันที่ให้วันลาไปจริงจะขึ้นว่า "ไม่มีรายการพิเศษ"
+test('วันลาที่ได้จากโหมดแลกวันหยุดไม่มีด่าน role ⇒ ด่านของป๊อปอัปต้องไม่ปิดโหมดนั้น', () => {
+  const credit = extractFunction(APP_SRC, 'getApprovedHolidayWorkDays');
+  assert.ok(!/isAllowanceEligible|canHolidayWork|allowanceEligibility/.test(credit),
+    'ถ้าวันหนึ่งตัวให้วันลามีด่าน role แล้ว ให้กลับมาทบทวนด่านของป๊อปอัปด้วย');
+  const fn = extractFunction(APP_SRC, 'showAttendanceDetail');
+  assert.ok(/_hwMoneyOk \|\| _hwAny\.compensationMode === 'annual-leave'/.test(fn),
+    'ด่านต้องปล่อยโหมดแลกวันหยุดผ่านเสมอ ปิดเฉพาะทางที่เป็นเงิน');
+});
+
+// รีวิวรอบ 3 (C1): แถวตารางกับป๊อปอัปเป็น "เรคอร์ดเดียวกัน เงินก้อนเดียวกัน" ⇒ ต้องหาเจ้าของแบบเดียวกัน
+test('ทั้งสองที่ที่คิดเงินของวันนี้ ห้ามถอยไปใช้เงินเดือนของคนที่กำลังดู', () => {
+  assert.ok(!/DATA_USERS\.find\(u => u\.id == uid\) \|\| currentUser/.test(APP_SRC),
+    'แถวตารางยังถอยไปใช้ currentUser อยู่ ⇒ คิดเงินจากเงินเดือนคนดู');
+  const row = extractFunction(APP_SRC, 'renderAttendanceTable');
+  const both = (APP_SRC.match(/\|\| \(currentUser && currentUser\.id === (uid|targetUserId) \? currentUser : null\)/g) || []);
+  assert.ok(both.length >= 2, `ต้องใช้สำนวนเดียวกันทั้งสองที่ แต่เจอ ${both.length}`);
 });
 
 console.log('T3 ช่องสถานที่ไม่ใช่ช่องบังคับ และรูปแบบที่ส่งต้องเป็นรูปแบบที่เซิร์ฟเวอร์รับ');
