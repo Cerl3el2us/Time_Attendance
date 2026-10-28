@@ -4817,3 +4817,13 @@ tr.finalize-row-confirmed:hover td {
   font-weight: 700;
   color: var(--text);
 }
+/* คำเตือนเมื่อแถวเวลา (คิดจากค่าตั้งค่าปัจจุบัน) กับเงิน (ที่ปักไว้ตอนอนุมัติ) ไม่ตรงกัน (2026-10-28)
+   สเปกเรียกกรณีนี้ว่าความเสี่ยงหลักของบล็อกนี้ — โชว์สองชุดพร้อมกันโดยไม่บอกว่าไม่ตรง คือหน้าจอโกหก */
+.hw-ot-detail .hw-ot-drift {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+  color: var(--warning);
+  font-weight: 600;
+  line-height: 1.5;
+}

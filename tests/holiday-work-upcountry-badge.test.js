@@ -224,6 +224,41 @@ test('วันธรรมดาที่มีธง upcountry และไม
   assert.strictEqual(calc.allowance1, RATE_UPCOUNTRY);
 });
 
+console.log('T2b ป๊อปอัปต้องเงียบในวันที่ payroll จ่าย ฿0 เพราะ role ไม่มีสิทธิ์ Holiday Work');
+
+// พบตอนรีวิว 2026-10-28: บล็อก hwRec ในป๊อปอัปมีด่านเดียวคือ Company Trip ⇒ role ที่ไม่มีสิทธิ์
+// holidayWork เห็น badge, ชั่วโมง, ค่าเดินทาง ฿500 และ (หลังใส่เงิน) ยอดเป็นพันบาท ทั้งที่สลิปจ่าย ฿0
+// · ข้อนี้ผูกสองอย่างเข้าด้วยกันเป็นพฤติกรรม: ถ้า payroll ไม่จ่าย ด่านของป๊อปอัปต้องปิด
+test('ไม่มีสิทธิ์ holidayWork ⇒ payroll จ่าย 0 และด่านของป๊อปอัปต้องปิดพร้อมกัน', () => {
+  const SUN = '2026-09-27';
+  const paidRec = {
+    id: 1, userId: USER.id, type: 'holiday-work', status: 'approved', dateFrom: SUN,
+    compensationMode: 'paid', workStartTime: '09:00', workEndTime: '20:00',
+    otHours20: 7.5, otHours30: 2.5, locations: [{ name: 'NGK' }],
+  };
+  [['มีสิทธิ์', { upcountry: ['user'], holidayWork: ['user'] }, true],
+   ['ไม่มีสิทธิ์', { upcountry: ['user'], holidayWork: ['md'] }, false]].forEach(([label, elig, expect]) => {
+    const S = { ...SETTINGS, allowanceEligibility: elig };
+    const ctx = makeClient({ user: USER, leaves: [paidRec], pDays: days(), att: {} });
+    ctx.APP_SETTINGS = S;
+    const calc = ctx.computePayroll(USER, START, END, 1);
+    const จ่ายจริง = (calc.otHourBuckets ? Object.keys(calc.otHourBuckets).length > 0 : false)
+      || calc.holidayTransportTotal > 0 || calc.holidayWorkUpcountryCount > 0;
+    const ด่านเปิด = ctx.isAllowanceEligible(elig, USER.role, 'holidayWork');
+    assert.strictEqual(ด่านเปิด, expect, label + ': ด่านผิด');
+    assert.strictEqual(ด่านเปิด, จ่ายจริง,
+      `${label}: ด่านป๊อปอัป=${ด่านเปิด} แต่ payroll จ่าย=${จ่ายจริง} ⇒ จอกับสลิปพูดคนละเรื่อง`);
+  });
+});
+
+test('บล็อก hwRec ในป๊อปอัปผูกกับด่านนั้นจริง ไม่ใช่แค่ Company Trip', () => {
+  const fn = extractFunction(APP_SRC, 'showAttendanceDetail');
+  assert.ok(/const hwRec = isAllowanceEligible\(APP_SETTINGS\.allowanceEligibility, targetRole, 'holidayWork'\)/.test(fn),
+    'hwRec ต้องถูกปิดด้วยสิทธิ์ holidayWork เหมือนที่ payroll ปิด approvedHolidayWork');
+  assert.ok(!/const hwRec = dayLeave\('holiday-work'\);/.test(fn),
+    'ยังมีบรรทัดเดิมที่ไม่มีด่านอยู่');
+});
+
 console.log('T3 ช่องสถานที่ไม่ใช่ช่องบังคับ และรูปแบบที่ส่งต้องเป็นรูปแบบที่เซิร์ฟเวอร์รับ');
 
 // เจ้าของสั่ง 2026-10-28: "ตอนนี้บังคับกรอกสถานที่ จริงๆแล้วไม่ได้บังคับ แต่ถ้าไม่กรอก จะไม่ได้
