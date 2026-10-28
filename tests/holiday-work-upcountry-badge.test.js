@@ -1,0 +1,276 @@
+// ไอคอน 🗺️ Upcountry ของวันทำงานวันหยุด ต้องขึ้นเมื่อ "payroll จ่ายจริง" เท่านั้น (2026-10-28)
+//
+// ที่มา: เจ้าของเปิดป๊อปอัปของวันที่ 27 ก.ย. 2026 (ใบทำงานวันหยุด โหมดแลกวันหยุด กรอกสถานที่ไว้)
+// แล้วถามว่า *"ปกติ holiday work ถ้ากรอกข้อมูลช่องสถานที่ต้องได้เงินเบี้ยเลี้ยงด้วยถูกต้องไหม
+// หากว่าได้ ทำไมตอนนี้ในนี้ไม่มีเขียนไว้ว่าได้"* · วัดกับ computePayroll จริงแล้ว: ได้จริง —
+// holidayWorkUpcountryCount = 1, allowance1 = 2,160 = 9 × ฿240 โดยมีวันนั้นรวมอยู่ — แต่หน้าจอ
+// ไม่เขียนอะไรเลย · และเขาสั่งพ่วงมาว่า "ต้องขึ้นสัญลักษณ์ upcountry ด้วย **แต่อย่าคิดเงินเบิ้ล**"
+//
+// **เงื่อนไขที่ payroll ใช้จ่าย (holidayWorkUpcountryCount) ไม่มีเรื่องโหมดชดเชยอยู่ในนั้น**
+// ซึ่งเป็นข้อที่คนอ่านโค้ดเดาผิดได้ง่ายที่สุด เพราะเบี้ย ฿500 ค่าเดินทางวันหยุดที่อยู่ข้างๆ กัน
+// (holidayTransportForRecord) จ่ายเฉพาะโหมด paid ⇒ ใบแลกวันหยุดได้ ฿240 แต่ไม่ได้ ฿500
+//
+// ยามนี้จึงไม่ตรวจว่า "โค้ดหน้าตาเหมือนกันไหม" แต่ตรวจว่า **ไอคอนกับเงินตอบตรงกันทุกเคส**:
+// ยิง computePayroll ตัวจริงใส่ข้อมูลชุดเดียวกัน แล้วเทียบว่า holidayWorkEarnsUpcountry() ตอบ true
+// เมื่อ และเฉพาะเมื่อ payroll นับวันนั้นเป็นเบี้ย Upcountry · ถ้าวันหนึ่งกฎเงินเปลี่ยนข้างเดียว
+// ไอคอนจะกลายเป็นคำโฆษณาเงินที่สลิปไม่จ่าย ซึ่งเป็นบั๊กที่โปรเจกต์นี้เคยโดนมาแล้ว (2026-10-16)
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+const assert = require('assert');
+
+const ROOT = path.join(__dirname, '..');
+const APP_SRC = fs.readFileSync(path.join(ROOT, 'attendance/js/app.js'), 'utf8');
+
+function extractFunction(src, name) {
+  const re = new RegExp(`^(?:async )?function ${name}\\(`, 'm');
+  const m = re.exec(src);
+  assert.ok(m, `ไม่พบฟังก์ชัน ${name} ใน attendance/js/app.js`);
+  const i = src.indexOf('{', m.index);
+  let depth = 0;
+  for (let j = i; j < src.length; j++) {
+    if (src[j] === '{') depth++;
+    else if (src[j] === '}') { depth--; if (depth === 0) return src.slice(m.index, j + 1); }
+  }
+  throw new Error(`วงเล็บไม่สมดุลใน ${name}`);
+}
+function constDecl(src, name) {
+  // ต้องเช็กว่าบรรทัดเดียวจบจริง: `const X = {` ของอ็อบเจกต์หลายบรรทัดก็ตรงกับ regex นี้เหมือนกัน
+  // แล้วจะได้ประโยคที่ขาดกลางคันกลับไป ซึ่งพังเป็น SyntaxError ที่ชี้ไปผิดที่
+  const m = src.match(new RegExp(`^const ${name} = .*$`, 'm'));
+  if (m && /;\s*$/.test(m[0])) return m[0].replace(/^const /, '');
+  // ค่าคงที่แบบหลายบรรทัด (อ็อบเจกต์)
+  const o = new RegExp(`^const ${name} = \\{`, 'm').exec(src);
+  assert.ok(o, `ไม่พบ const ${name}`);
+  const i = src.indexOf('{', o.index);
+  let d = 0;
+  for (let j = i; j < src.length; j++) {
+    if (src[j] === '{') d++;
+    else if (src[j] === '}') { d--; if (!d) return src.slice(o.index, j + 1).replace(/^const /, '') + ';'; }
+  }
+  throw new Error(`unbalanced const ${name}`);
+}
+
+const TRIPS = ['2026-10-03'];                       // เสาร์ที่ถูกประกาศเป็น Company Trip
+const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+const BUSINESS_DAY_START_MINS = Number(/const BUSINESS_DAY_START_MINS = (\d+);/.exec(APP_SRC)[1]);
+const RATE_UPCOUNTRY = 240;
+const SETTINGS = {
+  allowances: {
+    earlyMorning1: 240, earlyMorning2: 480, earlyThreshold1Min: 450, earlyThreshold2Min: 390,
+    lateNight1: 100, lateNight2: 200, lateNightThreshold1Hour: 19, lateNightThreshold2Hour: 20,
+    upcountry: RATE_UPCOUNTRY, holidayTransport: 500, abroad: 1100, personalCar: 1000, phone: 1000, diligence: 0,
+  },
+  sso: { rate: 5, maxAmount: 875, minSalary: 1650 },
+  tax: { personalAllowanceAnnual: 60000 },
+  workSchedule: { standardStartHour: 8, standardStartMinute: 30 },
+  // ตั้งชัดเจน ไม่พึ่งค่าตั้งต้น เพราะเคสล่างทดสอบการปิดสิทธิ์ทีละตัว
+  allowanceEligibility: { upcountry: ['user'], holidayWork: ['user'] },
+  payroll: { periodStartDay: 21 },
+};
+const USER = { id: 1, role: 'user', salary: 24000, active: true };
+
+const SHARED = ['earlyLateRateFor', 'isVoidLeaveStatus', 'round2HalfUp', 'round1HalfUp',
+  'deriveOfficeOtFromEndTime', 'lateNightCheckoutMins', 'lateNightThresholdMins', 'lateNightThresholdHourOf',
+  'parseHHMMToMins', 'isHolidayWorkDay', 'isNonWorkDayForComp', 'isHolidayWorkOtRecord', 'companyTripDateInRange',
+  'isFullDayPersonalLeaveStatus', 'isRestAttendanceDay', 'isDeviceScanSource', 'isEarlyMorningDayStatus',
+  'deviceScanQualifiesForEarlyMorning', 'earlyMorningAutoPayEnabled', 'earlyMorningCheckInOk',
+  'deviceScanQualifiesForLateNight', 'lateNightCheckoutOk', 'addOtHours', 'accumulateApprovedOtHours',
+  'otPayFromHourBuckets', 'effectiveOtMultiplier', 'computePayroll', 'splitHolidayWorkOtMinutes',
+  'holidayWorkEndMins', 'hasUpcountryLocation', 'holidayTransportForRecord', 'lateNightPoints',
+  'holidayWorkTooLong', 'scanWindowError', 'getApprovedHolidayWorkDays', 'abroadTravelCreditDays',
+  'otEndCrossesMidnight', 'loggedInUser', 'isSuperAdmin', 'effectiveRole', 'gateRoleFor',
+  'canSubmitHolidayWorkForDate', 'standardOtMultiplier', 'otPayAmountFromLeave',
+  // ตัวจริงของสองตัวนี้ ไม่ใช่ stub — เคสล่างปิดสิทธิ์ทีละ role จึงต้องใช้ตัวตัดสินจริง
+  'isAllowanceEligible',
+  // ตัวที่ไฟล์นี้มีไว้ตรวจ
+  'holidayWorkEarnsUpcountry'];
+
+function makeClient(world) {
+  const ctx = {
+    HHMM_RE, APP_SETTINGS: SETTINGS, DATA_LEAVES: world.leaves, DATA_COMPANY_TRIP_DATES: TRIPS,
+    DATA_USERS: [world.user], currentUser: world.user, realUser: world.user, editingLeaveId: null, finalizeData: {},
+    isCompanyTripDay: d => TRIPS.includes(d), isPublicHoliday: () => false,
+    isApprovedAbroadDate: () => false, isAbroadTravelDay: () => false,
+    payPeriodBlockedForDate: () => ({ blocked: false }), bangkokDateStr: () => '2026-12-31',
+    attendanceTimesForDate: d => ({ checkIn: null, checkOut: null, lastScan: null, ...(world.att[d] || {}) }),
+    generatePeriodDays: () => world.pDays, getFinalizeKey: () => 'k', calcAnnualTax: () => 0,
+    L: en => en, console,
+  };
+  ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
+  vm.createContext(ctx);
+  vm.runInContext(constDecl(APP_SRC, 'EARLY_LATE_RATE_KEYS') + '\n' +
+    constDecl(APP_SRC, 'DEFAULT_ALLOWANCE_ELIGIBILITY') + '\n' +
+    SHARED.map(n => extractFunction(APP_SRC, n)).join('\n'), ctx);
+  return ctx;
+}
+
+let passed = 0;
+function test(name, fn) {
+  try { fn(); passed++; console.log(`  ok  ${name}`); }
+  catch (e) { process.exitCode = 1; console.log(`  FAIL  ${name}\n        ${e.message}`); }
+}
+
+const START = new Date(2026, 8, 21), END = new Date(2026, 9, 20);
+const SUNDAY = '2026-09-27';                        // อยู่ในรอบ และเป็นวันหยุดสุดสัปดาห์
+const hwRec = over => ({
+  id: 99, userId: USER.id, type: 'holiday-work', status: 'approved', dateFrom: SUNDAY,
+  compensationMode: 'paid', workStartTime: '09:00', workEndTime: '12:00',
+  otHours20: 0, otHours30: 0, locations: [{ name: 'Dainichi' }], ...over,
+});
+const days = (dateStatus = {}) => {
+  const out = [];
+  for (let d = new Date(2026, 8, 21); d <= new Date(2026, 9, 20); d.setDate(d.getDate() + 1)) {
+    const s = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const wd = d.getDay();
+    out.push({ date: s, status: dateStatus[s] || (wd === 0 || wd === 6 ? 'rest' : 'present'), upcountry: false });
+  }
+  return out;
+};
+
+// หัวใจของไฟล์นี้: ไอคอนกับเงินต้องตอบเหมือนกัน · ไม่ยืนยันตัวเลขที่เขียนมือ แต่ยืนยันว่า
+// สองฝั่ง "เห็นด้วยกัน" ซึ่งเป็นสิ่งเดียวที่ยังจริงอยู่เมื่อเรตหรือกฎเปลี่ยนในอนาคต
+function agree(label, recOver, { role = 'user', dateStatus = {}, elig } = {}) {
+  const S = elig ? { ...SETTINGS, allowanceEligibility: elig } : SETTINGS;
+  const rec = hwRec(recOver);
+  const user = { ...USER, role };
+  const world = { user, leaves: [rec], pDays: days(dateStatus), att: {} };
+  const ctx = makeClient(world);
+  ctx.APP_SETTINGS = S;
+  const calc = ctx.computePayroll(user, START, END, 1);
+  const จ่ายจริง = calc.holidayWorkUpcountryCount > 0;
+  const ไอคอนขึ้น = ctx.holidayWorkEarnsUpcountry(rec, S, role, (dateStatus[rec.dateFrom] === 'abroad'));
+  assert.strictEqual(ไอคอนขึ้น, จ่ายจริง,
+    `${label}: ไอคอน=${ไอคอนขึ้น} แต่ payroll นับ=${calc.holidayWorkUpcountryCount}`);
+  return { จ่ายจริง, allowance1: calc.allowance1 };
+}
+
+console.log('T1 ไอคอนกับเงินต้องตอบตรงกันทุกเคส');
+
+test('โหมดรับเป็นเงิน + กรอกสถานที่ ⇒ ได้เบี้ย และไอคอนขึ้น', () => {
+  const r = agree('paid+loc', { compensationMode: 'paid' });
+  assert.strictEqual(r.จ่ายจริง, true);
+});
+
+// เคสของเจ้าของ: ใบแลกวันหยุดก็ได้เบี้ย Upcountry — เป็นข้อที่หน้าจอเคยเงียบ
+test('โหมดแลกวันหยุด + กรอกสถานที่ ⇒ ได้เบี้ยเหมือนกัน (เคส 27 ก.ย. ของเจ้าของ)', () => {
+  const r = agree('annual-leave+loc', { compensationMode: 'annual-leave' });
+  assert.strictEqual(r.จ่ายจริง, true, 'โหมดแลกวันหยุดต้องได้เบี้ย Upcountry');
+  assert.strictEqual(r.allowance1, RATE_UPCOUNTRY, 'และต้องเป็นเงินจริงหนึ่งวัน');
+});
+
+test('ไม่กรอกสถานที่ ⇒ ไม่ได้เบี้ย และไอคอนต้องไม่ขึ้น (ทั้งสองโหมด)', () => {
+  ['paid', 'annual-leave'].forEach(mode => {
+    const r = agree('ไม่มีสถานที่ ' + mode, { compensationMode: mode, locations: [] });
+    assert.strictEqual(r.จ่ายจริง, false);
+  });
+  const r2 = agree('locations ไม่มีเลย', { locations: undefined });
+  assert.strictEqual(r2.จ่ายจริง, false);
+  const r3 = agree('ชื่อสถานที่ว่าง', { locations: [{ name: '   ' }] });
+  assert.strictEqual(r3.จ่ายจริง, false);
+});
+
+test('คำขอยังไม่อนุมัติ ⇒ ไม่ได้เบี้ย และไอคอนต้องไม่ขึ้น', () => {
+  ['pending', 'rejected', 'cancelled'].forEach(st => {
+    const r = agree('status=' + st, { status: st });
+    assert.strictEqual(r.จ่ายจริง, false, st);
+  });
+});
+
+// เบี้ยต่างประเทศครอบวันนั้นอยู่แล้ว (เจ้าของตัดสิน 2026-09-23)
+test('วันที่เป็น Abroad ⇒ ไม่ได้เบี้ย Upcountry และไอคอนต้องไม่ขึ้น', () => {
+  const r = agree('abroad', {}, { dateStatus: { [SUNDAY]: 'abroad' } });
+  assert.strictEqual(r.จ่ายจริง, false);
+});
+
+// วัน Company Trip ไม่จ่ายเบี้ยใดๆ (เจ้าของตัดสิน 2026-09-24)
+test('วัน Company Trip ⇒ ไม่ได้เบี้ย และไอคอนต้องไม่ขึ้น', () => {
+  const r = agree('company trip', { dateFrom: TRIPS[0] });
+  assert.strictEqual(r.จ่ายจริง, false);
+});
+
+test('ปิดสิทธิ์ upcountry ของ role ⇒ ไม่ได้เบี้ย และไอคอนต้องไม่ขึ้น', () => {
+  const r = agree('ไม่มีสิทธิ์ upcountry', {}, { elig: { upcountry: ['md'], holidayWork: ['user'] } });
+  assert.strictEqual(r.จ่ายจริง, false);
+});
+
+test('ปิดสิทธิ์ holidayWork ของ role ⇒ ไม่ได้เบี้ย และไอคอนต้องไม่ขึ้น', () => {
+  const r = agree('ไม่มีสิทธิ์ holidayWork', {}, { elig: { upcountry: ['user'], holidayWork: ['md'] } });
+  assert.strictEqual(r.จ่ายจริง, false);
+});
+
+console.log('T2 ไม่คิดเงินเบิ้ล');
+
+// เจ้าของสั่งตรงๆ ว่า "อย่าคิดเงินเบิ้ล" · payroll กันไว้แล้วที่ upcountryCount ซึ่งตัดวันที่มีใบ
+// holiday work ออกก่อนนับ แล้วนับจากใบแทน · ข้อนี้ตรึงพฤติกรรมนั้นไว้ ไม่ให้ใครรื้อโดยไม่ตั้งใจ
+test('วันเดียวกันมีทั้งธง upcountry ของวันและใบวันหยุด ⇒ จ่ายครั้งเดียว ไม่ใช่สองครั้ง', () => {
+  const rec = hwRec({});
+  const user = { ...USER };
+  const pDays = days().map(d => d.date === SUNDAY ? { ...d, upcountry: true } : d);
+  const ctx = makeClient({ user, leaves: [rec], pDays, att: {} });
+  const calc = ctx.computePayroll(user, START, END, 1);
+  assert.strictEqual(calc.upcountryCount, 1, 'ต้องนับวันนั้นครั้งเดียว');
+  assert.strictEqual(calc.allowance1, RATE_UPCOUNTRY, 'และเป็นเงินหนึ่งวัน ไม่ใช่สองวัน');
+});
+
+test('วันธรรมดาที่มีธง upcountry และไม่มีใบวันหยุด ⇒ ยังได้เบี้ยตามเดิม', () => {
+  const WEEKDAY = '2026-09-28';                      // จันทร์
+  const user = { ...USER };
+  const pDays = days().map(d => d.date === WEEKDAY ? { ...d, upcountry: true } : d);
+  const ctx = makeClient({ user, leaves: [], pDays, att: {} });
+  const calc = ctx.computePayroll(user, START, END, 1);
+  assert.strictEqual(calc.upcountryCount, 1);
+  assert.strictEqual(calc.allowance1, RATE_UPCOUNTRY);
+});
+
+console.log('T3 ช่องสถานที่ไม่ใช่ช่องบังคับ และรูปแบบที่ส่งต้องเป็นรูปแบบที่เซิร์ฟเวอร์รับ');
+
+// เจ้าของสั่ง 2026-10-28: "ตอนนี้บังคับกรอกสถานที่ จริงๆแล้วไม่ได้บังคับ แต่ถ้าไม่กรอก จะไม่ได้
+// เบี้ยเลี้ยง upcountry กับ เงินค่าเดินทางวันหยุด" และ "ถ้าทำงานที่ office ไม่ให้กรอกช่องสถานที่"
+//
+// กับดักที่ทำให้ข้อนี้ต้องมี: เอาการบล็อกฝั่งเว็บออกเฉยๆ แล้วปล่อยให้ payload ส่ง
+// `locations: [{ name: '' }]` ต่อไป จะโดนเซิร์ฟเวอร์ตอบ 400 ทั้งใบ — คนที่ทำงานวันหยุดที่ออฟฟิศ
+// จะยื่นคำขอไม่ได้เลย ซึ่งแย่กว่าเดิม · มีแค่ `undefined` เท่านั้นที่ผ่าน
+const SERVER_SRC = fs.readFileSync(path.join(ROOT, 'attendance-server/backend/server.js'), 'utf8');
+const vctx = { HHMM_RE, LOCATION_NAME_MAX: 200, console };
+vm.createContext(vctx);
+vm.runInContext(extractFunction(SERVER_SRC, 'validateUpcountryLocations'), vctx);
+
+test('เซิร์ฟเวอร์รับเฉพาะ undefined เมื่อไม่มีสถานที่ — ของว่างแบบอื่นถูกปฏิเสธ', () => {
+  assert.strictEqual(vctx.validateUpcountryLocations(undefined), null, 'undefined ต้องผ่าน');
+  assert.ok(vctx.validateUpcountryLocations([]), '[] ต้องถูกปฏิเสธ');
+  assert.ok(vctx.validateUpcountryLocations([{ name: '' }]), "[{name:''}] ต้องถูกปฏิเสธ");
+  assert.ok(vctx.validateUpcountryLocations([{ name: '   ' }]), 'ชื่อที่มีแต่ช่องว่างต้องถูกปฏิเสธ');
+  assert.strictEqual(vctx.validateUpcountryLocations([{ name: 'NGK' }]), null, 'ชื่อจริงต้องผ่าน');
+});
+
+test('submitHolidayWork ตัดคีย์ locations ทิ้งเมื่อเว้นว่าง ไม่ได้ส่งของว่าง', () => {
+  const fn = extractFunction(APP_SRC, 'submitHolidayWork');
+  assert.ok(/\.\.\.\(location \? \{ locations: \[\{ name: location \}\] \} : \{\}\)/.test(fn),
+    'payload ต้อง spread แบบมีเงื่อนไข ไม่ใช่ `locations: [{ name: location }]` ตรงๆ');
+  assert.ok(!/^\s*locations: \[\{ name: location \}\],\s*$/m.test(fn),
+    'ยังมีบรรทัดเดิมที่ส่ง locations เสมออยู่');
+});
+
+test('ไม่มีการบล็อกการยื่นเมื่อสถานที่ว่างแล้ว', () => {
+  const fn = extractFunction(APP_SRC, 'submitHolidayWork');
+  assert.ok(!/if \(!location\)\s*\{\s*showToast/.test(fn),
+    'ยังมีด่านที่ปฏิเสธการยื่นเมื่อไม่กรอกสถานที่');
+});
+
+test('ฟอร์มไม่ติดดอกจันบังคับที่ช่องสถานที่ และมีคำอธิบายครบ 3 ภาษา', () => {
+  const HTML = fs.readFileSync(path.join(ROOT, 'attendance/index.html'), 'utf8');
+  const JA = fs.readFileSync(path.join(ROOT, 'attendance/lang/ja.js'), 'utf8');
+  const block = HTML.slice(HTML.indexOf('data-en="Location (Upcountry)"'),
+    HTML.indexOf('id="holiday-work-start-time"'));
+  assert.ok(block.indexOf('holiday-work-location') > 0, 'ตัดบล็อกผิดที่');
+  assert.ok(!/color:#ef4444">\*<\/span><\/label>/.test(block.slice(0, block.indexOf('<input'))),
+    'ยังมีดอกจันบังคับอยู่ที่ป้ายช่องสถานที่');
+  const en = /data-en="(Fill this in only if you worked upcountry[^"]*)"/.exec(block);
+  assert.ok(en, 'ไม่พบคำอธิบายภาษาอังกฤษใต้ช่องสถานที่');
+  assert.ok(/ต่างจังหวัด/.test(block) && /ออฟฟิศ/.test(block), 'คำอธิบายภาษาไทยไม่ครบ');
+  assert.ok(JA.includes(en[1]), 'คำอธิบายนี้ยังไม่มีคำแปลญี่ปุ่นใน lang/ja.js');
+});
+
+console.log(`\n${passed} passed, ${process.exitCode ? 'มีข้อที่ล้มเหลว' : '0 failed'}`);

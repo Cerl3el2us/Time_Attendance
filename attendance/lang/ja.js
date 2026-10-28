@@ -1594,4 +1594,7 @@ window.LANG_JA = {
   "Claimed hours": "申請時間",
   "lunch deducted": "昼休み控除",
   "Enter the working hours exactly as on the attached Working Report": "勤務時間は添付の Working Report と一致させてください",
+  // 2026-10-28: the location field stopped being mandatory -- it names an upcountry site, so a
+  // holiday worked at the office is exactly the case for leaving it blank.
+  "Fill this in only if you worked upcountry. Worked at the office? Leave it blank — blank means no Upcountry allowance and no holiday transport.": "地方出張で勤務した場合のみ入力してください。事務所で勤務した場合は空欄のままにしてください — 空欄の場合、地方出張手当と休日交通費は支給されません。",
 };

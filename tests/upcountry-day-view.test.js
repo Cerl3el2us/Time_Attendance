@@ -46,12 +46,31 @@ function between(src, startMarker, endMarker) {
 
 // The icon decision, lifted out of the attendance-row renderer and wrapped in a function of its
 // three inputs. `upcountryBadge` is what the row ends up printing.
+// 2026-10-28: the row gained a second way to show this icon -- a Holiday Work record whose
+// location is filled in earns the Upcountry allowance too (owner: "ถ้าเกิดเขามีต่างจังหวัดต้องขึ้น
+// สัญลักษณ์ upcountry ด้วย แต่อย่าคิดเงินเบิ้ล"), so the snippet now also reads hwRow, APP_SETTINGS
+// and targetUser. The marker moved with it; the cases below cover BOTH ways in.
 const BADGE_SNIPPET = between(
   APP_SRC,
-  "    const upcountryShown = canUpcountryTarget && row.upcountry && row.status !== 'company-trip';",
+  "    const upcountryShown = (canUpcountryTarget && row.upcountry && row.status !== 'company-trip')",
   "        : attAllowIcon('🗺️', L('Upcountry', 'Upcountry'));");
 
-function makeSandbox(leaves) {
+// ค่าคงที่หลายบรรทัดที่ isAllowanceEligible() อ่าน — ดึงประกาศจริงออกมา ไม่พิมพ์ซ้ำในเทสต์
+function constDecl(src, name) {
+  const a = src.search(new RegExp('^const ' + name + ' = \\{', 'm'));
+  assert.ok(a >= 0, 'const ' + name + ' not found');
+  const i = src.indexOf('{', a);
+  let d = 0;
+  for (let j = i; j < src.length; j++) {
+    if (src[j] === '{') d++;
+    else if (src[j] === '}') { d--; if (!d) return src.slice(a, j + 1) + ';\n'; }
+  }
+  throw new Error('unbalanced ' + name);
+}
+
+const ELIG_ALL = { upcountry: ['user'], holidayWork: ['user'] };
+
+function makeSandbox(leaves, elig) {
   const ctx = {
     DATA_LEAVES: leaves,
     currentLang: 'en',
@@ -59,13 +78,22 @@ function makeSandbox(leaves) {
     escapeHtml: (s) => String(s == null ? '' : s),
     attAllowIcon: (emoji) => 'PLAIN:' + emoji,
     attAllowIconButton: (emoji, title, onclick) => 'CLICKABLE:' + emoji + '|' + onclick,
+    APP_SETTINGS: { allowanceEligibility: elig || ELIG_ALL },
+    isCompanyTripDay: (d) => d === '2026-12-25',
   };
   vm.createContext(ctx);
   vm.runInContext(
-    topLevelFn(APP_SRC, 'upcountryLocationsOf')
+    constDecl(APP_SRC, 'DEFAULT_ALLOWANCE_ELIGIBILITY')
+    + topLevelFn(APP_SRC, 'isAllowanceEligible')
+    + topLevelFn(APP_SRC, 'hasUpcountryLocation')
+    + topLevelFn(APP_SRC, 'holidayWorkEarnsUpcountry')
+    + topLevelFn(APP_SRC, 'upcountryLocationsOf')
     + topLevelFn(APP_SRC, 'upcountryDayRecord')
     + topLevelFn(APP_SRC, 'upcountryDayStops')
-    + 'function badgeFor(canUpcountryTarget, row, targetUserId) {\n'
+    // hwRow / targetUser default to the "no Holiday Work record" case, so every assertion written
+    // before 2026-10-28 keeps asking exactly what it asked then.
+    + 'function badgeFor(canUpcountryTarget, row, targetUserId, hwRow, targetUser) {\n'
+    + '  hwRow = hwRow || null; targetUser = targetUser || { role: "user" };\n'
     + BADGE_SNIPPET + '\n'
     + '  return upcountryBadge;\n}',
     ctx);
@@ -150,6 +178,57 @@ test('the icon is absent exactly where it was absent before this change', () => 
   assert.strictEqual(s.badgeFor(false, ROW, 7), '', 'a viewer without the right must see no icon');
   assert.strictEqual(s.badgeFor(true, { ...ROW, upcountry: false }, 7), '');
   assert.strictEqual(s.badgeFor(true, { ...ROW, status: 'company-trip' }, 7), '');
+});
+
+// --- 2026-10-28: the second way in, a Holiday Work record with a location ---
+// The owner's rule, in his words: the location field is for an upcountry site. Work at the office
+// on a holiday and you leave it blank, which is also how you end up with no allowance. So the
+// icon follows the field, and tests/holiday-work-upcountry-badge.test.js is what proves the field
+// follows the money.
+const REST_ROW = { date: '2026-10-18', upcountry: false, status: 'rest' };
+const HW = { id: 9, userId: 7, type: 'holiday-work', status: 'approved', dateFrom: '2026-10-18',
+  compensationMode: 'paid', locations: [{ name: 'NGK' }] };
+const USER7 = { role: 'user' };
+
+test('a Holiday Work day with a location shows the icon although the row flag is off', () => {
+  const s = makeSandbox([]);
+  assert.strictEqual(s.badgeFor(true, REST_ROW, 7, HW, USER7), 'PLAIN:🗺️');
+});
+
+test('both compensation modes show it — the allowance does not care which one', () => {
+  const s = makeSandbox([]);
+  ['paid', 'annual-leave'].forEach(mode => {
+    assert.strictEqual(s.badgeFor(true, REST_ROW, 7, { ...HW, compensationMode: mode }, USER7),
+      'PLAIN:🗺️', mode);
+  });
+});
+
+test('worked at the office: location left blank, so no icon', () => {
+  const s = makeSandbox([]);
+  [[], undefined, [{ name: '   ' }]].forEach(locations => {
+    assert.strictEqual(s.badgeFor(true, REST_ROW, 7, { ...HW, locations }, USER7), '',
+      JSON.stringify(locations));
+  });
+});
+
+test('a Holiday Work record that is not approved, is Abroad, or is a Company Trip shows nothing', () => {
+  const s = makeSandbox([]);
+  assert.strictEqual(s.badgeFor(true, REST_ROW, 7, { ...HW, status: 'pending' }, USER7), '');
+  assert.strictEqual(s.badgeFor(true, { ...REST_ROW, status: 'abroad' }, 7, HW, USER7), '');
+  assert.strictEqual(s.badgeFor(true, REST_ROW, 7, { ...HW, dateFrom: '2026-12-25' }, USER7), '');
+});
+
+test('a role with no Upcountry right sees no icon from a Holiday Work record either', () => {
+  const noUpc = makeSandbox([], { upcountry: ['md'], holidayWork: ['user'] });
+  assert.strictEqual(noUpc.badgeFor(true, REST_ROW, 7, HW, USER7), '');
+  const noHw = makeSandbox([], { upcountry: ['user'], holidayWork: ['md'] });
+  assert.strictEqual(noHw.badgeFor(true, REST_ROW, 7, HW, USER7), '');
+});
+
+test('one icon, not two, when the day qualifies both ways', () => {
+  const s = makeSandbox([APPROVED]);
+  const out = s.badgeFor(true, { ...ROW, upcountry: true }, 7, { ...HW, dateFrom: '2026-10-20' }, USER7);
+  assert.strictEqual((out.match(/🗺️/g) || []).length, 1, 'the row must print the icon once: ' + out);
 });
 
 console.log(`upcountry-day-view: ${passed} passed`);
