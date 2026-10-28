@@ -50,9 +50,12 @@ function between(src, startMarker, endMarker) {
 // location is filled in earns the Upcountry allowance too (owner: "ถ้าเกิดเขามีต่างจังหวัดต้องขึ้น
 // สัญลักษณ์ upcountry ด้วย แต่อย่าคิดเงินเบิ้ล"), so the snippet now also reads hwRow, APP_SETTINGS
 // and targetUser. The marker moved with it; the cases below cover BOTH ways in.
+// 2026-10-28 (รีวิวรอบ 5): มาร์กเกอร์ขยับ เพราะบรรทัดนี้เลิกอ่าน `hwRow` ตรงๆ แล้วไปอ่าน
+// `_hwDisp.takesDay` (คนละคำถามกับ "มีเรคอร์ดไหม" — ดูเหตุผลที่ holidayWorkDisplayFor) และเลิกใช้
+// `targetUser.role` ที่ถอยไปเป็น role ของคนดูได้ มาเป็น `_attOwner`
 const BADGE_SNIPPET = between(
   APP_SRC,
-  "    const upcountryShown = (canUpcountryTarget && row.upcountry && row.status !== 'company-trip' && !hwRow)",
+  "    const upcountryShown = (canUpcountryTarget && row.upcountry && row.status !== 'company-trip' && !_hwDisp.takesDay)",
   "        : attAllowIcon('🗺️', L('Upcountry', 'Upcountry'));");
 
 // ค่าคงที่หลายบรรทัดที่ isAllowanceEligible() อ่าน — ดึงประกาศจริงออกมา ไม่พิมพ์ซ้ำในเทสต์
@@ -90,10 +93,20 @@ function makeSandbox(leaves, elig) {
     + topLevelFn(APP_SRC, 'upcountryLocationsOf')
     + topLevelFn(APP_SRC, 'upcountryDayRecord')
     + topLevelFn(APP_SRC, 'upcountryDayStops')
+    + topLevelFn(APP_SRC, 'holidayWorkDisplayFor')
     // hwRow / targetUser default to the "no Holiday Work record" case, so every assertion written
     // before 2026-10-28 keeps asking exactly what it asked then.
+    // 2026-10-28 (รีวิวรอบ 5): รีวิวชี้ว่าการรับ `targetUser` เป็นพารามิเตอร์ทำให้ไม่มีเทสต์ไหน
+    // เห็นได้เลยว่าโค้ดจริงหยิบอ็อบเจกต์ไหนมาใช้ · และ `_hwDisp` ถ้าฉีดเข้ามาเองก็จะเป็นการเขียนกฎ
+    // ซ้ำในเทสต์ ⇒ harness เรียก holidayWorkDisplayFor() **ตัวจริง** โดยยัดเรคอร์ดที่เทสต์ส่งมา
+    // เข้า DATA_LEAVES ชั่วคราว ให้มันค้นเจอเองตามทางปกติ · `hwRow` ที่บรรทัด badge ใช้ จึงเป็น
+    // ผลลัพธ์ของฟังก์ชันกลาง ไม่ใช่สิ่งที่เทสต์ยัดให้ ⇒ กฎมีที่มาเดียวทั้งในโค้ดและในเทสต์
     + 'function badgeFor(canUpcountryTarget, row, targetUserId, hwRow, targetUser) {\n'
-    + '  hwRow = hwRow || null; targetUser = targetUser || { role: "user" };\n'
+    + '  const _attOwner = targetUser || { role: "user" };\n'
+    + '  if (hwRow) DATA_LEAVES.push(hwRow);\n'
+    + '  const _hwDisp = holidayWorkDisplayFor(targetUserId, row.date, row.status, _attOwner.role, APP_SETTINGS);\n'
+    + '  if (hwRow) DATA_LEAVES.pop();\n'
+    + '  hwRow = _hwDisp.rec;\n'
     + BADGE_SNIPPET + '\n'
     + '  return upcountryBadge;\n}',
     ctx);
