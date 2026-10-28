@@ -249,20 +249,36 @@ function buildPayslipWorkbook({ companyInfo, user, calc, fin, period, attendance
   // hours (computePayroll otPayFromHourBuckets) or read as stored from an MD-approved snapshot --
   // only the float noise of adding them up is removed here, nothing is recomputed.
   const otTotal = Math.round(((calc.ot15Amount || 0) + (calc.ot20Amount || 0) + (calc.ot30Amount || 0)) * 100 + 1e-9) / 100;
+  // 2026-10-28 (เจ้าของ): "ปกติถ้าไม่ได้รับเงินส่วนไหน ชื่อส่วนนั้นจะไม่โชว์ในสลิป แต่ถ้าได้รับเงิน
+  // ก็จะโชว์ชื่อส่วนนั้นด้วย และถ้าได้รับเงินนั่นหมายความว่าต้องได้รับสิทธิ์"
+  // ⇒ `canShow()` ถูกถอดออกจากบรรทัดรายได้ทั้งหมด · `.filter(amount > 0)` ด้านล่างทำหน้าที่
+  // "ไม่มีเงินไม่โชว์" อยู่แล้วตั้งแต่ 2026-09-15 ⇒ การเอาสิทธิ์มากรองอีกชั้นเหลือผลเดียวคือ
+  // **ซ่อนบรรทัดที่มีเงินอยู่** ซึ่งเป็นด้านที่ผิด
+  //
+  // ช่อง OT รับเงินจากสองสิทธิ์: ใบ OT ปกติ (`ot`) และใบทำงานวันหยุด (`holidayWork`) ·
+  // `canShow('ot')` จึงซ่อนเงินที่มาจากวันหยุดของคนที่ไม่มีสิทธิ์ OT ปกติ ⇒ ยอดรวมมีเงินก้อนนั้น
+  // แต่ไม่มีบรรทัดอธิบาย — สลิปบวกไม่ลงตัว
+  //
+  // ปลอดภัยเพราะ computePayroll ทำยอดเป็น 0 ให้เองเมื่อ role ไม่มีสิทธิ์ (ดูคอมเมนต์ 2026-07-31
+  // ข้างบน และวัดจริงแล้วเมื่อ 2026-10-28 กับพนักงานจริง 10 คน × 9 เบี้ย: 8 เบี้ยได้ 0 ทันที
+  // เหลือแต่ `ot` ที่ยังมีเงิน ซึ่งเป็นเงินวันหยุดที่เขามีสิทธิ์ได้จริง)
+  // ⇒ "มีเงิน = มีสิทธิ์" เป็นจริงในโค้ดนี้ จึงใช้ยอดเงินเป็นด่านเดียวได้
+  //
+  // ฝั่งหักเงินด้านล่างไม่แตะ: เจ้าของตัดสินไว้ 2026-07-31 ว่ายอด deduct มีทุกเดือนอยู่แล้ว
   const earningsItems = [
     ['Basic Salary', calc.base], ['Position Allowance', calc.posAllowance],
     ['Housing Allowance', calc.housingAllowance], ['Transportation Allowance', calc.transport],
-    ...(canShow('diligence') ? [['Perfect Attendance', calc.diligenceAllowance]] : []),
-    ...(canShow('ot') ? [['Overtime Pay', otTotal]] : []),
-    ...(canShow('upcountry') ? [['Allowance 1 (Upcountry)', calc.allowance1]] : []),
-    ...(canShow('earlyLate') ? [['Allowance 2 (Early Morning / Late Night)', calc.allowance2]] : []),
+    ['Perfect Attendance', calc.diligenceAllowance],
+    ['Overtime Pay', otTotal],
+    ['Allowance 1 (Upcountry)', calc.allowance1],
+    ['Allowance 2 (Early Morning / Late Night)', calc.allowance2],
     // 2026-07-31: phone allowance is now per-employee-flag-gated (like personalCar), not
     // unconditional -- caller's `eligibility.phone` is already ANDed with user.phoneAllowanceEligible.
-    ...(canShow('phone') ? [['Allowance 3 (Mobile Phone)', calc.allowance3]] : []),
-    ...(canShow('longDistance') ? [['Long Distance Allowance', calc.longDistanceTotal]] : []),
-    ...(canShow('personalCar') ? [['Personal Car Allowance', calc.personalCarTotal]] : []),
-    ...(canShow('holidayWork') ? [['Holiday Transport Allowance', calc.holidayTransportTotal || 0]] : []),
-    ...(canShow('abroad') ? [['Abroad Allowance', calc.abroadTotal || 0]] : []),
+    ['Allowance 3 (Mobile Phone)', calc.allowance3],
+    ['Long Distance Allowance', calc.longDistanceTotal],
+    ['Personal Car Allowance', calc.personalCarTotal],
+    ['Holiday Transport Allowance', calc.holidayTransportTotal || 0],
+    ['Abroad Allowance', calc.abroadTotal || 0],
     ['Bonus', fin.bonus],
     ...(fin.manualAllowances || []).filter(ma => (ma.amount || 0) > 0).map(ma => [ma.type || 'Other Allowance', ma.amount]),
   ].filter(([, amount]) => (amount || 0) > 0);
