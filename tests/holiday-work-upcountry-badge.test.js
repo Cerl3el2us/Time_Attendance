@@ -98,7 +98,9 @@ const SHARED = ['earlyLateRateFor', 'isVoidLeaveStatus', 'round2HalfUp', 'round1
   // ตัวจริงของสองตัวนี้ ไม่ใช่ stub — เคสล่างปิดสิทธิ์ทีละ role จึงต้องใช้ตัวตัดสินจริง
   'isAllowanceEligible',
   // ตัวที่ไฟล์นี้มีไว้ตรวจ
-  'holidayWorkEarnsUpcountry'];
+  'holidayWorkEarnsUpcountry',
+  // 2026-10-28: ตัวนับ Upcountry ที่รายงานทุกหน้าใช้ และชุดวันที่มันอ้าง
+  'holidayWorkUnlockDates', 'reportUpcountryDays'];
 
 function makeClient(world) {
   const ctx = {
@@ -624,6 +626,106 @@ test('ป๊อปอัป 🚙: ต้องผ่านทั้งสิท�
   assert.strictEqual(popupCond(PC_MARK, Object.assign({}, ok, { row: { status: 'company-trip' } }), PC_PRELUDE).shown, false);
   assert.strictEqual(popupCond(PC_MARK, Object.assign({}, ok, { row: { status: 'leave-sick' } }), PC_PRELUDE).shown, false,
     'payroll ตัดวันลาเต็มวันออกจาก approvedPC');
+});
+
+// ───────────────────────────────────────────────────────────────────────────────────────────────
+// 2026-10-28 (เจ้าของสั่ง: "แก้ให้ตรง เดี๋ยวพนักงานดูแล้วเข้าใจผิดว่าได้เงินไม่ครบ"):
+// ตัวเลข Upcountry ที่หน้า Reports / Dashboard / สรุปงวด แสดง ต้องเท่ากับจำนวนครั้งที่สลิปจ่าย
+// ของเดิมมีสามสูตรในสี่ที่ และไม่มีที่ไหนนับใบทำงานวันหยุดที่กรอกสถานที่ ซึ่งสลิปจ่าย ฿240 ให้
+// ⇒ วัดกับข้อมูลจริง: 4 คนจาก 10 คน รายงานบอกน้อยกว่าสลิป 1 ครั้ง
+//
+// ข้อล่างนี้ไม่ยืนยันตัวเลขที่เขียนมือ แต่ยืนยันว่า **รายงานกับ payroll เห็นด้วยกัน** ซึ่งเป็น
+// สิ่งเดียวที่ยังจริงอยู่เมื่อเรตหรือกฎเปลี่ยนในอนาคต — หลักเดียวกับ `agree()` ด้านบน
+function upcAgree(label, { role = 'user', leaves = [], dateStatus = {}, upcountryOn = [], elig } = {}) {
+  const S = elig ? { ...SETTINGS, allowanceEligibility: elig } : SETTINGS;
+  const user = { ...USER, role };
+  const pDays = days(dateStatus).map(d =>
+    upcountryOn.includes(d.date) ? { ...d, upcountry: true } : d);
+  const world = { user, leaves, pDays, att: {} };
+  const ctx = makeClient(world);
+  ctx.APP_SETTINGS = S;
+  const calc = ctx.computePayroll(user, START, END, 1);
+  const รายงาน = ctx.reportUpcountryDays(user, pDays, S);
+  assert.strictEqual(รายงาน.length, calc.upcountryCount,
+    `${label}: รายงานบอก ${รายงาน.length} ครั้ง แต่สลิปจ่าย ${calc.upcountryCount} ครั้ง ` +
+    `(ธงรายวัน ${calc.upcountryCount - calc.holidayWorkUpcountryCount} + วันหยุด ${calc.holidayWorkUpcountryCount})`);
+  return { รายงาน, calc };
+}
+
+const UPC_SUNDAY = SUNDAY;              // วันหยุดสุดสัปดาห์ที่ใบทำงานวันหยุดใช้
+const UPC_WEEKDAY = '2026-09-28';       // วันธรรมดาในงวดเดียวกัน
+
+test('รายงาน = สลิป: ใบทำงานวันหยุดที่กรอกสถานที่ (เคสที่ของเดิมนับขาด)', () => {
+  const { calc, รายงาน } = upcAgree('HW มีสถานที่', { leaves: [hwRec({})] });
+  assert.strictEqual(calc.holidayWorkUpcountryCount, 1, 'เคสนี้ต้องมีก้อนวันหยุด 1 ครั้งจริง');
+  assert.ok(รายงาน.some(x => x.fromHolidayWork && x.date === UPC_SUNDAY),
+    'รายการต้องบอกด้วยว่าวันนั้นมาจากใบทำงานวันหยุด ไม่ใช่โผล่มาเฉยๆ');
+});
+
+test('รายงาน = สลิป: ใบทำงานวันหยุดที่ไม่กรอกสถานที่ ⇒ ไม่นับทั้งสองฝั่ง', () => {
+  const { รายงาน } = upcAgree('HW ไม่มีสถานที่', { leaves: [hwRec({ locations: [] })] });
+  assert.strictEqual(รายงาน.length, 0);
+});
+
+test('รายงาน = สลิป: ธงรายวันธรรมดา', () => {
+  upcAgree('ธงวันธรรมดา', { upcountryOn: [UPC_WEEKDAY] });
+});
+
+// ทิศที่สอง: ธงรายวันติดค้างอยู่ แต่ใบทำงานวันหยุดยึดวันนั้นไปแล้ว ⇒ payroll ตัดธงออกไม่ให้จ่ายซ้อน
+// ของเดิมรายงานนับธงนั้นด้วย ⇒ นับเกิน
+test('รายงาน = สลิป: ธงติดค้างบนวันที่ใบทำงานวันหยุดยึดไป ⇒ นับครั้งเดียว ไม่ซ้อน', () => {
+  const { calc, รายงาน } = upcAgree('ธงซ้อนวันหยุด',
+    { leaves: [hwRec({})], upcountryOn: [UPC_SUNDAY] });
+  assert.strictEqual(calc.upcountryCount, 1, 'payroll ต้องจ่ายครั้งเดียว');
+  assert.strictEqual(รายงาน.length, 1);
+  assert.strictEqual(รายงาน[0].fromHolidayWork, true, 'ครั้งที่นับต้องมาจากใบทำงานวันหยุด');
+});
+
+// ทิศที่สาม: ธงรายวันอยู่บนวันลาเต็มวัน ⇒ payroll ตัดออก
+test('รายงาน = สลิป: ธงบนวันลาเต็มวัน ⇒ ไม่นับทั้งสองฝั่ง', () => {
+  const { รายงาน } = upcAgree('ธงบนวันลาเต็มวัน',
+    { upcountryOn: [UPC_WEEKDAY], dateStatus: { [UPC_WEEKDAY]: 'leave-annual' } });
+  assert.strictEqual(รายงาน.length, 0);
+});
+
+test('รายงาน = สลิป: วันไปต่างประเทศ ⇒ ใบทำงานวันหยุดวันนั้นไม่ได้เบี้ย', () => {
+  const { รายงาน } = upcAgree('HW บนวันต่างประเทศ',
+    { leaves: [hwRec({})], dateStatus: { [UPC_SUNDAY]: 'abroad' } });
+  assert.strictEqual(รายงาน.length, 0);
+});
+
+test('รายงาน = สลิป: ไม่มีสิทธิ์ upcountry ⇒ ศูนย์ทั้งสองฝั่ง', () => {
+  const { รายงาน } = upcAgree('ไม่มีสิทธิ์ upcountry',
+    { leaves: [hwRec({})], upcountryOn: [UPC_WEEKDAY],
+      elig: { upcountry: ['md'], holidayWork: ['user'], ot: ['user'], earlyLate: ['user'] } });
+  assert.strictEqual(รายงาน.length, 0);
+});
+
+// role ที่มีสิทธิ์ upcountry แต่ไม่มีสิทธิ์ holidayWork: payroll ไม่ยึดวันนั้น ⇒ ธงของวันยังถูกนับ
+// และก้อนวันหยุดไม่ถูกนับ · เป็นเคสที่ทำให้ "ตัดธงทิ้งเสมอ" ผิด
+test('รายงาน = สลิป: มีสิทธิ์ upcountry แต่ไม่มีสิทธิ์ holidayWork', () => {
+  const { calc, รายงาน } = upcAgree('ไม่มีสิทธิ์ holidayWork',
+    { leaves: [hwRec({})], upcountryOn: [UPC_SUNDAY],
+      elig: { upcountry: ['user'], holidayWork: ['md'], ot: ['user'], earlyLate: ['user'] } });
+  assert.strictEqual(calc.holidayWorkUpcountryCount, 0, 'ก้อนวันหยุดต้องเป็น 0');
+  assert.strictEqual(รายงาน.length, 1, 'ธงของวันนั้นยังถูกนับ เพราะ payroll ไม่ได้ยึดวันไป');
+  assert.strictEqual(รายงาน[0].fromHolidayWork, false);
+});
+
+test('ทั้งสี่จอถาม reportUpcountryDays() ไม่มีใครนับเอง', () => {
+  const SRC = APP_SRC.replace(/^[ \t]*\/\/[^\n]*$/gm, '');
+  // สูตรสั้นเดิมต้องไม่เหลือนอกฟังก์ชันกลางและ computePayroll
+  const shortForm = (SRC.match(/d\.upcountry && d\.status !== 'company-trip'/g) || []).length;
+  assert.ok(shortForm <= 2,
+    `เจอสูตรสั้น ${shortForm} ที่ · อนุญาตได้ไม่เกิน 2 (reportUpcountryDays และ computePayroll) ` +
+    '⇒ มีจอที่นับเอง');
+  const calls = (SRC.match(/reportUpcountryDays\(/g) || []).length;
+  assert.ok(calls >= 5,
+    `คาดว่ามีจุดเรียกอย่างน้อย 5 จุด (นิยาม + การ์ด Dashboard + รายการวัน + สถิติรายงาน + ` +
+    `ป๊อปอัปรายงาน) แต่เจอ ${calls}`);
+  // และการ์ด Dashboard ต้องเลิกนับเรคอร์ดเอง
+  assert.ok(!/l\.type === 'upcountry' && l\.status === 'approved' &&\s*\n\s*l\.dateFrom >= startStr/.test(SRC),
+    'การ์ด Dashboard ยังนับเรคอร์ด upcountry เองอยู่ ⇒ ตัวเลขกับรายการวันต่างกันได้อีก');
 });
 
 test('การ์ดมือถือใช้ badge ชุดเดียวกับแถวบนจอ จึงไม่มีกฎของตัวเอง', () => {
