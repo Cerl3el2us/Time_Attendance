@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 170;
+const APP_BUILD = 171;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -16130,30 +16130,57 @@ async function renderPayslip() {
   // it at all. Previously only Bonus was gated (via display:none) here; Diligence/OT/Allowance
   // 1-3 were always rendered regardless of role, which is how an accounting/marketing employee
   // never granted Upcountry/Early-Late/OT eligibility in Settings could still see those rows.
+  //
+  // 2026-10-28 (เจ้าของ): **กฎนี้ถูกยกเลิก** — "ปกติถ้าไม่ได้รับเงินส่วนไหน ชื่อส่วนนั้นจะไม่โชว์ใน
+  // สลิป แต่ถ้าได้รับเงินก็จะโชว์ชื่อส่วนนั้นด้วย และถ้าได้รับเงินนั่นหมายความว่าต้องได้รับสิทธิ์"
+  // ⇒ บรรทัดรายได้โชว์เมื่อ **มียอดเงิน** เท่านั้น ไม่ดูสิทธิ์อีก
+  //
+  // คอมเมนต์ 2026-08-02 ข้างบนอ้างว่า "mirrors payslipXlsx.js's canShow() exactly" ซึ่ง
+  // **ไม่จริงแล้วตั้งแต่ 2026-09-15**: ฝั่ง Excel ปิดท้ายด้วย `.filter(([, amount]) => amount > 0)`
+  // ตามที่เจ้าของขอเอง ⇒ Excel ตัดบรรทัดยอดศูนย์ออกมาตลอด ส่วนเว็บโชว์เป็น "—" ·
+  // บรรทัด Abroad (2026-09-21) ก็ใช้กฎยอดเงินอยู่แล้ว · เว็บจึงเป็นใบที่ไม่ได้ทำตาม ไม่ใช่ Excel
+  //
+  // และนี่ปิดบั๊กเงินด้วย: ช่อง OT ×2/×3 รับเงินจากสองสิทธิ์ — ใบ OT ปกติ (`ot`) และใบทำงาน
+  // วันหยุด (`holidayWork`) · การซ่อนด้วยสิทธิ์ `ot` อย่างเดียวทำให้คนที่ได้เงินมาจากวันหยุด
+  // เห็นยอดรวมแต่ไม่เห็นบรรทัดที่อธิบายมัน ⇒ สลิปบวกไม่ลงตัว
+  // วัดกับข้อมูลจริง 2026-10-28: ถอดสิทธิ์ `ot` ออกจาก role หนึ่ง ยอดรวมยัง 40,360 เท่าเดิม
+  // แต่บรรทัดที่อธิบาย ฿2,000 หายไป
+  //
+  // **ปลอดภัยเพราะ computePayroll ทำยอดเป็น 0 ให้เองเมื่อไม่มีสิทธิ์** — พิสูจน์แล้วด้วยการถอด
+  // สิทธิ์ทีละตัวจากพนักงานจริงทั้ง 10 คน × 9 เบี้ย: 8 เบี้ยได้ 0 ทันที เหลือแต่ `ot` ที่ยังมีเงิน
+  // ซึ่งเป็นเงินวันหยุดที่เขามีสิทธิ์ได้จริงผ่าน `holidayWork` ⇒ "มีเงิน = มีสิทธิ์" เป็นจริงในโค้ดนี้
+  // ⇒ ด่านสิทธิ์ตอนแสดงผลเป็นการกรองซ้ำที่กรองผิดตัว
+  //
+  // ฝั่งหักเงินไม่แตะ: เจ้าของตัดสินไว้ 2026-07-31 ว่า "ปกติแล้วยอด deduct มันมีอยู่ทุกเดือน
+  // อยู่แล้ว" ⇒ โชว์ทุกเดือนแม้เป็น 0 (กฎนี้ใช้กับรายได้เท่านั้น)
+  //
+  // แต่ละบรรทัดผูกกับ **ค่าเดียวกับที่โค้ดใช้ตัดสินว่าจะพิมพ์ยอดหรือพิมพ์ "—"** (ดูด้านบน) จึงเป็นไป
+  // ไม่ได้ที่บรรทัดจะโชว์แล้วข้างในเป็น "—"
   const rowVis = (id, show) => { const r = el(id); if (r) r.style.display = show ? '' : 'none'; };
-  rowVis('payslip-diligence-row', view.eligibility.diligence);
-  rowVis('payslip-ot15-row', view.eligibility.ot);
-  rowVis('payslip-ot20-row', view.eligibility.ot);
-  rowVis('payslip-ot30-row', view.eligibility.ot);
-  rowVis('payslip-a1-row', view.eligibility.upcountry);
-  rowVis('payslip-a2-row', view.eligibility.earlyLate);
-  rowVis('payslip-a3-row', view.eligibility.phone);
+  rowVis('payslip-diligence-row', diligenceAllowance > 0);
+  rowVis('payslip-ot15-row', ot15Amount > 0);
+  rowVis('payslip-ot20-row', ot20Amount > 0);
+  rowVis('payslip-ot30-row', ot30Amount > 0);
+  rowVis('payslip-a1-row', allowance1 > 0);
+  rowVis('payslip-a2-row', earlyLateBonus > 0);
+  rowVis('payslip-a3-row', allowance3 > 0);
   // 2026-08-02: row visibility changed from activity-gated (longDistanceCount > 0) to
   // eligibility-gated (view.eligibility.longDistance), matching payslipXlsx.js's canShow() and
   // Allowance 1/2/3 above -- an eligible employee with zero trips THIS period still sees the row
   // (showing "—"), same as every other allowance row; only a genuinely ineligible role/employee
   // has the row hidden entirely. Previously an eligible driver with no long-distance activity
   // this period saw the row vanish, inconsistent with how every other allowance row behaves.
+  // 2026-10-28 (เจ้าของ): ยอดเงิน ไม่ใช่สิทธิ์ — ดูเหตุเต็มที่บล็อก rowVis ข้างบน
   const ldRowEl = document.getElementById('payslip-longdistance-row');
-  if (ldRowEl) ldRowEl.style.display = view.eligibility.longDistance ? '' : 'none';
+  if (ldRowEl) ldRowEl.style.display = longDistanceTotal > 0 ? '' : 'none';
   el('payslip-longdistance').textContent = longDistanceTotal > 0 ? fmtB(longDistanceTotal) : '—';
   el('payslip-longdistance-detail').textContent = longDistanceCount > 0 ? `${longDistanceCount} ${t('pay_times')} × ฿${view.display.rates.longDistance || 0}` : '—';
   const pcRowEl = document.getElementById('payslip-personalcar-row');
-  if (pcRowEl) pcRowEl.style.display = view.eligibility.personalCar ? '' : 'none';
+  if (pcRowEl) pcRowEl.style.display = personalCarTotal > 0 ? '' : 'none';
   el('payslip-personalcar').textContent = personalCarTotal > 0 ? fmtB(personalCarTotal) : '—';
   el('payslip-personalcar-detail').textContent = personalCarCount > 0 ? `${personalCarCount} ${t('pay_times')} × ฿${Number(view.display.personalCarRateDisplay).toLocaleString()}` : '—';
   const htRowEl = document.getElementById('payslip-holidaytransport-row');
-  if (htRowEl) htRowEl.style.display = view.eligibility.holidayWork ? '' : 'none';
+  if (htRowEl) htRowEl.style.display = holidayTransportTotal > 0 ? '' : 'none';
   const htEl = el('payslip-holidaytransport');
   const htDetailEl = el('payslip-holidaytransport-detail');
   if (htEl) htEl.textContent = holidayTransportTotal > 0 ? fmtB(holidayTransportTotal) : '—';
@@ -16168,7 +16195,8 @@ async function renderPayslip() {
   const abRowEl = document.getElementById('payslip-abroad-row');
   const abTotal = view.calc && view.calc.abroadTotal ? view.calc.abroadTotal : 0;
   const abDays = view.calc && view.calc.abroadDays ? view.calc.abroadDays : 0;
-  if (abRowEl) abRowEl.style.display = (view.eligibility.abroad && abTotal > 0) ? '' : 'none';
+  // 2026-10-28: บรรทัดนี้ใช้กฎยอดเงินอยู่ก่อนแล้ว เหลือแต่เอาด่านสิทธิ์ออกให้เหมือนทั้งใบ
+  if (abRowEl) abRowEl.style.display = abTotal > 0 ? '' : 'none';
   const abLblEl = el('payslip-lbl-abroad');
   if (abLblEl) {
     abLblEl.innerHTML = `✈️ ${currentLang === 'ja' ? '海外勤務手当' : L('Abroad', 'ทำงานต่างประเทศ')}` +
@@ -16208,8 +16236,9 @@ async function renderPayslip() {
   // treats Bonus as a recurring "genuinely can apply to any employee in a different period" row
   // (zero prints as "—" via the amount text below, same as the real paper payslip) instead of
   // hiding the whole row at zero.
+  // 2026-10-28 (เจ้าของ): เคยโชว์เสมอ ขณะที่ Excel ตัดออกเมื่อเป็น 0 — อีกจุดที่สองใบไม่ตรงกัน
   const bonusRowEl = el('payslip-bonus-row');
-  if (bonusRowEl) bonusRowEl.style.display = '';
+  if (bonusRowEl) bonusRowEl.style.display = bonus > 0 ? '' : 'none';
   if (el('payslip-bonus')) el('payslip-bonus').textContent = bonus > 0 ? fmtB(bonus) : '—';
   if (el('payslip-lbl-bonus')) el('payslip-lbl-bonus').textContent = currentLang === 'ja' ? '🎁 ボーナス (Bonus)' : L('🎁 Bonus', '🎁 โบนัส (Bonus)');
   el('payslip-ssf').textContent = fmtB(ssf);
