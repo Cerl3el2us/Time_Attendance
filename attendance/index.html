@@ -21,7 +21,7 @@
   <meta name="theme-color" content="#2563eb">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/style.css?v=20261028a">
+  <link rel="stylesheet" href="css/style.css?v=20261028b">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css" integrity="sha384-MinO0mNliZ3vwppuPOUnGa+iq619pfMhLVUXfC4LHwSCvF9H+6P/KO4Q7qBOYV5V" crossorigin="anonymous"/>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css" integrity="sha384-RkASv+6KfBMW9eknReJIJ6b3UnjKOKC5bOUaNgIY778NFbQ8MtWq9Lr/khUgqtTt" crossorigin="anonymous">
 </head>
@@ -1721,7 +1721,10 @@
         <textarea id="holiday-work-reason" class="form-control" rows="3" placeholder="ระบุงานที่ทำในวันหยุด..." data-en-ph="Specify the work you did on the holiday..."></textarea>
       </div>
       <div class="form-group">
-        <label class="form-label"><span data-en="Attach Working Report">แนบ Working Report</span> <span style="color:#ef4444">*</span></label>
+        <!-- 2026-10-28 (owner): the Working Report backs an UPCOUNTRY claim, so it is required
+             only while the location box has something in it. The star is toggled by
+             refreshHolidayWorkPayCompare(), which already runs on every edit of that box. -->
+        <label class="form-label"><span data-en="Attach Working Report">แนบ Working Report</span> <span id="hw-report-star" style="color:#ef4444;display:none">*</span></label>
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
           <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0">
             <span data-en="📎 Choose File">📎 เลือกไฟล์</span>
@@ -1730,7 +1733,7 @@
           <span id="holiday-work-file-name" style="font-size:13px;color:#64748b">ยังไม่ได้เลือกไฟล์</span>
           <button id="holiday-work-file-clear" class="btn btn-ghost btn-sm" style="display:none;color:#ef4444;padding:2px 6px" onclick="clearHolidayWorkFile()">✕</button>
         </div>
-        <div style="font-size:11px;color:#94a3b8;margin-top:4px" data-en="Working Report is mandatory">ต้องแนบ Working Report</div>
+        <div style="font-size:11px;color:#94a3b8;margin-top:4px" data-en="Required only when a work location is given — a holiday worked at the office needs no attachment.">ต้องแนบเฉพาะเมื่อกรอกสถานที่ — ทำงานวันหยุดที่ออฟฟิศไม่ต้องแนบ</div>
       </div>
       <div id="holiday-work-latenight-wrap" style="display:none;background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:12px 14px">
         <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;margin:0">
@@ -2823,10 +2826,10 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js" integrity="sha384-SYKAG6cglRMN0RVvhNeBY0r3FYKNOJtznwA0v7B5Vp9tr31xAHsZC0DqkQ/pZDmj" crossorigin="anonymous"></script>
-<script src="lang/ja.js?v=20261028b"></script>  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js" integrity="sha384-5JqMv4L/Xa0hfvtF06qboNdhvuYXUku9ZrhZh3bSk8VXF0A/RuSLHpLsSV9Zqhl6" crossorigin="anonymous"></script>
+<script src="lang/ja.js?v=20261028c"></script>  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js" integrity="sha384-5JqMv4L/Xa0hfvtF06qboNdhvuYXUku9ZrhZh3bSk8VXF0A/RuSLHpLsSV9Zqhl6" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ja.js" integrity="sha384-mKor8U8jwukUkfxaFPCsxKF9S62PXq4gG7zcZ5yQ2x3KL1msprJZeFlKFEDeeb5V" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/th.js" integrity="sha384-E6OVFg1zUc/pckGxry0YZ6VeZ1E17l7Jl8ZQx58jbEfxxkz9LqknQhiIrA9zg/8b" crossorigin="anonymous"></script>
 
-<script src="js/app.js?v=20261028c"></script>
+<script src="js/app.js?v=20261028e"></script>
 </body>
 </html>

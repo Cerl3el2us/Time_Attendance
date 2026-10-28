@@ -5580,7 +5580,19 @@ function otPayFromHourBuckets(buckets, hourlyRate) {
   });
   return out;
 }
+// 2026-10-28 (owner): "ตอนนี้บังคับกรอกสถานที่ จริงๆแล้วไม่ได้บังคับ แต่ถ้าไม่กรอก จะไม่ได้
+// เบี้ยเลี้ยง upcountry กับ เงินค่าเดินทางวันหยุด" and "ถ้าทำงานที่ office ไม่ให้กรอกช่องสถานที่".
+// The field names an upcountry site, so a holiday worked at the office has none -- an absent or
+// empty list is now a valid request that simply earns neither allowance (hasUpcountryLocation()
+// is what pays them). A list that IS present still has to be exactly one real name: half-filled
+// is the shape that quietly pays for a place nobody went.
+// `[]` is accepted as well as absent so that EDITING a record can clear the location. The PUT
+// path reads `updates.locations !== undefined ? updates.locations : leave.locations`, so an
+// omitted key means "keep what is there" -- without an explicit empty list there would be no way
+// to take a location back off a record, and the allowance would keep being paid.
 function validateHolidayWorkLocation(locations) {
+  if (locations === undefined || locations === null) return null;
+  if (Array.isArray(locations) && locations.length === 0) return null;
   if (!Array.isArray(locations) || locations.length !== 1) {
     return 'locations must be an array with exactly one entry';
   }
@@ -6903,7 +6915,12 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
     if (type === 'upcountry' && body.locations === undefined) {
       return res.status(400).json({ success:false, message:'locations required for upcountry requests' });
     }
-    const locErr = validateUpcountryLocations(body.locations);
+    // 2026-10-28: holiday-work has its own validator (validateHolidayWorkLocation, applied in the
+    // holiday-work branch below) and its own rule -- the location is optional there. Running the
+    // upcountry validator over it as well would reject the empty list that "worked at the office"
+    // now sends, with a message about upcountry requests that would make no sense on this form.
+    // One type, one validator.
+    const locErr = type === 'holiday-work' ? null : validateUpcountryLocations(body.locations);
     if (locErr) return res.status(400).json({ success:false, message:locErr });
     const freeFieldErr = validateLeaveFreeFields(body);
     if (freeFieldErr) return res.status(400).json({ success:false, message:freeFieldErr });
@@ -6945,8 +6962,15 @@ app.post('/api/leaves', withLeavesLock((req, res) => {
       }
       const hwLocErr = validateHolidayWorkLocation(body.locations);
       if (hwLocErr) return res.status(400).json({ success:false, message:hwLocErr });
-      if (!body.attachment && !(Number(body.fileCount) > 0)) {
-        return res.status(400).json({ success:false, message:'Working Report attachment is required for holiday-work requests' });
+      // 2026-10-28 (owner): "ถ้าทำงานที่ office ไม่ต้องแนบ working report แต่ถ้ากรอกสถานที่ถึงจะ
+      // ต้องแนบ". The Working Report is the document an approver checks an UPCOUNTRY claim
+      // against -- it is what justifies the two allowances the location switches on. A holiday
+      // worked at the office claims neither, so there is nothing to check and nothing to attach.
+      // Tied to the same hasUpcountryLocation() the money uses, so the attachment is demanded in
+      // exactly the cases that pay, and never in the cases that do not.
+      if (hasUpcountryLocation({ locations: body.locations }) &&
+          !body.attachment && !(Number(body.fileCount) > 0)) {
+        return res.status(400).json({ success:false, message:'Working Report attachment is required when a work location is given' });
       }
     }
     // SECURITY FIX 2026-08-13 (re-audit, F-3): distanceKm was only bounds-checked (non-negative),
@@ -7724,8 +7748,13 @@ app.put('/api/leaves/:id', withLeavesLock((req, res) => {
       }
       const hwLocErrPut = validateHolidayWorkLocation(resolvedLocations);
       if (hwLocErrPut) return res.status(400).json({ success:false, message:hwLocErrPut });
-      if (!resolvedAttachment && !(Number(resolvedFileCount) > 0)) {
-        return res.status(400).json({ success:false, message:'Working Report attachment is required for holiday-work requests' });
+      // Same rule as the POST path: the Working Report backs an upcountry claim, so it is required
+      // only while there IS one. Editing a record down to no location therefore also stops
+      // demanding it -- the two have to move together or an edit could strand a record in a state
+      // it could never be saved in.
+      if (hasUpcountryLocation({ locations: resolvedLocations }) &&
+          !resolvedAttachment && !(Number(resolvedFileCount) > 0)) {
+        return res.status(400).json({ success:false, message:'Working Report attachment is required when a work location is given' });
       }
     }
     if (newType === 'early-morning') {
