@@ -251,12 +251,64 @@ test('ไม่มีสิทธิ์ holidayWork ⇒ payroll จ่าย 0 �
   });
 });
 
-test('บล็อก hwRec ในป๊อปอัปผูกกับด่านนั้นจริง ไม่ใช่แค่ Company Trip', () => {
+// รีวิวรอบ 4 หักล้างยามเดิมของข้อนี้ได้ด้วย mutation สองแบบ (เปิดด่านให้ผ่านหมด / กลับด้านเงื่อนไข
+// เจ้าของ) เพราะมันเป็นแค่ regex บนซอร์ส ⇒ ดึง "ตัวด่าน" ออกมารันจริงแล้วทดสอบพฤติกรรมแทน
+function makeOwnerGate(users, me, targetUserId, elig) {
   const fn = extractFunction(APP_SRC, 'showAttendanceDetail');
-  assert.ok(/isAllowanceEligible\(APP_SETTINGS\.allowanceEligibility, _hwOwnerUser\.role, 'holidayWork'\)/.test(fn),
-    'ด่านเงินต้องผูกกับสิทธิ์ holidayWork ของเจ้าของเรคอร์ด');
+  const m = fn.match(/const _ownerUser = [\s\S]*?const _ownerCan = [^\n]*\n/);
+  assert.ok(m, 'หาบล็อกประกาศตัวด่านเจ้าของไม่เจอ ⇒ โครงเปลี่ยนไปแล้ว ให้ทบทวนยามนี้');
+  const ctx = {
+    DATA_USERS: users, currentUser: me, targetUserId,
+    APP_SETTINGS: { allowanceEligibility: elig }, console,
+  };
+  vm.createContext(ctx);
+  vm.runInContext(constDecl(APP_SRC, 'DEFAULT_ALLOWANCE_ELIGIBILITY') + '\n' +
+    extractFunction(APP_SRC, 'isAllowanceEligible') + '\n' + m[0] +
+    '\nout = { role: _ownerRole, hw: _ownerCan("holidayWork"), upc: _ownerCan("upcountry") };', ctx);
+  return ctx.out;
+}
+
+test('ด่านเจ้าของ: หาเจ้าของเจอและมีสิทธิ์ ⇒ เปิด', () => {
+  const g = makeOwnerGate([{ id: 7, role: 'user' }], { id: 1, role: 'md' }, 7,
+    { holidayWork: ['user'], upcountry: ['user'] });
+  assert.strictEqual(g.role, 'user');
+  assert.strictEqual(g.hw, true);
+});
+
+test('ด่านเจ้าของ: เจ้าของไม่มีสิทธิ์ แม้คนดูมี ⇒ ปิด', () => {
+  const g = makeOwnerGate([{ id: 7, role: 'accounting' }], { id: 1, role: 'md' }, 7,
+    { holidayWork: ['md'], upcountry: ['md'] });
+  assert.strictEqual(g.role, 'accounting');
+  assert.strictEqual(g.hw, false, 'ต้องตัดสินด้วย role ของเจ้าของ ไม่ใช่ของคนดู');
+  assert.strictEqual(g.upc, false);
+});
+
+// เคสที่รีวิวรอบ 4 ชี้: หาเจ้าของไม่เจอ แล้วโค้ดถอยไปใช้ role ของคนดู ⇒ โชว์เบี้ยของวันที่จ่าย ฿0
+test('ด่านเจ้าของ: หาเจ้าของไม่เจอ ⇒ ปิดทุกด่าน ไม่ถอยไปใช้คนดู', () => {
+  const g = makeOwnerGate([], { id: 1, role: 'md' }, 7, { holidayWork: ['md'], upcountry: ['md'] });
+  assert.strictEqual(g.role, null, 'ไม่รู้ว่าเจ้าของเป็น role อะไร ⇒ ต้องเป็น null');
+  assert.strictEqual(g.hw, false);
+  assert.strictEqual(g.upc, false);
+});
+
+test('ด่านเจ้าของ: ดูของตัวเองแม้ไม่อยู่ใน DATA_USERS ⇒ ยังใช้ได้', () => {
+  const g = makeOwnerGate([], { id: 7, role: 'user' }, 7, { holidayWork: ['user'] });
+  assert.strictEqual(g.role, 'user');
+  assert.strictEqual(g.hw, true);
+});
+
+test('บล็อก hwRec ผูกกับด่านเจ้าของ และยังปล่อยโหมดแลกวันหยุดผ่าน', () => {
+  const fn = extractFunction(APP_SRC, 'showAttendanceDetail');
+  assert.ok(/const _hwMoneyOk = _ownerCan\('holidayWork'\);/.test(fn),
+    'ด่านเงินต้องใช้ตัวเดียวกับด่านของ 🗺️ ไม่ใช่หาเจ้าของเองซ้ำ');
+  assert.ok(/_hwMoneyOk \|\| _hwAny\.compensationMode === 'annual-leave'/.test(fn),
+    'ต้องปล่อยโหมดแลกวันหยุดผ่าน เพราะวันลาได้จริงโดยไม่มีด่าน role');
   assert.ok(!/const hwRec = dayLeave\('holiday-work'\);/.test(fn),
     'ยังมีบรรทัดเดิมที่ไม่มีด่านอยู่');
+  // 🗺️ ต้องใช้ด่านเดียวกัน ไม่ใช่ targetRole ซึ่งถอยไปเป็น role ของคนดูได้
+  assert.ok(!/holidayWorkEarnsUpcountry\(_hwUpcRec, APP_SETTINGS, targetRole,/.test(fn),
+    'badge Upcountry ยังตัดสินด้วย targetRole อยู่');
+  assert.ok(/holidayWorkEarnsUpcountry\(_hwUpcRec, APP_SETTINGS, _ownerRole,/.test(fn));
 });
 
 // รีวิวรอบ 3 (C2): ด่านนั้นปิดเกิน — getApprovedHolidayWorkDays() ให้วันลาโดย **ไม่มีด่าน role เลย**

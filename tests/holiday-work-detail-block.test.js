@@ -65,6 +65,25 @@ function test(name, fn) {
 }
 // ข้อความที่ตาเห็น (ถอด tag ออก) — ตรวจผลลัพธ์ ไม่ใช่ตรวจซอร์ส
 const text = html => html.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+// ทุกสตริงอังกฤษที่บล็อกนี้ส่งเข้า L() — **ดึงจากโค้ด ไม่พิมพ์มือ** เพื่อให้รายการล้าสมัยไม่ได้
+function englishStrings() {
+  const fn = extractFunction(APP_SRC, 'holidayWorkDetailBlockHtml');
+  const out = [];
+  for (const m of fn.matchAll(/\bL\(\s*'((?:[^'\\]|\\.)*)'/g)) out.push(m[1].replace(/\\'/g, "'"));
+  assert.ok(out.length >= 6, `ดึงสตริงได้แค่ ${out.length} ตัว ⇒ รูปแบบการเรียก L() เปลี่ยนไปแล้ว`);
+  return [...new Set(out)];
+}
+function realJaDict() {
+  const box = { window: {}, out: {} };
+  vm.runInNewContext(JA_SRC + '\nout.d = window.LANG_JA;', box);
+  return box.out.d;
+}
+function makeJaCtx() {
+  const ja = makeCtx('ja');
+  ja._ja = realJaDict();
+  return ja;
+}
+
 const rec = over => Object.assign({
   type: 'holiday-work', compensationMode: 'paid', dateFrom: '2026-10-18',
   workStartTime: '09:00', workEndTime: '16:20', otHours20: 6.33, otHours30: 0,
@@ -199,25 +218,77 @@ test('09:00–16:20 แถวอัตราต้องเป็น 6 ชม. 2
 console.log('T5 ครบ 3 ภาษา — ตรวจจากข้อความที่เรนเดอร์ในโหมด ja จริง');
 
 test('โหมดญี่ปุ่นไม่มีอังกฤษคาอยู่ในบล็อก', () => {
-  const ja = makeCtx('ja');
-  // โหลดดิกชันนารีจริงจาก lang/ja.js
-  const dict = {};
-  vm.runInNewContext(JA_SRC + '\nout.d = window.LANG_JA;', { window: {}, out: dict });
-  ja._ja = dict.d;
+  const ja = makeJaCtx();
   const t = text(ja.holidayWorkDetailBlockHtml(rec({ otHours20: 6.33, otHours30: 2 }), 125));
-  // รายการนี้ต้องเป็น **คำที่โค้ดส่งเข้า L() จริงในวันนี้** · รีวิวรอบ 3 พิสูจน์ว่ารายการเดิมยังเขียน
-  // 'lunch deducted' ซึ่งถูกเปลี่ยนเป็น 'lunch' ไปแล้ว ⇒ ลบคีย์ "lunch" ออกจาก ja.js แล้วเทสต์ยังเขียว
-  // ⇒ สตริงเดียวที่คอมมิตนั้นเพิ่ม ไม่มียามคุ้มเลย
-  ['Total for this day', 'Estimate', 'lunch', 'Claimed hours', 'Location', 'no longer match']
-    .forEach(w => assert.ok(!t.includes(w), `ยังมีอังกฤษหลุด "${w}" : ` + t));
+  // **รายการคำถูกดึงจากโค้ดเอง ไม่ได้พิมพ์ไว้** — รีวิวรอบ 3 และ 4 หักล้างรายการที่พิมพ์มือได้สองครั้ง
+  // (รอบ 3: ค้างคำเก่า 'lunch deducted' · รอบ 4: ลืม 'Estimate' กับประโยคคำเตือน ⇒ เปลี่ยนข้อความ
+  // อังกฤษโดยไม่แตะ ja.js แล้วทุกเทสต์ยังเขียว) ⇒ รายการที่พิมพ์มือจะล้าสมัยเสมอ เลิกพิมพ์
+  englishStrings().forEach(w => assert.ok(!t.includes(w), `ยังมีอังกฤษหลุด "${w}" : ` + t));
   assert.ok(/合計|時間|分/.test(t), 'ควรมีญี่ปุ่นจริง : ' + t);
 });
 
-// ยามของยาม: รายการคำข้างบนต้องตรงกับคำที่โค้ดใช้จริง ไม่ใช่คำที่เคยใช้
-test('ทุกคำในรายการคำต้องห้ามยังถูกส่งเข้า L() จริงในโค้ดวันนี้', () => {
-  const fn = extractFunction(APP_SRC, 'holidayWorkDetailBlockHtml');
-  ['Total for this day', 'lunch', 'Claimed hours', 'Location']
-    .forEach(w => assert.ok(fn.includes(`L('${w}'`), `'${w}' ไม่ได้ถูกใช้ในโค้ดแล้ว ⇒ รายการคำล้าสมัย`));
+test('โหมดญี่ปุ่นของสาขา "ไม่มีเงินเดือนให้อ่าน" ก็ต้องไม่มีอังกฤษคา', () => {
+  // รีวิวรอบ 4: เทสต์ ja เดิมส่ง hourlyRate 125 เสมอ ⇒ สาขา else (ซึ่งเป็นที่เดียวที่ใช้คีย์
+  // "Paid on the payslip") ไม่เคยถูกเรนเดอร์เลย · ลบคีย์นั้นออกจาก ja.js แล้วเทสต์ยังเขียว
+  const ja = makeJaCtx();
+  const t = text(ja.holidayWorkDetailBlockHtml(rec({ otHours20: 6.33, otHours30: 2 }), 0));
+  englishStrings().forEach(w => assert.ok(!t.includes(w), `ยังมีอังกฤษหลุด "${w}" : ` + t));
+});
+
+test('ทุกสตริงอังกฤษในบล็อกมีคำแปลญี่ปุ่นอยู่จริงใน lang/ja.js', () => {
+  const dict = realJaDict();
+  englishStrings().forEach(w => assert.ok(
+    Object.prototype.hasOwnProperty.call(dict, w), `ไม่มีคีย์ "${w}" ใน lang/ja.js`));
+});
+
+test('เงินในป๊อปอัปอ่านเงินเดือนจากเจ้าของเรคอร์ด ไม่ใช่จาก targetUserObj', () => {
+  // รีวิวรอบ 4: เปลี่ยนกลับเป็น targetUserObj แล้วทั้ง 65 ไฟล์ยังเขียว ⇒ บั๊กที่เคยแก้ไปกลับมาได้เงียบๆ
+  const fn = extractFunction(APP_SRC, 'showAttendanceDetail');
+  assert.ok(/const _hwSalary = Number\(_ownerUser && _ownerUser\.salary\) \|\| 0;/.test(fn),
+    'เงินเดือนต้องอ่านจาก _ownerUser เท่านั้น');
+  assert.ok(!/_hwSalary = Number\(targetUserObj/.test(fn), 'ยังอ่านจาก targetUserObj อยู่');
+});
+
+console.log('T6 โหมดแลกวันหยุดต้องไม่มีเงินโผล่ แม้เรคอร์ดเก่าจะมีชั่วโมงติดมา');
+
+// รีวิวรอบ 4 (T5): ตั้งแต่ด่านปล่อยโหมดแลกวันหยุดผ่าน ด่าน `paid` สองตัวกลายเป็นสิ่งเดียวที่กันเงิน
+// ไม่ให้รั่วออกประตูนั้น และทั้งสองไม่มียามคุ้ม (ถอดออกแล้วทุกเทสต์ยังเขียว)
+test('เรคอร์ดแลกวันหยุดที่มี otHours ติดมา ยังต้องไม่โชว์เงินและไม่โชว์แถวอัตรา', () => {
+  const t = text(CTX.holidayWorkDetailBlockHtml(
+    rec({ compensationMode: 'annual-leave', workStartTime: '09:00', workEndTime: '20:00',
+          otHours20: 7.5, otHours30: 2.5 }), 125));
+  assert.ok(!/฿/.test(t), 'โหมดแลกวันหยุดต้องไม่มีเงินเลย : ' + t);
+  assert.ok(!/×2|×3/.test(t), 'โหมดแลกวันหยุดต้องไม่มีแถวอัตรา : ' + t);
+  assert.ok(/สถานที่|เวลาที่ยื่น/.test(t), 'แต่ยังต้องบอกสถานที่และเวลาที่ยื่น : ' + t);
+});
+
+test('badge ของโหมดแลกวันหยุดต้องไม่ติดจำนวนเงิน', () => {
+  const fn = extractFunction(APP_SRC, 'showAttendanceDetail');
+  assert.ok(/const _hwAmt = \(paid && _hwHourly > 0\)/.test(fn),
+    'ยอดเงินบน badge ต้องผูกกับโหมด paid ไม่งั้นใบแลกวันหยุดจะขึ้น "แลกวันหยุด ≈ ฿…"');
+});
+
+console.log('T7 สีคำเตือนต้องผ่านเกณฑ์คอนทราสต์ทั้งสองธีม (ยามของ CSS แบบคลาส)');
+
+// รีวิวรอบ 4 (T6): tests/theme-aware-colors.test.js กวาดเฉพาะสี inline ใน index.html/app.js
+// ⇒ กฎแบบคลาสใน style.css ไม่มียามเลย · เปลี่ยนกลับเป็นสีที่อ่านไม่ออกแล้วทุกเทสต์ยังเขียว
+test('.hw-ot-drift ผ่าน 4.5:1 บนพื้นจริงของทั้งธีมสว่างและธีมมืด', () => {
+  const CSS = fs.readFileSync(path.join(ROOT, 'attendance/css/style.css'), 'utf8');
+  const hex = s => { const m = /#([0-9a-fA-F]{6})/.exec(s); assert.ok(m, 'หาสีไม่เจอ: ' + s); return m[1]; };
+  const base = /\.hw-ot-detail \.hw-ot-drift \{[^}]*?color:\s*(#[0-9a-fA-F]{6})/.exec(CSS);
+  const dark = /\[data-theme="dark"\] \.hw-ot-detail \.hw-ot-drift \{[^}]*color:\s*(#[0-9a-fA-F]{6})/.exec(CSS);
+  assert.ok(base, 'ไม่พบสีของ .hw-ot-drift (หรือกลับไปใช้ var() ซึ่งวัดไม่ได้ที่นี่)');
+  assert.ok(dark, 'ไม่พบสีของธีมมืด ⇒ ธีมมืดจะตกไปใช้สีของธีมสว่าง');
+  // พื้นของบล็อกคือ var(--bg) ของแต่ละธีม อ่านจาก style.css เองเพื่อไม่ให้ค่าค้าง
+  const lightBg = hex(/:root \{[\s\S]*?--bg:\s*(#[0-9a-fA-F]{6})/.exec(CSS)[0].split('--bg:')[1]);
+  const darkBg = hex(/\[data-theme="dark"\] \{[\s\S]*?--bg:\s*(#[0-9a-fA-F]{6})/.exec(CSS)[0].split('--bg:')[1]);
+  const lin = v => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+  const lum = h => { const c = [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16));
+    return 0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2]); };
+  const ratio = (a, b) => (Math.max(lum(a), lum(b)) + 0.05) / (Math.min(lum(a), lum(b)) + 0.05);
+  const rLight = ratio(hex(base[1]), lightBg), rDark = ratio(hex(dark[1]), darkBg);
+  assert.ok(rLight >= 4.5, `ธีมสว่างได้ ${rLight.toFixed(2)} (ต้อง >= 4.5)`);
+  assert.ok(rDark >= 4.5, `ธีมมืดได้ ${rDark.toFixed(2)} (ต้อง >= 4.5)`);
 });
 
 console.log(`\n${passed} passed, ${process.exitCode ? 'มีข้อที่ล้มเหลว' : '0 failed'}`);
