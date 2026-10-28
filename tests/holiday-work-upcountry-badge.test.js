@@ -400,6 +400,42 @@ test('ทั้งสี่จอถามฟังก์ชันกลาง�
   }
 });
 
+// 2026-10-28 (รีวิวรอบ 6): ยามข้อบนตรวจแค่ว่า **มีการเรียก** ฟังก์ชันกลาง ไม่เคยดูว่าเรียกถาม
+// ถึง "เรคอร์ดของใคร" ⇒ รอบ 5 ส่ง `targetUser.id` ในใบพิมพ์ (ตัวที่ถอยไปเป็นคนที่กำลังดู) ทั้งที่
+// คอมเมนต์ที่ตัวเองเขียนไว้สามบรรทัดเหนือมันบอกว่าห้ามใช้ `targetUser` — และทุกเทสต์เขียว
+// นี่คือความผิดพลาดรูปแบบเดียวกับการนับ `const locErr =`: ตรึงชื่อ แต่ไม่ตรึงสิ่งที่มันพูดถึง
+test('ทุกจุดเรียกฟังก์ชันกลาง ถามถึงเรคอร์ดของเจ้าของแถว ไม่ใช่ของคนที่กำลังดู', () => {
+  // ตัดคอมเมนต์บรรทัดและนิยามของฟังก์ชันออกก่อน ไม่งั้นจะนับประโยคที่แค่ *พูดถึง* มัน และนับ
+  // `function holidayWorkDisplayFor(userId, …)` เป็นจุดเรียกด้วย (บทเรียนเดียวกับยามนับจุดเรียก
+  // ของ validateUpcountryLocations ข้างล่าง — ผมพลาดซ้ำรูปแบบเดิมตอนเขียนข้อนี้ครั้งแรก)
+  const SRC = APP_SRC.replace(/^[ \t]*\/\/[^\n]*$/gm, '').replace(/^function holidayWorkDisplayFor\(/m, 'function __def__(');
+  const calls = [...SRC.matchAll(/holidayWorkDisplayFor\(([^,]+),/g)].map(m => m[1].trim());
+  assert.strictEqual(calls.length, 3,
+    `คาดว่ามี 3 จุดเรียก (แถว, ใบพิมพ์, ป๊อปอัป) แต่เจอ ${calls.length}: ${calls.join(' | ')} ⇒ ` +
+    'ถ้าเพิ่มจอใหม่จริง ให้เพิ่มในข้อนี้ด้วย');
+  // ชื่อที่ยอมรับได้: id ที่ `days`/`generatePeriodDays` ใช้สร้างตาราง หรือพารามิเตอร์ที่ส่งค่านั้นมา
+  const OK = new Set(['targetUserId', 'ownerUserId']);
+  calls.forEach(arg => {
+    assert.ok(OK.has(arg),
+      `จุดเรียกถามถึง "${arg}" ซึ่งไม่ใช่ id ของเจ้าของแถว · ` +
+      '`targetUser.id` / `targetUserObj.id` / `currentUser.id` ถอยไปเป็นคนที่กำลังดูได้ ' +
+      '⇒ ตารางเป็นของคนหนึ่ง ไอคอนเบี้ยเป็นของอีกคน');
+  });
+});
+
+// รีวิวรอบ 6 (test gap 2): ยามเดิมตรึงไว้ครึ่งเดียว — ตรวจว่าตัวให้วันลา **ไม่มี** ด่าน role
+// แต่ไม่มีใครตรึงว่าลิสต์ที่สร้าง holidayWorkDates **มี** ด่าน ⇒ ถอด `canHolidayWork ?` ออกจาก
+// computePayroll แล้ว `takesDay` ผิดทั้งสี่จอ โดยไม่มีอะไรแดง · สมมติฐานของฟังก์ชันกลางมีสองขา
+// ต้องตรึงทั้งสองขา
+test('ลิสต์ที่สร้าง holidayWorkDates ยังมีด่านสิทธิ์ ⇒ สมมติฐานของ takesDay ยังใช้ได้', () => {
+  const fn = extractFunction(APP_SRC, 'computePayroll');
+  assert.ok(/const approvedHolidayWork = canHolidayWork \?/.test(fn),
+    'approvedHolidayWork ไม่ได้ gate ด้วย canHolidayWork แล้ว ⇒ `takesDay` ของ holidayWorkDisplayFor ' +
+    'ซึ่งสะท้อนลิสต์นี้ กลายเป็นคนละเรื่องกับ payroll ให้กลับไปทบทวนทั้งสี่จอ');
+  assert.ok(/holidayWorkDates\s*=\s*new Set\(approvedHolidayWork/.test(fn),
+    'holidayWorkDates ไม่ได้สร้างจาก approvedHolidayWork แล้ว ⇒ ทบทวน takesDay');
+});
+
 test('การ์ดมือถือใช้ badge ชุดเดียวกับแถวบนจอ จึงไม่มีกฎของตัวเอง', () => {
   const row = extractFunction(APP_SRC, 'renderAttendanceTable');
   const uses = (row.match(/\[holidayWorkBadge, earlyBadge, lateBadge, otBadge, upcountryBadge,/g) || []);

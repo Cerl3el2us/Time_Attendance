@@ -233,6 +233,33 @@ test('all three renderings of the timesheet show Holiday Work, not just the desk
   }
 });
 
+// 2026-10-28 (รีวิวรอบ 6): ใบพิมพ์ค้นเรคอร์ดด้วย `targetUser.id` อยู่ 5 จุด ซึ่งถอยไปเป็น id ของ
+// **คนที่กำลังดู** เมื่อหาเจ้าของใน DATA_USERS ไม่เจอ ขณะที่ตารางถูกสร้างจาก `days` ของ
+// `targetUserId` ⇒ กระดาษที่ถูกเซ็นจะมีเบี้ยของคนหนึ่งอยู่บนตารางเวลาของอีกคน · รอบ 5 เพิ่ม
+// `ownerRole` เข้าไปด้วยเหตุผลนี้ทุกตัวอักษร แล้วบรรทัดถัดไปก็ส่ง `targetUser.id` เป็น userId
+test('the printed sheet never looks up records by the viewer-fallback user', () => {
+  const print = extractFunction(APP_SRC, 'buildAttendancePrintView');
+  const code = print.replace(/^[ \t]*\/\/[^\n]*$/gm, '');
+  const bad = code.match(/targetUser\.id\b/g) || [];
+  assert.deepStrictEqual(bad, [],
+    'buildAttendancePrintView() still resolves "whose records" from targetUser.id, which becomes\n' +
+    '       currentUser when the row owner is not in DATA_USERS. Use ownerUserId -- the same id the\n' +
+    '       days array was built from.');
+  // และต้องใช้ ownerUserId จริงที่ทุกจุดที่ถาม "เรคอร์ดของใคร" — ไม่ใช่แค่ไม่มี targetUser.id
+  for (const probe of [
+    /hasHolidayWorkClaimOnDate\(row\.date, ownerUserId/,
+    /l\.userId === ownerUserId && l\.type === 'holiday-work'/,
+    /holidayWorkDisplayFor\(ownerUserId,/,
+    /attendanceDayOtRecord\(ownerUserId,/,
+    /l\.userId === ownerUserId && l\.type === 'personal-car'/,
+  ]) {
+    assert.ok(probe.test(code),
+      `a record lookup in buildAttendancePrintView() no longer uses ownerUserId: ${probe}`);
+  }
+  // `targetUser` ยังใช้ได้สำหรับชื่อบนหัวเอกสาร — ยามนี้ต้องไม่ห้ามเรื่องนั้น
+  assert.ok(/targetUser\.name/.test(code), 'the printed header no longer prints the employee name');
+});
+
 test('the Holiday Work icon is gated by holidayWork eligibility', () => {
   const fn = extractFunction(APP_SRC, 'renderAttendanceTable');
   // 2026-10-28 (รีวิวรอบ 4): ด่านนี้เคยเขียนเป็น isAllowanceEligible(eligAtt, targetUser.role, …)

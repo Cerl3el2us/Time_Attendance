@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 168;
+const APP_BUILD = 169;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -3318,11 +3318,15 @@ function otHoursRateDetail(l) {
   const hrs30 = Number(l.otHours30) || 0;
   if (hrs20 > 0 || hrs30 > 0) {
     const parts = [];
-    if (hrs20 > 0) parts.push(`${hrs20} ${L('h', 'ชม.')} ×2`);
-    if (hrs30 > 0) parts.push(`${hrs30} ${L('h', 'ชม.')} ×3`);
+    // 2026-10-28 (รีวิวรอบ 6): ของเดิมพิมพ์ชั่วโมงดิบ ⇒ เรคอร์ดที่เก็บ 6.33 หรือ 4.25 (มีอยู่ใน
+    // ข้อมูลจริงแล้วทั้งสองค่า) จะอ่านว่า "6.33 ชม." ซึ่งเป็นสตริงที่เจ้าของทักมาเองสองครั้งว่า
+    // อ่านเป็น 6 ชั่วโมง 33 นาที · รอบ 5 กวาดทศนิยมออกจากสามจอของตารางเวลาและป๊อปอัป
+    // แต่ไม่ได้แตะรายการที่ถอน ซึ่งพิมพ์เลขเดียวกันด้วยโค้ดอีกชุด
+    if (hrs20 > 0) parts.push(`${holidayWorkDurationLabel(Math.round(hrs20 * 60)).hm} ×2`);
+    if (hrs30 > 0) parts.push(`${holidayWorkDurationLabel(Math.round(hrs30 * 60)).hm} ×3`);
     return parts.join(' + ');
   }
-  return `${Number(l.otHours) || 0} ${L('h', 'ชม.')} ${otMultiplierLabel(effectiveOtMultiplier(l))}`;
+  return `${holidayWorkDurationLabel(Math.round((Number(l.otHours) || 0) * 60)).hm} ${otMultiplierLabel(effectiveOtMultiplier(l))}`;
 }
 // 2026-09-24 (owner, round 7): "OT is computed from the total hours, then rounded once". The
 // approved OT HOURS of the period are summed per multiplier bucket (office OT x1.5, driver OT,
@@ -3474,8 +3478,12 @@ function estimateDayEarnings(opts) {
     const before = otPayFromHourBuckets(applyGuaranteedOtFloor({ ...raw }, user, canOt), hourlyRate).otAmount;
     const after = otPayFromHourBuckets(applyGuaranteedOtFloor(merged, user, canOt), hourlyRate).otAmount;
     const gain = round2HalfUp(after - before);
+    // 2026-10-28 (รีวิวรอบ 6): `askHours` เป็นชั่วโมงทศนิยม (`round2(mins/60)`) ⇒ กรอก 09:00–16:20
+    // บนฟอร์มทำงานวันหยุด การ์ดนี้จะอ่านว่า "⏱️ OT 6.33 ชม. ×2" — **เลขเดียวกับที่เจ้าของทักมา
+    // สองครั้ง** และนี่คือการ์ดที่เขาใช้ตัดสินใจระหว่าง "รับเป็นเงิน" กับ "แลกวันหยุด" ⇒ เป็นจอที่
+    // ห้ามอ่านผิดที่สุด · รอบ 5 กวาดทศนิยมออกจากจอที่ *แสดงผลลัพธ์* แต่จอที่ *สร้างเรคอร์ด* ยังพิมพ์อยู่
     const detail = askedKeys.sort((a, b) => Number(a) - Number(b))
-      .map(k => `${askHours[k]} ${L('h', 'ชม.')} ×${k}`).join(' + ');
+      .map(k => `${holidayWorkDurationLabel(Math.round(askHours[k] * 60)).hm} ×${k}`).join(' + ');
     lines.push({ key: 'ot', label: `⏱️ OT ${detail}`, amount: gain });
     if (gain === 0 && hourlyRate > 0 && role === 'driver') {
       warnings.push(L('Your guaranteed monthly OT already covers these hours, so they add nothing.',
@@ -3546,10 +3554,14 @@ function estimateDayEarnings(opts) {
       l.dateFrom === date && !isVoidLeaveStatus(l.status) && l.id !== o.excludeLeaveId);
     if (clash.length) {
       const hrs = round2HalfUp(clash.reduce((s, l) => s + (Number(l.otHours) || 0), 0));
+      // 2026-10-28 (รีวิวรอบ 6): ชั่วโมงบนคำเตือนนี้เคยพิมพ์เป็นทศนิยมดิบ ("3.5 ชม.") · มันอยู่บน
+      // ฟอร์มทำงานวันหยุดเดียวกับการ์ดเทียบเงิน ซึ่งเพิ่งเลิกใช้ทศนิยมไปในคอมมิตเดียวกันนี้
+      // ⇒ ถ้าปล่อยไว้ หน้าเดียวกันจะพูดสองภาษา · ตัวจัดรูปแบบเดียวกันตอบถูกทั้งสามภาษาอยู่แล้ว
+      const hrsLbl = holidayWorkDurationLabel(Math.round(hrs * 60)).hm;
       warnings.push(currentLang === 'ja'
-        ? `この日には残業申請（${hrs}時間）があります — 現金を選ぶと、その申請は加算されません`
-        : L(`An OT request of ${hrs}h exists for this day — choosing the money means it is not counted on top`,
-            `มีใบขอ OT ของวันนี้อยู่ ${hrs} ชม. — ถ้าเลือกรับเป็นเงิน ใบนั้นจะไม่ถูกนับเพิ่ม`));
+        ? `この日には残業申請（${hrsLbl}）があります — 現金を選ぶと、その申請は加算されません`
+        : L(`An OT request of ${hrsLbl} exists for this day — choosing the money means it is not counted on top`,
+            `มีใบขอ OT ของวันนี้อยู่ ${hrsLbl} — ถ้าเลือกรับเป็นเงิน ใบนั้นจะไม่ถูกนับเพิ่ม`));
     }
   }
   return out();
@@ -12146,6 +12158,13 @@ function renderAttendanceTable() {
     // จอ · ส่ง role ของ **เจ้าของแถว** เข้าไปให้มันถาม holidayWorkDisplayFor() ตัวเดียวกับที่นี่
     // `targetUser` ที่มันมีอยู่แล้วใช้แทนไม่ได้ เพราะตัวนั้นถอยไปเป็น `currentUser` เมื่อหาไม่เจอ
     ownerRole: _attOwner ? _attOwner.role : null,
+    // 2026-10-28 (รีวิวรอบ 6): **และ `targetUser.id` ก็ใช้แทนไม่ได้ด้วยเหตุผลเดียวกันเป๊ะ** —
+    // รอบ 5 เขียนคอมเมนต์สามบรรทัดข้างบนว่าห้ามใช้ `targetUser` แล้วบรรทัดถัดไปในใบพิมพ์ก็ส่ง
+    // `targetUser.id` เป็น userId ให้ฟังก์ชันกลาง · ตารางของใบพิมพ์สร้างจาก `days` ของ
+    // `targetUserId` แต่ไอคอนไปค้นเรคอร์ดของ `targetUser.id` ⇒ เมื่อหาเจ้าของไม่เจอ
+    // **กระดาษจะเอาเบี้ยของคนที่กำลังดู ไปแปะบนตารางเวลาของอีกคน** แล้วถูกเซ็นไปแบบนั้น
+    // `targetUserId` คือ id ที่ `days` ใช้ จึงเป็นตัวเดียวที่ถูกต้องสำหรับการค้นเรคอร์ดทุกจุด
+    ownerUserId: targetUserId,
   });
   syncAttendanceStickyHead();
 }
@@ -12156,7 +12175,7 @@ function renderAttendanceTable() {
 // 2026-08-02: rebuilt on feedback — plain "28 July 2026" date (fmtDateLong, no Thai
 // วัน...ที่ grammar prefix) + a separate explicit Status column (Present/Late/Not clocked
 // in/Holiday/...) instead of a stacked note under the date; cleaner font/spacing throughout.
-function buildAttendancePrintView({ targetUser, days, start, end, workDays, lateDays, annualDays, sickDays, canEarlyLateTarget, canOTTarget, canUpcountryTarget, canPersonalCarTarget, canLongDistTarget, canHolidayWorkTarget, ownerRole }) {
+function buildAttendancePrintView({ targetUser, days, start, end, workDays, lateDays, annualDays, sickDays, canEarlyLateTarget, canOTTarget, canUpcountryTarget, canPersonalCarTarget, canLongDistTarget, canHolidayWorkTarget, ownerRole, ownerUserId }) {
   const el = document.getElementById('att-print-view');
   if (!el || !targetUser) return;
 
@@ -12198,14 +12217,18 @@ function buildAttendancePrintView({ targetUser, days, start, end, workDays, late
       ? `${plAbbrev[row.partialLeave.type] || row.partialLeave.type} (${L('PM', 'บ่าย')})`
       : (row.checkOut ? `⬇️ ${escapeHtml(row.checkOut)} ${srcIcon(row.checkOutSource)}` : '—');
 
+    // 2026-10-28 (รีวิวรอบ 6): ทุกจุดในลูปนี้ที่ถาม "เรคอร์ดของใคร" ต้องใช้ `ownerUserId` ซึ่งเป็น
+    // id ตัวเดียวกับที่ `days` ถูกสร้างขึ้นมา · ของเดิมใช้ `targetUser.id` ที่ถอยไปเป็นคนที่กำลังดู
+    // เมื่อหาเจ้าของใน DATA_USERS ไม่เจอ ⇒ ตารางเป็นของคนหนึ่ง ไอคอนเบี้ยเป็นของอีกคน บนกระดาษ
+    // ที่ถูกเซ็น · `targetUser` เหลือใช้เฉพาะชื่อและรหัสพนักงานที่พิมพ์บนหัวเอกสาร
     const badges = [];
     if (canEarlyLateTarget && row.checkIn && row.status !== 'company-trip' && isDeviceScanSource(row.checkInSource)
-        && (!isRestAttendanceDay(row) || hasHolidayWorkClaimOnDate(row.date, targetUser.id, false))) {
+        && (!isRestAttendanceDay(row) || hasHolidayWorkClaimOnDate(row.date, ownerUserId, false))) {
       const [h, m] = row.checkIn.split(':').map(Number);
       if (h * 60 + m <= earlyThresholdMinsOf(_pA, 1)) badges.push('🌅');
     }
     if (canEarlyLateTarget && deviceScanQualifiesForLateNight(row, new Set(DATA_LEAVES.filter(l =>
-      l.userId === targetUser.id && l.type === 'holiday-work' && l.status === 'approved'
+      l.userId === ownerUserId && l.type === 'holiday-work' && l.status === 'approved'
     ).map(l => l.dateFrom)))) badges.push('🌙');
     // 2026-10-08 (review): this carried the old `type === 'ot'` filter verbatim and had no 🔄 at
     // all, so the printout contradicted the screen beside it on an approved Holiday Work day. The
@@ -12215,14 +12238,14 @@ function buildAttendancePrintView({ targetUser, days, start, end, workDays, late
     // วัดกับข้อมูลจริงวันที่แก้: 4 ใน 5 ใบที่อนุมัติแล้ว สลิปจ่าย Upcountry ฿240 จอขึ้น 🗺️
     // **แต่กระดาษไม่ขึ้นอะไร** — และกระดาษคือสิ่งที่ถูกเซ็นและใช้เคลียร์ข้อพิพาท
     // ⇒ ถามฟังก์ชันกลางตัวเดียวกับแถวและป๊อปอัป ไม่มีกฎของตัวเองอีก
-    const hwPrint = holidayWorkDisplayFor(targetUser.id, row.date, row.status, ownerRole, APP_SETTINGS);
+    const hwPrint = holidayWorkDisplayFor(ownerUserId, row.date, row.status, ownerRole, APP_SETTINGS);
     if (hwPrint.rec) badges.push('🔄');
-    if (attendanceDayOtRecord(targetUser.id, row.date, canOTTarget, canHolidayWorkTarget)) badges.push('⏱️');
+    if (attendanceDayOtRecord(ownerUserId, row.date, canOTTarget, canHolidayWorkTarget)) badges.push('⏱️');
     if ((canUpcountryTarget && row.upcountry && row.status !== 'company-trip' && !hwPrint.takesDay)
       || holidayWorkEarnsUpcountry(hwPrint.rec, APP_SETTINGS, ownerRole, row.status === 'abroad')) badges.push('🗺️');
     if (canLongDistTarget && row.longDistance) badges.push('🚗');
     if (canPersonalCarTarget) {
-      const pcLv = DATA_LEAVES.find(l => l.userId === targetUser.id && l.type === 'personal-car' && l.dateFrom === row.date && l.status === 'approved');
+      const pcLv = DATA_LEAVES.find(l => l.userId === ownerUserId && l.type === 'personal-car' && l.dateFrom === row.date && l.status === 'approved');
       if (pcLv) badges.push('🚙');
     }
     // 2026-09-28: the excuse must be visible wherever the day is shown -- a forgiven late arrival
@@ -15794,7 +15817,12 @@ function getPayrollView(user, start, end, periodIndex) {
     personalCarRateDisplay: calc.approvedPC?.[0]?.personalCarRate != null
       ? calc.approvedPC[0].personalCarRate : (S.allowances.personalCar != null ? S.allowances.personalCar : 1000),
     lateDeductMinutes,
-    rates: { upcountry: S.allowances.upcountry || 240, longDistance: S.allowances.longDistance, personalCar: S.allowances.personalCar },
+    // 2026-10-28 (รีวิวรอบ 6): `|| 240` ที่นี่คือพี่น้องของตัวที่รอบ 5 แก้ไปบน badge แต่อยู่สูงกว่า
+    // หนึ่งชั้น — **บนสลิป** · ตัวเงินคือ `S.allowances.upcountry * totalUpcountryCount` ซึ่งไม่มี
+    // ค่าสำรองเลย ⇒ ตั้งเบี้ย Upcountry เป็น 0 (เซิร์ฟเวอร์ยอมรับ 0 ที่ `server.js` validator)
+    // แล้วสลิปจะแสดง "9 ครั้ง × ฿240" ใต้ยอดเบี้ยที่เป็น ฿0 · ฝาแฝดใน server.js แก้คู่กัน
+    // (กฎ dual-sync — แก้ข้างเดียวตัวเลขจะแตกกันเงียบๆ)
+    rates: { upcountry: S.allowances.upcountry != null ? S.allowances.upcountry : 240, longDistance: S.allowances.longDistance, personalCar: S.allowances.personalCar },
     ssoDisplay: { rate: S.sso.rate || 5, maxAmount: S.sso.maxAmount || 875, minSalary: S.sso.minSalary || 1650 },
     pvdRate: user.role === 'md' ? 0 : (user.pvdRate !== undefined ? user.pvdRate : 5),
   };
