@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 171;
+const APP_BUILD = 172;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -3478,21 +3478,29 @@ function estimateDayEarnings(opts) {
 
   // --- OT (x1.5 office / driver tiers / x2-x3 holiday work) ---
   const canOt = isAllowanceEligible(elig, role, 'ot');
+  // 2026-10-28 (ต่อจากกฎที่เจ้าของบอกเรื่องสลิป): ชั่วโมงใน `askHours` มาจากสามแหล่งที่ payroll
+  // จ่ายด้วย **สิทธิ์คนละตัว** — ใบ OT ออฟฟิศและ OT คนขับจ่ายใต้ `ot` ส่วนชั่วโมง ×2/×3 ของ
+  // ทำงานวันหยุดจ่ายใต้ `holidayWork` (`approvedHolidayWork` ใน computePayroll) · ของเดิมเอา
+  // `canOt` คลุมทั้งก้อน ⇒ คนที่มีสิทธิ์ทำงานวันหยุดแต่ไม่มีสิทธิ์ OT ปกติ จะเห็นการ์ด
+  // "💰 รับเป็นเงิน" บอกว่าได้ ฿0 **ทั้งที่สลิปจ่ายจริง** และนั่นคือการ์ดที่เจ้าของใช้ตัดสินใจ
+  // ระหว่างรับเงินกับแลกวันหยุด ⇒ ด่านย้ายมาอยู่ที่ "แหล่งของชั่วโมง" ทีละแหล่ง
+  const canHwPay = isAllowanceEligible(elig, role, 'holidayWork');
   const askHours = {};
-  if (o.otEndTime) {
+  if (canOt && o.otEndTime) {
     const derived = deriveOfficeOtFromEndTime(date, o.otEndTime, S);
     addOtHours(askHours, derived.otMultiplier, derived.otHours);
   }
-  if (o.driverTiers) {
+  if (canOt && o.driverTiers) {
     Object.keys(o.driverTiers).forEach(k => addOtHours(askHours, Number(k), Number(o.driverTiers[k]) || 0));
   }
-  if (o.mode === 'paid' && o.hwStartTime && o.hwEndTime) {
+  if (canHwPay && o.mode === 'paid' && o.hwStartTime && o.hwEndTime) {
     const sp = splitHolidayWorkOtMinutes(o.hwStartTime, o.hwEndTime, S);
     addOtHours(askHours, 2, sp.otHours20);
     addOtHours(askHours, 3, sp.otHours30);
   }
+  // ด่านอยู่ที่แต่ละแหล่งข้างบนแล้ว ⇒ มีชั่วโมงอยู่ในนี้ = สลิปจ่ายจริง จึงไม่กรองด้วย canOt อีก
   const askedKeys = Object.keys(askHours);
-  if (askedKeys.length && canOt) {
+  if (askedKeys.length) {
     // The floor is applied to each side's OWN real hour total, never to "floor + new hours" -- doing
     // it once on the baseline and then adding on top would charge the employee's new hours against
     // an already-lifted bucket and report a gain the payslip will never show. applyGuaranteedOtFloor
