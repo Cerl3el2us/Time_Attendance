@@ -169,6 +169,10 @@ test('every guard from the design is present', () => {
   const body = shortenRouteBody();
   ['isShortenableApprovedLeave(leave)', "code:'shorten-bad-date'", "code:'shorten-past'",
    "code:'shorten-whole'", "code:'shorten-after-end'", "code:'shorten-empty-remainder'",
+   // 2026-11-02 (same-day review): the mirror of empty-remainder. A request ending on a weekend
+   // or holiday can have a tail with no working day at all, which returned nothing and stored a
+   // day-mode record with days:0 -- read as HOURLY by leaveMinutesOf().
+   "code:'shorten-empty-giveback'",
    'lockedPeriodInRange', 'mdApprovedPeriodInRange', 'accountingConfirmedInRange',
    "code:'period-locked'", "code:'period-frozen'", "code:'period-confirmed'"]
     .forEach(k => assert.ok(body.includes(k), `missing guard: ${k}`));
@@ -186,6 +190,22 @@ test('both records are written in one save, and the quota snapshot is refreshed'
   // mutates the array it was handed.
   assert.ok(body.indexOf("code:'shorten-empty-remainder'") < body.indexOf('leaves[idx] = kept'),
     'the empty-remainder refusal must be checked before anything is written');
+  assert.ok(body.indexOf("code:'shorten-empty-giveback'") < body.indexOf('leaves[idx] = kept'),
+    'the empty-giveback refusal must be checked before anything is written');
+});
+// 2026-11-02 (same-day review): the given-back row is born 'cancelled', a status
+// isHiddenFromColleaguesStatus() keeps out of a plain user's GET /api/leaves. It used to go out as
+// a plain broadcast({type:'LEAVE_CREATED'}) copied from the create route -- whose record is
+// pending/approved and therefore visible to colleagues -- so every connected socket was told who
+// gave back which days. broadcastLeaveUpdated() asks leaveVisibleToViewer() per socket.
+test('the cancelled tail is announced per viewer, never to every socket', () => {
+  // Comment lines are stripped first: the note above the fixed call quotes the broken call, and a
+  // scan that reads prose as code reports the bug it is standing next to.
+  const body = shortenRouteBody().split('\n').filter(line => !line.trim().startsWith('//')).join('\n');
+  assert.ok(body.includes('broadcastLeaveUpdated(givenBack)'),
+    'the given-back row must be announced through the visibility-aware broadcaster');
+  assert.ok(!/broadcast\(\{\s*type:\s*'LEAVE_CREATED'/.test(body),
+    "a plain LEAVE_CREATED broadcast sends a colleague's cancelled record to every socket");
 });
 test('the shorten route never touches the approval fields of the kept record', () => {
   const body = shortenRouteBody();
@@ -283,6 +303,25 @@ test('a split that leaves no working day is reported as days:0 for the route to 
   const { kept } = S.splitLeaveForShorten({ ...SICK, dateFrom: '2026-10-31', days: 2 }, '2026-11-02', BY);
   assert.strictEqual(kept.days, 0);
 });
+// 2026-11-02 (same-day review): the same thing on the other side, which nothing was checking.
+test('a tail with no working day is reported as days:0 too (weekend-only give-back)', () => {
+  const S = makeSplit();
+  // Thu 05/11 .. Sun 08/11, coming back Sat 07/11 -> the tail is Sat+Sun = no working day.
+  const { kept, givenBack } = S.splitLeaveForShorten(
+    { ...SICK, dateFrom: '2026-11-05', dateTo: '2026-11-08', days: 2 }, '2026-11-07', BY);
+  assert.strictEqual(givenBack.days, 0, 'the tail holds no working day');
+  assert.ok(kept.days > 0, 'and the kept side is fine, so only the give-back guard can catch this');
+});
+// The modal must refuse it before the request is ever sent, for the same reason the kept side does.
+test('the modal disables Confirm when the tail has no working day', () => {
+  const fn = extractFunction(APP_SRC, 'updateShortenLeavePreview');
+  const iBack = fn.indexOf('backDays === 0');
+  const iEnable = fn.indexOf('btn.disabled = false');
+  assert.ok(iBack > 0, 'updateShortenLeavePreview has no backDays === 0 guard');
+  assert.ok(iEnable > 0, 'updateShortenLeavePreview no longer enables Confirm anywhere');
+  assert.ok(iBack < iEnable,
+    'the backDays guard must run before Confirm is enabled, or the user can still send it');
+});
 
 console.log('the arithmetic the route relies on');
 test('kept days + given-back days = the original days, for every split point', () => {
@@ -309,18 +348,44 @@ function clientFnBody(name) {
   const next = APP_SRC.indexOf('\n// ', i + 10);
   return APP_SRC.slice(i, next > 0 ? next : i + 6000);
 }
-test('shortenLeave() guards the owner and posts to the shorten route', () => {
+test('shortenLeave() guards the owner and opens the modal', () => {
   const body = clientFnBody('shortenLeave');
-  ['blockIfObserver()', 'isShortenableApprovedLeave(', 'deriveLeaveDaysCount(',
-   '/shorten', "method: 'POST'", 'confirm(', 'currentUser.id'].forEach(k =>
+  ['blockIfObserver()', 'isShortenableApprovedLeave(', 'currentUser.id',
+   "getElementById('shorten-leave-modal')", 'initDatePickers()'].forEach(k =>
     assert.ok(body.includes(k), `shortenLeave is missing ${k}`));
 });
-test('the confirm says how many days come back, in all three languages', () => {
-  const body = clientFnBody('shortenLeave');
+test('confirmShortenLeave() posts to the shorten route', () => {
+  const i = APP_SRC.indexOf('async function confirmShortenLeave()');
+  assert.ok(i > 0, 'confirmShortenLeave() does not exist');
+  const body = APP_SRC.slice(i, APP_SRC.indexOf('\n}', i) + 2);
+  ['/shorten', "method: 'POST'", 'returnDate', 'shortenBlockMessage('].forEach(k =>
+    assert.ok(body.includes(k), `confirmShortenLeave is missing ${k}`));
+});
+test('the summary states both day counts before anything is sent, in all three languages', () => {
+  const i = APP_SRC.indexOf('function updateShortenLeavePreview()');
+  assert.ok(i > 0, 'updateShortenLeavePreview() does not exist');
+  const body = APP_SRC.slice(i, APP_SRC.indexOf('\n}\n', i));
+  assert.ok(body.includes('deriveLeaveDaysCount('), 'the summary must compute the day counts');
   assert.ok(/currentLang === 'ja'/.test(body), 'Japanese wording is required');
-  assert.ok(/L\(`Coming back on/.test(body), 'English/Thai confirm via L() is required');
+  assert.ok(/L\(`The request becomes/.test(body), 'English/Thai wording via L() is required');
   assert.ok(body.includes('${backDays}') && body.includes('${keptDays}'),
-    'the confirm must state both day counts, not just the dates');
+    'the summary must state both day counts, not just the dates');
+  assert.ok(body.includes("btn.disabled = true") && body.includes('btn.disabled = false'),
+    'an impossible choice must disable Confirm rather than fail after a round trip');
+});
+// 2026-11-02 (owner): the date is asked for in a real date field, not a prompt(). prompt() can
+// only take a typed YYYY-MM-DD, while every other date field in this app shows DD/MM/YYYY and
+// parses a typed 3/11/2026 -- the owner reported this the first time the feature reached the site.
+test('the return date is asked for with the app\'s own date field, never a prompt()', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'attendance/index.html'), 'utf8');
+  assert.ok(/<input type="date" id="shorten-return-date"/.test(html),
+    'the modal needs a real input[type=date] WITH AN id -- initDatePickers() only binds fields that have one');
+  const fn = clientFnBody('shortenLeave');
+  const code = fn.split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
+  assert.ok(!/\bprompt\s*\(/.test(code), 'shortenLeave must not ask for the date through prompt()');
+  const confirmFn = APP_SRC.slice(APP_SRC.indexOf('async function confirmShortenLeave()'));
+  assert.ok(!/\bconfirm\s*\(/.test(confirmFn.slice(0, confirmFn.indexOf('\n}\n')).replace(/confirmShortenLeave/g, '')),
+    'the modal is the confirmation -- no second confirm() dialog on top of it');
 });
 test('every refusal code the server can send has wording on this side', () => {
   const i = APP_SRC.indexOf('function shortenBlockMessage(');

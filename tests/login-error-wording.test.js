@@ -50,11 +50,22 @@ test('the browser shows a different message for 503 than for bad credentials', (
 
 test('the 5xx wording says it is not the password, in Thai and English', () => {
   const body = loginBody();
-  const fiveXX = body.slice(body.indexOf('res.status === 503'));
+  // Comment lines are stripped: the note next to the fix quotes the old "(500)" literal, and a
+  // scan that reads prose as code fails on the explanation of the very thing it is checking.
+  const fiveXX = body.slice(body.indexOf('res.status === 503'))
+    .split('\n').filter(line => !line.trim().startsWith('//')).join('\n');
   assert.ok(/not your password/i.test(fiveXX), 'the English must say it is not the password');
   assert.ok(fiveXX.includes('ไม่ใช่รหัสผ่านของคุณผิด'), 'the Thai must say it is not the password');
-  assert.ok(/\(503\)/.test(fiveXX) && /\(500\)/.test(fiveXX),
+  assert.ok(/\(503\)/.test(fiveXX),
     'the status code belongs in the text so it can be reported without devtools');
+  // 2026-11-02 (same-day review): the other 5xx branch used to carry the literal "(500)", which
+  // told the administrator the wrong number for a 502 or a 504. It now appends the real status,
+  // outside the translated string (ja.js is keyed by the English text, so interpolating into the
+  // key would drop the Japanese). Assert the real thing: no hardcoded 500, and the code appended.
+  assert.ok(!/\(500\)/.test(fiveXX),
+    'a hardcoded (500) misreports a 502/504 -- append res.status instead');
+  assert.ok(/\$\{res\.status\}/.test(fiveXX),
+    'the non-503 5xx branch must show the status it actually got');
 });
 
 test('every message the login screen can show has a Japanese entry', () => {
