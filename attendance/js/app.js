@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 178;
+const APP_BUILD = 179;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -18605,6 +18605,13 @@ const NOTIFICATION_RENDERERS = {
     ? `${p.employeeName || ''}さんが承認済みの申請を取り消しました: ${notifRecordsText(p.records)}`
     : L(`${p.employeeName || ''} cancelled an approved request: ${notifRecordsText(p.records)}`,
         `${p.employeeName || ''} ยกเลิกคำขอที่อนุมัติแล้ว: ${notifRecordsText(p.records)}`) }),
+  // 2026-11-02 (owner): deliberately not worded as a cancellation. Nothing was cancelled whole and
+  // no approval was taken back -- an approved leave got shorter and the unused days went back to a
+  // balance. Both halves are named so payroll can see what the request became without opening it.
+  'leave-shortened': p => ({ icon: '↩️', text: currentLang === 'ja'
+    ? `${p.employeeName || ''}さんが${notifTypeLabel(p.type)}の${notifDateRange(p.backFrom, p.backTo)}（${p.backDays}日）を返却しました — 申請は${notifDateRange(p.keptFrom, p.keptTo)}（${p.keptDays}日）になりました`
+    : L(`${p.employeeName || ''} gave back ${p.backDays} day(s) of ${notifTypeLabel(p.type)} (${notifDateRange(p.backFrom, p.backTo)}) — the request is now ${notifDateRange(p.keptFrom, p.keptTo)} (${p.keptDays} day(s))`,
+        `${p.employeeName || ''} คืน${notifTypeLabel(p.type)} ${p.backDays} วัน (${notifDateRange(p.backFrom, p.backTo)}) — คำขอเหลือ ${notifDateRange(p.keptFrom, p.keptTo)} (${p.keptDays} วัน)`) }),
   'cf-expiry-reminder': p => {
     const min = Math.max(0, Number(p.minutes) || 0);
     const days = Math.round(min / 480 * 100) / 100;

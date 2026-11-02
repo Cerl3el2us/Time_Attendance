@@ -429,8 +429,8 @@ const NOTIFICATION_RETENTION_DAYS = 90;
 const NOTIFICATION_MAX_PER_USER = 300;
 // Every kind the server writes (app.js NOTIFICATION_RENDERERS has one renderer per kind).
 const NOTIFICATION_KINDS = ['request-approved', 'request-rejected', 'approval-needed', 'request-revoked',
-  'accounting-revoked', 'approved-cancelled', 'cf-expiry-reminder', 'cf-run-overdue', 'cf-manual-decision',
-  'time-corrected'];
+  'accounting-revoked', 'approved-cancelled', 'leave-shortened', 'cf-expiry-reminder', 'cf-run-overdue',
+  'cf-manual-decision', 'time-corrected'];
 // Pages a link may point at (app.js openNotificationLink).
 const NOTIFICATION_LINK_PAGES = ['my-requests', 'approval', 'approval-history', 'leave', 'settings', 'attendance'];
 // null on a read/parse failure or a non-array -- mutating callers fail closed (never overwrite it).
@@ -479,6 +479,10 @@ const NOTIFICATION_ROLE_KINDS = {
   'approval-needed': ['manager', 'md', 'accounting'],
   'accounting-revoked': ['md'],
   'approved-cancelled': ['md', 'accounting'],
+  // 2026-11-02 (owner, asked for after the same-day review pointed out the gap): giving days back
+  // needs no approval, but payroll still has to know that approved leave days inside an open
+  // period changed -- the same reason the cancel route notifies.
+  'leave-shortened': ['md', 'accounting'],
   'cf-run-overdue': ['md', 'accounting'],
   'cf-manual-decision': ['md', 'accounting'],
 };
@@ -8842,6 +8846,27 @@ function dependentsMismatchOrGuardError(wantIds, deps, leaves, ownerUser) {
 // 2026-09-24 (owner, round 7): the owner cancelled APPROVED record(s) (soft cancel, incl. the
 // Holiday Work dependents) -> push + inbox to every active MD and Accounting user except the
 // canceller: employee, type(s), date(s).
+// 2026-11-02 (owner): MD and Accounting hear about days given back, the way they already hear about
+// a cancelled approval. The act is not the same, so the wording is not shared: nothing was cancelled
+// wholesale and no approval was taken back -- an approved leave got shorter and days returned to a
+// balance, inside a period whose payroll may still be open. Both halves of the record are named, so
+// the reader does not have to open the page to see what the request became.
+function notifyApprovedLeaveShortened(actor, kept, givenBack) {
+  if (!actor || !kept || !givenBack) return;
+  const range = r => (r.dateTo && r.dateTo !== r.dateFrom ? `${r.dateFrom} to ${r.dateTo}` : r.dateFrom);
+  notifyMdAccounting({
+    title: 'Leave Days Given Back',
+    body: `${actor.name} gave back ${givenBack.days} day(s) of ${getTypeLabel(kept.type, 'en')} (${range(givenBack)}); the request is now ${range(kept)}`.slice(0, 900),
+    tag: 'ta-leave-shortened', url: '/',
+  }, {
+    kind: 'leave-shortened',
+    params: { employeeName: actor.name, type: kept.type,
+      backFrom: givenBack.dateFrom, backTo: givenBack.dateTo || givenBack.dateFrom, backDays: givenBack.days,
+      keptFrom: kept.dateFrom, keptTo: kept.dateTo || kept.dateFrom, keptDays: kept.days },
+    link: { page: 'approval-history', leaveId: givenBack.id, date: givenBack.dateFrom },
+  }, actor.id);
+}
+
 function notifyApprovedRecordCancelled(actor, records) {
   if (!actor || !Array.isArray(records) || !records.length) return;
   const what = records.map(r => {
@@ -9360,6 +9385,7 @@ app.post('/api/leaves/:id/shorten', withLeavesLock((req, res) => {
     // see it holds no copy yet, and its withdrawn status makes the client refetch over the
     // authenticated GET, which is how it arrives -- the same path a cancel already takes.
     broadcastLeaveUpdated(givenBack);
+    notifyApprovedLeaveShortened(live, leaves[idx], givenBack);
     return res.json({ success:true, leave: leaves[idx], cancelled: givenBack });
   } catch (e) {
     console.error('[LEAVE] shorten failed', e);
