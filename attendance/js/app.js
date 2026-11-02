@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 173;
+const APP_BUILD = 176;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -4446,6 +4446,28 @@ function isLegacyAutoApprovedPersonalCar(l) {
   return !!(l && l.type === 'personal-car' && l.status === 'approved' && !l.approver);
 }
 // Dual-sync with server.js: isCancellableApprovedLeave
+// DUAL-SYNC: server.js DAY_BASED_LEAVE_TYPES (:6253) -- the three leave types counted in working
+// days, which are also the three the 2026-11-02 partial cancellation covers.
+const DAY_BASED_LEAVE_TYPES = new Set(['annual', 'sick', 'business']);
+// DUAL-SYNC: server.js isValidDateStr.
+function isValidDateStr(s) { return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s); }
+
+// DUAL-SYNC: server.js deriveLeaveDaysCount (same function, same name). 2026-11-02: the loop this
+// replaces lived inline inside submitLeave(), so nothing else could ask "how many working days is
+// this range?" -- the partial-cancel confirm needs that number to tell the employee how many days
+// come back, and a second copy of the loop would drift from the server's answer in silence.
+// Weekends and public holidays are skipped: they are not leave days and never leave the quota.
+function deriveLeaveDaysCount(dateFrom, dateTo) {
+  let days = 0;
+  let d = new Date(dateFrom + 'T12:00:00');
+  const end = new Date((dateTo || dateFrom) + 'T12:00:00');
+  while (d <= end) {
+    if (d.getDay() !== 0 && d.getDay() !== 6 && !isPublicHoliday(localDateStr(d))) days++;
+    d.setDate(d.getDate() + 1);
+  }
+  return days;
+}
+
 function isCancellableApprovedLeave(l, asOfYmd) {
   if (!l || l.status !== 'approved') return false;
   // 2026-09-24 (owner): dual-sync with server.js -- the owner may cancel an APPROVED Holiday Work
@@ -4458,6 +4480,20 @@ function isCancellableApprovedLeave(l, asOfYmd) {
   if (!l.dateFrom || !/^\d{4}-\d{2}-\d{2}$/.test(l.dateFrom)) return false;
   const asOf = asOfYmd || bangkokDateStr();
   return asOf < l.dateFrom;
+}
+
+// DUAL-SYNC: server.js isShortenableApprovedLeave (same function, same name).
+// 2026-11-02 (owner): see the server copy for why this exists -- the employee gives back the days
+// of an approved leave that have not arrived, instead of losing the whole approval. This copy only
+// decides whether the button renders; the server decides whether the write happens.
+function isShortenableApprovedLeave(l, asOfYmd) {
+  if (!l || l.status !== 'approved') return false;
+  if (!DAY_BASED_LEAVE_TYPES.has(l.type)) return false;
+  if (l.hourlyStart || l.hourlyEnd) return false;
+  if (!isValidDateStr(l.dateFrom) || !isValidDateStr(l.dateTo)) return false;
+  const asOf = isValidDateStr(asOfYmd) ? asOfYmd : bangkokDateStr();
+  const earliest = asOf > l.dateFrom ? asOf : l.dateFrom;
+  return l.dateTo > earliest;
 }
 
 async function savePeriodLocks() {
@@ -8635,8 +8671,20 @@ async function login() {
       // Was always showing "incorrect password" no matter what the backend actually said --
       // masked a rate-limit lockout (429) as a password error, which is genuinely misleading
       // since the fix for one is "wait" and the fix for the other is "check your password".
-      errEl.querySelector('span').textContent = res.status === 429
-        ? L('⏳ Too many login attempts — please wait a few minutes and try again', '⏳ ลองเข้าสู่ระบบบ่อยเกินไป — กรุณารอสักครู่แล้วลองใหม่')
+      // 2026-11-02 (owner, after a real outage): 503 and 500 were also shown as "incorrect
+      // username or password". On 2 Nov the backend was restarted under an account that could
+      // not read users.json, so readUsers() returned null and EVERY login answered 503 -- the
+      // screen told every employee their password was wrong, and an hour went into checking
+      // passwords that had never changed. The server already distinguishes these; only this line
+      // threw the distinction away. The status code is shown too, so the next person can say
+      // what happened without opening devtools.
+      errEl.querySelector('span').textContent =
+        res.status === 429
+          ? L('⏳ Too many login attempts — please wait a few minutes and try again', '⏳ ลองเข้าสู่ระบบบ่อยเกินไป — กรุณารอสักครู่แล้วลองใหม่')
+        : res.status === 503
+          ? L('⚠️ The system cannot read its data right now — this is not your password. Please tell the administrator. (503)', '⚠️ ระบบอ่านข้อมูลไม่ได้ในขณะนี้ — ไม่ใช่รหัสผ่านของคุณผิด กรุณาแจ้งผู้ดูแลระบบ (503)')
+        : res.status >= 500
+          ? L('⚠️ The server failed while signing you in — this is not your password. Please tell the administrator. (500)', '⚠️ เซิร์ฟเวอร์ผิดพลาดระหว่างเข้าสู่ระบบ — ไม่ใช่รหัสผ่านของคุณผิด กรุณาแจ้งผู้ดูแลระบบ (500)')
         : L('Incorrect username or password', 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง');
       errEl.style.display = 'flex';
       return;
@@ -19590,10 +19638,9 @@ async function submitLeave() {
     dateFrom = document.getElementById('leave-form-from').value;
     dateTo   = document.getElementById('leave-form-to').value || dateFrom;
     if (!dateFrom) { showToast(L('⚠️ Please specify the start date', '⚠️ กรุณาระบุวันที่เริ่มลา'), 'warning'); return; }
-    days = 0;
-    let d = new Date(dateFrom + 'T12:00:00');
-    const end = new Date(dateTo + 'T12:00:00');
-    while (d <= end) { if (d.getDay() !== 0 && d.getDay() !== 6 && !isPublicHoliday(localDateStr(d))) days++; d.setDate(d.getDate()+1); }
+    // 2026-11-02: the count moved out to deriveLeaveDaysCount() (DUAL-SYNC with server.js) so the
+    // partial-cancel confirm can reuse the exact same rule instead of carrying a second copy.
+    days = deriveLeaveDaysCount(dateFrom, dateTo);
     if (days === 0) { showToast(L('⚠️ No working days in the selected range', '⚠️ ไม่มีวันทำงานในช่วงที่เลือก'), 'warning'); return; }
   } else {
     dateFrom = document.getElementById('leave-form-date').value;
@@ -22514,6 +22561,7 @@ function renderLeaveHistory() {
       : `<div style="display:flex;gap:6px;justify-content:flex-end">
            <button class="btn btn-ghost btn-sm" onclick="showLeaveDetail(${l.id})">${L('Details', 'รายละเอียด')}</button>
            ${isCancellableApprovedLeave(l) ? (approvedCancelBlockCode(l) ? actionBlockedNoteHtml(cancelBlockMessage(approvedCancelBlockCode(l), l)) : `<button class="btn btn-danger btn-sm" onclick="cancelLeave(${l.id})">${L('Cancel', 'ยกเลิก')}</button>`) : ''}
+           ${shortenLeaveButtonHtml(l)}
          </div>`;
 
     return `<tr style="${isWithdrawnLeaveStatus(l.status) ? 'opacity:.6' : ''}">
@@ -22712,6 +22760,115 @@ async function cancelLeave(id) {
   if (currentPage === 'calendar') renderCalendarPage();
   showToast(L('🗑️ Request cancelled', '🗑️ ยกเลิกคำขอเรียบร้อยแล้ว'), 'info');
   return true;
+}
+
+// 2026-11-02 (owner): "I am coming back to work on <date>" -- gives back the days of an APPROVED
+// leave that have not arrived yet. Before today the employee's only option was cancelLeave()
+// above, which ends the whole request and only works before it starts (isCancellableApprovedLeave),
+// so an approved leave already under way could not be trimmed: the real case was a sick leave
+// 30/10-5/11 whose last three days were no longer needed on 02/11.
+// Kept separate from cancelLeave() on purpose: that one ends a request, this one trims it, and
+// one confirm trying to say both would say neither clearly. Server: POST /api/leaves/:id/shorten.
+async function shortenLeave(id) {
+  if (blockIfObserver()) return false;
+  const l = DATA_LEAVES.find(x => x.id === id);
+  if (!l) return false;
+  // Defense-in-depth: the button only renders on the employee's own request, but this function is
+  // reachable directly too -- never trust the UI gate alone (same reasoning as cancelLeave()).
+  if (l.userId !== currentUser.id) {
+    showToast(L('⛔ You can only change your own requests', '⛔ คุณแก้ได้เฉพาะคำขอของตัวเองเท่านั้น'), 'danger');
+    return false;
+  }
+  if (!isShortenableApprovedLeave(l)) {
+    showToast(L('This request has no upcoming days left to give back',
+      'คำขอนี้ไม่มีวันข้างหน้าเหลือให้คืนแล้ว'), 'warning');
+    return false;
+  }
+  // The earliest day that may be given back is the day after today, and never the request's own
+  // first day (that would be cancelling the whole thing, which cancelLeave() already does).
+  const addDays = (ymd, n) => { const d = new Date(ymd + 'T12:00:00'); d.setDate(d.getDate() + n); return localDateStr(d); };
+  const today = bangkokDateStr();
+  const earliest = addDays(today > l.dateFrom ? today : l.dateFrom, 1);
+  const returnDate = prompt(currentLang === 'ja'
+    ? `何日から出勤しますか？（${earliest} ～ ${l.dateTo}）`
+    : L(`Which day are you coming back to work? (${earliest} to ${l.dateTo})`,
+        `กลับมาทำงานวันไหน? (${earliest} ถึง ${l.dateTo})`), earliest);
+  if (!returnDate) return false;
+  const picked = String(returnDate).trim();
+  if (!isValidDateStr(picked) || picked < earliest || picked > l.dateTo) {
+    showToast(currentLang === 'ja'
+      ? `${earliest} ～ ${l.dateTo} の日付を入力してください`
+      : L(`Pick a date between ${earliest} and ${l.dateTo}`,
+          `กรุณาเลือกวันที่ระหว่าง ${earliest} ถึง ${l.dateTo}`), 'warning');
+    return false;
+  }
+  const keptTo = addDays(picked, -1);
+  const keptDays = deriveLeaveDaysCount(l.dateFrom, keptTo);
+  const backDays = deriveLeaveDaysCount(picked, l.dateTo);
+  // Mirrors the server's 'shorten-empty-remainder' refusal so the employee hears it before the
+  // round trip, not after. DUAL-SYNC: the server decides; this only saves a pointless request.
+  if (keptDays === 0) {
+    showToast(L('No working day would be left on the request — cancel the whole request instead',
+      'จะไม่มีวันทำงานเหลือในคำขอนี้ — ให้ยกเลิกทั้งใบแทน'), 'warning');
+    return false;
+  }
+  if (!confirm(currentLang === 'ja'
+    ? `${picked} から出勤します。申請は ${l.dateFrom}～${keptTo}（${keptDays}日）になり、${picked}～${l.dateTo}（${backDays}日）は取り消して残日数に戻ります。取り消した分は履歴に残ります。`
+    : L(`Coming back on ${picked}. The request becomes ${l.dateFrom} to ${keptTo} (${keptDays} day(s)); ${picked} to ${l.dateTo} (${backDays} day(s)) is cancelled and returned to your balance. The cancelled part stays in your history.`,
+        `กลับมาทำงาน ${picked} · คำขอจะเหลือ ${l.dateFrom} ถึง ${keptTo} (${keptDays} วัน) และ ${picked} ถึง ${l.dateTo} (${backDays} วัน) จะถูกยกเลิกและคืนเข้ายอดคงเหลือ ส่วนที่ยกเลิกจะยังอยู่ในประวัติ`))) return false;
+  try {
+    const r = await apiFetch(`/api/leaves/${id}/shorten`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ returnDate: picked })
+    });
+    const data = await r.json();
+    if (!data.success) throw new Error(data.code ? shortenBlockMessage(data.code, l) : (data.message || 'Shorten failed'));
+    const i = DATA_LEAVES.findIndex(x => x.id === id);
+    if (i >= 0 && data.leave) DATA_LEAVES[i] = data.leave;
+    if (data.cancelled) DATA_LEAVES.push(data.cancelled);
+  } catch (e) {
+    showToast(L('❌ Could not change the request: ', '❌ แก้คำขอไม่สำเร็จ: ') + e.message, 'danger');
+    return false;
+  }
+  // Annual leave returning to the pool can move an already-snapshotted carry-forward, which lives
+  // in settings -- same refresh cancelLeave() does for the types that touch that pool.
+  if (l.type === 'annual') await loadSettingsFromBackend();
+  updateMyRequestsBadge();
+  updateApprovalBadge();
+  if (currentPage === 'leave') renderLeaveHistory();
+  if (currentPage === 'my-requests') renderMyRequests();
+  if (currentPage === 'attendance') renderAttendanceTable();
+  if (currentPage === 'calendar') renderCalendarPage();
+  showToast(currentLang === 'ja' ? `✅ ${backDays}日を残日数に戻しました`
+    : L(`✅ ${backDays} day(s) returned to your balance`, `✅ คืน ${backDays} วันเข้ายอดคงเหลือแล้ว`), 'success');
+  return true;
+}
+
+// 2026-11-02: one definition of the "give the remaining days back" button, used by every list that
+// shows an approved request, so the two lists can never disagree about when it appears. It renders
+// only on the viewer's OWN request -- a colleague's row must not offer it, and shortenLeave()
+// refuses it there anyway. btn-outline, not btn-danger: trimming a request is not ending one.
+function shortenLeaveButtonHtml(l) {
+  if (!isShortenableApprovedLeave(l)) return '';
+  if (!currentUser || l.userId !== currentUser.id) return '';
+  const label = currentLang === 'ja' ? '早めに出勤' : L('Come back early', 'กลับมาทำงานก่อนกำหนด');
+  return `<button class="btn btn-outline btn-sm" onclick="shortenLeave(${l.id})">${label}</button>`;
+}
+
+// Server refusal codes for /shorten, worded here the way cancelBlockMessage() does for cancels.
+// Anything this switch does not know is a shared period/guard code, so it falls through to the
+// cancel wording instead of showing the employee a raw code.
+function shortenBlockMessage(code, l) {
+  switch (code) {
+    case 'shorten-not-owner': return L('You can only change your own requests', 'คุณแก้ได้เฉพาะคำขอของตัวเองเท่านั้น');
+    case 'shorten-not-eligible': return L('This request cannot be shortened', 'คำขอนี้หดวันไม่ได้');
+    case 'shorten-bad-date': return L('That date could not be read', 'อ่านวันที่ที่เลือกไม่ได้');
+    case 'shorten-past': return L('Only days that have not arrived yet can be given back', 'คืนได้เฉพาะวันที่ยังไม่มาถึง');
+    case 'shorten-whole': return L('That would cancel the whole request — use Cancel instead', 'นั่นคือการยกเลิกทั้งใบ — ให้กดยกเลิกแทน');
+    case 'shorten-after-end': return L('The leave already ends before that date', 'วันลาจบก่อนวันที่เลือกแล้ว');
+    case 'shorten-empty-remainder': return L('No working day would be left on the request — cancel the whole request instead', 'จะไม่มีวันทำงานเหลือในคำขอนี้ — ให้ยกเลิกทั้งใบแทน');
+    default: return cancelBlockMessage(code, l);
+  }
 }
 
 // 2026-09-24 (owner): MD / Accounting take back an approval on a money-bearing request (pay,
@@ -24191,12 +24348,18 @@ function renderMyRequests() {
       : isLegacyAutoApprovedPersonalCar(l) || isCancellableApprovedLeave(l)
       ? `<div style="display:flex;gap:6px;flex-shrink:0">
            <button class="btn btn-danger btn-sm" onclick="cancelLeave(${l.id})">${L('Cancel', 'ยกเลิก')}</button>
+           ${shortenLeaveButtonHtml(l)}
          </div>`
       : String(l.status || '').startsWith('pending')
       ? `<div style="display:flex;gap:6px;flex-shrink:0">
            ${EDITABLE_LEAVE_TYPES.has(l.type) ? `<button class="btn btn-ghost btn-sm" onclick="editLeaveRequest(${l.id})">${L('✏️ Edit', '✏️ แก้ไข')}</button>` : ''}
            <button class="btn btn-danger btn-sm" onclick="cancelLeave(${l.id})">${L('Cancel', 'ยกเลิก')}</button>
          </div>`
+      // 2026-11-02: an approved leave that has already STARTED lands here -- it used to show no
+      // action at all, which is exactly the dead end the owner hit. It can still give back the
+      // days that have not arrived.
+      : shortenLeaveButtonHtml(l)
+      ? `<div style="display:flex;gap:6px;flex-shrink:0">${shortenLeaveButtonHtml(l)}</div>`
       : '';
 
     return `
