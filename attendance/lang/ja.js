@@ -103,7 +103,7 @@ window.LANG_JA = {
   // 2026-11-02: a backend that cannot read its own data answered 503 to every login, and the
   // screen called it a wrong password. These two say what actually happened.
   "⚠️ The system cannot read its data right now — this is not your password. Please tell the administrator. (503)": "⚠️ システムが現在データを読み取れません — パスワードの誤りではありません。管理者にご連絡ください。(503)",
-  "⚠️ The server failed while signing you in — this is not your password. Please tell the administrator. (500)": "⚠️ ログイン処理中にサーバーエラーが発生しました — パスワードの誤りではありません。管理者にご連絡ください。(500)",
+  "⚠️ The server failed while signing you in — this is not your password. Please tell the administrator.": "⚠️ ログイン処理中にサーバーエラーが発生しました — パスワードの誤りではありません。管理者にご連絡ください。",
   // 2026-07-18 hint audit — newly added explanatory hints
   "Rules, calculations, and how-to guides": "ルール、計算方法、使い方ガイド",
   // 2026-08-09 (2nd-pass audit): removed a duplicate of this key -- see the other copy further

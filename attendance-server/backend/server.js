@@ -9322,6 +9322,16 @@ app.post('/api/leaves/:id/shorten', withLeavesLock((req, res) => {
       return res.status(400).json({ success:false, code:'shorten-empty-remainder',
         message:'No working day would be left on the request -- cancel the whole request instead' });
     }
+    // 2026-11-02 (review of the same day's merge): the same argument applies to the OTHER side, and
+    // it was missing. A request ending on a weekend or holiday can produce a tail with no working
+    // day at all (19-22 Nov, returning on Saturday the 21st -> the tail is Sat+Sun), which would
+    // store a day-mode record with days:0 -- read as HOURLY by leaveMinutesOf() -- while returning
+    // nothing to the balance and splitting the request in two for no gain. Refuse it; the modal
+    // disables Confirm for the same case, and this is the gate a direct API call meets.
+    if (givenBack.days === 0) {
+      return res.status(400).json({ success:false, code:'shorten-empty-giveback',
+        message:'That range has no working day to give back -- pick another date' });
+    }
     givenBack.id = nextId(leaves);
     leaves[idx] = kept;
     leaves.push(givenBack);
@@ -9339,7 +9349,17 @@ app.post('/api/leaves/:id/shorten', withLeavesLock((req, res) => {
       }
     }
     broadcastLeaveUpdated(leaves[idx]);
-    broadcast({ type: 'LEAVE_CREATED', leave: toPublicLeaveProjection(givenBack) });
+    // 2026-11-02 (review of the same day's merge): this used to be
+    // `broadcast({ type:'LEAVE_CREATED', leave: toPublicLeaveProjection(givenBack) })`, copied from
+    // the create route -- but that route's record is pending/approved, which colleagues may see,
+    // while THIS one is born 'cancelled'. isHiddenFromColleaguesStatus() covers exactly that, and
+    // GET /api/leaves withholds such a record from a plain user (owner's decision 2026-09-24), so
+    // a plain `broadcast` pushed the one thing the REST layer refuses: who gave back which days,
+    // on which dates, to every connected socket. broadcastLeaveUpdated() asks
+    // leaveVisibleToViewer() per socket and sends LEAVE_DELETED{id} to the rest; a viewer who may
+    // see it holds no copy yet, and its withdrawn status makes the client refetch over the
+    // authenticated GET, which is how it arrives -- the same path a cancel already takes.
+    broadcastLeaveUpdated(givenBack);
     return res.json({ success:true, leave: leaves[idx], cancelled: givenBack });
   } catch (e) {
     console.error('[LEAVE] shorten failed', e);

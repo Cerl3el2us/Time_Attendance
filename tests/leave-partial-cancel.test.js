@@ -169,6 +169,10 @@ test('every guard from the design is present', () => {
   const body = shortenRouteBody();
   ['isShortenableApprovedLeave(leave)', "code:'shorten-bad-date'", "code:'shorten-past'",
    "code:'shorten-whole'", "code:'shorten-after-end'", "code:'shorten-empty-remainder'",
+   // 2026-11-02 (same-day review): the mirror of empty-remainder. A request ending on a weekend
+   // or holiday can have a tail with no working day at all, which returned nothing and stored a
+   // day-mode record with days:0 -- read as HOURLY by leaveMinutesOf().
+   "code:'shorten-empty-giveback'",
    'lockedPeriodInRange', 'mdApprovedPeriodInRange', 'accountingConfirmedInRange',
    "code:'period-locked'", "code:'period-frozen'", "code:'period-confirmed'"]
     .forEach(k => assert.ok(body.includes(k), `missing guard: ${k}`));
@@ -186,6 +190,22 @@ test('both records are written in one save, and the quota snapshot is refreshed'
   // mutates the array it was handed.
   assert.ok(body.indexOf("code:'shorten-empty-remainder'") < body.indexOf('leaves[idx] = kept'),
     'the empty-remainder refusal must be checked before anything is written');
+  assert.ok(body.indexOf("code:'shorten-empty-giveback'") < body.indexOf('leaves[idx] = kept'),
+    'the empty-giveback refusal must be checked before anything is written');
+});
+// 2026-11-02 (same-day review): the given-back row is born 'cancelled', a status
+// isHiddenFromColleaguesStatus() keeps out of a plain user's GET /api/leaves. It used to go out as
+// a plain broadcast({type:'LEAVE_CREATED'}) copied from the create route -- whose record is
+// pending/approved and therefore visible to colleagues -- so every connected socket was told who
+// gave back which days. broadcastLeaveUpdated() asks leaveVisibleToViewer() per socket.
+test('the cancelled tail is announced per viewer, never to every socket', () => {
+  // Comment lines are stripped first: the note above the fixed call quotes the broken call, and a
+  // scan that reads prose as code reports the bug it is standing next to.
+  const body = shortenRouteBody().split('\n').filter(line => !line.trim().startsWith('//')).join('\n');
+  assert.ok(body.includes('broadcastLeaveUpdated(givenBack)'),
+    'the given-back row must be announced through the visibility-aware broadcaster');
+  assert.ok(!/broadcast\(\{\s*type:\s*'LEAVE_CREATED'/.test(body),
+    "a plain LEAVE_CREATED broadcast sends a colleague's cancelled record to every socket");
 });
 test('the shorten route never touches the approval fields of the kept record', () => {
   const body = shortenRouteBody();
@@ -282,6 +302,25 @@ test('a split that leaves no working day is reported as days:0 for the route to 
   // Sat 31/10 .. Thu 05/11, coming back Mon 02/11 -> the kept span is Sat+Sun only.
   const { kept } = S.splitLeaveForShorten({ ...SICK, dateFrom: '2026-10-31', days: 2 }, '2026-11-02', BY);
   assert.strictEqual(kept.days, 0);
+});
+// 2026-11-02 (same-day review): the same thing on the other side, which nothing was checking.
+test('a tail with no working day is reported as days:0 too (weekend-only give-back)', () => {
+  const S = makeSplit();
+  // Thu 05/11 .. Sun 08/11, coming back Sat 07/11 -> the tail is Sat+Sun = no working day.
+  const { kept, givenBack } = S.splitLeaveForShorten(
+    { ...SICK, dateFrom: '2026-11-05', dateTo: '2026-11-08', days: 2 }, '2026-11-07', BY);
+  assert.strictEqual(givenBack.days, 0, 'the tail holds no working day');
+  assert.ok(kept.days > 0, 'and the kept side is fine, so only the give-back guard can catch this');
+});
+// The modal must refuse it before the request is ever sent, for the same reason the kept side does.
+test('the modal disables Confirm when the tail has no working day', () => {
+  const fn = extractFunction(APP_SRC, 'updateShortenLeavePreview');
+  const iBack = fn.indexOf('backDays === 0');
+  const iEnable = fn.indexOf('btn.disabled = false');
+  assert.ok(iBack > 0, 'updateShortenLeavePreview has no backDays === 0 guard');
+  assert.ok(iEnable > 0, 'updateShortenLeavePreview no longer enables Confirm anywhere');
+  assert.ok(iBack < iEnable,
+    'the backDays guard must run before Confirm is enabled, or the user can still send it');
 });
 
 console.log('the arithmetic the route relies on');

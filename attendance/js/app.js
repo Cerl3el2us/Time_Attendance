@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 177;
+const APP_BUILD = 178;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -1156,7 +1156,20 @@ function initDatePickers() {
     // it would undo a correctly parsed date. Turning it off leaves attachTypedDateEntry() as the
     // single parser for every date field, restricted or not; it clears readOnly itself so the
     // field is still typable, and clicking still opens the calendar.
-    flatpickr(inp, { locale, dateFormat: 'Y-m-d', altInput: true, altFormat, allowInput: false });
+    // 2026-11-02: carry the field's own min/max over to the calendar. flatpickr does NOT read
+    // those attributes by itself, so the shorten-leave field (the only field in the app that
+    // sets them, in shortenLeave()) opened a calendar where every day of the month was black and
+    // clickable although only the request's own remaining days are legal — the owner could pick
+    // 5 Nov for a 19–24 Nov request and only find out from a disabled Confirm button. Reading
+    // them here rather than passing them at the one call site means a re-init (language switch,
+    // the MutationObserver) restores the range from the DOM instead of silently dropping it, and
+    // commitTypedDate()'s fp.isEnabled() check now holds a typed date to the same range.
+    const bounds = {};
+    const minAttr = inp.getAttribute('min');
+    const maxAttr = inp.getAttribute('max');
+    if (minAttr) bounds.minDate = minAttr;
+    if (maxAttr) bounds.maxDate = maxAttr;
+    flatpickr(inp, { locale, dateFormat: 'Y-m-d', altInput: true, altFormat, allowInput: false, ...bounds });
   });
   initHolidayWorkDatePicker();
   initEarlyMorningDatePicker();
@@ -8683,8 +8696,14 @@ async function login() {
           ? L('⏳ Too many login attempts — please wait a few minutes and try again', '⏳ ลองเข้าสู่ระบบบ่อยเกินไป — กรุณารอสักครู่แล้วลองใหม่')
         : res.status === 503
           ? L('⚠️ The system cannot read its data right now — this is not your password. Please tell the administrator. (503)', '⚠️ ระบบอ่านข้อมูลไม่ได้ในขณะนี้ — ไม่ใช่รหัสผ่านของคุณผิด กรุณาแจ้งผู้ดูแลระบบ (503)')
+        // 2026-11-02 (same-day review): this branch catches every 5xx that is not 503, but the
+        // code in the text was the literal "(500)" -- a 502 from a proxy or a 504 while the
+        // backend is restarting would have told the administrator to go looking for a 500 that
+        // never happened, which is the opposite of why the code was put in the message. The real
+        // status is appended OUTSIDE the translated string on purpose: ja.js is keyed by the
+        // English text, so interpolating into the key would silently drop the Japanese.
         : res.status >= 500
-          ? L('⚠️ The server failed while signing you in — this is not your password. Please tell the administrator. (500)', '⚠️ เซิร์ฟเวอร์ผิดพลาดระหว่างเข้าสู่ระบบ — ไม่ใช่รหัสผ่านของคุณผิด กรุณาแจ้งผู้ดูแลระบบ (500)')
+          ? L('⚠️ The server failed while signing you in — this is not your password. Please tell the administrator.', '⚠️ เซิร์ฟเวอร์ผิดพลาดระหว่างเข้าสู่ระบบ — ไม่ใช่รหัสผ่านของคุณผิด กรุณาแจ้งผู้ดูแลระบบ') + ` (${res.status})`
         : L('Incorrect username or password', 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง');
       errEl.style.display = 'flex';
       return;
@@ -22566,7 +22585,7 @@ function renderLeaveHistory() {
 
     return `<tr style="${isWithdrawnLeaveStatus(l.status) ? 'opacity:.6' : ''}">
       <td><span class="badge ${cfg.badgeClass}">${cfg.icon} ${escapeHtml(cfg.label)}</span></td>
-      <td style="${withdrawnRowStyle(l)}">${dateLabel}</td>
+      <td><span style="${withdrawnRowStyle(l)}">${dateLabel}</span>${shortenedLeaveNetNoteHtml(l)}</td>
       <td class="col-hide-mobile">${Number(l.days)} ${L('days', 'วัน')}</td>
       <td class="col-hide-mobile">${escapeHtml(l.reason)}${l.attachment ? ` <a href="javascript:void(0)" class="att-open-link" data-attachment="${escapeHtml(l.attachment)}" data-attachment-name="${escapeHtml(l.attachmentName || l.attachment)}" title="${L('Open attachment', 'เปิดไฟล์แนบ')}">📎</a>` : ''}</td>
       <td>${statusBadge}</td>
@@ -22851,6 +22870,20 @@ function updateShortenLeavePreview() {
     return bad(L('No working day would be left on the request — cancel the whole request instead',
       'จะไม่มีวันทำงานเหลือในคำขอนี้ — ให้ยกเลิกทั้งใบแทน'));
   }
+  // 2026-11-02 (review of the same day's merge): the mirror of the guard above was missing. A
+  // request that ends on a weekend or a holiday can have a tail with no WORKING day in it at all
+  // (19-22 Nov, coming back on Saturday the 21st: the tail is Sat+Sun = 0 days). The preview then
+  // read "0 วัน จะถูกยกเลิกและคืนเข้ายอดคงเหลือ" with Confirm still enabled, and the write went
+  // through: the request split into two rows, nothing returned to the balance, and the tail stored
+  // as a day-mode record with days:0 -- which leaveMinutesOf() reads as an HOURLY record, the very
+  // thing the kept-side guard exists to prevent. The server refuses this too
+  // (code shorten-empty-giveback), so a direct call cannot get past it either.
+  if (backDays === 0) {
+    return bad(currentLang === 'ja'
+      ? '選んだ範囲に勤務日がありません（休日のみ）— 返せる日がありません'
+      : L('That range has no working day to give back (weekend/holiday only)',
+          'ช่วงที่เลือกไม่มีวันทำงานให้คืน (เป็นวันหยุดล้วน) — เลือกวันอื่น'));
+  }
   btn.disabled = false;
   preview.innerHTML = (currentLang === 'ja'
     ? `申請は <b>${fmtDate(l.dateFrom)} 〜 ${fmtDate(keptTo)}（${keptDays}日）</b> になります。<br>`
@@ -22918,6 +22951,41 @@ function shortenLeaveButtonHtml(l) {
   return `<button class="btn btn-outline btn-sm" onclick="shortenLeave(${l.id})">${label}</button>`;
 }
 
+// 2026-11-02 (owner): after giving days back, the leave history shows the one request as TWO rows
+// -- the trimmed original and the cancelled tail -- and the owner, looking at his own real record,
+// said the page "should also state how many days the leave actually comes to once cancelled".
+// Until now that meant reading two rows and subtracting by hand.
+// The figure comes from leaveRecordMinutes(), the same function the balance cards and every report
+// path use, and never from a second calculation of its own: a private formula here would drift
+// from the balance silently (the project has that scar already -- see the dual-sync notes on the
+// payroll engine). minToStr() then prints it in whichever of the three languages is on.
+// "Original" is derived as taken + given back rather than read from originalDateTo, because a
+// request shortened twice overwrites originalDateTo with the second round's starting point while
+// both cancelled tails still point here through cancelledWith -- the sum stays right either way.
+function shortenedLeaveNetNoteHtml(l) {
+  if (!l || !l.shortenedAt) return '';
+  // The record must still stand. A shortened leave can be withdrawn afterwards -- an Excused
+  // Attendance grant cancels an approved leave covering the same days, and md/accounting can
+  // revoke -- and `shortenedAt` survives that. Without this the struck-through row would still
+  // announce "actually taken: 2 days" for a leave that in the end was not taken at all.
+  if (isWithdrawnLeaveStatus(l.status)) return '';
+  const takenMin = leaveRecordMinutes(l);
+  const givenBackMin = (typeof DATA_LEAVES !== 'undefined' ? DATA_LEAVES : [])
+    .filter(x => x && x.status === 'cancelled' && x.cancelledWith === l.id)
+    .reduce((sum, x) => sum + leaveRecordMinutes(x), 0);
+  // No tail found (a legacy shortenedAt, or the tail was itself removed): say nothing rather than
+  // print "given back 0", which would read as a bug to the one person who would notice.
+  if (givenBackMin <= 0) return '';
+  const taken = minToStr(takenMin);
+  const back = minToStr(givenBackMin);
+  const original = minToStr(takenMin + givenBackMin);
+  const text = currentLang === 'ja'
+    ? `実際の取得：${taken}（元 ${original}、${back} 返却）`
+    : L(`Actually taken: ${taken} (of ${original}, ${back} given back)`,
+        `ลาจริง ${taken} (จากเดิม ${original} คืนแล้ว ${back})`);
+  return `<div style="font-size:11px;color:#64748b;margin-top:2px">📊 ${escapeHtml(text)}</div>`;
+}
+
 // Server refusal codes for /shorten, worded here the way cancelBlockMessage() does for cancels.
 // Anything this switch does not know is a shared period/guard code, so it falls through to the
 // cancel wording instead of showing the employee a raw code.
@@ -22930,6 +22998,7 @@ function shortenBlockMessage(code, l) {
     case 'shorten-whole': return L('That would cancel the whole request — use Cancel instead', 'นั่นคือการยกเลิกทั้งใบ — ให้กดยกเลิกแทน');
     case 'shorten-after-end': return L('The leave already ends before that date', 'วันลาจบก่อนวันที่เลือกแล้ว');
     case 'shorten-empty-remainder': return L('No working day would be left on the request — cancel the whole request instead', 'จะไม่มีวันทำงานเหลือในคำขอนี้ — ให้ยกเลิกทั้งใบแทน');
+    case 'shorten-empty-giveback': return L('That range has no working day to give back (weekend/holiday only)', 'ช่วงที่เลือกไม่มีวันทำงานให้คืน (เป็นวันหยุดล้วน) — เลือกวันอื่น');
     default: return cancelBlockMessage(code, l);
   }
 }
