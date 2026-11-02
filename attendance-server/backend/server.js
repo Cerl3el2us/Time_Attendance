@@ -8084,27 +8084,6 @@ function isCancellableApprovedLeave(leave, asOfYmd) {
   return asOf < leave.dateFrom;
 }
 
-// Dual-sync with app.js: isShortenableApprovedLeave
-// 2026-11-02 (owner): an approved annual/sick/business leave may be SHORTENED by the employee --
-// the days that have not arrived yet are given back, the rest of the approval stands. Until today
-// the only options were isCancellableApprovedLeave() above, which takes the WHOLE record and only
-// before it starts, and the MD/Accounting revoke route, which also takes the whole record. The real
-// case that forced this: an approved 30/10-5/11 sick leave whose last three days were no longer
-// needed on 02/11 -- already running, so nothing could touch it.
-// True only when a legal returnDate exists at all: it must be after today (owner's rule: future
-// days only), after dateFrom (anything else is cancelling the whole request, which has its own
-// route) and no later than dateTo. Such a date exists exactly when dateTo is past both today and
-// dateFrom. Hourly-mode records are excluded: they are a single day and carry days:0.
-function isShortenableApprovedLeave(leave, asOfYmd) {
-  if (!leave || leave.status !== 'approved') return false;
-  if (!DAY_BASED_LEAVE_TYPES.has(leave.type)) return false;
-  if (leave.hourlyStart || leave.hourlyEnd) return false;
-  if (!isValidDateStr(leave.dateFrom) || !isValidDateStr(leave.dateTo)) return false;
-  const asOf = isValidDateStr(asOfYmd) ? asOfYmd : bangkokDateStr();
-  const earliest = asOf > leave.dateFrom ? asOf : leave.dateFrom;
-  return leave.dateTo > earliest;
-}
-
 // Dual-sync with app.js computeLateDeductMinutes (annual-leave balance deduction, NOT the payslip
 // display one inside computePayslipExtras). Same exemptions: weekends, public holidays, company
 // trips, approved annual/sick/business leave days, drivers; approved checkIn time-corrections win.
@@ -9231,122 +9210,6 @@ function fetchMizuhoResonaRates() {
 // permanently-pending promise instead of just failing its own.
 let _exRateInflight = null;
 
-// 2026-11-02: the split itself, with no I/O and no request in sight, so the tests can run the real
-// rule instead of rebuilding the two records and then asserting against their own copy of it --
-// a route whose logic is only reachable through HTTP gets tested by matching strings in its source,
-// which proves the line is present and nothing about what it computes.
-// `kept` keeps the original id, status, approver and approvedAt: the approval that already happened
-// is not re-decided here. `givenBack` has no id yet -- only the caller holding the whole array can
-// allocate one (nextId).
-function splitLeaveForShorten(leave, returnDate, byUser, atIso) {
-  const at = atIso || new Date().toISOString();
-  const dateTo = leave.dateTo;
-  const keptTo = addDaysToDateStr(returnDate, -1);
-  const kept = { ...leave,
-    dateTo: keptTo, days: deriveLeaveDaysCount(leave.dateFrom, keptTo),
-    shortenedAt: at, shortenedBy: byUser.name, originalDateTo: dateTo };
-  const givenBack = { ...leave,
-    dateFrom: returnDate, dateTo, days: deriveLeaveDaysCount(returnDate, dateTo),
-    status: 'cancelled', cancelledAt: at, cancelledById: byUser.id, cancelledBy: byUser.name,
-    cancelledWith: leave.id, serverCreatedAt: at };
-  // Only the kept record carries the shortening marks; the cancelled tail is a record in its own
-  // right, so inheriting them through the spread above would be noise in its history row.
-  delete givenBack.shortenedAt; delete givenBack.shortenedBy; delete givenBack.originalDateTo;
-  return { kept, givenBack };
-}
-
-// 2026-11-02 (owner): the employee gives back the days of an APPROVED annual/sick/business leave
-// that have not arrived yet -- "I am coming back to work on <returnDate>". Everything before that
-// date keeps its original approval, approver and id; the tail becomes its own 'cancelled' record
-// (cancelledWith -> the original) so the history still shows it was approved and then given back.
-// Why it exists: DELETE /api/leaves/:id cancels the WHOLE record and only before it starts
-// (isCancellableApprovedLeave), and the revoke route is whole-record and md/accounting-only, so an
-// approved leave already under way could not be trimmed at all. The real case: an approved sick
-// leave 30/10-5/11 whose last three days were no longer needed on 02/11.
-// Not role-gated on purpose (owner's decision): giving days back costs the company nothing and
-// needs no second approval. md/accounting still take approvals back with /revoke, which is a
-// different act and lands as 'revoked'.
-app.post('/api/leaves/:id/shorten', withLeavesLock((req, res) => {
-  try {
-    const id = parseInt(req.params.id);
-    const body = parseBody(req) || {};
-    const leaves = readLeaves();
-    if (leaves === null) return res.status(503).json({ success:false, message:'Service temporarily unavailable' });
-    const idx = leaves.findIndex(l => l.id === id);
-    if (idx < 0) return res.status(404).json({ success:false, message:'Not found' });
-    const leave = leaves[idx];
-    const users = readUsers() || [];
-    const live = users.find(u => u.id === req.user.sub);
-    if (!live) return res.status(403).json({ success:false, message:'Forbidden' });
-    // The button only ever renders on the employee's own request, but never trust that alone.
-    if (leave.userId !== live.id) {
-      return res.status(403).json({ success:false, code:'shorten-not-owner', message:'You can only shorten your own leave' });
-    }
-    if (!isShortenableApprovedLeave(leave)) {
-      return res.status(400).json({ success:false, code:'shorten-not-eligible', message:'This request cannot be shortened' });
-    }
-    const returnDate = String(body.returnDate || '');
-    if (!isValidDateStr(returnDate)) {
-      return res.status(400).json({ success:false, code:'shorten-bad-date', message:'returnDate must be YYYY-MM-DD' });
-    }
-    const dateTo = leave.dateTo;
-    // Owner's rule (2026-11-02): future days only -- a day that has arrived is history, not a plan.
-    if (returnDate <= bangkokDateStr()) {
-      return res.status(400).json({ success:false, code:'shorten-past', message:'Only days that have not arrived yet can be given back' });
-    }
-    if (returnDate <= leave.dateFrom) {
-      return res.status(400).json({ success:false, code:'shorten-whole', message:'That would cancel the whole request -- cancel it instead' });
-    }
-    if (returnDate > dateTo) {
-      return res.status(400).json({ success:false, code:'shorten-after-end', message:'The leave already ends before that date' });
-    }
-    // The same three period guards the revoke route runs, on the span being given back: a day
-    // inside a locked / MD-approved / tax-confirmed period must not change under those steps.
-    if (lockedPeriodInRange(returnDate, dateTo)) {
-      return res.status(400).json({ success:false, code:'period-locked', message:'This pay period is locked' });
-    }
-    if (mdApprovedPeriodInRange(returnDate, dateTo, leave.userId)) {
-      return res.status(409).json({ success:false, code:'period-frozen', message:'Payroll for this period has already been approved by the Managing Director' });
-    }
-    if (accountingConfirmedInRange(returnDate, dateTo, leave.userId)) {
-      return res.status(409).json({ success:false, code:'period-confirmed', message:'Accounting has already confirmed tax for this period -- unconfirm before making changes' });
-    }
-    // Same field shape as the cancel route so the history views and `cancelledWith` nesting behave
-    // identically (app.js reads cancelledWith to nest this row under the record it came from).
-    const { kept, givenBack } = splitLeaveForShorten(leave, returnDate, live);
-    // A kept span with no working day would store days:0, and leaveMinutesOf() reads days:0 as an
-    // HOURLY record and falls through to hourlyStart/timePart -- a day-mode record must never end
-    // up there. Refuse and let the employee cancel the whole request instead. Checked before
-    // anything is written, so a refusal leaves the array untouched.
-    if (kept.days === 0) {
-      return res.status(400).json({ success:false, code:'shorten-empty-remainder',
-        message:'No working day would be left on the request -- cancel the whole request instead' });
-    }
-    givenBack.id = nextId(leaves);
-    leaves[idx] = kept;
-    leaves.push(givenBack);
-    console.log('[LEAVE] approved leave shortened', JSON.stringify({ id, userId: leave.userId,
-      type: leave.type, dateFrom: leave.dateFrom, originalDateTo: dateTo, keptTo: kept.dateTo,
-      keptDays: kept.days, givenBackDays: givenBack.days, givenBackId: givenBack.id }));
-    saveLeaves(leaves);
-    // Returning annual-leave days changes an already-snapshotted carry-forward, exactly as the
-    // cancel and revoke routes refresh it. sick/business never enter the annual pool.
-    if (leave.type === 'annual') {
-      try {
-        refreshSnapshottedCarryForward(leaves, live, leave.dateFrom);
-      } catch (e) {
-        console.error('[LEAVE] carry-forward refresh after shorten failed', e && e.message);
-      }
-    }
-    broadcastLeaveUpdated(leaves[idx]);
-    broadcast({ type: 'LEAVE_CREATED', leave: toPublicLeaveProjection(givenBack) });
-    return res.json({ success:true, leave: leaves[idx], cancelled: givenBack });
-  } catch (e) {
-    console.error('[LEAVE] shorten failed', e);
-    return res.status(500).json({ success:false, message:'Internal error' });
-  }
-}));
-
 // 2026-09-26 (owner): the dashboard shows each bank's TT buying rate but never said whether it
 // had moved. The banks publish once a day, so "since last time" has to mean "since the previous
 // publication", not "since the previous fetch" -- a browser refresh must not zero the arrow.
@@ -9394,7 +9257,6 @@ function annotateExRateChange(data) {
   }
   return data;
 }
-
 
 app.get('/api/exchange-rate', async (req, res) => {
   try {
