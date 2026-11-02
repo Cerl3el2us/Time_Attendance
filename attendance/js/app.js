@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 173;
+const APP_BUILD = 175;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -8635,8 +8635,20 @@ async function login() {
       // Was always showing "incorrect password" no matter what the backend actually said --
       // masked a rate-limit lockout (429) as a password error, which is genuinely misleading
       // since the fix for one is "wait" and the fix for the other is "check your password".
-      errEl.querySelector('span').textContent = res.status === 429
-        ? L('⏳ Too many login attempts — please wait a few minutes and try again', '⏳ ลองเข้าสู่ระบบบ่อยเกินไป — กรุณารอสักครู่แล้วลองใหม่')
+      // 2026-11-02 (owner, after a real outage): 503 and 500 were also shown as "incorrect
+      // username or password". On 2 Nov the backend was restarted under an account that could
+      // not read users.json, so readUsers() returned null and EVERY login answered 503 -- the
+      // screen told every employee their password was wrong, and an hour went into checking
+      // passwords that had never changed. The server already distinguishes these; only this line
+      // threw the distinction away. The status code is shown too, so the next person can say
+      // what happened without opening devtools.
+      errEl.querySelector('span').textContent =
+        res.status === 429
+          ? L('⏳ Too many login attempts — please wait a few minutes and try again', '⏳ ลองเข้าสู่ระบบบ่อยเกินไป — กรุณารอสักครู่แล้วลองใหม่')
+        : res.status === 503
+          ? L('⚠️ The system cannot read its data right now — this is not your password. Please tell the administrator. (503)', '⚠️ ระบบอ่านข้อมูลไม่ได้ในขณะนี้ — ไม่ใช่รหัสผ่านของคุณผิด กรุณาแจ้งผู้ดูแลระบบ (503)')
+        : res.status >= 500
+          ? L('⚠️ The server failed while signing you in — this is not your password. Please tell the administrator. (500)', '⚠️ เซิร์ฟเวอร์ผิดพลาดระหว่างเข้าสู่ระบบ — ไม่ใช่รหัสผ่านของคุณผิด กรุณาแจ้งผู้ดูแลระบบ (500)')
         : L('Incorrect username or password', 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง');
       errEl.style.display = 'flex';
       return;
