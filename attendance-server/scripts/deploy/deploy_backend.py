@@ -180,9 +180,31 @@ env_prefix = (' '.join(env_bits) + ' ') if env_bits else ''
 if not SUPERADMIN_PASSWORD:
     print('[NOTE] SUPERADMIN_PASSWORD not set on this machine — superadmin account will NOT be created until you set it (see DEVELOPER_HANDOFF.md)')
 
-cmd = f'cd "/volume1/web/Time_Attendance/attendance-server/backend" && HOME="/volume1/web/Time_Attendance/attendance-server" {env_prefix}nohup {NODE} server.js >> server.log 2>&1 & echo pid:$!'
-started = run(cmd)
-print('[START]', started if started is not None else '(unknown -- read timed out)')
+# Wrap a whole command for `sh -c '<here>'`, closing and reopening the quote around any
+# single quote inside it, so a password or value containing ' cannot end the string early.
+def _single_quoted(s):
+    return "'" + s.replace("'", "'\\''") + "'"
+
+
+# 2026-11-02 (owner): start as root, the way the NAS itself does.
+# This script used to kill the old process with sudo and then start the new one as the SSH
+# account, so the backend had two possible owners depending on who last restarted it:
+#   - /usr/local/etc/rc.d/attendance-autostart.sh, at boot AND every time its watchdog loop finds
+#     the backend down (it checks every 5 minutes), runs `start_backend()` with no su/sudo -u, and
+#     rc.d runs as root -- so boot and every automatic recovery give a ROOT-owned process;
+#   - this script gave a Teerawat-owned one.
+# The two are not interchangeable, because the asymmetry runs one way: root reads the Teerawat-owned
+# data files fine, while Teerawat cannot read a root-owned 0600 one. On 2026-11-02 a restart through
+# this script handed the backend to Teerawat while four 0600 files were root-owned; readUsers()
+# returned null, EVERY route answered 503, and the whole site looked like its data had been wiped.
+# Nothing about that was specific to what was being deployed -- any deploy would have done it.
+# Starting as root removes the mismatch instead of papering over it, and matches what the watchdog
+# would do on its own minutes later anyway. Checked against the real rc.d script, not from memory.
+start_sh = (f'cd "/volume1/web/Time_Attendance/attendance-server/backend" && '
+            f'HOME="/volume1/web/Time_Attendance/attendance-server" {env_prefix}'
+            f'nohup {NODE} server.js < /dev/null >> server.log 2>&1 & echo pid:$!')
+started = run_sudo(f'sh -c {_single_quoted(start_sh)}')
+print('[START]', (started or '').strip() or '(no output -- verifying below)')
 time.sleep(4)
 
 new_pid = run(FIND_PID)
@@ -191,9 +213,17 @@ print('[AFTER] running pid(s):', new_pid or '(none -- FAILED TO START)')
 if old_pid and new_pid and (set(old_pid.split()) & set(new_pid.split())):
     print('[WARN] new pid overlaps with the pre-restart pid -- restart may not have taken effect')
 
+# The expected owner is now root, and anything else is the problem -- the reverse of what this
+# check used to say. A Teerawat-owned process here means the sudo start silently fell back to a
+# plain one, which is the exact state that caused the 2026-11-02 outage, so it is called out
+# loudly rather than noted in passing.
 new_owner = run(f"ps -o user= -p {new_pid.split()[-1]} 2>/dev/null") if new_pid else None
-if new_owner and new_owner.strip() != NAS_USER:
-    print(f'[WARN] the running process is owned by "{new_owner.strip()}", not {NAS_USER} -- the watchdog likely respawned it as root; future restarts of this script will need sudo again until this is cleaned up')
+if new_owner and new_owner.strip() != 'root':
+    print(f'[WARN] the running process is owned by "{new_owner.strip()}", not root -- it cannot read '
+          f'any root-owned 0600 file in backend/data, which makes every route answer 503. '
+          f'Check that sudo worked for {NAS_USER} on the NAS.')
+elif new_owner:
+    print('[OK] running as root, the same owner the NAS boot script and its watchdog use')
 
 health = run('curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/health')
 print('[VERIFY] health check HTTP', health)
