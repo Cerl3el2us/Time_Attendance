@@ -4446,6 +4446,22 @@ function isLegacyAutoApprovedPersonalCar(l) {
   return !!(l && l.type === 'personal-car' && l.status === 'approved' && !l.approver);
 }
 // Dual-sync with server.js: isCancellableApprovedLeave
+// DUAL-SYNC: server.js deriveLeaveDaysCount (same function, same name). 2026-11-02: the loop this
+// replaces lived inline inside submitLeave(), so nothing else could ask "how many working days is
+// this range?" -- the partial-cancel confirm needs that number to tell the employee how many days
+// come back, and a second copy of the loop would drift from the server's answer in silence.
+// Weekends and public holidays are skipped: they are not leave days and never leave the quota.
+function deriveLeaveDaysCount(dateFrom, dateTo) {
+  let days = 0;
+  let d = new Date(dateFrom + 'T12:00:00');
+  const end = new Date((dateTo || dateFrom) + 'T12:00:00');
+  while (d <= end) {
+    if (d.getDay() !== 0 && d.getDay() !== 6 && !isPublicHoliday(localDateStr(d))) days++;
+    d.setDate(d.getDate() + 1);
+  }
+  return days;
+}
+
 function isCancellableApprovedLeave(l, asOfYmd) {
   if (!l || l.status !== 'approved') return false;
   // 2026-09-24 (owner): dual-sync with server.js -- the owner may cancel an APPROVED Holiday Work
@@ -19590,10 +19606,9 @@ async function submitLeave() {
     dateFrom = document.getElementById('leave-form-from').value;
     dateTo   = document.getElementById('leave-form-to').value || dateFrom;
     if (!dateFrom) { showToast(L('⚠️ Please specify the start date', '⚠️ กรุณาระบุวันที่เริ่มลา'), 'warning'); return; }
-    days = 0;
-    let d = new Date(dateFrom + 'T12:00:00');
-    const end = new Date(dateTo + 'T12:00:00');
-    while (d <= end) { if (d.getDay() !== 0 && d.getDay() !== 6 && !isPublicHoliday(localDateStr(d))) days++; d.setDate(d.getDate()+1); }
+    // 2026-11-02: the count moved out to deriveLeaveDaysCount() (DUAL-SYNC with server.js) so the
+    // partial-cancel confirm can reuse the exact same rule instead of carrying a second copy.
+    days = deriveLeaveDaysCount(dateFrom, dateTo);
     if (days === 0) { showToast(L('⚠️ No working days in the selected range', '⚠️ ไม่มีวันทำงานในช่วงที่เลือก'), 'warning'); return; }
   } else {
     dateFrom = document.getElementById('leave-form-date').value;
