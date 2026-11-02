@@ -302,4 +302,56 @@ test('a split that would leave no working day on the record is detectable', () =
   assert.strictEqual(S.deriveLeaveDaysCount('2026-10-31', '2026-11-01'), 0);
 });
 
+console.log('the button and its confirm');
+function clientFnBody(name) {
+  const i = APP_SRC.indexOf(`async function ${name}(`);
+  assert.ok(i > 0, `${name}() does not exist`);
+  const next = APP_SRC.indexOf('\n// ', i + 10);
+  return APP_SRC.slice(i, next > 0 ? next : i + 6000);
+}
+test('shortenLeave() guards the owner and posts to the shorten route', () => {
+  const body = clientFnBody('shortenLeave');
+  ['blockIfObserver()', 'isShortenableApprovedLeave(', 'deriveLeaveDaysCount(',
+   '/shorten', "method: 'POST'", 'confirm(', 'currentUser.id'].forEach(k =>
+    assert.ok(body.includes(k), `shortenLeave is missing ${k}`));
+});
+test('the confirm says how many days come back, in all three languages', () => {
+  const body = clientFnBody('shortenLeave');
+  assert.ok(/currentLang === 'ja'/.test(body), 'Japanese wording is required');
+  assert.ok(/L\(`Coming back on/.test(body), 'English/Thai confirm via L() is required');
+  assert.ok(body.includes('${backDays}') && body.includes('${keptDays}'),
+    'the confirm must state both day counts, not just the dates');
+});
+test('every refusal code the server can send has wording on this side', () => {
+  const i = APP_SRC.indexOf('function shortenBlockMessage(');
+  assert.ok(i > 0, 'shortenBlockMessage() does not exist');
+  const body = APP_SRC.slice(i, APP_SRC.indexOf('\n// ', i + 10));
+  const routeBody = shortenRouteBody();
+  const codes = [...routeBody.matchAll(/code:'([a-z-]+)'/g)].map(m => m[1]);
+  assert.ok(codes.length >= 7, `expected the route to send several codes, saw ${codes.length}`);
+  for (const c of new Set(codes)) {
+    if (c.startsWith('period-')) continue; // shared with cancels; handled by the default branch
+    assert.ok(body.includes(`case '${c}'`), `no wording for refusal code ${c}`);
+  }
+  assert.ok(body.includes('default: return cancelBlockMessage('), 'unknown codes must fall through');
+});
+test('the button is defined once and used by every list that shows an approved request', () => {
+  assert.ok(APP_SRC.includes('function shortenLeaveButtonHtml(l)'), 'the shared button helper is missing');
+  const uses = (APP_SRC.match(/shortenLeaveButtonHtml\(l\)/g) || []).length;
+  assert.ok(uses >= 3, `every approved-request list must offer it, saw ${uses} uses`);
+  const helper = APP_SRC.slice(APP_SRC.indexOf('function shortenLeaveButtonHtml(l)'));
+  assert.ok(helper.includes('l.userId !== currentUser.id'), "a colleague's row must not offer the button");
+  assert.ok(/class="btn btn-outline btn-sm"/.test(helper), 'btn-outline is the class that exists in style.css');
+});
+test('the button class actually exists in the stylesheet', () => {
+  const css = fs.readFileSync(path.join(ROOT, 'attendance/css/style.css'), 'utf8');
+  assert.ok(css.includes('.btn-outline'), '.btn-outline must be a real class, or the button renders unstyled');
+});
+test('the cache-buster was bumped past the value this work started from', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'attendance/index.html'), 'utf8');
+  const m = /js\/app\.js\?v=(\d{8})/.exec(html);
+  assert.ok(m, 'cache-buster not found');
+  assert.ok(Number(m[1]) >= 20261102, `cache-buster ${m[1]} must be 20261102 or later`);
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ', 0 failed'}`);
