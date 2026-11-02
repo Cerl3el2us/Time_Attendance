@@ -147,4 +147,159 @@ test('both copies carry the DUAL-SYNC note', () => {
   }
 });
 
+console.log('shorten route');
+function shortenRouteBody() {
+  const i = SERVER_SRC.indexOf("app.post('/api/leaves/:id/shorten'");
+  assert.ok(i > 0, 'the shorten route does not exist');
+  return SERVER_SRC.slice(i, SERVER_SRC.indexOf('\napp.', i + 10));
+}
+test('the route is wrapped in the leaves lock and fails closed on an unreadable file', () => {
+  const body = shortenRouteBody();
+  assert.ok(SERVER_SRC.includes("app.post('/api/leaves/:id/shorten', withLeavesLock("), 'must use withLeavesLock');
+  assert.ok(body.includes('if (leaves === null) return res.status(503)'), 'must fail closed on a read error');
+});
+test('only the employee the leave belongs to, never an approver', () => {
+  const body = shortenRouteBody();
+  assert.ok(body.includes("code:'shorten-not-owner'"), 'needs the not-owner refusal');
+  assert.ok(/leave\.userId !== live\.id/.test(body), 'needs the owner check against the live user');
+  assert.ok(!SERVER_SRC.includes("app.post('/api/leaves/:id/shorten', requireRole("),
+    'this route is for the employee, so it must not be role-gated to md/accounting');
+});
+test('every guard from the design is present', () => {
+  const body = shortenRouteBody();
+  ['isShortenableApprovedLeave(leave)', "code:'shorten-bad-date'", "code:'shorten-past'",
+   "code:'shorten-whole'", "code:'shorten-after-end'", "code:'shorten-empty-remainder'",
+   'lockedPeriodInRange', 'mdApprovedPeriodInRange', 'accountingConfirmedInRange',
+   "code:'period-locked'", "code:'period-frozen'", "code:'period-confirmed'"]
+    .forEach(k => assert.ok(body.includes(k), `missing guard: ${k}`));
+});
+test('both records are written in one save, and the quota snapshot is refreshed', () => {
+  const body = shortenRouteBody();
+  ['splitLeaveForShorten(leave, returnDate, live)', 'givenBack.id = nextId(leaves)',
+   'leaves[idx] = kept', 'leaves.push(givenBack)', 'saveLeaves(leaves)',
+   'refreshSnapshottedCarryForward', 'broadcastLeaveUpdated(leaves[idx])']
+    .forEach(k => assert.ok(body.includes(k), `missing write step: ${k}`));
+  assert.ok(!/status: 'revoked'/.test(body), "the employee's own act is 'cancelled', never 'revoked'");
+  // One save only: a half-applied split would leave a record whose days no longer match its range.
+  assert.strictEqual((body.match(/saveLeaves\(/g) || []).length, 1, 'exactly one save');
+  // The empty-remainder refusal has to come before the first write, or a refused call still
+  // mutates the array it was handed.
+  assert.ok(body.indexOf("code:'shorten-empty-remainder'") < body.indexOf('leaves[idx] = kept'),
+    'the empty-remainder refusal must be checked before anything is written');
+});
+test('the shorten route never touches the approval fields of the kept record', () => {
+  const body = shortenRouteBody();
+  [/status:\s*'approved'/, /approver\s*:/, /approvedAt\s*:/].forEach(re =>
+    assert.ok(!re.test(body), `must not rewrite the approval: ${re}`));
+});
+
+console.log('splitLeaveForShorten: what the route actually writes');
+// The real split function, plus the two real minutes helpers the quota is built from, so these
+// assertions run the shipped rule rather than a copy of it.
+function makeSplit() {
+  const ctx = {
+    HHMM_RE: /^([01]\d|2[0-3]):[0-5]\d$/,
+    isPublicHoliday: s => HOLIDAYS.has(s),
+    ta_localDateStr: localDateStr,
+    hourlyLeaveChargedMinutes: () => 0, // never reached: every record here is day-mode (days > 0)
+  };
+  vm.createContext(ctx);
+  vm.runInContext([
+    extractFunction(SERVER_SRC, 'addDaysToDateStr'),
+    extractFunction(SERVER_SRC, 'deriveLeaveDaysCount'),
+    extractFunction(SERVER_SRC, 'splitLeaveForShorten'),
+    extractFunction(SERVER_SRC, 'leaveMinutesOf'),
+    extractFunction(SERVER_SRC, 'isVoidLeaveStatus'),
+  ].join('\n'), ctx);
+  return ctx;
+}
+function makeClientMinutes() {
+  const ctx = { hourlyLeaveChargedMinutes: () => 0 };
+  vm.createContext(ctx);
+  vm.runInContext([
+    extractFunction(APP_SRC, 'leaveRecordMinutes'),
+    extractFunction(APP_SRC, 'isVoidLeaveStatus'),
+  ].join('\n'), ctx);
+  return ctx;
+}
+const BY = { id: 1, name: 'Sirintorn' };
+
+test("the owner's real case splits into 30/10-02/11 kept and 03-05/11 given back", () => {
+  const S = makeSplit();
+  const { kept, givenBack } = S.splitLeaveForShorten(SICK, '2026-11-03', BY, '2026-11-02T03:00:00.000Z');
+  assert.strictEqual(kept.dateFrom, '2026-10-30');
+  assert.strictEqual(kept.dateTo, '2026-11-02');
+  assert.strictEqual(kept.days, 2);              // 30/10 and 02/11 (31/10-01/11 is a weekend)
+  assert.strictEqual(kept.originalDateTo, '2026-11-05');
+  assert.strictEqual(givenBack.dateFrom, '2026-11-03');
+  assert.strictEqual(givenBack.dateTo, '2026-11-05');
+  assert.strictEqual(givenBack.days, 2);         // 03/11 and 05/11 (04/11 is a public holiday)
+  assert.strictEqual(givenBack.cancelledWith, SICK.id);
+});
+test('the kept record keeps its id and approval; the given-back one is cancelled and has no id yet', () => {
+  const S = makeSplit();
+  const approved = { ...SICK, approver: 'Takiuchi', approvedAt: '2026-10-29T02:00:00.000Z' };
+  const { kept, givenBack } = S.splitLeaveForShorten(approved, '2026-11-03', BY);
+  assert.strictEqual(kept.id, approved.id);
+  assert.strictEqual(kept.status, 'approved');
+  assert.strictEqual(kept.approver, 'Takiuchi');
+  assert.strictEqual(kept.approvedAt, approved.approvedAt);
+  assert.strictEqual(kept.shortenedBy, 'Sirintorn');
+  assert.strictEqual(givenBack.status, 'cancelled');
+  assert.strictEqual(givenBack.cancelledBy, 'Sirintorn');
+  assert.strictEqual(givenBack.cancelledById, 1);
+  // The caller allocates the id from the whole array; a copied id would collide with the original.
+  assert.strictEqual(givenBack.id, approved.id, 'spread keeps the id until the route overwrites it');
+  // The shortening marks belong to the kept record only.
+  ['shortenedAt', 'shortenedBy', 'originalDateTo'].forEach(k =>
+    assert.ok(!(k in givenBack), `givenBack must not carry ${k}`));
+});
+test('the split never loses or invents a day, at every split point', () => {
+  const S = makeSplit();
+  for (const ret of ['2026-10-31', '2026-11-01', '2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05']) {
+    const { kept, givenBack } = S.splitLeaveForShorten(SICK, ret, BY);
+    assert.strictEqual(kept.days + givenBack.days, SICK.days,
+      `split at ${ret}: ${kept.days}+${givenBack.days} != ${SICK.days}`);
+  }
+});
+test('the quota goes back by exactly the days given back -- same number on both sides', () => {
+  const S = makeSplit(), C = makeClientMinutes();
+  const { kept, givenBack } = S.splitLeaveForShorten(SICK, '2026-11-03', BY);
+  // "Used" is what both balance readers sum: the non-void records of that type.
+  const usedServer = ls => ls.filter(l => !S.isVoidLeaveStatus(l.status)).reduce((s, l) => s + S.leaveMinutesOf(l), 0);
+  const usedClient = ls => ls.filter(l => !C.isVoidLeaveStatus(l.status)).reduce((s, l) => s + C.leaveRecordMinutes(l), 0);
+  const before = [SICK];
+  const after = [kept, { ...givenBack, id: 999 }];
+  assert.strictEqual(usedServer(before) - usedServer(after), givenBack.days * 8 * 60, 'server');
+  assert.strictEqual(usedClient(before) - usedClient(after), givenBack.days * 8 * 60, 'client');
+  assert.strictEqual(usedServer(after), usedClient(after), 'both sides must agree after the split');
+  // And the cancelled row really is the reason -- counting it would wipe the refund out.
+  const naive = after.reduce((s, l) => s + S.leaveMinutesOf(l), 0);
+  assert.strictEqual(naive, usedServer(before), 'the cancelled row still holds its own days');
+});
+test('a split that leaves no working day is reported as days:0 for the route to refuse', () => {
+  const S = makeSplit();
+  // Sat 31/10 .. Thu 05/11, coming back Mon 02/11 -> the kept span is Sat+Sun only.
+  const { kept } = S.splitLeaveForShorten({ ...SICK, dateFrom: '2026-10-31', days: 2 }, '2026-11-02', BY);
+  assert.strictEqual(kept.days, 0);
+});
+
+console.log('the arithmetic the route relies on');
+test('kept days + given-back days = the original days, for every split point', () => {
+  const S = makeServerDays();
+  const from = '2026-10-30', to = '2026-11-05';
+  const total = S.deriveLeaveDaysCount(from, to);
+  const addDays = (s, n) => { const d = new Date(s + 'T12:00:00'); d.setDate(d.getDate() + n); return localDateStr(d); };
+  for (const ret of ['2026-10-31', '2026-11-01', '2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05']) {
+    const kept = S.deriveLeaveDaysCount(from, addDays(ret, -1));
+    const back = S.deriveLeaveDaysCount(ret, to);
+    assert.strictEqual(kept + back, total, `split at ${ret}: ${kept}+${back} != ${total}`);
+  }
+});
+test('a split that would leave no working day on the record is detectable', () => {
+  const S = makeServerDays();
+  // Sat 31/10 .. Thu 05/11, coming back Mon 02/11 -> the kept span is Sat+Sun only.
+  assert.strictEqual(S.deriveLeaveDaysCount('2026-10-31', '2026-11-01'), 0);
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ', 0 failed'}`);
