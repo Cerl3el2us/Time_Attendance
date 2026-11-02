@@ -86,4 +86,65 @@ test('submitLeave() uses the helper instead of keeping its own copy of the loop'
   assert.ok(!/while \(d <= end\)/.test(body), 'the inline day-count loop must be gone from submitLeave');
 });
 
+function makePredicate(src, extra) {
+  const ctx = Object.assign({
+    DAY_BASED_LEAVE_TYPES: new Set(['annual', 'sick', 'business']),
+    bangkokDateStr: () => '2026-11-02',
+    isValidDateStr: s => /^\d{4}-\d{2}-\d{2}$/.test(s),
+  }, extra || {});
+  vm.createContext(ctx);
+  vm.runInContext(extractFunction(src, 'isShortenableApprovedLeave'), ctx);
+  return ctx;
+}
+const bothPredicate = () => [['client', makePredicate(APP_SRC)], ['server', makePredicate(SERVER_SRC)]];
+const SICK = { id: 7, userId: 1, type: 'sick', status: 'approved', dateFrom: '2026-10-30', dateTo: '2026-11-05', days: 4 };
+
+console.log('shortenable predicate: both sides agree');
+test("the owner's real case is shortenable on 2026-11-02", () => {
+  for (const [side, X] of bothPredicate()) {
+    assert.strictEqual(X.isShortenableApprovedLeave(SICK, '2026-11-02'), true, side);
+  }
+});
+test('a leave whose last day has passed is not shortenable', () => {
+  for (const [side, X] of bothPredicate()) {
+    assert.strictEqual(X.isShortenableApprovedLeave(SICK, '2026-11-05'), false, side + ' last day');
+    assert.strictEqual(X.isShortenableApprovedLeave(SICK, '2026-11-09'), false, side + ' after');
+  }
+});
+test('single-day, hourly, non-approved and out-of-scope types are not shortenable', () => {
+  for (const [side, X] of bothPredicate()) {
+    const no = (over, why) => assert.strictEqual(
+      X.isShortenableApprovedLeave({ ...SICK, ...over }, '2026-11-02'), false, `${side} ${why}`);
+    no({ dateTo: '2026-10-30' }, 'single day');
+    no({ dateTo: undefined }, 'no dateTo');
+    no({ hourlyStart: '09:00', hourlyEnd: '12:00' }, 'hourly mode');
+    no({ status: 'pending' }, 'pending');
+    no({ status: 'cancelled' }, 'already cancelled');
+    no({ status: 'revoked' }, 'already revoked');
+    no({ type: 'abroad' }, 'abroad is out of scope this round');
+    no({ type: 'holiday-work' }, 'holiday-work is out of scope');
+    no({ dateFrom: 'nope' }, 'malformed dateFrom');
+    assert.strictEqual(X.isShortenableApprovedLeave(null, '2026-11-02'), false, side + ' null');
+  }
+});
+test('a leave entirely in the future is shortenable too (not only one already running)', () => {
+  for (const [side, X] of bothPredicate()) {
+    assert.strictEqual(X.isShortenableApprovedLeave(
+      { ...SICK, dateFrom: '2026-12-01', dateTo: '2026-12-04' }, '2026-11-02'), true, side);
+  }
+});
+test('both copies carry the DUAL-SYNC note', () => {
+  for (const [name, src] of [['app.js', APP_SRC], ['server.js', SERVER_SRC]]) {
+    const fn = extractFunction(src, 'isShortenableApprovedLeave');
+    // The whole comment block that sits directly above the function, however long it runs --
+    // counting characters backwards would silently stop reading once a copy's comment grew.
+    const before = src.slice(0, src.indexOf(fn)).split('\n');
+    if (before.length && before[before.length - 1].trim() === '') before.pop(); // the newline the function starts after
+    const block = [];
+    for (let i = before.length - 1; i >= 0 && before[i].trim().startsWith('//'); i--) block.unshift(before[i]);
+    assert.ok(block.length, `${name} has no comment above isShortenableApprovedLeave`);
+    assert.ok(/DUAL-SYNC|Dual-sync/.test(block.join('\n')), `${name} needs the dual-sync comment`);
+  }
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ', 0 failed'}`);

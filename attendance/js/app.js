@@ -4446,6 +4446,12 @@ function isLegacyAutoApprovedPersonalCar(l) {
   return !!(l && l.type === 'personal-car' && l.status === 'approved' && !l.approver);
 }
 // Dual-sync with server.js: isCancellableApprovedLeave
+// DUAL-SYNC: server.js DAY_BASED_LEAVE_TYPES (:6253) -- the three leave types counted in working
+// days, which are also the three the 2026-11-02 partial cancellation covers.
+const DAY_BASED_LEAVE_TYPES = new Set(['annual', 'sick', 'business']);
+// DUAL-SYNC: server.js isValidDateStr.
+function isValidDateStr(s) { return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s); }
+
 // DUAL-SYNC: server.js deriveLeaveDaysCount (same function, same name). 2026-11-02: the loop this
 // replaces lived inline inside submitLeave(), so nothing else could ask "how many working days is
 // this range?" -- the partial-cancel confirm needs that number to tell the employee how many days
@@ -4474,6 +4480,20 @@ function isCancellableApprovedLeave(l, asOfYmd) {
   if (!l.dateFrom || !/^\d{4}-\d{2}-\d{2}$/.test(l.dateFrom)) return false;
   const asOf = asOfYmd || bangkokDateStr();
   return asOf < l.dateFrom;
+}
+
+// DUAL-SYNC: server.js isShortenableApprovedLeave (same function, same name).
+// 2026-11-02 (owner): see the server copy for why this exists -- the employee gives back the days
+// of an approved leave that have not arrived, instead of losing the whole approval. This copy only
+// decides whether the button renders; the server decides whether the write happens.
+function isShortenableApprovedLeave(l, asOfYmd) {
+  if (!l || l.status !== 'approved') return false;
+  if (!DAY_BASED_LEAVE_TYPES.has(l.type)) return false;
+  if (l.hourlyStart || l.hourlyEnd) return false;
+  if (!isValidDateStr(l.dateFrom) || !isValidDateStr(l.dateTo)) return false;
+  const asOf = isValidDateStr(asOfYmd) ? asOfYmd : bangkokDateStr();
+  const earliest = asOf > l.dateFrom ? asOf : l.dateFrom;
+  return l.dateTo > earliest;
 }
 
 async function savePeriodLocks() {

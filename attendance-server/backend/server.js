@@ -8084,6 +8084,27 @@ function isCancellableApprovedLeave(leave, asOfYmd) {
   return asOf < leave.dateFrom;
 }
 
+// Dual-sync with app.js: isShortenableApprovedLeave
+// 2026-11-02 (owner): an approved annual/sick/business leave may be SHORTENED by the employee --
+// the days that have not arrived yet are given back, the rest of the approval stands. Until today
+// the only options were isCancellableApprovedLeave() above, which takes the WHOLE record and only
+// before it starts, and the MD/Accounting revoke route, which also takes the whole record. The real
+// case that forced this: an approved 30/10-5/11 sick leave whose last three days were no longer
+// needed on 02/11 -- already running, so nothing could touch it.
+// True only when a legal returnDate exists at all: it must be after today (owner's rule: future
+// days only), after dateFrom (anything else is cancelling the whole request, which has its own
+// route) and no later than dateTo. Such a date exists exactly when dateTo is past both today and
+// dateFrom. Hourly-mode records are excluded: they are a single day and carry days:0.
+function isShortenableApprovedLeave(leave, asOfYmd) {
+  if (!leave || leave.status !== 'approved') return false;
+  if (!DAY_BASED_LEAVE_TYPES.has(leave.type)) return false;
+  if (leave.hourlyStart || leave.hourlyEnd) return false;
+  if (!isValidDateStr(leave.dateFrom) || !isValidDateStr(leave.dateTo)) return false;
+  const asOf = isValidDateStr(asOfYmd) ? asOfYmd : bangkokDateStr();
+  const earliest = asOf > leave.dateFrom ? asOf : leave.dateFrom;
+  return leave.dateTo > earliest;
+}
+
 // Dual-sync with app.js computeLateDeductMinutes (annual-leave balance deduction, NOT the payslip
 // display one inside computePayslipExtras). Same exemptions: weekends, public holidays, company
 // trips, approved annual/sick/business leave days, drivers; approved checkIn time-corrections win.
