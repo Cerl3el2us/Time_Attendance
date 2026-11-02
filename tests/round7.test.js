@@ -212,6 +212,10 @@ const SAMPLE = {
   'request-revoked': { type: 'holiday-work', dateFrom: '2027-11-06', by: 'Acc', reason: 'wrong day', also: [{ type: 'late-out', dateFrom: '2027-11-06' }] },
   'accounting-revoked': { employeeName: 'Somchai', by: 'Acc', reason: '', records: [{ type: 'ot', dateFrom: '2027-11-02' }] },
   'approved-cancelled': { employeeName: 'Somchai', records: [{ type: 'annual', dateFrom: '2027-11-10', dateTo: '2027-11-11' }] },
+  // 2026-11-02: days given back out of an approved leave -- both halves of the split are named, so
+  // the sample carries both (a missing one would read as "undefined day(s)", which this test catches).
+  'leave-shortened': { employeeName: 'Somchai', type: 'annual', backFrom: '2027-11-10', backTo: '2027-11-11',
+    backDays: 2, keptFrom: '2027-11-08', keptTo: '2027-11-09', keptDays: 2 },
   'cf-expiry-reminder': { minutes: 780, expiryDate: '2027-11-30' },
   'cf-run-overdue': { year: 2026 },
   'cf-manual-decision': { employeeName: 'Somchai', userId: 9, year: 2026, deactivatedAt: '2026-06-30T03:00:00.000Z' },

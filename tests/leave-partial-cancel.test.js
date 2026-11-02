@@ -207,6 +207,23 @@ test('the cancelled tail is announced per viewer, never to every socket', () => 
   assert.ok(!/broadcast\(\{\s*type:\s*'LEAVE_CREATED'/.test(body),
     "a plain LEAVE_CREATED broadcast sends a colleague's cancelled record to every socket");
 });
+// 2026-11-02 (owner asked for this after the review found the gap): the cancel route tells MD and
+// Accounting about every cancelled approved record; this one said nothing, so approved leave days
+// could change inside an open pay period with no word to the people who run payroll.
+test('MD and Accounting are told, with wording of its own, after the save', () => {
+  const body = shortenRouteBody().split('\n').filter(line => !line.trim().startsWith('//')).join('\n');
+  assert.ok(body.includes('notifyApprovedLeaveShortened(live, leaves[idx], givenBack)'),
+    'the route must notify md/accounting once the split is written');
+  assert.ok(body.indexOf('saveLeaves(leaves)') < body.indexOf('notifyApprovedLeaveShortened'),
+    'notify only after the write: a refused or failed save must not announce a change that did not happen');
+  assert.ok(!body.includes('notifyApprovedRecordCancelled'),
+    'this is not a cancellation of the whole request -- it must not reuse the cancel wording');
+  // The kind has to exist on both sides; tests/round7.test.js asserts the keys match exactly.
+  assert.ok(SERVER_SRC.includes("'leave-shortened'"), 'kind missing from the server');
+  assert.ok(APP_SRC.includes("'leave-shortened':"), 'renderer missing from app.js');
+  assert.ok(/'leave-shortened':\s*\['md',\s*'accounting'\]/.test(SERVER_SRC),
+    'the kind must be role-targeted, so it is purged when someone stops being md/accounting');
+});
 test('the shorten route never touches the approval fields of the kept record', () => {
   const body = shortenRouteBody();
   [/status:\s*'approved'/, /approver\s*:/, /approvedAt\s*:/].forEach(re =>
