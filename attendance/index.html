@@ -1430,6 +1430,32 @@
 </div>
 
 <!-- Late Out Modal -->
+<!-- 2026-11-02 (owner): "กลับมาทำงานก่อนกำหนด" used to ask for the date through prompt(), which can
+     only take YYYY-MM-DD while every other date field in this app shows DD/MM/YYYY and accepts a
+     typed 3/11/2026. A real input[type=date] with an id gets initDatePickers()'s flatpickr, its
+     locale-aware display and attachTypedDateEntry()'s parser for free, exactly like the others. -->
+<div class="modal-overlay" id="shorten-leave-modal" onclick="if(event.target===this)closeShortenLeaveModal()">
+  <div class="modal" style="max-width:460px">
+    <div class="modal-header">
+      <h3 data-en="↩️ Come back to work early">↩️ กลับมาทำงานก่อนกำหนด</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeShortenLeaveModal()">✕</button>
+    </div>
+    <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
+      <div id="shorten-leave-current" style="font-size:13px;color:#475569"></div>
+      <div class="form-field" style="margin-bottom:0">
+        <label data-en="Which day are you coming back to work?">กลับมาทำงานวันไหน</label>
+        <input type="date" id="shorten-return-date" onchange="updateShortenLeavePreview()">
+        <div id="shorten-leave-range" style="font-size:11px;color:#94a3b8;margin-top:4px"></div>
+      </div>
+      <div id="shorten-leave-preview" style="font-size:13px;line-height:1.7;background:#f8fafc;border-radius:10px;padding:12px"></div>
+    </div>
+    <div class="modal-footer" style="display:flex;gap:10px;justify-content:flex-end">
+      <button class="btn btn-ghost" onclick="closeShortenLeaveModal()" data-en="Cancel">ยกเลิก</button>
+      <button class="btn btn-primary" id="shorten-leave-confirm" onclick="confirmShortenLeave()" data-en="Confirm">ยืนยัน</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="lateout-modal" onclick="if(event.target===this)closeLateOutModal()">
   <div class="modal" style="max-width:440px">
     <div class="modal-header">
@@ -2826,10 +2852,10 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js" integrity="sha384-SYKAG6cglRMN0RVvhNeBY0r3FYKNOJtznwA0v7B5Vp9tr31xAHsZC0DqkQ/pZDmj" crossorigin="anonymous"></script>
-<script src="lang/ja.js?v=20261102k"></script>  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js" integrity="sha384-5JqMv4L/Xa0hfvtF06qboNdhvuYXUku9ZrhZh3bSk8VXF0A/RuSLHpLsSV9Zqhl6" crossorigin="anonymous"></script>
+<script src="lang/ja.js?v=20261102m"></script>  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js" integrity="sha384-5JqMv4L/Xa0hfvtF06qboNdhvuYXUku9ZrhZh3bSk8VXF0A/RuSLHpLsSV9Zqhl6" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ja.js" integrity="sha384-mKor8U8jwukUkfxaFPCsxKF9S62PXq4gG7zcZ5yQ2x3KL1msprJZeFlKFEDeeb5V" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/th.js" integrity="sha384-E6OVFg1zUc/pckGxry0YZ6VeZ1E17l7Jl8ZQx58jbEfxxkz9LqknQhiIrA9zg/8b" crossorigin="anonymous"></script>
 
-<script src="js/app.js?v=20261102x"></script>
+<script src="js/app.js?v=20261102y"></script>
 </body>
 </html>

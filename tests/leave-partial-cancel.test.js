@@ -309,18 +309,44 @@ function clientFnBody(name) {
   const next = APP_SRC.indexOf('\n// ', i + 10);
   return APP_SRC.slice(i, next > 0 ? next : i + 6000);
 }
-test('shortenLeave() guards the owner and posts to the shorten route', () => {
+test('shortenLeave() guards the owner and opens the modal', () => {
   const body = clientFnBody('shortenLeave');
-  ['blockIfObserver()', 'isShortenableApprovedLeave(', 'deriveLeaveDaysCount(',
-   '/shorten', "method: 'POST'", 'confirm(', 'currentUser.id'].forEach(k =>
+  ['blockIfObserver()', 'isShortenableApprovedLeave(', 'currentUser.id',
+   "getElementById('shorten-leave-modal')", 'initDatePickers()'].forEach(k =>
     assert.ok(body.includes(k), `shortenLeave is missing ${k}`));
 });
-test('the confirm says how many days come back, in all three languages', () => {
-  const body = clientFnBody('shortenLeave');
+test('confirmShortenLeave() posts to the shorten route', () => {
+  const i = APP_SRC.indexOf('async function confirmShortenLeave()');
+  assert.ok(i > 0, 'confirmShortenLeave() does not exist');
+  const body = APP_SRC.slice(i, APP_SRC.indexOf('\n}', i) + 2);
+  ['/shorten', "method: 'POST'", 'returnDate', 'shortenBlockMessage('].forEach(k =>
+    assert.ok(body.includes(k), `confirmShortenLeave is missing ${k}`));
+});
+test('the summary states both day counts before anything is sent, in all three languages', () => {
+  const i = APP_SRC.indexOf('function updateShortenLeavePreview()');
+  assert.ok(i > 0, 'updateShortenLeavePreview() does not exist');
+  const body = APP_SRC.slice(i, APP_SRC.indexOf('\n}\n', i));
+  assert.ok(body.includes('deriveLeaveDaysCount('), 'the summary must compute the day counts');
   assert.ok(/currentLang === 'ja'/.test(body), 'Japanese wording is required');
-  assert.ok(/L\(`Coming back on/.test(body), 'English/Thai confirm via L() is required');
+  assert.ok(/L\(`The request becomes/.test(body), 'English/Thai wording via L() is required');
   assert.ok(body.includes('${backDays}') && body.includes('${keptDays}'),
-    'the confirm must state both day counts, not just the dates');
+    'the summary must state both day counts, not just the dates');
+  assert.ok(body.includes("btn.disabled = true") && body.includes('btn.disabled = false'),
+    'an impossible choice must disable Confirm rather than fail after a round trip');
+});
+// 2026-11-02 (owner): the date is asked for in a real date field, not a prompt(). prompt() can
+// only take a typed YYYY-MM-DD, while every other date field in this app shows DD/MM/YYYY and
+// parses a typed 3/11/2026 -- the owner reported this the first time the feature reached the site.
+test('the return date is asked for with the app\'s own date field, never a prompt()', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'attendance/index.html'), 'utf8');
+  assert.ok(/<input type="date" id="shorten-return-date"/.test(html),
+    'the modal needs a real input[type=date] WITH AN id -- initDatePickers() only binds fields that have one');
+  const fn = clientFnBody('shortenLeave');
+  const code = fn.split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
+  assert.ok(!/\bprompt\s*\(/.test(code), 'shortenLeave must not ask for the date through prompt()');
+  const confirmFn = APP_SRC.slice(APP_SRC.indexOf('async function confirmShortenLeave()'));
+  assert.ok(!/\bconfirm\s*\(/.test(confirmFn.slice(0, confirmFn.indexOf('\n}\n')).replace(/confirmShortenLeave/g, '')),
+    'the modal is the confirmation -- no second confirm() dialog on top of it');
 });
 test('every refusal code the server can send has wording on this side', () => {
   const i = APP_SRC.indexOf('function shortenBlockMessage(');

@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 176;
+const APP_BUILD = 177;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -22784,38 +22784,95 @@ async function shortenLeave(id) {
       'คำขอนี้ไม่มีวันข้างหน้าเหลือให้คืนแล้ว'), 'warning');
     return false;
   }
-  // The earliest day that may be given back is the day after today, and never the request's own
-  // first day (that would be cancelling the whole thing, which cancelLeave() already does).
-  const addDays = (ymd, n) => { const d = new Date(ymd + 'T12:00:00'); d.setDate(d.getDate() + n); return localDateStr(d); };
+  // 2026-11-02 (owner): this used to ask through prompt(), which can only take a typed
+  // YYYY-MM-DD while every other date field in this app shows DD/MM/YYYY and accepts 3/11/2026.
+  // The modal holds a real input[type=date] with an id, so initDatePickers() gives it the same
+  // flatpickr, the same locale display and attachTypedDateEntry()'s parser as every other field.
+  _shortenLeaveId = id;
+  const earliest = shortenEarliestReturnDate(l);
+  const input = document.getElementById('shorten-return-date');
+  input.min = earliest;
+  input.max = l.dateTo;
+  input.value = earliest;
+  document.getElementById('shorten-leave-current').textContent = currentLang === 'ja'
+    ? `現在の申請：${fmtDate(l.dateFrom)} 〜 ${fmtDate(l.dateTo)}（${l.days}日）`
+    : L(`This request: ${fmtDate(l.dateFrom)} to ${fmtDate(l.dateTo)} (${l.days} day(s))`,
+        `คำขอนี้: ${fmtDate(l.dateFrom)} ถึง ${fmtDate(l.dateTo)} (${l.days} วัน)`);
+  document.getElementById('shorten-leave-range').textContent = currentLang === 'ja'
+    ? `${fmtDate(earliest)} 〜 ${fmtDate(l.dateTo)} の範囲で選べます`
+    : L(`Choose between ${fmtDate(earliest)} and ${fmtDate(l.dateTo)}`,
+        `เลือกได้ระหว่าง ${fmtDate(earliest)} ถึง ${fmtDate(l.dateTo)}`);
+  document.getElementById('shorten-leave-modal').classList.add('show');
+  // Bind the picker after the modal exists on screen, the same way the other modals' fields are
+  // bound, so the field shows DD/MM/YYYY rather than the raw ISO value.
+  initDatePickers();
+  updateShortenLeavePreview();
+  return true;
+}
+
+// The earliest day that may be given back is the day after today, and never the request's own
+// first day (that would be cancelling the whole thing, which cancelLeave() already does).
+function shortenEarliestReturnDate(l) {
   const today = bangkokDateStr();
-  const earliest = addDays(today > l.dateFrom ? today : l.dateFrom, 1);
-  const returnDate = prompt(currentLang === 'ja'
-    ? `何日から出勤しますか？（${earliest} ～ ${l.dateTo}）`
-    : L(`Which day are you coming back to work? (${earliest} to ${l.dateTo})`,
-        `กลับมาทำงานวันไหน? (${earliest} ถึง ${l.dateTo})`), earliest);
-  if (!returnDate) return false;
-  const picked = String(returnDate).trim();
-  if (!isValidDateStr(picked) || picked < earliest || picked > l.dateTo) {
-    showToast(currentLang === 'ja'
-      ? `${earliest} ～ ${l.dateTo} の日付を入力してください`
-      : L(`Pick a date between ${earliest} and ${l.dateTo}`,
-          `กรุณาเลือกวันที่ระหว่าง ${earliest} ถึง ${l.dateTo}`), 'warning');
-    return false;
+  const d = new Date((today > l.dateFrom ? today : l.dateFrom) + 'T12:00:00');
+  d.setDate(d.getDate() + 1);
+  return localDateStr(d);
+}
+
+function closeShortenLeaveModal() {
+  document.getElementById('shorten-leave-modal').classList.remove('show');
+  _shortenLeaveId = null;
+}
+
+// Shows what the request becomes before anything is sent, and refuses impossible choices in place
+// rather than after a round trip. DUAL-SYNC with the server's own guards: the server still decides.
+function updateShortenLeavePreview() {
+  const l = DATA_LEAVES.find(x => x.id === _shortenLeaveId);
+  const preview = document.getElementById('shorten-leave-preview');
+  const btn = document.getElementById('shorten-leave-confirm');
+  if (!l || !preview) return;
+  const picked = String(document.getElementById('shorten-return-date').value || '').trim();
+  const earliest = shortenEarliestReturnDate(l);
+  const bad = msg => { preview.textContent = msg; btn.disabled = true; };
+  if (!isValidDateStr(picked)) {
+    return bad(L('Pick the day you are coming back.', 'เลือกวันที่จะกลับมาทำงาน'));
   }
-  const keptTo = addDays(picked, -1);
+  if (picked < earliest || picked > l.dateTo) {
+    return bad(currentLang === 'ja'
+      ? `${fmtDate(earliest)} 〜 ${fmtDate(l.dateTo)} の日付を選んでください`
+      : L(`Pick a date between ${fmtDate(earliest)} and ${fmtDate(l.dateTo)}`,
+          `กรุณาเลือกวันที่ระหว่าง ${fmtDate(earliest)} ถึง ${fmtDate(l.dateTo)}`));
+  }
+  const d = new Date(picked + 'T12:00:00'); d.setDate(d.getDate() - 1);
+  const keptTo = localDateStr(d);
   const keptDays = deriveLeaveDaysCount(l.dateFrom, keptTo);
   const backDays = deriveLeaveDaysCount(picked, l.dateTo);
-  // Mirrors the server's 'shorten-empty-remainder' refusal so the employee hears it before the
-  // round trip, not after. DUAL-SYNC: the server decides; this only saves a pointless request.
   if (keptDays === 0) {
-    showToast(L('No working day would be left on the request — cancel the whole request instead',
-      'จะไม่มีวันทำงานเหลือในคำขอนี้ — ให้ยกเลิกทั้งใบแทน'), 'warning');
-    return false;
+    return bad(L('No working day would be left on the request — cancel the whole request instead',
+      'จะไม่มีวันทำงานเหลือในคำขอนี้ — ให้ยกเลิกทั้งใบแทน'));
   }
-  if (!confirm(currentLang === 'ja'
-    ? `${picked} から出勤します。申請は ${l.dateFrom}～${keptTo}（${keptDays}日）になり、${picked}～${l.dateTo}（${backDays}日）は取り消して残日数に戻ります。取り消した分は履歴に残ります。`
-    : L(`Coming back on ${picked}. The request becomes ${l.dateFrom} to ${keptTo} (${keptDays} day(s)); ${picked} to ${l.dateTo} (${backDays} day(s)) is cancelled and returned to your balance. The cancelled part stays in your history.`,
-        `กลับมาทำงาน ${picked} · คำขอจะเหลือ ${l.dateFrom} ถึง ${keptTo} (${keptDays} วัน) และ ${picked} ถึง ${l.dateTo} (${backDays} วัน) จะถูกยกเลิกและคืนเข้ายอดคงเหลือ ส่วนที่ยกเลิกจะยังอยู่ในประวัติ`))) return false;
+  btn.disabled = false;
+  preview.innerHTML = (currentLang === 'ja'
+    ? `申請は <b>${fmtDate(l.dateFrom)} 〜 ${fmtDate(keptTo)}（${keptDays}日）</b> になります。<br>`
+      + `<b>${fmtDate(picked)} 〜 ${fmtDate(l.dateTo)}（${backDays}日）</b> は取り消され、残日数に戻ります。<br>`
+      + `取り消した分は履歴に残ります。`
+    : L(`The request becomes <b>${fmtDate(l.dateFrom)} to ${fmtDate(keptTo)} (${keptDays} day(s))</b>.<br>`
+        + `<b>${fmtDate(picked)} to ${fmtDate(l.dateTo)} (${backDays} day(s))</b> is cancelled and returned to your balance.<br>`
+        + `The cancelled part stays in your history.`,
+        `คำขอจะเหลือ <b>${fmtDate(l.dateFrom)} ถึง ${fmtDate(keptTo)} (${keptDays} วัน)</b><br>`
+        + `ส่วน <b>${fmtDate(picked)} ถึง ${fmtDate(l.dateTo)} (${backDays} วัน)</b> จะถูกยกเลิกและคืนเข้ายอดคงเหลือ<br>`
+        + `ส่วนที่ยกเลิกจะยังอยู่ในประวัติ`));
+}
+
+async function confirmShortenLeave() {
+  const id = _shortenLeaveId;
+  const l = DATA_LEAVES.find(x => x.id === id);
+  if (!l) return false;
+  const picked = String(document.getElementById('shorten-return-date').value || '').trim();
+  if (!isValidDateStr(picked)) return false;
+  const backDays = deriveLeaveDaysCount(picked, l.dateTo);
+  const btn = document.getElementById('shorten-leave-confirm');
+  btn.disabled = true;
   try {
     const r = await apiFetch(`/api/leaves/${id}/shorten`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -22827,9 +22884,11 @@ async function shortenLeave(id) {
     if (i >= 0 && data.leave) DATA_LEAVES[i] = data.leave;
     if (data.cancelled) DATA_LEAVES.push(data.cancelled);
   } catch (e) {
+    btn.disabled = false;
     showToast(L('❌ Could not change the request: ', '❌ แก้คำขอไม่สำเร็จ: ') + e.message, 'danger');
     return false;
   }
+  closeShortenLeaveModal();
   // Annual leave returning to the pool can move an already-snapshotted carry-forward, which lives
   // in settings -- same refresh cancelLeave() does for the types that touch that pool.
   if (l.type === 'annual') await loadSettingsFromBackend();
@@ -22843,6 +22902,10 @@ async function shortenLeave(id) {
     : L(`✅ ${backDays} day(s) returned to your balance`, `✅ คืน ${backDays} วันเข้ายอดคงเหลือแล้ว`), 'success');
   return true;
 }
+
+// The request the shorten modal is currently open on. Null whenever the modal is closed, so a
+// stale id can never be sent by a late click on a modal that has already been dismissed.
+let _shortenLeaveId = null;
 
 // 2026-11-02: one definition of the "give the remaining days back" button, used by every list that
 // shows an approved request, so the two lists can never disagree about when it appears. It renders
