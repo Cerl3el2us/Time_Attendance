@@ -5135,6 +5135,15 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
       }
       A.leave.businessLeaveDays = normalizeQuotaDays(A.leave.businessLeaveDays, DEFAULT_BUSINESS_LEAVE_DAYS);
     }
+    // 2026-11-03 (เจ้าของตัดสิน): วันที่เริ่มบังคับให้ลาเป็นชั่วโมงเต็ม · '' = ยังไม่บังคับ
+    // ตรวจที่นี่ด้วย ไม่ใช่แค่ฝั่งหน้าเว็บ เพราะค่าที่พังจะทำให้ wholeHourLeaveRequired() คืน false
+    // เงียบๆ -- ด่านทั้งระบบจะถูกปิดโดยไม่มีใครรู้ ซึ่งแย่กว่าการปฏิเสธการบันทึกไปตรงๆ
+    if (A.leave && A.leave.wholeHourLeaveFrom !== undefined) {
+      const v = A.leave.wholeHourLeaveFrom;
+      if (v === '' || v === null) A.leave.wholeHourLeaveFrom = '';
+      else if (typeof v === 'string' && isValidDateStr(v.trim())) A.leave.wholeHourLeaveFrom = v.trim();
+      else return res.status(400).json({ success: false, message: 'appSettings.leave.wholeHourLeaveFrom must be an empty string or a YYYY-MM-DD date' });
+    }
     // 2026-10-13: per-role early/late rates (owner's decision). A SEPARATE appSettings section,
     // not a nested object inside `allowances`, because that section's validator demands a number
     // from every key -- the morningReviewEnabled incident showed a nested non-number there makes
@@ -6266,6 +6275,13 @@ function hourlyLeaveShapeError(hourlyStart, hourlyEnd, dateFrom, dateTo) {
   if (dateTo && dateTo !== dateFrom) return 'hourly leave must be a single day (dateTo must equal dateFrom)';
   // 2026-09-24 (owner): the lunch hour is not charged, so e.g. 12:00-13:00 would cost nothing.
   if (hourlyLeaveChargedMinutes(hourlyStart, hourlyEnd) <= 0) return 'hourly leave falls entirely within the 12:00-13:00 lunch break';
+  // 2026-11-03 (เจ้าของตัดสิน): ตั้งแต่วันที่ตั้งไว้ใน appSettings.leave.wholeHourLeaveFrom
+  // (แผน: 2027-01-01) ลาได้เป็นชั่วโมงเต็มเท่านั้น -- ตัดสินจาก "วันที่ลา" ไม่ใช่วันที่กดยื่น
+  // ใบที่ยื่นไปแล้วไม่ถูกตรวจย้อน เพราะด่านนี้ถูกเรียกเฉพาะตอน POST /api/leaves และ PUT (แก้ใบ)
+  if (wholeHourLeaveRequired(dateFrom)) {
+    const whErr = wholeHourLeaveError(hourlyStart, hourlyEnd);
+    if (whErr) return `hourly leave on ${dateFrom} must be in whole hours: ${whErr}`;
+  }
   return null;
 }
 // DUAL-SYNC with app.js hourlyLeaveChargedMinutes.
@@ -6282,6 +6298,74 @@ function hourlyLeaveChargedMinutes(hourlyStart, hourlyEnd) {
   const lunchMin = Math.max(0, Math.min(e, 13 * 60) - Math.max(s, 12 * 60));
   return e - s - lunchMin;
 }
+
+// ===== WHOLE-HOUR LEAVE (DUAL-SYNC BLOCK) =====
+// 2026-11-03 (เจ้าของตัดสิน: "ปรับปรุงการยื่นวันลา ให้ลาได้เป็นชั่วโมงอย่างเดียว ยกเลิกการลารายนาที")
+// แบบเต็ม: docs/superpowers/specs/2026-11-03-whole-hour-leave-design.md
+//
+// เริ่มใช้รอบมกราคม 2027 แต่ "วันเริ่มบังคับ" เป็นค่าตั้ง ไม่ใช่ตัวเลขฝังในโค้ด -- เจ้าของบอกว่า
+// แผนอาจเลื่อน และเขาต้องเลื่อนเองได้โดยไม่ต้องรอให้ใครแก้โค้ดแล้วขึ้นเว็บใหม่
+// ด่านตัดสินจาก "วันที่ลา" (dateFrom) ไม่ใช่วันที่กดยื่น -- เจ้าของตัดสิน 2026-11-03 ว่า
+// "ลาพักร้อนที่เหลือในปีนี้ ยังอนุญาตให้ลาเป็นนาทีได้อยู่" ⇒ คนที่ยื่นใบลาของเดือนธันวาคม
+// ตอนเดือนมกราคม ต้องยังยื่นแบบเดิมได้ · ใบที่ยื่นไปแล้วไม่ถูกตรวจย้อน ด่านทำงานตอนยื่น/แก้เท่านั้น
+//
+// ค่าคงที่สามตัวและฟังก์ชันกฎสามตัวด้านล่าง ต้อง "เหมือนกันทุกตัวอักษร" กับ app.js
+// ยาม: tests/whole-hour-leave.test.js เทียบให้ทีละตัวอักษร ไม่ใช่แค่เทียบพฤติกรรม
+// ยกเว้นตัวอ่านค่าตั้งสองตัวที่ตั้งใจให้ต่างกัน (getAppSettings() ที่นี่ / APP_SETTINGS ที่นั่น)
+// แบบเดียวกับที่ carryForwardExpiryEnabled ทำอยู่แล้ว
+const WHOLE_HOUR_LEAVE_MAX_HOURS = 7;
+const WHOLE_HOUR_LEAVE_GRID_MIN = 30;
+// เวลาเลิกงาน 17:30 ยังไม่มีในค่าตั้ง (workSchedule เก็บแค่เวลาเริ่ม) -- ค่านี้จึงฝังไว้ตรงกับ
+// setHalfDayLeave() ใน app.js ที่ฝัง '17:30' อยู่เดิม ถ้าวันหน้าย้ายไปอยู่ในค่าตั้ง ต้องแก้ทั้งคู่
+const WHOLE_HOUR_LEAVE_DAY_END_MIN = 17 * 60 + 30;
+
+function wholeHourLeaveSettings() {
+  return getAppSettings().leave || {};
+}
+function wholeHourLeaveDayStartMin() {
+  const ws = getAppSettings().workSchedule || {};
+  return (ws.standardStartHour != null ? ws.standardStartHour : 8) * 60
+    + (ws.standardStartMinute != null ? ws.standardStartMinute : 30);
+}
+
+function wholeHourLeaveRequired(dateStr) {
+  const from = String(wholeHourLeaveSettings().wholeHourLeaveFrom || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from)) return false;
+  const d = String(dateStr || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return false;
+  return d >= from;
+}
+// "เริ่มกี่โมง + ลากี่ชั่วโมง" -> เวลาสิ้นสุด · คืน null ถ้าขอมาไม่ได้
+// พักเที่ยง 12:00-13:00 ไม่คิดเป็นเวลาลา (เจ้าของตัดสิน 2026-09-24) ⇒ ช่วงที่คร่อมพักเที่ยง
+// ต้องยาวขึ้นอีก 60 นาที จึงจะได้เวลาลาเท่าที่ขอจริง: 10:00 ลา 3 ชม. สิ้นสุด 14:00 ไม่ใช่ 13:00
+// ผลลัพธ์ต้องสอดคล้องกับ hourlyLeaveChargedMinutes() เสมอ -- เทสต์ตรวจย้อนกลับทุกแถว
+function hourlyLeaveEndFromHours(hourlyStart, hours) {
+  const h = Number(hours);
+  if (!Number.isInteger(h) || h < 1 || h > WHOLE_HOUR_LEAVE_MAX_HOURS) return null;
+  const s = parseHHMMToMins(hourlyStart);
+  if (!Number.isFinite(s)) return null;
+  if (s >= 12 * 60 && s < 13 * 60) return null;
+  let end = s + h * 60;
+  if (s < 12 * 60 && end > 12 * 60) end += 60;
+  if (end > WHOLE_HOUR_LEAVE_DAY_END_MIN) return null;
+  const p2 = n => String(n).padStart(2, '0');
+  return `${p2(Math.floor(end / 60))}:${p2(end % 60)}`;
+}
+// คืนรหัสเหตุผลสั้นๆ ไม่ใช่ข้อความ -- แต่ละฝั่งเอาไปทำข้อความเองคนละภาษา
+// (หน้าเว็บ 3 ภาษา / เซิร์ฟเวอร์เป็นอังกฤษสำหรับ API) กฎจึงเหมือนกันทุกตัวอักษรได้
+function wholeHourLeaveError(hourlyStart, hourlyEnd) {
+  const s = parseHHMMToMins(hourlyStart), e = parseHHMMToMins(hourlyEnd);
+  if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s) return 'not-whole-hour';
+  if (s % WHOLE_HOUR_LEAVE_GRID_MIN !== 0) return 'off-grid';
+  if (s >= 12 * 60 && s < 13 * 60) return 'starts-in-lunch';
+  if (s < wholeHourLeaveDayStartMin() || e > WHOLE_HOUR_LEAVE_DAY_END_MIN) return 'outside-work-hours';
+  const charged = hourlyLeaveChargedMinutes(hourlyStart, hourlyEnd);
+  if (charged <= 0 || charged % 60 !== 0) return 'not-whole-hour';
+  if (charged > WHOLE_HOUR_LEAVE_MAX_HOURS * 60) return 'exceeds-max';
+  return null;
+}
+// ===== END WHOLE-HOUR LEAVE (DUAL-SYNC BLOCK) =====
+
 function deriveLeaveDaysCount(dateFrom, dateTo) {
   let days = 0;
   let d = new Date(dateFrom + 'T12:00:00');
@@ -10017,7 +10101,7 @@ const DEFAULT_APP_SETTINGS = {
   // face scanner only. `driver` is exempt by default for the same reason geofence exempts it --
   // drivers are not at the office, so a company-wide off switch would strand them.
   webClock: { enabled: true, exemptRoles: ['driver'] },
-  leave: { carryForwardMax: 5, carryForwardExpiryEnabled: true, carryForwardExpiryMonth: 3, carryForwardExpiryDay: 31, carryForwardNotifyDays: 30, annualLeaveMinMonths: 6, annualLeaveTiers: DEFAULT_ANNUAL_LEAVE_TIERS.map(t => ({ ...t })), sickLeaveDays: DEFAULT_SICK_LEAVE_DAYS, businessLeaveDays: DEFAULT_BUSINESS_LEAVE_DAYS },
+  leave: { carryForwardMax: 5, carryForwardExpiryEnabled: true, carryForwardExpiryMonth: 3, carryForwardExpiryDay: 31, carryForwardNotifyDays: 30, annualLeaveMinMonths: 6, annualLeaveTiers: DEFAULT_ANNUAL_LEAVE_TIERS.map(t => ({ ...t })), sickLeaveDays: DEFAULT_SICK_LEAVE_DAYS, businessLeaveDays: DEFAULT_BUSINESS_LEAVE_DAYS, wholeHourLeaveFrom: '' },
   map: { cartoApiKey: '' },
   allowanceTypes: [],
   lateDeductPolicy: {

@@ -389,6 +389,8 @@ window.LANG_JA = {
   "Enable Payslip Email": "給与明細メール送信を有効化",
   "End Date": "終了日",
   "End Time": "終了時刻",
+  // 2026-11-03: ช่อง "จำนวนชั่วโมง" ของฟอร์มลาแบบชั่วโมงเต็ม (เจ้าของตัดสิน เริ่มรอบ ม.ค. 2027)
+  "Number of Hours": "休暇時間数",
   "End Work": "退勤",
   "End day is auto (Start − 1)": "終了日は自動設定（開始日 − 1）",
   "Ending Mileage (km)": "終了時走行距離（km）",

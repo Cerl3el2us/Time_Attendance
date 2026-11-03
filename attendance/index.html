@@ -1323,23 +1323,46 @@
       <div id="leave-mode-hours" style="display:none">
         <div class="form-field" style="margin-bottom:12px">
           <label data-en="Leave Date">วันที่ลา</label>
-          <input type="date" id="leave-form-date" onchange="calcLeaveHours()">
+          <input type="date" id="leave-form-date" onchange="onLeaveHourDateChange()">
           <div style="font-size:11px;color:#94a3b8;margin-top:4px" data-en="📌 Backdated dates are allowed — the request still requires approval">📌 สามารถระบุวันที่ย้อนหลังได้ — คำขอยังคงต้องรอการอนุมัติ</div>
         </div>
-        <div class="form-row">
-          <div class="form-field" style="margin-bottom:0">
-            <label data-en="Start Time">เวลาเริ่ม</label>
-            <input type="time" id="leave-form-start" onchange="calcLeaveHours()">
+        <!-- ฟอร์มเดิม: กรอกเวลาเริ่ม-สิ้นสุดเอง ใช้กับวันลาที่ยังไม่ถึงวันบังคับชั่วโมงเต็ม -->
+        <div id="leave-hours-free">
+          <div class="form-row">
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="Start Time">เวลาเริ่ม</label>
+              <input type="time" id="leave-form-start" onchange="calcLeaveHours()">
+            </div>
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="End Time">เวลาสิ้นสุด</label>
+              <input type="time" id="leave-form-end" onchange="calcLeaveHours()">
+            </div>
           </div>
-          <div class="form-field" style="margin-bottom:0">
-            <label data-en="End Time">เวลาสิ้นสุด</label>
-            <input type="time" id="leave-form-end" onchange="calcLeaveHours()">
+        </div>
+        <!-- 2026-11-03 (เจ้าของตัดสิน: "ให้ลาได้เป็นชั่วโมงอย่างเดียว ยกเลิกการลารายนาที")
+             ตั้งแต่ appSettings.leave.wholeHourLeaveFrom เป็นต้นไป เลือก "เวลาเริ่ม + จำนวนชั่วโมง"
+             แล้วระบบคำนวณเวลาสิ้นสุดให้ ⇒ กรอกเป็นนาทีไม่ได้อีก
+             สอง <select> นี้ไม่ได้เก็บค่าเอง แต่เขียนลง #leave-form-start / #leave-form-end ซึ่งยัง
+             เป็นแหล่งข้อมูลจริงเหมือนเดิม ⇒ submitLeave() / calcLeaveHours() / editLeaveRequest()
+             ไม่ต้องแก้ตรรกะที่อ่านค่า และโค้ดเดิมที่อ้างสองไอดีนั้นทั้งหมดยังทำงานต่อได้ -->
+        <div id="leave-hours-whole" style="display:none">
+          <div class="form-row">
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="Start Time">เวลาเริ่ม</label>
+              <select id="leave-form-start-slot" onchange="onWholeHourLeaveChange()"></select>
+            </div>
+            <div class="form-field" style="margin-bottom:0">
+              <label data-en="Number of Hours">จำนวนชั่วโมง</label>
+              <select id="leave-form-hours" onchange="onWholeHourLeaveChange()"></select>
+            </div>
           </div>
+          <div id="leave-form-end-computed" style="font-size:12px;color:#64748b;margin-top:6px"></div>
         </div>
         <div style="display:flex;gap:8px;margin-top:8px">
           <button type="button" onclick="setHalfDayLeave('am')" class="btn btn-ghost btn-sm" style="flex:1" data-en="🌅 Half day (morning)">🌅 ลาครึ่งวันเช้า</button>
           <button type="button" onclick="setHalfDayLeave('pm')" class="btn btn-ghost btn-sm" style="flex:1" data-en="🌇 Half day (afternoon)">🌇 ลาครึ่งวันบ่าย</button>
         </div>
+        <div id="leave-halfday-hint" style="display:none;font-size:11px;color:#94a3b8;margin-top:6px"></div>
         <div id="leave-hours-summary" style="display:none;margin-top:10px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:8px 14px;font-size:13px;color:#166534;font-weight:600"></div>
       </div>
 
@@ -2860,10 +2883,10 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js" integrity="sha384-SYKAG6cglRMN0RVvhNeBY0r3FYKNOJtznwA0v7B5Vp9tr31xAHsZC0DqkQ/pZDmj" crossorigin="anonymous"></script>
-<script src="lang/ja.js?v=20261102n"></script>  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js" integrity="sha384-5JqMv4L/Xa0hfvtF06qboNdhvuYXUku9ZrhZh3bSk8VXF0A/RuSLHpLsSV9Zqhl6" crossorigin="anonymous"></script>
+<script src="lang/ja.js?v=20261103a"></script>  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js" integrity="sha384-5JqMv4L/Xa0hfvtF06qboNdhvuYXUku9ZrhZh3bSk8VXF0A/RuSLHpLsSV9Zqhl6" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ja.js" integrity="sha384-mKor8U8jwukUkfxaFPCsxKF9S62PXq4gG7zcZ5yQ2x3KL1msprJZeFlKFEDeeb5V" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/th.js" integrity="sha384-E6OVFg1zUc/pckGxry0YZ6VeZ1E17l7Jl8ZQx58jbEfxxkz9LqknQhiIrA9zg/8b" crossorigin="anonymous"></script>
 
-<script src="js/app.js?v=20261103a"></script>
+<script src="js/app.js?v=20261103b"></script>
 </body>
 </html>

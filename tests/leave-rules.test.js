@@ -29,6 +29,15 @@ function extractFunction(src, name) {
   }
   throw new Error(`unbalanced ${name}`);
 }
+// 2026-11-03: ค่าคงที่ของกฎ "ลาเป็นชั่วโมงเต็ม" ถูกดึงออกจากซอร์สจริงเหมือนฟังก์ชัน ไม่พิมพ์ซ้ำที่นี่
+// เพราะถ้าเจ้าของเปลี่ยนเพดาน 7 ชม. ในอนาคต เทสต์นี้ต้องขยับตามเอง ไม่ใช่ยืนยันค่าเก่าค้างไว้
+function extractConst(src, name) {
+  const re = new RegExp(`^const ${name} = [^;]+;`, 'm');
+  const m = re.exec(src);
+  if (!m) throw new Error(`const ${name} not found`);
+  return m[0];
+}
+const SERVER_CONSTS = ['WHOLE_HOUR_LEAVE_MAX_HOURS', 'WHOLE_HOUR_LEAVE_GRID_MIN', 'WHOLE_HOUR_LEAVE_DAY_END_MIN'];
 
 const SHARED = ['normalizeAnnualLeaveTiers', 'getAnnualLeaveTiers', 'getAnnualLeaveMinMonths',
   'annualLeaveUnlockDateStr', 'isAnnualLeaveUnlocked', 'annualLeaveEntitlementDays',
@@ -40,7 +49,11 @@ const CLIENT_FNS = [...SHARED, 'leaveRecordMinutes', 'getApprovedHolidayWorkDays
   'getOpeningUsedKey', 'getOpeningUsedDays', 'computeLeaveBalance', 'canUseAnnualLeave', 'localDateStr', 'isYearEndCountedLeaveStatus', 'annualLeaveRemainingMinutes'];
 const SERVER_FNS = [...SHARED, 'leaveMinutesOf', 'getApprovedHolidayWorkAnnualLeaveDays',
   'deriveLeaveDaysCount', 'ta_localDateStr', 'isValidDateStr', 'hourlyLeaveShapeError', 'parseHHMMToMins',
-  'leaveBalanceError', 'leaveBalanceRemainingMinutes', 'annualLeaveServiceError', 'isYearEndCountedLeaveStatus', 'annualLeaveRemainingMinutes'];
+  'leaveBalanceError', 'leaveBalanceRemainingMinutes', 'annualLeaveServiceError', 'isYearEndCountedLeaveStatus', 'annualLeaveRemainingMinutes',
+  // 2026-11-03: hourlyLeaveShapeError() เรียกกฎ "ลาเป็นชั่วโมงเต็ม" ⇒ ต้องอยู่ในกระบะทรายด้วย
+  // ไม่งั้นด่านที่เทสต์ไฟล์นี้ตรวจอยู่จะพังเป็น ReferenceError · ยามของกฎนั้นเองคือ
+  // tests/whole-hour-leave.test.js ซึ่งเทียบสำเนาสองฝั่งทีละตัวอักษร
+  'wholeHourLeaveSettings', 'wholeHourLeaveDayStartMin', 'wholeHourLeaveRequired', 'wholeHourLeaveError'];
 
 const TIERS = [{ afterMonths: 6, days: 3 }, { afterMonths: 12, days: 6 }, { afterMonths: 24, days: 8 }, { afterMonths: 36, days: 10 }];
 function leaveSettings(over) {
@@ -79,7 +92,10 @@ function makeServer(world) {
   };
   ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
-  vm.runInContext(SERVER_FNS.map(n => extractFunction(SERVER_SRC, n)).join('\n'), ctx);
+  vm.runInContext([
+    ...SERVER_CONSTS.map(n => extractConst(SERVER_SRC, n)),
+    ...SERVER_FNS.map(n => extractFunction(SERVER_SRC, n)),
+  ].join('\n'), ctx);
   return ctx;
 }
 

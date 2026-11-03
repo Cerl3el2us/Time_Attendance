@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 180;
+const APP_BUILD = 181;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -1806,7 +1806,9 @@ let APP_SETTINGS = {
   // 2026-09-25: web check-in geofence (Paso Tower). Editable in Settings; `enabled:false` restores
   // the pre-geofence behaviour exactly.
   geofence: { enabled: true, lat: 13.7268315, lng: 100.52847, radiusM: 150, exemptRoles: ['driver'] },
-  leave: { carryForwardMax: 5, carryForwardExpiryEnabled: true, carryForwardExpiryMonth: 3, carryForwardExpiryDay: 31, carryForwardNotifyDays: 30, annualLeaveMinMonths: 6, annualLeaveTiers: DEFAULT_ANNUAL_LEAVE_TIERS.map(t => ({ ...t })), sickLeaveDays: DEFAULT_SICK_LEAVE_DAYS, businessLeaveDays: DEFAULT_BUSINESS_LEAVE_DAYS },
+  leave: { carryForwardMax: 5, carryForwardExpiryEnabled: true, carryForwardExpiryMonth: 3, carryForwardExpiryDay: 31, carryForwardNotifyDays: 30, annualLeaveMinMonths: 6, annualLeaveTiers: DEFAULT_ANNUAL_LEAVE_TIERS.map(t => ({ ...t })), sickLeaveDays: DEFAULT_SICK_LEAVE_DAYS, businessLeaveDays: DEFAULT_BUSINESS_LEAVE_DAYS,
+    // 2026-11-03: '' = ยังไม่บังคับลาเป็นชั่วโมงเต็ม (แผนของเจ้าของคือตั้งเป็น 2027-01-01)
+    wholeHourLeaveFrom: '' },
   allowanceTypes: [],
   lateDeductPolicy: {
     enabled: false,
@@ -5249,6 +5251,73 @@ function hourlyLeaveChargedMinutes(hourlyStart, hourlyEnd) {
   return e - s - lunchMin;
 }
 
+// ===== WHOLE-HOUR LEAVE (DUAL-SYNC BLOCK) =====
+// 2026-11-03 (เจ้าของตัดสิน: "ปรับปรุงการยื่นวันลา ให้ลาได้เป็นชั่วโมงอย่างเดียว ยกเลิกการลารายนาที")
+// แบบเต็ม: docs/superpowers/specs/2026-11-03-whole-hour-leave-design.md
+//
+// เริ่มใช้รอบมกราคม 2027 แต่ "วันเริ่มบังคับ" เป็นค่าตั้ง ไม่ใช่ตัวเลขฝังในโค้ด -- เจ้าของบอกว่า
+// แผนอาจเลื่อน และเขาต้องเลื่อนเองได้โดยไม่ต้องรอให้ใครแก้โค้ดแล้วขึ้นเว็บใหม่
+// ด่านตัดสินจาก "วันที่ลา" (dateFrom) ไม่ใช่วันที่กดยื่น -- เจ้าของตัดสิน 2026-11-03 ว่า
+// "ลาพักร้อนที่เหลือในปีนี้ ยังอนุญาตให้ลาเป็นนาทีได้อยู่" ⇒ คนที่ยื่นใบลาของเดือนธันวาคม
+// ตอนเดือนมกราคม ต้องยังยื่นแบบเดิมได้ · ใบที่ยื่นไปแล้วไม่ถูกตรวจย้อน ด่านทำงานตอนยื่น/แก้เท่านั้น
+//
+// ค่าคงที่สามตัวและฟังก์ชันกฎสามตัวด้านล่าง ต้อง "เหมือนกันทุกตัวอักษร" กับ server.js
+// ยาม: tests/whole-hour-leave.test.js เทียบให้ทีละตัวอักษร ไม่ใช่แค่เทียบพฤติกรรม
+// ยกเว้นตัวอ่านค่าตั้งสองตัวที่ตั้งใจให้ต่างกัน (APP_SETTINGS ที่นี่ / getAppSettings() ที่นั่น)
+// แบบเดียวกับที่ carryForwardExpiryEnabled ทำอยู่แล้ว
+const WHOLE_HOUR_LEAVE_MAX_HOURS = 7;
+const WHOLE_HOUR_LEAVE_GRID_MIN = 30;
+// เวลาเลิกงาน 17:30 ยังไม่มีในค่าตั้ง (workSchedule เก็บแค่เวลาเริ่ม) -- ค่านี้จึงฝังไว้ตรงกับ
+// setHalfDayLeave() ที่ฝัง '17:30' อยู่เดิม ถ้าวันหน้าเวลาเลิกงานย้ายไปอยู่ในค่าตั้ง ต้องแก้ทั้งคู่
+const WHOLE_HOUR_LEAVE_DAY_END_MIN = 17 * 60 + 30;
+
+function wholeHourLeaveSettings() {
+  return APP_SETTINGS.leave || {};
+}
+function wholeHourLeaveDayStartMin() {
+  const ws = APP_SETTINGS.workSchedule || {};
+  return (ws.standardStartHour != null ? ws.standardStartHour : 8) * 60
+    + (ws.standardStartMinute != null ? ws.standardStartMinute : 30);
+}
+
+function wholeHourLeaveRequired(dateStr) {
+  const from = String(wholeHourLeaveSettings().wholeHourLeaveFrom || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from)) return false;
+  const d = String(dateStr || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return false;
+  return d >= from;
+}
+// "เริ่มกี่โมง + ลากี่ชั่วโมง" -> เวลาสิ้นสุด · คืน null ถ้าขอมาไม่ได้
+// พักเที่ยง 12:00-13:00 ไม่คิดเป็นเวลาลา (เจ้าของตัดสิน 2026-09-24) ⇒ ช่วงที่คร่อมพักเที่ยง
+// ต้องยาวขึ้นอีก 60 นาที จึงจะได้เวลาลาเท่าที่ขอจริง: 10:00 ลา 3 ชม. สิ้นสุด 14:00 ไม่ใช่ 13:00
+// ผลลัพธ์ต้องสอดคล้องกับ hourlyLeaveChargedMinutes() เสมอ -- เทสต์ตรวจย้อนกลับทุกแถว
+function hourlyLeaveEndFromHours(hourlyStart, hours) {
+  const h = Number(hours);
+  if (!Number.isInteger(h) || h < 1 || h > WHOLE_HOUR_LEAVE_MAX_HOURS) return null;
+  const s = parseHHMMToMins(hourlyStart);
+  if (!Number.isFinite(s)) return null;
+  if (s >= 12 * 60 && s < 13 * 60) return null;
+  let end = s + h * 60;
+  if (s < 12 * 60 && end > 12 * 60) end += 60;
+  if (end > WHOLE_HOUR_LEAVE_DAY_END_MIN) return null;
+  const p2 = n => String(n).padStart(2, '0');
+  return `${p2(Math.floor(end / 60))}:${p2(end % 60)}`;
+}
+// คืนรหัสเหตุผลสั้นๆ ไม่ใช่ข้อความ -- แต่ละฝั่งเอาไปทำข้อความเองคนละภาษา
+// (หน้าเว็บ 3 ภาษา / เซิร์ฟเวอร์เป็นอังกฤษสำหรับ API) กฎจึงเหมือนกันทุกตัวอักษรได้
+function wholeHourLeaveError(hourlyStart, hourlyEnd) {
+  const s = parseHHMMToMins(hourlyStart), e = parseHHMMToMins(hourlyEnd);
+  if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s) return 'not-whole-hour';
+  if (s % WHOLE_HOUR_LEAVE_GRID_MIN !== 0) return 'off-grid';
+  if (s >= 12 * 60 && s < 13 * 60) return 'starts-in-lunch';
+  if (s < wholeHourLeaveDayStartMin() || e > WHOLE_HOUR_LEAVE_DAY_END_MIN) return 'outside-work-hours';
+  const charged = hourlyLeaveChargedMinutes(hourlyStart, hourlyEnd);
+  if (charged <= 0 || charged % 60 !== 0) return 'not-whole-hour';
+  if (charged > WHOLE_HOUR_LEAVE_MAX_HOURS * 60) return 'exceeds-max';
+  return null;
+}
+// ===== END WHOLE-HOUR LEAVE (DUAL-SYNC BLOCK) =====
+
 // DUAL-SYNC with server.js carryForwardExpiryEnabled / carryForwardExpiryDateStr /
 // leaveMinutesOnOrBefore / carryForwardForfeitMinutes.
 // 2026-09-24 (owner): carried-forward annual days expire on the configured month/day of the year
@@ -6745,6 +6814,13 @@ function renderSettingsPage(_skipRefresh) {
         field(L('Expiry Day','วันที่หมดอายุ'), inp('set-cf-expiry-day', s.leave.carryForwardExpiryDay, 'number', 'min="1" max="31"')),
         field(L('Notify Before Expiry (days)','แจ้งเตือนล่วงหน้าก่อนหมดอายุ (วัน)'), inp('set-cf-notify', s.leave.carryForwardNotifyDays, 'number', 'min="1"'), L('In-app toast window for the employee. Employees with carry-forward still unused also get a notification (and an email if they opted in) this many days before the expiry date and again 7 days before (from 09:00; the second one only when this is more than 7).', 'ช่วงเวลาที่แสดง toast ในแอปให้พนักงาน นอกจากนี้ พนักงานที่ยังมีวันยกยอดเหลือจะได้รับการแจ้งเตือน (และอีเมลหากเปิดรับไว้) ล่วงหน้าตามจำนวนวันนี้ก่อนวันหมดอายุ และอีกครั้ง 7 วันก่อน (ตั้งแต่ 09:00 ครั้งที่สองเฉพาะเมื่อค่านี้มากกว่า 7)'))
       )}
+      ${row2(
+        field(L('Whole-hour leave from','บังคับลาเป็นชั่วโมงเต็มตั้งแต่วันที่'),
+          inp('set-whole-hour-from', s.leave.wholeHourLeaveFrom || '', 'date'),
+          L(`From this leave DATE on, hourly leave must be in whole hours (1h, 2h, 3h …), at most ${WHOLE_HOUR_LEAVE_MAX_HOURS}h, and start on a 30-minute mark; half days become 4h each. Requests dated before it keep the old rules. Empty = rule off.`,
+            `ตั้งแต่ "วันที่ลา" นี้เป็นต้นไป การลารายชั่วโมงต้องเป็นชั่วโมงเต็ม (1, 2, 3 ชั่วโมง …) ไม่เกิน ${WHOLE_HOUR_LEAVE_MAX_HOURS} ชั่วโมง และเริ่มตรงทุกครึ่งชั่วโมง · ครึ่งวันกลายเป็น 4 ชั่วโมงเท่ากันทั้งเช้าและบ่าย · ใบที่ลาวันก่อนหน้านี้ยังใช้กฎเดิมทุกอย่าง · เว้นว่าง = ยังไม่บังคับ`)),
+        ''
+      )}
       ${cfAtRiskReportHtml()}
       ${openingLeaveBalancesSectionHtml()}
     `)}
@@ -7574,6 +7650,11 @@ async function saveSettingsPage() {
   APP_SETTINGS.leave.carryForwardExpiryMonth = parseInt(document.getElementById('set-cf-expiry-month')?.value) || 3;
   APP_SETTINGS.leave.carryForwardExpiryDay   = fi('set-cf-expiry-day');
   APP_SETTINGS.leave.carryForwardNotifyDays  = fi('set-cf-notify');
+  // 2026-11-03: วันเริ่มบังคับลาเป็นชั่วโมงเต็ม · เขียนเฉพาะเมื่อช่องมีอยู่จริง (แบบเดียวกับ
+  // set-cf-expiry-enabled ด้านบน) -- ถ้าช่องไม่ถูกเรนเดอร์ ค่าที่เก็บไว้ต้องไม่ถูกล้างทิ้ง
+  // ช่องว่าง = ปิดกฎ ซึ่งเป็นค่าที่ตั้งใจได้ จึงไม่ใช้ `||` ที่จะทำให้ล้างค่าไม่ได้
+  const whFromEl = document.getElementById('set-whole-hour-from');
+  if (whFromEl) APP_SETTINGS.leave.wholeHourLeaveFrom = String(whFromEl.value || '').trim();
   if (document.getElementById('set-sick-leave-days')) {
     // Pass the raw input (not fi() which turns blank into 0) so an accidentally
     // cleared field falls back to 30/3 instead of zeroing every employee's quota.
@@ -19360,6 +19441,14 @@ function editLeaveRequest(id) {
       document.getElementById('leave-form-date').value = l.dateFrom;
       document.getElementById('leave-form-start').value = l.hourlyStart;
       document.getElementById('leave-form-end').value = l.hourlyEnd;
+      // 2026-11-03: ใบเก่าเป็นรายนาทีได้ (ไม่ถูกตรวจย้อน) แต่ถ้าวันลาของมันเลยวันบังคับไปแล้ว
+      // ฟอร์มชั่วโมงเต็มแทนค่าเดิมไม่ได้ ⇒ บอกให้รู้ว่าค่าถูกปรับ ไม่ใช่ให้เขากดบันทึกทับเงียบๆ
+      if (!syncWholeHourLeaveSelectsFromInputs()) {
+        showToast(currentLang === 'ja'
+          ? '⚠️ この申請は分単位です — 時間単位で選び直してください'
+          : L('⚠️ This request used minutes — please pick the time again in whole hours',
+              '⚠️ ใบนี้เป็นการลารายนาที — กรุณาเลือกเวลาใหม่เป็นชั่วโมงเต็ม'), 'warning');
+      }
       calcLeaveHours();
     } else {
       setLeaveMode('days');
@@ -19541,6 +19630,9 @@ function setLeaveMode(mode) {
     hourDiv.style.display = '';
     dayBtn?.classList.remove('is-active');
     hrBtn?.classList.add('is-active');
+    // 2026-11-03: เลือกฟอร์มให้ตรงกับวันที่ลาปัจจุบันทุกครั้งที่เข้าโหมดชั่วโมง ไม่ใช่เฉพาะตอน
+    // เปลี่ยนวันที่ -- ไม่งั้นคนที่สลับโหมดไป-กลับจะเห็นฟอร์มของกฎเก่าค้างอยู่
+    renderWholeHourLeaveControls();
   }
 }
 
@@ -19623,12 +19715,151 @@ function calcLeaveHours() {
 // 08:30-12:00 / 13:00-17:30 boundary leaveDayCoverage() classifies as a clean 'am'/'pm' half-day
 // (vs. 'partial', which would silently reintroduce the "late"/blank-day bug this feature exists
 // to fix if someone fat-fingers the manual time fields by even a minute).
+// ===== ฟอร์มลาเป็นชั่วโมง: แบบเดิม (กรอกเวลาเอง) vs แบบชั่วโมงเต็ม =====
+// 2026-11-03 (เจ้าของตัดสิน) -- ที่มาของกฎอยู่ที่บล็อก WHOLE-HOUR LEAVE ด้านบนในไฟล์นี้
+// สอง <select> เขียนค่าลง #leave-form-start / #leave-form-end ซึ่งยังเป็นแหล่งข้อมูลจริง
+// ⇒ submitLeave() / calcLeaveHours() / editLeaveRequest() อ่านที่เดิมต่อไปได้โดยไม่ต้องแก้
+function wholeHourLeaveHHMM(mins) {
+  const p2 = n => String(n).padStart(2, '0');
+  return `${p2(Math.floor(mins / 60))}:${p2(mins % 60)}`;
+}
+function wholeHourLeaveFormActive() {
+  return wholeHourLeaveRequired(document.getElementById('leave-form-date')?.value || '');
+}
+// เวลาเริ่มที่เลือกได้: ทุกครึ่งชั่วโมงตั้งแต่เวลาเริ่มงาน ถึงเวลาที่ยังลาได้อย่างน้อย 1 ชม.
+// ข้ามช่วงพักเที่ยงเพราะพักอยู่แล้ว ไม่ต้องลา (wholeHourLeaveError คืน 'starts-in-lunch')
+function wholeHourLeaveStartSlots() {
+  const out = [];
+  for (let m = wholeHourLeaveDayStartMin(); m <= WHOLE_HOUR_LEAVE_DAY_END_MIN - 60; m += WHOLE_HOUR_LEAVE_GRID_MIN) {
+    if (m >= 12 * 60 && m < 13 * 60) continue;
+    out.push(m);
+  }
+  return out;
+}
+// จำนวนชั่วโมงสูงสุดที่ยังจบก่อนเลิกงาน เมื่อเริ่มเวลานี้ -- ตัวเลือกที่ทำให้เลย 17:30 จะไม่ถูกแสดง
+// ⇒ พนักงานเลือกค่าที่ส่งไม่ผ่านไม่ได้ตั้งแต่แรก แทนที่จะกดส่งแล้วค่อยโดนปฏิเสธ
+function wholeHourLeaveMaxHoursFor(startHHMM) {
+  let max = 0;
+  for (let h = 1; h <= WHOLE_HOUR_LEAVE_MAX_HOURS; h++) {
+    if (hourlyLeaveEndFromHours(startHHMM, h)) max = h; else break;
+  }
+  return max;
+}
+function renderWholeHourLeaveControls(preferStart, preferHours) {
+  const whole   = wholeHourLeaveFormActive();
+  const freeEl  = document.getElementById('leave-hours-free');
+  const wholeEl = document.getElementById('leave-hours-whole');
+  const hintEl  = document.getElementById('leave-halfday-hint');
+  if (!freeEl || !wholeEl) return;
+  freeEl.style.display  = whole ? 'none' : '';
+  wholeEl.style.display = whole ? '' : 'none';
+  if (hintEl) {
+    hintEl.style.display = whole ? '' : 'none';
+    if (whole) {
+      const amS = wholeHourLeaveHHMM(wholeHourLeaveDayStartMin());
+      const amE = hourlyLeaveEndFromHours(amS, 4) || '';
+      const pmE = wholeHourLeaveHHMM(WHOLE_HOUR_LEAVE_DAY_END_MIN);
+      const pmS = wholeHourLeaveHHMM(WHOLE_HOUR_LEAVE_DAY_END_MIN - 240);
+      hintEl.textContent = currentLang === 'ja'
+        ? `午前半休 = 4時間 (${amS}–${amE}) ・ 午後半休 = 4時間 (${pmS}–${pmE})`
+        : L(`Half day (morning) = 4h (${amS}–${amE}) · Half day (afternoon) = 4h (${pmS}–${pmE})`,
+            `ครึ่งวันเช้า = 4 ชม. (${amS}–${amE}) · ครึ่งวันบ่าย = 4 ชม. (${pmS}–${pmE})`);
+    }
+  }
+  if (!whole) { calcLeaveHours(); return; }
+
+  const slotEl  = document.getElementById('leave-form-start-slot');
+  const hoursEl = document.getElementById('leave-form-hours');
+  if (!slotEl || !hoursEl) return;
+  const slots = wholeHourLeaveStartSlots().map(wholeHourLeaveHHMM);
+  const wantStart = [preferStart, slotEl.value, slots[0]].find(v => slots.includes(v)) || slots[0];
+  slotEl.innerHTML = slots.map(s => `<option value="${s}"${s === wantStart ? ' selected' : ''}>${s}</option>`).join('');
+
+  const maxH = wholeHourLeaveMaxHoursFor(wantStart);
+  const prevH = Number(hoursEl.value) || 0;
+  const wantH = [Number(preferHours) || 0, prevH, 1].find(v => v >= 1 && v <= maxH) || 1;
+  const unit = h => currentLang === 'ja' ? `${h}時間` : L(`${h}h`, `${h} ชั่วโมง`);
+  hoursEl.innerHTML = Array.from({ length: maxH }, (_, i) => i + 1)
+    .map(h => `<option value="${h}"${h === wantH ? ' selected' : ''}>${unit(h)}</option>`).join('');
+  onWholeHourLeaveChange();
+}
+function onWholeHourLeaveChange() {
+  const start = document.getElementById('leave-form-start-slot')?.value || '';
+  const hours = Number(document.getElementById('leave-form-hours')?.value) || 0;
+  const end   = hourlyLeaveEndFromHours(start, hours);
+  const startEl = document.getElementById('leave-form-start');
+  const endEl   = document.getElementById('leave-form-end');
+  if (startEl) startEl.value = start;
+  if (endEl)   endEl.value   = end || '';
+  const outEl = document.getElementById('leave-form-end-computed');
+  if (outEl) {
+    outEl.textContent = end
+      ? (currentLang === 'ja' ? `終了 ${end}` : L(`Ends at ${end}`, `สิ้นสุด ${end}`))
+      : '';
+  }
+  calcLeaveHours();
+}
+function onLeaveHourDateChange() {
+  renderWholeHourLeaveControls();
+}
+// ใช้ตอนเติมฟอร์มจากค่าที่มีอยู่ (แก้ใบเดิม / กดปุ่มครึ่งวัน): อ่านจากช่องจริงแล้วย้อนกลับเป็น
+// "เริ่ม + จำนวนชั่วโมง" · คืน false ถ้าค่าที่มีอยู่แทนด้วยชั่วโมงเต็มไม่ได้ (เช่นใบเก่า 38 นาที)
+function syncWholeHourLeaveSelectsFromInputs() {
+  const start = document.getElementById('leave-form-start')?.value || '';
+  const end   = document.getElementById('leave-form-end')?.value || '';
+  const charged = (start && end) ? hourlyLeaveChargedMinutes(start, end) : 0;
+  const hours = (charged > 0 && charged % 60 === 0) ? charged / 60 : 0;
+  const representable = !wholeHourLeaveFormActive() || (hours > 0 && !wholeHourLeaveError(start, end));
+  renderWholeHourLeaveControls(start, hours);
+  return representable;
+}
+function wholeHourLeaveErrorText(code) {
+  if (code === 'exceeds-max') {
+    return currentLang === 'ja'
+      ? `⚠️ 時間単位の休暇は1件あたり最大${WHOLE_HOUR_LEAVE_MAX_HOURS}時間です — 終日の場合は「日単位」で申請してください`
+      : L(`⚠️ Hourly leave is at most ${WHOLE_HOUR_LEAVE_MAX_HOURS}h per request — use day mode for a full day`,
+          `⚠️ ลารายชั่วโมงได้ไม่เกิน ${WHOLE_HOUR_LEAVE_MAX_HOURS} ชั่วโมงต่อใบ — ถ้าลาเต็มวันให้ใช้โหมดลาเป็นวัน`);
+  }
+  if (code === 'off-grid') {
+    return currentLang === 'ja'
+      ? '⚠️ 開始時刻は30分単位で選んでください'
+      : L('⚠️ The start time must be on a 30-minute mark', '⚠️ เวลาเริ่มต้องเป็นทุกครึ่งชั่วโมง');
+  }
+  if (code === 'starts-in-lunch') {
+    return currentLang === 'ja'
+      ? '⚠️ 昼休み (12:00–13:00) からは開始できません'
+      : L('⚠️ Leave cannot start during the 12:00–13:00 lunch break', '⚠️ เริ่มลาในเวลาพักเที่ยง 12:00–13:00 ไม่ได้');
+  }
+  if (code === 'outside-work-hours') {
+    const s = wholeHourLeaveHHMM(wholeHourLeaveDayStartMin());
+    const e = wholeHourLeaveHHMM(WHOLE_HOUR_LEAVE_DAY_END_MIN);
+    return currentLang === 'ja'
+      ? `⚠️ 勤務時間 (${s}–${e}) の中で選んでください`
+      : L(`⚠️ Leave must fall within working hours (${s}–${e})`, `⚠️ ต้องอยู่ในเวลางาน (${s}–${e})`);
+  }
+  return currentLang === 'ja'
+    ? '⚠️ 休暇は1時間単位で申請してください (1時間・2時間・3時間…)'
+    : L('⚠️ Leave must be in whole hours (1h, 2h, 3h …)', '⚠️ ต้องลาเป็นชั่วโมงเต็มเท่านั้น (1, 2, 3 ชั่วโมง …)');
+}
+
 function setHalfDayLeave(half) {
   const startEl = document.getElementById('leave-form-start');
   const endEl   = document.getElementById('leave-form-end');
   if (!startEl || !endEl) return;
   const _ws = APP_SETTINGS.workSchedule;
   const stdStart = `${String(_ws?.standardStartHour ?? 8).padStart(2,'0')}:${String(_ws?.standardStartMinute ?? 30).padStart(2,'0')}`;
+  // 2026-11-03 (เจ้าของตัดสิน: "ถ้าลาเช้าเท่ากับลา 4 ชั่วโมง หมายความว่ากลับมาเข้าทำงานตอน 13.30
+  // ถ้าลาบ่ายก็จะกลายเป็น 13.30-17.30"): ตั้งแต่วันบังคับ ครึ่งวันคือ 4 ชม.เท่ากันทั้งเช้าและบ่าย
+  // เช้า 08:30-13:30 หักพักเที่ยงแล้วได้ 4 ชม. · บ่าย 13:30-17:30 ได้ 4 ชม. ⇒ รวม 8 ชม.พอดี
+  // และเป็นชั่วโมงเต็มทั้งคู่ จึงไม่ต้องมีข้อยกเว้นให้ครึ่งวัน
+  // วันลาก่อนวันบังคับคงเวลาเดิม 08:30-12:00 (3.5 ชม.) / 13:00-17:30 (4.5 ชม.) -- เจ้าของตัดสิน
+  // ว่ากฎเก่าต้องไม่เปลี่ยนกลางคัน เพราะวันพักร้อนที่เหลือของปี 2026 ยังลาเป็นนาทีได้
+  if (wholeHourLeaveFormActive()) {
+    if (half === 'am') { startEl.value = stdStart; endEl.value = hourlyLeaveEndFromHours(stdStart, 4) || ''; }
+    else { startEl.value = wholeHourLeaveHHMM(WHOLE_HOUR_LEAVE_DAY_END_MIN - 240); endEl.value = wholeHourLeaveHHMM(WHOLE_HOUR_LEAVE_DAY_END_MIN); }
+    syncWholeHourLeaveSelectsFromInputs();
+    return;
+  }
   if (half === 'am') { startEl.value = stdStart; endEl.value = '12:00'; }
   else { startEl.value = '13:00'; endEl.value = '17:30'; }
   calcLeaveHours();
@@ -19681,6 +19912,13 @@ async function submitLeave() {
     // 2026-09-24 (owner): the 12:00-13:00 lunch hour is not charged (hourlyLeaveChargedMinutes).
     const totalMin = hourlyLeaveChargedMinutes(start, end);
     if (totalMin <= 0) { showToast(L('⚠️ The selected time is entirely within the 12:00–13:00 lunch break', '⚠️ ช่วงเวลาที่เลือกอยู่ในเวลาพักเที่ยง 12:00–13:00 ทั้งหมด'), 'warning'); return; }
+    // 2026-11-03 (เจ้าของตัดสิน): ตั้งแต่วันที่ตั้งไว้ ลาได้เป็นชั่วโมงเต็มเท่านั้น -- ตัดสินจาก
+    // วันที่ลา ไม่ใช่วันที่กดยื่น · DUAL-SYNC: server.js ปฏิเสธซ้ำใน hourlyLeaveShapeError()
+    // ด่านฝั่งนี้มีไว้ให้ข้อความไทย/ญี่ปุ่นที่บอกว่าผิดตรงไหน ไม่ใช่ด่านเดียวที่กันไว้
+    if (wholeHourLeaveRequired(dateFrom)) {
+      const whCode = wholeHourLeaveError(start, end);
+      if (whCode) { showToast(wholeHourLeaveErrorText(whCode), 'warning'); return; }
+    }
     const h = Math.floor(totalMin / 60), m = totalMin % 60;
     days = 0;
     hourlyStart = start;
