@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 179;
+const APP_BUILD = 180;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -22254,10 +22254,18 @@ function openTimeCorrectionModal(date, checkIn, checkOut) {
   document.getElementById('tc-field').value = '';
   document.getElementById('tc-corrected-time').value = '';
   document.getElementById('tc-reason').value = '';
-  const _isDarkTC = document.documentElement.getAttribute('data-theme') === 'dark';
+  // 2026-11-03 (เจ้าของ: "คลิกที่เวลาเข้างาน เวลาออกงานแล้วไม่มีสีหรืออะไรบอกเลยว่ากำลังคลิก
+  // ตัวไหนอยู่"): ของเดิมทาสีตั้งต้นลงบนปุ่มเป็น inline ทุกครั้งที่เปิดโมดัล ซึ่ง **ชนะ**
+  // `.tc-field-selected` ที่ย้ายไปอยู่ใน CSS เมื่อ 2026-10-21 (กฎนั้นไม่มี !important)
+  // ⇒ class ที่ selectCorrectionField() ใส่ให้ไม่เปลี่ยนอะไรทางสายตาเลยทั้งสองธีม · วัดบนเว็บจริง
+  // build 179: ปุ่มที่ถูกเลือกกับไม่ถูกเลือกได้ background rgb(248,250,252) และ border
+  // rgb(226,232,240) เท่ากันเป๊ะ · สีตั้งต้นของทั้งสองธีมมีอยู่แล้วใน `.tc-field-btn` และ
+  // `[data-theme="dark"] .tc-field-btn` ⇒ สิ่งที่การเปิดโมดัลต้องทำคือถอดสถานะที่ค้างจากรอบก่อน
+  // ไม่ใช่ทาสีทับ (tc-field ถูกล้างเป็นค่าว่างด้านบนอยู่แล้ว แต่ class ไม่เคยถูกถอด ⇒ เปิดรอบสอง
+  // ปุ่มเดิมจะดูเหมือนยังถูกเลือกทั้งที่ฟอร์มถือว่ายังไม่ได้เลือก)
+  // ยาม: tests/time-correction-selected-state.test.js
   ['tc-btn-in','tc-btn-out'].forEach(id => {
-    const b = document.getElementById(id);
-    b.style.borderColor = _isDarkTC ? '#334155' : '#e2e8f0'; b.style.background = _isDarkTC ? '#0f172a' : '#f8fafc';
+    document.getElementById(id).classList.remove('tc-field-selected');
   });
   // Reset to default (non-quick-fix) UI — openQuickFixCheckIn() overrides these right after calling this
   document.getElementById('tc-modal-title').textContent = L('✏️ Request Time Correction', '✏️ ขอแก้ไขเวลาย้อนหลัง');
