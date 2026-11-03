@@ -116,16 +116,15 @@ def run_sudo(cmd, timeout=20):
     """For commands that need root (killing a root-owned process). Pipes the NAS password
     over a PTY, matching the pattern this project already uses for root file writes.
 
-    2026-11-03: used to sleep a flat 1.5s and then chan.close(). That is why the restart added in
-    530e03a never once worked: closing a PTY channel tears down the pty, and sudo 1.9.5 (measured
-    on this NAS) runs the command under a monitor that kills the command's WHOLE PROCESS GROUP
-    when its pty goes away -- SIGHUP first, then SIGKILL, which `nohup` cannot ignore. The
-    backgrounded node died within those 4 seconds every time, so the deploy killed the live
-    backend and left nothing running until the rc.d watchdog came along up to 5 minutes later.
-    Measured 2026-11-03: killed 14:40:06, watchdog restarted it 14:44:26 -- 4 minutes down.
-    Now it waits for the command to actually finish, so the channel closes because sudo exited,
-    not because a timer fired. The start command itself also detaches with setsid (see below);
-    both halves are needed -- waiting alone still leaves node inside sudo's pty session.
+    2026-11-03: used to sleep a flat 1.5s and then chan.close(). Waiting for the command to
+    finish is simply more correct than a timer, so it stays -- but do NOT read it as the fix for
+    the restart bug below. It was changed while chasing a theory that a closing pty made sudo
+    kill the backgrounded process, and that theory was then DISPROVEN by measurement: a
+    backgrounded `sleep` launched through this exact helper survives, with and without setsid,
+    with the channel closed after 1.5s and with it left open. node itself also runs fine through
+    it (`node --version` as root, with the same cd, HOME and env prefix, writes its output), and
+    so does appending to backend/server.log. Every component works in isolation; only
+    `node server.js` fails, and it leaves no line in server.log at all.
     """
     chan = client.get_transport().open_session()
     chan.settimeout(timeout)
@@ -218,11 +217,11 @@ def _single_quoted(s):
 # Nothing about that was specific to what was being deployed -- any deploy would have done it.
 # Starting as root removes the mismatch instead of papering over it, and matches what the watchdog
 # would do on its own minutes later anyway. Checked against the real rc.d script, not from memory.
-# 2026-11-03: `setsid` is the other half of the fix described in run_sudo() above. Without it the
-# backgrounded node stays in the session of the pty that sudo made for this command, so sudo's
-# monitor kills it (SIGKILL, which nohup cannot ignore) the moment the channel closes. setsid puts
-# it in a session of its own with no controlling terminal -- the same state the rc.d watchdog's
-# copy ends up in, which is why THAT one has always worked with an otherwise identical command.
+# 2026-11-03: `setsid` was added on the (since DISPROVEN) theory that sudo's pty teardown killed
+# the backgrounded node -- see run_sudo() above for what was actually measured. It is kept only
+# because detaching a daemon from the launching terminal is correct on its own and was measured
+# not to break anything; it does NOT fix the restart bug. **สคริปต์นี้ยังสตาร์ต backend ไม่สำเร็จ**
+# ทุกครั้งที่รัน ตัวเฝ้า rc.d เป็นคนกู้ให้ภายใน 5 นาที (ดู STATUS.md หัวข้อเปิดอยู่)
 # Verified present on this NAS at /usr/bin/setsid before relying on it.
 start_sh = (f'cd "/volume1/web/Time_Attendance/attendance-server/backend" && '
             f'HOME="/volume1/web/Time_Attendance/attendance-server" {env_prefix}'
