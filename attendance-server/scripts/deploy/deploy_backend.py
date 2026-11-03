@@ -35,7 +35,7 @@ Deploy script for attendance backend.
   (password piped over a PTY channel, mirroring the pattern already used elsewhere in
   this project for root file writes) whenever it isn't Teerawat's own process.
 """
-import paramiko, time, socket, os
+import paramiko, time, socket, os, sys
 
 NODE = '/volume1/@appstore/Node.js_v22/usr/local/bin/node'
 FIND_PID = "ps aux | grep 'node server.js' | grep -v grep | awk '{print $2}'"
@@ -114,15 +114,33 @@ def run(cmd, timeout=20):
 
 def run_sudo(cmd, timeout=20):
     """For commands that need root (killing a root-owned process). Pipes the NAS password
-    over a PTY, matching the pattern this project already uses for root file writes."""
+    over a PTY, matching the pattern this project already uses for root file writes.
+
+    2026-11-03: used to sleep a flat 1.5s and then chan.close(). That is why the restart added in
+    530e03a never once worked: closing a PTY channel tears down the pty, and sudo 1.9.5 (measured
+    on this NAS) runs the command under a monitor that kills the command's WHOLE PROCESS GROUP
+    when its pty goes away -- SIGHUP first, then SIGKILL, which `nohup` cannot ignore. The
+    backgrounded node died within those 4 seconds every time, so the deploy killed the live
+    backend and left nothing running until the rc.d watchdog came along up to 5 minutes later.
+    Measured 2026-11-03: killed 14:40:06, watchdog restarted it 14:44:26 -- 4 minutes down.
+    Now it waits for the command to actually finish, so the channel closes because sudo exited,
+    not because a timer fired. The start command itself also detaches with setsid (see below);
+    both halves are needed -- waiting alone still leaves node inside sudo's pty session.
+    """
     chan = client.get_transport().open_session()
     chan.settimeout(timeout)
     chan.get_pty()
     chan.exec_command(f'sudo -S {cmd}')
     time.sleep(0.5)
     chan.send(NAS_PASSWORD + '\n')
-    time.sleep(1.5)
     out = b''
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        while chan.recv_ready():
+            out += chan.recv(4096)
+        if chan.exit_status_ready():
+            break
+        time.sleep(0.1)
     while chan.recv_ready():
         out += chan.recv(4096)
     chan.close()
@@ -200,14 +218,27 @@ def _single_quoted(s):
 # Nothing about that was specific to what was being deployed -- any deploy would have done it.
 # Starting as root removes the mismatch instead of papering over it, and matches what the watchdog
 # would do on its own minutes later anyway. Checked against the real rc.d script, not from memory.
+# 2026-11-03: `setsid` is the other half of the fix described in run_sudo() above. Without it the
+# backgrounded node stays in the session of the pty that sudo made for this command, so sudo's
+# monitor kills it (SIGKILL, which nohup cannot ignore) the moment the channel closes. setsid puts
+# it in a session of its own with no controlling terminal -- the same state the rc.d watchdog's
+# copy ends up in, which is why THAT one has always worked with an otherwise identical command.
+# Verified present on this NAS at /usr/bin/setsid before relying on it.
 start_sh = (f'cd "/volume1/web/Time_Attendance/attendance-server/backend" && '
             f'HOME="/volume1/web/Time_Attendance/attendance-server" {env_prefix}'
-            f'nohup {NODE} server.js < /dev/null >> server.log 2>&1 & echo pid:$!')
+            f'setsid nohup {NODE} server.js < /dev/null >> server.log 2>&1 & echo pid:$!')
 started = run_sudo(f'sh -c {_single_quoted(start_sh)}')
 print('[START]', (started or '').strip() or '(no output -- verifying below)')
-time.sleep(4)
 
-new_pid = run(FIND_PID)
+# 2026-11-03: used to sleep a flat 4 seconds and judge once. Node needs longer than that on this
+# NAS, so even a start that worked could be reported as a failure -- and a real failure was
+# reported in the same breath as [DONE] and exit 0. Poll instead, and say how long it took.
+new_pid = ''
+for _ in range(30):            # ไม่เกิน ~60 วินาที
+    new_pid = run(FIND_PID) or ''
+    if new_pid:
+        break
+    time.sleep(2)
 print('[AFTER] running pid(s):', new_pid or '(none -- FAILED TO START)')
 
 if old_pid and new_pid and (set(old_pid.split()) & set(new_pid.split())):
@@ -225,10 +256,24 @@ if new_owner and new_owner.strip() != 'root':
 elif new_owner:
     print('[OK] running as root, the same owner the NAS boot script and its watchdog use')
 
-health = run('curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/health')
-print('[VERIFY] health check HTTP', health)
-if health != '200':
-    print('[ERROR] backend did not come up healthy after restart -- check server.log')
+# 2026-11-03: one shot at the health check right after the start was too early, and a failure
+# printed [ERROR] and then exited 0 -- so a deploy that left the site DOWN looked exactly like a
+# deploy that worked, to a human skimming and to anything that checks the exit code. Poll, then
+# exit non-zero on failure and say what to do about it.
+health = ''
+for _ in range(30):            # ไม่เกิน ~60 วินาที
+    health = run('curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/health')
+    if health == '200':
+        break
+    time.sleep(2)
+print('[VERIFY] health check HTTP', health or '(no answer)')
 
 client.close()
+if health != '200':
+    print('[ERROR] backend did not come up healthy after restart -- check '
+          'attendance-server/backend/server.log on the NAS.')
+    print('        The site is DOWN right now. The rc.d watchdog retries every 5 minutes and will')
+    print('        bring it back as root, so recovery is automatic -- but do not walk away until')
+    print('        a health check answers 200.')
+    sys.exit(1)
 print('[DONE]')
