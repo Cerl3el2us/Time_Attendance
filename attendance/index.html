@@ -1389,7 +1389,15 @@
       <div id="tc-employee-line" style="font-size:13px;color:#1e3a5f;font-weight:700;display:none"></div>
       <div class="form-field" style="margin-bottom:0">
         <label data-en="Date to Correct">วันที่ที่ต้องการแก้ไข</label>
-        <input type="date" id="tc-date" style="background:#f1f5f9;color:#475569;pointer-events:none">
+        <!-- 2026-11-03: `disabled` ไม่ใช่แค่ `pointer-events:none` — วันที่ของคำร้องถูกกำหนดจาก
+             แถวที่กด ✏️ มาแล้ว ช่องนี้จึงเป็นแค่การแสดงผล · initDatePickers() ผูก flatpickr
+             แบบ altInput ให้ช่องนี้ ซึ่งซ่อน input ตัวนี้แล้วสร้างช่องใหม่ขึ้นมาแทน และช่องใหม่
+             **ไม่สืบทอด inline style** ⇒ pointer-events:none หายไป และผู้ใช้เปลี่ยนวันได้จริง
+             (วัดเอง: กด ✏️ ที่ 15/10/2026 แล้วเลือก 28 ในปฏิทิน ค่าที่จะยื่นเปลี่ยนเป็น 2026-10-28)
+             · flatpickr คัดลอก `disabled` ไปให้ช่องที่มันสร้างเสมอ จึงล็อกได้จริงทั้งเมาส์และ Tab
+             · โค้ดอ่าน/เขียนค่าผ่าน .value ด้วย JS ไม่ได้พึ่ง form submit จึงไม่กระทบ
+             ยาม: tests/locked-date-fields-stay-locked.test.js -->
+        <input type="date" id="tc-date" disabled style="background:#f1f5f9;color:#475569;pointer-events:none">
       </div>
       <div>
         <label style="font-size:12px;font-weight:600;color:#64748b;margin-bottom:8px;display:block" data-en="Which field to edit">แก้ไขข้อมูลใด</label>
