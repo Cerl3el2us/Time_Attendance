@@ -123,7 +123,15 @@ const approvedLeaves = DATA_LEAVES.filter(l => l.userId === u.id && l.type === t
 
 **ปัญหา:** ไม่กรองปี — `u.annualLeave` เป็นสิทธิ**ต่อปี** (reset ทุกปี, มี carry-forward แยกผ่าน `getCarryForwardDays`) แต่ `DATA_LEAVES` สะสมข้ามปี. พอขึ้นปีใหม่ leave ที่ approved ปีนี้ยังถูกนับกินสิทธิปีหน้าถาวร → balance ปีหน้าเพี้ยน. ตอนนี้ app มีข้อมูลแค่ปี 2026 เลยยังไม่กระทบ แต่จะระเบิดต้นปี 2027
 
-**FIX:** เพิ่ม year filter (นับเฉพาะ leave ที่ dateFrom อยู่ในปีปัจจุบัน) ทั้ง gate และ display:
+> **แก้ไปแล้ว — ตรวจกับโค้ดจริงเมื่อ 2026-11-03 (อย่าตกใจซ้ำ)** ทั้ง 4 เส้นทางกรองปีด้วย
+> `l.dateFrom >= yStart && l.dateFrom <= yEnd` แล้ว: `computeLeaveBalance()` และ
+> `pendingLeaveMinutes()` (ยอดคงเหลือฝั่งหน้าเว็บ) · ด่านตอนยื่นใน `submitLeave()`
+> (`committedLeaves`) · และฝั่งเซิร์ฟเวอร์ `annualLeaveRemainingMinutes()` กับ
+> `leaveBalanceRemainingMinutes()` ซึ่งเอา "ปี" มาจาก `dateFrom` ของใบนั้นเอง ไม่ใช่ปีปัจจุบัน
+> ⇒ ใบลาที่ยื่นข้ามปีก็นับเข้าสิทธิ์ของปีที่ลา ไม่ใช่ปีที่กดยื่น · ตรวจตอนทำเรื่องบังคับลาเป็น
+> ชั่วโมงเต็ม เพราะกำหนดเริ่มใช้คือมกราคม 2027 ซึ่งเป็นรอบเดียวกับที่โน้ตนี้เตือนว่าจะพัง
+
+**FIX (ของเดิมที่เสนอไว้ตอนนั้น):** เพิ่ม year filter (นับเฉพาะ leave ที่ dateFrom อยู่ในปีปัจจุบัน) ทั้ง gate และ display:
 ```js
 const yStart = `${thisYear}-01-01`, yEnd = `${thisYear}-12-31`;
 const approvedLeaves = DATA_LEAVES.filter(l =>
