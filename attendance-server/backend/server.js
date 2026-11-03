@@ -10929,6 +10929,11 @@ const STD_END_MIN     = 17 * 60 + 30; // 17:30
 // 2026-08-06 (Opus audit finding 5, dual-sync twin of app.js's copy): absorbs a few-minutes-off
 // manual entry so a near-exact half-day/full-day boundary doesn't silently degrade to 'partial'.
 const HALFDAY_TOL_MIN = 15;
+// 2026-11-03 (dual-sync twin of app.js's copy): the PM half-day is 13:30-17:30 once
+// "บังคับลาเป็นชั่วโมงเต็ม" is on, and the old window ended at LUNCH_END_MIN so it fell through to
+// 'partial'. Bounded by "4h before the end of the work day" so it tracks the same 4h half-day rule.
+// See app.js's copy for what broke. Must stay identical to it -- ยาม: tests/whole-hour-leave.test.js
+const PM_HALFDAY_LATEST_START_MIN = STD_END_MIN - 4 * 60; // 13:30
 function leaveDayCoverage(l, dateStr, stdStartMin) {
   if (!['annual', 'sick', 'business'].includes(l.type)) return 'none';
   if (!(dateStr >= l.dateFrom && dateStr <= (l.dateTo || l.dateFrom))) return 'none';
@@ -10942,7 +10947,7 @@ function leaveDayCoverage(l, dateStr, stdStartMin) {
   const sMin = sh * 60 + sm, eMin = eh * 60 + em;
   if (sMin <= stdStartMin + HALFDAY_TOL_MIN && eMin >= STD_END_MIN - HALFDAY_TOL_MIN) return 'full';
   if (sMin <= stdStartMin + HALFDAY_TOL_MIN && eMin >= LUNCH_START_MIN) return 'am';
-  if (sMin >= LUNCH_START_MIN && sMin <= LUNCH_END_MIN && eMin >= STD_END_MIN - HALFDAY_TOL_MIN) return 'pm';
+  if (sMin >= LUNCH_START_MIN && sMin <= PM_HALFDAY_LATEST_START_MIN && eMin >= STD_END_MIN - HALFDAY_TOL_MIN) return 'pm';
   return 'partial';
 }
 

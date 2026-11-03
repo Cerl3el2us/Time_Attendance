@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 181;
+const APP_BUILD = 182;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -8019,6 +8019,15 @@ const STD_END_MIN     = 17 * 60 + 30; // 17:30 -- hardcoded like the OT-start ti
 // 08:30, or a rounder-looking 17:00 instead of 17:30) so a near-exact half-day/full-day boundary
 // doesn't silently degrade to 'partial' and lose the late-clearing/chip treatment.
 const HALFDAY_TOL_MIN = 15;
+// 2026-11-03: the PM half-day no longer starts at 13:00. When "บังคับลาเป็นชั่วโมงเต็ม" is on,
+// the owner's rule makes both halves 4h, so the afternoon one is 13:30-17:30 (see setHalfDayLeave).
+// The old window ended at LUNCH_END_MIN, so 13:30 fell through to 'partial' -- measured on both
+// copies before this fix -- and every `coverage === 'pm'` consumer (app.js:12335/12380/12459/23494)
+// stopped drawing the leave chip in the check-OUT cell, so an approved PM half-day with no
+// check-out scan read as a missing check-out. Bounded by "4h before the end of the work day"
+// rather than a new hardcoded time, so it tracks the same 4h half-day rule; the lower bound is
+// unchanged, which is what still keeps a near-full-day leave out of 'pm'.
+const PM_HALFDAY_LATEST_START_MIN = STD_END_MIN - 4 * 60; // 13:30
 function leaveDayCoverage(l, dateStr, stdStartMin) {
   if (!['annual', 'sick', 'business'].includes(l.type)) return 'none';
   if (!(dateStr >= l.dateFrom && dateStr <= (l.dateTo || l.dateFrom))) return 'none';
@@ -8032,7 +8041,7 @@ function leaveDayCoverage(l, dateStr, stdStartMin) {
   const sMin = sh * 60 + sm, eMin = eh * 60 + em;
   if (sMin <= stdStartMin + HALFDAY_TOL_MIN && eMin >= STD_END_MIN - HALFDAY_TOL_MIN) return 'full';
   if (sMin <= stdStartMin + HALFDAY_TOL_MIN && eMin >= LUNCH_START_MIN) return 'am';
-  if (sMin >= LUNCH_START_MIN && sMin <= LUNCH_END_MIN && eMin >= STD_END_MIN - HALFDAY_TOL_MIN) return 'pm';
+  if (sMin >= LUNCH_START_MIN && sMin <= PM_HALFDAY_LATEST_START_MIN && eMin >= STD_END_MIN - HALFDAY_TOL_MIN) return 'pm';
   return 'partial';
 }
 
@@ -19759,7 +19768,9 @@ function renderWholeHourLeaveControls(preferStart, preferHours) {
       const amS = wholeHourLeaveHHMM(wholeHourLeaveDayStartMin());
       const amE = hourlyLeaveEndFromHours(amS, 4) || '';
       const pmE = wholeHourLeaveHHMM(WHOLE_HOUR_LEAVE_DAY_END_MIN);
-      const pmS = wholeHourLeaveHHMM(WHOLE_HOUR_LEAVE_DAY_END_MIN - 240);
+      // 2026-11-03: บ่ายเริ่มตรงที่เช้าจบเสมอ ไม่ใช่ตัวเลขฝังแยก -- ถ้าเวลาเริ่มงานใน workSchedule
+      // ถูกเปลี่ยน (ช่องรับ 6-10) สองครึ่งต้องยังต่อกันพอดี ไม่ใช่ซ้อนทับกันเงียบๆ
+      const pmS = amE || wholeHourLeaveHHMM(WHOLE_HOUR_LEAVE_DAY_END_MIN - 240);
       hintEl.textContent = currentLang === 'ja'
         ? `午前半休 = 4時間 (${amS}–${amE}) ・ 午後半休 = 4時間 (${pmS}–${pmE})`
         : L(`Half day (morning) = 4h (${amS}–${amE}) · Half day (afternoon) = 4h (${pmS}–${pmE})`,
@@ -19801,6 +19812,16 @@ function onWholeHourLeaveChange() {
 }
 function onLeaveHourDateChange() {
   renderWholeHourLeaveControls();
+}
+// 2026-11-03: เปลี่ยน "เวลาเริ่ม" ต้องสร้างรายการจำนวนชั่วโมงใหม่ ไม่ใช่แค่คำนวณเวลาสิ้นสุด --
+// จำนวนชั่วโมงสูงสุดขึ้นกับเวลาเริ่ม ของเดิมผูก onchange ไว้กับ onWholeHourLeaveChange() เฉยๆ
+// ⇒ เลือก 10:00 + 4 ชม. แล้วเปลี่ยนเวลาเริ่มเป็น 16:30 รายการยังค้างที่ 1-6 ทั้งที่เหลือได้แค่ 1
+// เวลาสิ้นสุดกลายเป็นค่าว่าง กล่องสรุปหายไปเงียบๆ และกดยื่นได้แต่เด้ง "กรุณาระบุเวลาเริ่มและสิ้นสุด"
+// ทั้งที่หน้าจอดูเหมือนกรอกครบ (ยืนยันบนเว็บจริง 2026-11-03)
+function onWholeHourLeaveStartChange() {
+  const slotEl  = document.getElementById('leave-form-start-slot');
+  const hoursEl = document.getElementById('leave-form-hours');
+  renderWholeHourLeaveControls(slotEl ? slotEl.value : undefined, Number(hoursEl?.value) || 0);
 }
 // ใช้ตอนเติมฟอร์มจากค่าที่มีอยู่ (แก้ใบเดิม / กดปุ่มครึ่งวัน): อ่านจากช่องจริงแล้วย้อนกลับเป็น
 // "เริ่ม + จำนวนชั่วโมง" · คืน false ถ้าค่าที่มีอยู่แทนด้วยชั่วโมงเต็มไม่ได้ (เช่นใบเก่า 38 นาที)
@@ -19855,8 +19876,11 @@ function setHalfDayLeave(half) {
   // วันลาก่อนวันบังคับคงเวลาเดิม 08:30-12:00 (3.5 ชม.) / 13:00-17:30 (4.5 ชม.) -- เจ้าของตัดสิน
   // ว่ากฎเก่าต้องไม่เปลี่ยนกลางคัน เพราะวันพักร้อนที่เหลือของปี 2026 ยังลาเป็นนาทีได้
   if (wholeHourLeaveFormActive()) {
-    if (half === 'am') { startEl.value = stdStart; endEl.value = hourlyLeaveEndFromHours(stdStart, 4) || ''; }
-    else { startEl.value = wholeHourLeaveHHMM(WHOLE_HOUR_LEAVE_DAY_END_MIN - 240); endEl.value = wholeHourLeaveHHMM(WHOLE_HOUR_LEAVE_DAY_END_MIN); }
+    // 2026-11-03: บ่ายเริ่มตรงที่เช้าจบ (ไม่ใช่ 13:30 ที่ฝังไว้ต่างหาก) ⇒ สองครึ่งต่อกันพอดีเสมอ
+    // แม้เวลาเริ่มงานจะถูกเปลี่ยน · ด้วยค่าปัจจุบัน 08:30 ผลลัพธ์เท่าเดิมทุกประการคือ 13:30
+    const amEnd = hourlyLeaveEndFromHours(stdStart, 4);
+    if (half === 'am') { startEl.value = stdStart; endEl.value = amEnd || ''; }
+    else { startEl.value = amEnd || wholeHourLeaveHHMM(WHOLE_HOUR_LEAVE_DAY_END_MIN - 240); endEl.value = wholeHourLeaveHHMM(WHOLE_HOUR_LEAVE_DAY_END_MIN); }
     syncWholeHourLeaveSelectsFromInputs();
     return;
   }

@@ -33,7 +33,8 @@ function extractFunction(src, name) {
   throw new Error(`unbalanced ${name}`);
 }
 function extractConst(src, name) {
-  const re = new RegExp(`^const ${name} = [^;]+;`, 'm');
+  // ยอมให้มีเว้นวรรคหลายตัวรอบ `=` -- ค่าคงที่ของ leaveDayCoverage จัดคอลัมน์ไว้ (`LUNCH_END_MIN   =`)
+  const re = new RegExp(`^const ${name} *= *[^;]+;`, 'm');
   const m = re.exec(src);
   if (!m) throw new Error(`const ${name} not found`);
   return m[0];
@@ -222,5 +223,38 @@ test('ด่านเดิมยังทำงาน: 12:00–13:00 ยัง�
   const S = makeServerShape('');
   assert.ok(/lunch/.test(S.hourlyLeaveShapeError('12:00', '13:00', '2026-10-01', '2026-10-01')));
 });
+
+// ===== 6. ครึ่งวันแบบใหม่ต้องถูกจัดประเภทเป็นครึ่งวันจริง ไม่ใช่ 'partial' =====
+// บั๊กที่เจอตอนรีวิว 2026-11-03: ครึ่งวันบ่ายแบบใหม่ 13:30–17:30 เคยได้ 'partial' เพราะสาขา pm
+// ของ leaveDayCoverage() บังคับให้เวลาเริ่มอยู่ใน 12:00–13:00 ⇒ ทุกที่ที่เช็ก coverage === 'pm'
+// (ป้าย "ลา" ในช่องเวลาออกงาน) เงียบไป คนที่ลาบ่ายแล้วไม่สแกนออกจะดูเหมือนลืมสแกน
+const COVERAGE_CONSTS = ['LUNCH_START_MIN', 'LUNCH_END_MIN', 'STD_END_MIN', 'HALFDAY_TOL_MIN', 'PM_HALFDAY_LATEST_START_MIN'];
+const COVERAGE_CASES = [
+  ['ครึ่งวันเช้า แบบเก่า', '08:30', '12:00', 'am'],
+  ['ครึ่งวันบ่าย แบบเก่า', '13:00', '17:30', 'pm'],
+  ['ครึ่งวันเช้า แบบใหม่', '08:30', '13:30', 'am'],
+  ['ครึ่งวันบ่าย แบบใหม่', '13:30', '17:30', 'pm'],
+  ['ลาทั้งวันแบบชั่วโมง', '08:30', '17:30', 'full'],
+  ['ลาสั้นๆ ตอนบ่าย', '15:00', '16:00', 'partial'],
+];
+console.log('\n[6] leaveDayCoverage() กับครึ่งวันแบบใหม่');
+test('ค่าคงที่ PM_HALFDAY_LATEST_START_MIN เหมือนกันทุกตัวอักษร', () => {
+  assert.strictEqual(extractConst(APP_SRC, 'PM_HALFDAY_LATEST_START_MIN'),
+    extractConst(SERVER_SRC, 'PM_HALFDAY_LATEST_START_MIN'));
+});
+// leaveDayCoverage() ไม่ได้ถูกบังคับให้เหมือนกันทุกตัวอักษร (คอมเมนต์ข้างในสองสำเนาต่างกันมาแต่เดิม)
+// กฎของมันคือ "ต้องจำแนกเหมือนกัน" ⇒ ยามคือเคสพฤติกรรมด้านล่างที่รันทั้งสองฝั่งด้วยชุดเดียวกัน
+for (const [side, src] of [['client', APP_SRC], ['server', SERVER_SRC]]) {
+  for (const [name, s, e, want] of COVERAGE_CASES) {
+    test(`${side}: ${name} ${s}–${e} => ${want}`, () => {
+      const ctx = {};
+      vm.createContext(ctx);
+      vm.runInContext(COVERAGE_CONSTS.map(n => extractConst(src, n)).join('\n')
+        + '\n' + extractFunction(src, 'leaveDayCoverage'), ctx);
+      const l = { type: 'annual', dateFrom: '2027-02-10', dateTo: '2027-02-10', days: 0, hourlyStart: s, hourlyEnd: e };
+      assert.strictEqual(ctx.leaveDayCoverage(l, '2027-02-10', 8 * 60 + 30), want);
+    });
+  }
+}
 
 console.log(`\n${pass} ผ่าน` + (process.exitCode ? ' — มีข้อที่ตก' : ''));

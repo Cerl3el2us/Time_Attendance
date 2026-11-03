@@ -79,7 +79,9 @@ function world(users, leaves, log) {
     isApprovedAbroadDate: () => false,
   };
   vm.createContext(ctx);
-  ['LUNCH_START_MIN', 'LUNCH_END_MIN', 'STD_END_MIN', 'HALFDAY_TOL_MIN', 'PERSONAL_LEAVE_TYPES']
+  // 2026-11-03: PM_HALFDAY_LATEST_START_MIN เพิ่มเข้ามาตอนแก้บั๊กครึ่งวันบ่ายแบบใหม่ 13:30–17:30
+  // ที่เคยถูกจัดเป็น 'partial' -- leaveDayCoverage() อ้างถึงมัน ถ้าไม่ดึงมาด้วยจะพังเป็น ReferenceError
+  ['LUNCH_START_MIN', 'LUNCH_END_MIN', 'STD_END_MIN', 'HALFDAY_TOL_MIN', 'PM_HALFDAY_LATEST_START_MIN', 'PERSONAL_LEAVE_TYPES']
     .forEach(n => vm.runInContext(extractConst(APP_SRC, n), ctx));
   // 2026-10-11 (review): isEmployeeRecord used to be stubbed here as `() => true`. That hid the
   // whole rule one level down -- putting the truthy test back INSIDE isEmployeeRecord restored the
