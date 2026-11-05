@@ -49,7 +49,7 @@ test('the start command still carries the same working directory, HOME and stdio
   const built = m[1];
   ['cd "/volume1/web/Time_Attendance/attendance-server/backend"',
    'HOME="/volume1/web/Time_Attendance/attendance-server"',
-   'nohup', 'server.js', 'server.log', '< /dev/null'].forEach(bit =>
+   'server.js', 'server.log', '< /dev/null'].forEach(bit =>
     assert.ok(built.includes(bit), `the start command no longer contains: ${bit}`));
 });
 
@@ -105,21 +105,40 @@ test('run_sudo() does not allocate a pty -- tearing one down is what killed ever
     'stdin must be closed after the password, or sudo may keep waiting for more input');
 });
 
-test('the start is backgrounded with nohup, the shape the NAS boot script itself uses', () => {
+// 2026-11-05 (เจ้าของสั่งให้แก้): เปลี่ยนจาก `nohup … &` เป็น `setsid --fork`
+// **ของเดิมพังตรงไหน:** `sh -c '… nohup node … & echo pid:$!'` ทิ้งเชลล์ห่อ `sh -c` ค้างไว้ถาวร
+// ข้างๆ node (ppid 1 ทั้งคู่) · สตริงคำสั่งของเชลล์ห่อมีคำว่า `node server.js` อยู่ ⇒ FIND_PID
+// (`ps aux | grep 'node server.js'`) จับได้ทั้งคู่ ⇒ `[BEFORE]`/`[AFTER]` โชว์สอง pid และ kill
+// รอบถัดไปต้องฆ่าสองตัว · ไม่เป็นอันตราย (การตรวจเจ้าของโปรเซสใช้ pid ตัวท้ายซึ่งเป็น node จริง)
+// แต่ทำให้ผลอ่านยากและเป็นที่ซ่อนของค่าที่ไม่ควรอยู่ใน argv
+// `setsid --fork` ให้ setsid แยกตัวไปเป็น session leader แล้วตัวแม่จบทันที ⇒ sh จบตาม
+// ⇒ **เหลือโปรเซสเดียว ppid 1** และ deploy ไม่ค้างรอ
+// วัดบน NAS นี้แล้วเมื่อ 2026-11-05 (เคส E ของการวัดชุดเดียวกับที่หาต้นเหตุ pty): ไม่มี pty +
+// `setsid --fork` → รอด ppid 1 ตรวจ 14 วินาทีหลังปิดช่อง · `setsid` มีจริงที่ /usr/bin/setsid
+// บนเครื่องนี้ และรับธง `--fork` (ไม่ใช่ busybox ที่ไม่มีธงนี้)
+// **ห้ามกลับไปใช้ `exec` แบบ foreground** ซึ่งเป็นรูปเดียวที่วัดแล้วว่าตายตอนปิดช่อง (เคส F)
+// และเคยทำเว็บล่มไป ~2.5 นาทีเมื่อ 09:22
+test('the start detaches with setsid --fork and leaves no wrapper shell behind', () => {
   const m = CODE.match(/start_sh\s*=\s*\(([\s\S]*?)\)\nstarted/);
   assert.ok(m, 'start_sh is not built where this guard expects it');
   const built = m[1];
+  assert.ok(/setsid --fork/.test(built),
+    'the start no longer uses `setsid --fork` -- without it the `sh -c` wrapper lingers next to '
+    + 'node and FIND_PID matches both, which is what this change removed');
   assert.ok(!/\bexec\b/.test(built),
     'the start runs node in the foreground again -- measured 2026-11-05 as the one shape that dies '
-    + 'when the channel closes (case F), and it took the site down for ~5 minutes');
-  assert.ok(!built.includes('setsid'),
-    'setsid is back -- it was added on a disproven theory and is not needed once no pty is opened');
+    + 'when the channel closes (case F), and it took the site down for ~2.5 minutes');
+  assert.ok(!built.includes('nohup'),
+    'nohup is back alongside setsid -- pick one; `setsid --fork` already detaches, and the pair is '
+    + 'what the 2026-11-03 version had while it never once started successfully');
   // `2>&1` และตัวเชื่อม `&&` ก็มี & เหมือนกัน เอาสองอย่างนั้นออกก่อน จึงจะเหลือ & ที่เป็นการ
   // background จริง — ยามรุ่นก่อนลืมตัด `&&` แล้วรายงานโค้ดที่ถูกว่าผิด
-  assert.ok(built.replace(/2>&1/g, '').replace(/&&/g, '').includes('&'),
-    'the start must be backgrounded like the rc.d boot script does, or the deploy blocks on it');
-  assert.ok(built.includes('echo pid:$!'),
-    'the started pid should come back, so [START] says something a human can check');
+  assert.ok(!built.replace(/2>&1/g, '').replace(/&&/g, '').includes('&'),
+    'the start is backgrounded with `&` again -- that is what leaves the wrapper shell behind; '
+    + '`setsid --fork` returns on its own without it');
+  assert.ok(!built.includes('echo pid:$!'),
+    'there is no background job to report a pid for any more -- `[AFTER]` and the health check are '
+    + 'what decide whether the restart worked');
 });
 
 test('the command is wrapped for sh -c with quote-safe escaping', () => {
