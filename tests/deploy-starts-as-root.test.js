@@ -43,7 +43,7 @@ test('the start goes through run_sudo(), not a plain run()', () => {
   assert.ok(!/started\s*=\s*run\(/.test(CODE), 'the non-sudo start is back');
 });
 
-test('the start command still carries the same working directory, HOME, stdio and env prefix', () => {
+test('the start command still carries the same working directory, HOME and stdio', () => {
   const m = CODE.match(/start_sh\s*=\s*\(([\s\S]*?)\)\nstarted/);
   assert.ok(m, 'start_sh is not built where this guard expects it');
   const built = m[1];
@@ -51,7 +51,26 @@ test('the start command still carries the same working directory, HOME, stdio an
    'HOME="/volume1/web/Time_Attendance/attendance-server"',
    'nohup', 'server.js', 'server.log', '< /dev/null'].forEach(bit =>
     assert.ok(built.includes(bit), `the start command no longer contains: ${bit}`));
-  assert.ok(built.includes('env_prefix'), 'SUPERADMIN_PASSWORD would stop being passed through');
+});
+
+// 2026-11-05: กลับด้านจากยามเดิมที่บังคับว่า start ต้องมี `env_prefix` (= ส่ง SUPERADMIN_PASSWORD
+// ไปให้ node) · ตอนนี้ต้อง **ไม่มี** เพราะค่านั้นไปโผล่เป็นข้อความเปิดใน `ps aux` บน NAS:
+// เชลล์ห่อ `sh -c` ค้างอยู่ถาวร (ppid 1) หลังคอมมิต 1380ccd เพราะไม่มี pty ให้รื้อ ⇒ บัญชีใด
+// บนเครื่องที่สั่ง ps aux ได้ อ่านรหัส superadmin ได้ทันที · เป็นบั๊กประเภทเดียวกับที่
+// attendance-autostart.sh เคยแก้ให้โทเคน Cloudflare เมื่อ 2026-08-13
+// แทนที่ด้วยไฟล์ seed ที่เก็บแฮช (ดู systemAccount.js) ⇒ ไม่ต้องส่งรหัสผ่าน CLI อีกเลย
+// ฝั่ง server.js ยังอ่าน process.env.SUPERADMIN_PASSWORD ต่อ สำหรับทางติดตั้งใหม่หมดเท่านั้น
+test('the start command never carries the superadmin password on the command line', () => {
+  const m = CODE.match(/start_sh\s*=\s*\(([\s\S]*?)\)\nstarted/);
+  assert.ok(m, 'start_sh is not built where this guard expects it');
+  const built = m[1];
+  ['env_prefix', 'SUPERADMIN_PASSWORD', 'env_bits'].forEach(bit =>
+    assert.ok(!built.includes(bit),
+      `the start command carries \`${bit}\` again -- the password lands in argv, and the lingering `
+      + '`sh -c` wrapper keeps it readable in `ps aux` until the next restart. The seed file in '
+      + 'backend/data holds the bcrypt hash instead, so nothing needs to be passed here.'));
+  assert.ok(!/SUPERADMIN_PASSWORD/.test(CODE),
+    'deploy_backend.py reads SUPERADMIN_PASSWORD again -- it has no job here any more');
 });
 
 // ยามข้อนี้คุมต้นเหตุจริงของบั๊ก "สคริปต์ deploy สตาร์ต backend ไม่ขึ้นเลยตั้งแต่ 530e03a"

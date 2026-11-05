@@ -52,7 +52,15 @@ if not NAS_PASSWORD:
         '  The account must be in the DSM administrators group (the restart step uses sudo).\n'
         '  See attendance-server/DEVELOPER_HANDOFF.md for the full handover checklist.')
 
-SUPERADMIN_PASSWORD = os.environ.get('SUPERADMIN_PASSWORD', '')
+# 2026-11-05: this script no longer touches SUPERADMIN_PASSWORD at all.
+# It used to read it from the developer's machine and prepend it to the start command, which put
+# the password into argv on the NAS -- readable by any local account via `ps aux`, and (after the
+# pty fix in 1380ccd) readable until the next restart, because the `sh -c` wrapper now lingers.
+# The backend keeps its own durable copy of the account's bcrypt HASH in
+# backend/data/superadmin-seed.json and rebuilds the account from that if it ever goes missing,
+# so nothing needs to be handed over here. A fresh install with neither the account nor the seed
+# is the only case that still needs the env var, and it is a one-off done on the NAS --
+# see attendance-server/DEVELOPER_HANDOFF.md.
 
 # 2026-09-24 (owner): the account was hard-coded to 'Teerawat', so only that one person could
 # deploy -- if the account were disabled the deploy path was dead until someone edited this file.
@@ -208,17 +216,6 @@ if old_pid:
         kill_pids(still_alive.split())
         time.sleep(2)
 
-# Escape for a double-quoted shell string on the NAS (Synology sh/bash).
-def _sh_escape(s):
-    return s.replace('\\', '\\\\').replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
-
-env_bits = []
-if SUPERADMIN_PASSWORD:
-    env_bits.append(f'SUPERADMIN_PASSWORD="{_sh_escape(SUPERADMIN_PASSWORD)}"')
-env_prefix = (' '.join(env_bits) + ' ') if env_bits else ''
-if not SUPERADMIN_PASSWORD:
-    print('[NOTE] SUPERADMIN_PASSWORD not set on this machine — superadmin account will NOT be created until you set it (see DEVELOPER_HANDOFF.md)')
-
 # Wrap a whole command for `sh -c '<here>'`, closing and reopening the quote around any
 # single quote inside it, so a password or value containing ' cannot end the string early.
 def _single_quoted(s):
@@ -251,7 +248,7 @@ def _single_quoted(s):
 # that reliably DIES when the channel closes -- it took the site down for ~5 minutes. Do not
 # reintroduce either; tests/deploy-starts-as-root.test.js fails if they come back, and says why.
 start_sh = (f'cd "/volume1/web/Time_Attendance/attendance-server/backend" && '
-            f'HOME="/volume1/web/Time_Attendance/attendance-server" {env_prefix}'
+            f'HOME="/volume1/web/Time_Attendance/attendance-server" '
             f'nohup {NODE} server.js < /dev/null >> server.log 2>&1 & echo pid:$!')
 started = run_sudo(f'sh -c {_single_quoted(start_sh)}')
 print('[START]', (started or '').strip() or '(no output -- verifying below)')

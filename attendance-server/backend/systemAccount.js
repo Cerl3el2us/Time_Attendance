@@ -8,16 +8,96 @@
  * not be able to break developer login by accident.
  *
  * Provides a developer-only login that is NOT an employee record. The account is
- * re-created automatically on every backend start if removed from users.json, and
- * protected fields cannot be changed through the normal user-management API.
+ * re-created automatically if removed from users.json, and protected fields cannot
+ * be changed through the normal user-management API.
  *
  * Secret developer-only login. Regular users must not learn that this account
  * exists — do not show it in employee lists, role dropdowns, login hints, or
- * user-visible API errors. Password: SUPERADMIN_PASSWORD env (never commit it).
+ * user-visible API errors. The password itself is never stored by this project:
+ * only its bcrypt hash, in users.json and in the seed file described below.
+ *
+ * 2026-11-05 (owner asked for this directly, which is what the AI POLICY above
+ * requires — the request was "บัญชีนี้จะต้องไม่มีปัญหาในการใช้งาน และหากบัญชีถูกลบไป
+ * ด้วยความผิดพลาดอะไรสักอย่าง บัญชีนี้จะต้องกลับมาได้" plus "หากวันข้างหน้าเปลี่ยนคอม
+ * เครื่องใหม่ ต้องสามารถใช้งานบัญชีนี้ได้"):
+ *
+ * This file used to claim the account was re-created "on every backend start", but
+ * that was only ever true when SUPERADMIN_PASSWORD happened to be in the process
+ * environment. Checked on the real NAS: /usr/local/etc/rc.d/attendance-autostart.sh
+ * never passes it (grep finds the name nowhere in that script), and that watchdog is
+ * what starts the backend most of the time -- so in practice the account could NOT
+ * come back on its own, and recovery depended on one developer machine having the
+ * password in a Windows env var.
+ *
+ * It no longer does. ensureSystemAccounts() now takes a `seedStore`:
+ *     { read() -> object|null, write(object) -> void }
+ * holding ONLY the bcrypt hash (never the password), so the account can be rebuilt
+ * with the SAME password the owner already knows, from state that lives next to the
+ * data on the NAS instead of on anybody's PC. A bcrypt hash cannot be turned back
+ * into the password, which is why it is allowed to sit on disk (and therefore in
+ * Hyper Backup) while the password itself still is not.
+ *
+ * This module does no file I/O of its own, so every case is unit-tested with an
+ * in-memory store -- see tests/superadmin-seed.test.js. The caller owns the file,
+ * its 600 permissions, and any caching (readUsers() runs on nearly every request,
+ * so read() must be cheap).
+ * Design: docs/superpowers/specs/2026-11-05-superadmin-account-durability-design.md
  */
 
 const SYSTEM_USERNAME = 'superadmin';
 const SYSTEM_USER_ID = 900001;
+
+// รูปแบบไฟล์ seed · ขึ้นเลขนี้เมื่อโครงสร้างเปลี่ยนไปจนอ่านแบบเก่าไม่ได้
+const SEED_VERSION = 1;
+// ยอมรับเฉพาะสิ่งที่หน้าตาเป็นแฮช bcrypt จริง ($2a$/$2b$/$2y$) — กันการเขียนบัญชีที่ล็อกอิน
+// ไม่ได้ลง users.json ถ้าไฟล์ seed ถูกแก้มือหรือเสียหายจนกลายเป็นข้อความอื่น
+const BCRYPT_HASH_RE = /^\$2[aby]\$/;
+
+// อ่าน seed แบบไม่มีทางทำให้ผู้เรียกล้ม: ทุกความผิดพลาดแปลว่า "ถือว่าไม่มี seed"
+// readUsers() เรียกฟังก์ชันนี้ทางอ้อมแทบทุก request ⇒ ห้าม throw ออกไปข้างนอกเด็ดขาด
+function readSeed(seedStore) {
+  if (!seedStore || typeof seedStore.read !== 'function') return null;
+  let raw;
+  try {
+    raw = seedStore.read();
+  } catch (e) {
+    console.error('[SYSTEM] superadmin seed unreadable — ignoring:', e.message);
+    return null;
+  }
+  if (!raw || typeof raw !== 'object') return null;
+  if (raw.version !== SEED_VERSION) {
+    console.error('[SYSTEM] superadmin seed has version', raw.version, '— ignoring');
+    return null;
+  }
+  const hash = typeof raw.password === 'string' ? raw.password : '';
+  if (!BCRYPT_HASH_RE.test(hash)) {
+    console.error('[SYSTEM] superadmin seed does not hold a bcrypt hash — ignoring');
+    return null;
+  }
+  return {
+    password: hash,
+    tokenVersion: Number.isFinite(raw.tokenVersion) ? raw.tokenVersion : 0,
+    mustChangePassword: raw.mustChangePassword === true,
+  };
+}
+
+// เขียน seed แบบไม่มีทางทำให้ผู้เรียกล้มเช่นกัน — ดิสก์เต็มหรือสิทธิ์ไม่พอ ต้องไม่ทำให้
+// ทุก request ตอบ 503 เพราะอ่านผู้ใช้ไม่ได้
+function writeSeed(seedStore, record) {
+  if (!seedStore || typeof seedStore.write !== 'function') return;
+  try {
+    seedStore.write({
+      version: SEED_VERSION,
+      password: record.password,
+      tokenVersion: Number.isFinite(record.tokenVersion) ? record.tokenVersion : 0,
+      mustChangePassword: record.mustChangePassword === true,
+      updatedAt: new Date().toISOString(),
+    });
+    console.log('[SYSTEM] superadmin seed updated');
+  } catch (e) {
+    console.error('[SYSTEM] failed to write superadmin seed:', e.message);
+  }
+}
 
 const PROTECTED_KEYS = new Set([
   'id', 'username', 'role', 'isSystemAccount', 'employeeNo', 'name', 'dept', 'position',
@@ -72,7 +152,7 @@ function buildSystemAccountRecord(passwordHash) {
   };
 }
 
-function ensureSystemAccounts(users, bcrypt, rounds) {
+function ensureSystemAccounts(users, bcrypt, rounds, seedStore) {
   if (!Array.isArray(users)) return { users, changed: false };
 
   let changed = false;
@@ -87,15 +167,33 @@ function ensureSystemAccounts(users, bcrypt, rounds) {
     if (!kept) kept = u;
   }
 
+  const seed = readSeed(seedStore);
+
   if (!kept) {
-    const envPass = process.env.SUPERADMIN_PASSWORD;
-    if (!envPass) {
-      console.warn('[SYSTEM] superadmin missing — set SUPERADMIN_PASSWORD and restart backend to create it');
-      return { users: withoutDupes, changed: false };
+    if (seed) {
+      // กู้บัญชีคืนจากแฮชเดิม ⇒ รหัสที่เจ้าของจำไว้ใช้ได้ทันที ไม่ต้องตั้งใหม่
+      kept = buildSystemAccountRecord(seed.password);
+      // tokenVersion คือกลไกเพิกถอน token (server.js ~1049 และ ~1076): JWT พกค่านี้ไปตอน
+      // ล็อกอิน ถ้าค่าของผู้ใช้สดไม่ตรงกับใน token จะถูกปฏิเสธ · คืนค่าเดิมตรงๆ จะปลุก token
+      // ที่เคยถูกเพิกถอนด้วยการเปลี่ยนรหัสผ่านให้ใช้ได้อีก จึงบวกหนึ่งเสมอเพื่อรับประกันว่า
+      // ไม่มี token ใบไหนที่ออกไปก่อนหน้านี้ใช้ได้ · ราคาคือถ้าบัญชีหายตอนกำลังใช้งานอยู่
+      // จะถูกเด้งออกและต้องล็อกอินใหม่ ซึ่งยอมรับได้
+      kept.tokenVersion = seed.tokenVersion + 1;
+      kept.mustChangePassword = seed.mustChangePassword;
+      console.log('[SYSTEM] Restored superadmin from seed (same password as before)');
+      changed = true;
+    } else {
+      const envPass = process.env.SUPERADMIN_PASSWORD;
+      if (!envPass) {
+        console.warn('[SYSTEM] superadmin missing — set SUPERADMIN_PASSWORD and restart backend to create it');
+        return { users: withoutDupes, changed: false };
+      }
+      // ทางติดตั้งใหม่หมด: ไม่มีทั้งบัญชีและ seed · สคริปต์ deploy ไม่ส่งค่านี้มาแล้ว
+      // (รหัสจะโผล่ใน `ps aux` บน NAS) ⇒ ทางนี้ใช้ตอนตั้งเครื่องใหม่เท่านั้น
+      kept = buildSystemAccountRecord(bcrypt.hashSync(String(envPass), rounds));
+      console.log('[SYSTEM] Created superadmin system account (password from SUPERADMIN_PASSWORD env)');
+      changed = true;
     }
-    kept = buildSystemAccountRecord(bcrypt.hashSync(String(envPass), rounds));
-    console.log('[SYSTEM] Created superadmin system account (password from SUPERADMIN_PASSWORD env)');
-    changed = true;
   }
 
   const canonical = buildSystemAccountRecord(kept.password);
@@ -110,6 +208,17 @@ function ensureSystemAccounts(users, bcrypt, rounds) {
     for (const k of PROTECTED_KEYS) {
       if (kept[k] !== merged[k]) { changed = true; break; }
     }
+  }
+
+  // ให้ seed ตรงกับบัญชีที่ใช้ล็อกอินจริงเสมอ — จุดนี้คือจุดเดียวที่เขียน seed ทั้งฟังก์ชัน
+  // **users.json ชนะ seed เสมอ** เมื่อทั้งคู่มีแต่ไม่ตรงกัน เพราะบัญชีในไฟล์คือตัวที่ล็อกอินได้
+  // (เกิดได้เมื่อเจ้าของเปลี่ยนรหัสหน้าเว็บ หรือกู้ users.json จากแบ็กอัปเก่า)
+  // ตัวตัดสินว่าจะเขียนคือฟิลด์ password เท่านั้น ไม่เอา tokenVersion มาร่วม เพราะจะทำให้
+  // เขียนไฟล์บ่อยโดยไม่ได้ประโยชน์ · ความปลอดภัยยังอยู่ครบ: การเปลี่ยนรหัสผ่านเปลี่ยนทั้งแฮช
+  // และ tokenVersion พร้อมกัน ⇒ seed ถูกเขียนใหม่ทั้งคู่ในคราวเดียว
+  if (BCRYPT_HASH_RE.test(String(merged.password || ''))
+      && (!seed || seed.password !== merged.password)) {
+    writeSeed(seedStore, merged);
   }
 
   return { users: withoutDupes, changed };
