@@ -262,6 +262,19 @@ Requires the `NAS_PASSWORD` environment variable (`setx NAS_PASSWORD "..."` in c
 account must be an administrator because the restart uses `sudo`. `NAS_USER` optionally selects the
 account. Full setup in `attendance-server/DEVELOPER_HANDOFF.md`.
 
+**Run the copy on `Z:`, not your worktree's** (moved here 2026-11-05 from the handoff list in
+`STATUS.md`, where it was a one-off warning to one machine). The `Z:` path above is deliberate, not
+shorthand: the script imports only `paramiko` plus the stdlib, drives the NAS over SSH using absolute
+NAS paths, and its one file-relative dependency is `nas_known_hosts` sitting beside it — present in
+both copies. So the copy on `Z:` is always `main`'s and always behaves correctly, however far behind
+your worktree is. That matters because the versions from `530e03a` up to `1380ccd` **never started
+the backend once**: `run_sudo()` opened a pty that was torn down with the channel and dragged the
+process it had just started down with it. The home machine sat on `530e03a` for 44 commits, so every
+run there killed the backend until the rc.d watchdog revived it ~5 minutes later. If you do run your
+worktree's copy, make it current first and confirm `git rev-list --count HEAD..main` prints 0. And if
+a stale run has already left the backend down, **do not run the deploy again** — let the watchdog
+revive it, or revive it now over an SSH channel with **no pty** via `sudo -S`.
+
 **Use `py`, not `python`** (changed 2026-10-16 after measuring it on the office machine). Windows
 ships "app execution aliases" for `python.exe`/`python3.exe` in
 `%LOCALAPPDATA%\Microsoft\WindowsApps`, which sits ahead of a real Python on `PATH`. Measured on the
