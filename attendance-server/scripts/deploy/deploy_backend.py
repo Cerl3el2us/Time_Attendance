@@ -236,20 +236,30 @@ def _single_quoted(s):
 # Nothing about that was specific to what was being deployed -- any deploy would have done it.
 # Starting as root removes the mismatch instead of papering over it, and matches what the watchdog
 # would do on its own minutes later anyway. Checked against the real rc.d script, not from memory.
-# 2026-11-05: this is now character-for-character the start the NAS's own boot script runs
-# (/usr/local/etc/rc.d/attendance-autostart.sh -> start_backend()), which has kept the backend
-# alive for months, including every automatic recovery:
-#     cd "$BACKEND_DIR" && HOME="$BASE_DIR" nohup "$NODE" server.js < /dev/null >> server.log 2>&1 &
 # What used to break this script was never the shape of this command -- it was run_sudo() opening a
 # pty (see its docstring for the 2026-11-05 measurements). With no pty there is nothing to tear
-# down, and a backgrounded start measured as surviving with ppid 1.
-# A `setsid` sat here from 2026-11-03 on a theory that was disproven; it is gone because it is not
-# needed, not because it hurt. A foreground `exec` was tried on 2026-11-05 and is the one shape
-# that reliably DIES when the channel closes -- it took the site down for ~5 minutes. Do not
-# reintroduce either; tests/deploy-starts-as-root.test.js fails if they come back, and says why.
+# down, and both a backgrounded start and `setsid --fork` measured as surviving with ppid 1.
+#
+# 2026-11-05 (owner asked for it): `setsid --fork` instead of `nohup … &`.
+# The backgrounded form worked -- five restarts in a row, watchdog never had to step in -- but it
+# left the `sh -c` wrapper alive next to node (both reparented to ppid 1). That wrapper's argv
+# still contains the words "node server.js", so FIND_PID below matched BOTH, `[BEFORE]`/`[AFTER]`
+# printed two pids, and every later kill had to take out two processes. Harmless (the owner check
+# reads the last pid, which is node) but it makes the output hard to read and gives anything on
+# that command line a permanent home in `ps`.
+# `setsid --fork` forks, the child becomes a session leader and runs node, and the parent exits at
+# once -- so `sh` returns without `&` and leaves nothing behind: ONE process, ppid 1.
+# Measured on this NAS on 2026-11-05 (case E of the same run that found the pty cause): no pty +
+# `setsid --fork` survived, ppid 1, checked 14 seconds after the channel closed. `/usr/bin/setsid`
+# exists here and accepts `--fork` (it is util-linux, not the busybox build that lacks the flag).
+# `echo pid:$!` is gone with the background job; `[AFTER]` and the health poll are what judge the
+# restart, and both are stronger than an echoed pid.
+# **Do NOT go back to a foreground `exec`** -- that is the one shape measured as DYING when the
+# channel closes (case F), and it took the site down for ~2.5 minutes on 2026-11-05 09:22.
+# tests/deploy-starts-as-root.test.js fails if any of this is reverted, and says why.
 start_sh = (f'cd "/volume1/web/Time_Attendance/attendance-server/backend" && '
             f'HOME="/volume1/web/Time_Attendance/attendance-server" '
-            f'nohup {NODE} server.js < /dev/null >> server.log 2>&1 & echo pid:$!')
+            f'setsid --fork {NODE} server.js < /dev/null >> server.log 2>&1')
 started = run_sudo(f'sh -c {_single_quoted(start_sh)}')
 print('[START]', (started or '').strip() or '(no output -- verifying below)')
 
