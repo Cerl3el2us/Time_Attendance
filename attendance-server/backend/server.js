@@ -5056,11 +5056,13 @@ app.put('/api/settings', requireRole('md', 'accounting', 'manager'), (req, res) 
       }
       A.map.cartoApiKey = k.trim();
     }
-    if (A.sso && A.sso.rate !== undefined && (typeof A.sso.rate !== 'number' || !Number.isFinite(A.sso.rate) || A.sso.rate < 0 || A.sso.rate > 100)) {
-      return res.status(400).json({ success: false, message: 'appSettings.sso.rate must be a number 0-100' });
-    }
-    if (A.sso && A.sso.maxAmount !== undefined && (typeof A.sso.maxAmount !== 'number' || !Number.isFinite(A.sso.maxAmount) || A.sso.maxAmount < 0)) {
-      return res.status(400).json({ success: false, message: 'appSettings.sso.maxAmount must be a non-negative number' });
+    // 2026-11-05 (เจ้าของตัดสิน): เดิมสองด่านนี้ตรวจแค่ sso.rate กับ sso.maxAmount และ **ยอมรับ
+    // ค่า 0** (ปฏิเสธเฉพาะค่าติดลบ) ทั้งที่หน้าเว็บปฏิเสธ 0 อยู่แล้ว ⇒ ค่าที่ UI ห้ามเข้ามาทาง API
+    // ได้ แล้วสูตรก็กลืนมันด้วย `|| <ค่าปริยาย>` · ตอนนี้กฎทั้งห้าช่องอยู่ใน
+    // appSettingsPositiveError() ที่เดียว และมีเทสต์คุมว่าตรงกับฝั่งหน้าเว็บ
+    const _posErr = appSettingsPositiveError(A);
+    if (_posErr) {
+      return res.status(400).json({ success: false, message: _posErr });
     }
     if (A.geofence) {
       const g = A.geofence;
@@ -10379,6 +10381,34 @@ function morningReviewWindowOf(allowances) {
   // them. Settings-driven like the rest; 0 counts any later pass at all.
   const minGap = Number.isFinite(a.morningReviewMinGapMin) ? a.morningReviewMinGapMin : 30;
   return { start, end, minGap };
+}
+// 2026-11-05 (เจ้าของตัดสิน): คู่แฝดฝั่งเซิร์ฟเวอร์ของ settingsPositiveFieldError() ใน app.js
+// ห้าช่องนี้เป็นตัวเลขที่ค่า 0 ใช้ไม่ได้ และต้องถูกปฏิเสธ ไม่ใช่เก็บ 0 ไว้แล้วให้ฝั่งที่ใช้ค่าดักด้วย
+// `|| <ค่าปริยาย>` กลืนมันไปเงียบๆ (`sso.minSalary` → 1650 · `longDistanceThresholdKm` → 250 ·
+// `sso.maxSalary` → 17500 ในไฟล์ส่งประกันสังคม) ⇒ ไฟล์ตั้งค่าจะเก็บ 0 ขณะที่เครื่องคิดเงินใช้
+// ค่าปริยาย และ FAQ จะโชว์ 0 ให้พนักงานอ่าน · หน้าเว็บกันไว้ชั้นหนึ่งแล้ว ที่นี่คือชั้นที่นับ
+// เพราะด่านของหน้าเว็บเลี่ยงได้ด้วยการยิง API ตรง (บทเรียน "ไล่ให้ครบว่าใครตรวจเส้นทางนั้นบ้าง")
+// **เงียบเมื่อช่องนั้นไม่มีอยู่** (undefined/null) ตามกฎเดียวกับ review finding 5 ของ 2026-10-02
+// ด้านล่าง: ของที่ไม่มีไม่ใช่ของที่ผิด และการปฏิเสธจะไปขัดการบันทึกเรื่องอื่นด้วยข้อความเกี่ยวกับ
+// ส่วนที่คนนั้นอาจมองไม่เห็น · เพดาน 100 ของอัตรา SSO อยู่ที่นี่มาตลอด (หน้าเว็บไม่ได้ตรวจ)
+// ยาม: tests/settings-positive-fields.test.js บังคับว่าสองฝั่งต้องตรวจชุดช่องเดียวกัน
+// คืนข้อความ หรือ '' เมื่อไม่มีปัญหา
+function appSettingsPositiveError(appSettings) {
+  const s = appSettings || {};
+  const sso = s.sso || {};
+  const al = s.allowances || {};
+  const bad = v => v !== undefined && v !== null
+    && !(typeof v === 'number' && Number.isFinite(v) && v > 0);
+  if (bad(sso.rate) || (typeof sso.rate === 'number' && sso.rate > 100)) {
+    return 'appSettings.sso.rate must be a number greater than 0 and at most 100';
+  }
+  if (bad(sso.maxAmount)) return 'appSettings.sso.maxAmount must be a number greater than 0';
+  if (bad(sso.minSalary)) return 'appSettings.sso.minSalary must be a number greater than 0';
+  if (bad(sso.maxSalary)) return 'appSettings.sso.maxSalary must be a number greater than 0';
+  if (bad(al.longDistanceThresholdKm)) {
+    return 'appSettings.allowances.longDistanceThresholdKm must be a number greater than 0';
+  }
+  return '';
 }
 // A day Accounting has to look at before the Early Morning allowance is paid: a device check-in
 // early enough to earn it, and a later door pass inside the review window. `doorScans` is that

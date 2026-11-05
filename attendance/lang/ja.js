@@ -1217,6 +1217,12 @@ window.LANG_JA = {
   "Password set — welcome!": "パスワードを設定しました — ようこそ！",
   "⚠️ SSO rate must be greater than 0": "⚠️ 社会保険料率は0より大きくなければなりません",
   "⚠️ SSO max amount must be greater than 0": "⚠️ 社会保険料の上限額は0より大きくなければなりません",
+  // 2026-11-05: 空欄にして保存すると 0 が保存され、計算側は既定値（1,650 / 17,500 / 250km）を
+  // そのまま使い続けるため、設定画面とFAQには0が表示されるのに控除額は変わらない状態になる。
+  // そのため保存時に拒否する（settingsPositiveFieldError / appSettingsPositiveError を参照）
+  "⚠️ Min salary threshold must be greater than 0": "⚠️ 控除対象となる最低給与は0より大きくなければなりません",
+  "⚠️ Max salary ceiling must be greater than 0": "⚠️ 給与上限額は0より大きくなければなりません",
+  "⚠️ Minimum distance must be greater than 0": "⚠️ 最低距離は0より大きくなければなりません",
   "— None —": "— 未設定 —",
 
   // 2026-07-31 — allowance eligibility by role + centralized allowance rates (Rounds 1-3):
