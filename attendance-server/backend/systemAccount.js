@@ -53,6 +53,18 @@ const SEED_VERSION = 1;
 // ไม่ได้ลง users.json ถ้าไฟล์ seed ถูกแก้มือหรือเสียหายจนกลายเป็นข้อความอื่น
 const BCRYPT_HASH_RE = /^\$2[aby]\$/;
 
+// บ่นเรื่องเดิมซ้ำๆ ไม่ได้ · ผู้เรียก (server.js) แคชไฟล์ seed ไว้ในหน่วยความจำ ⇒ readSeed()
+// จะตรวจ "ของเสียชิ้นเดิม" ซ้ำทุก request · ถ้าพิมพ์ทุกครั้ง server.log จะบวมหนึ่งบรรทัดต่อหนึ่ง
+// request ตลอดไปเมื่อ seed เสียและบัญชีหายพร้อมกัน (เส้นทางนั้นคืนค่าออกก่อนถึงจุดที่จะซ่อม)
+// พบจากการรีวิวโค้ดตัวเอง 2026-11-05 · เงียบเฉพาะข้อความเดิมซ้ำ ไม่ใช่เงียบถาวร: ถ้าอ่าน seed
+// สำเร็จแล้วกลับเสียอีก จะบ่นใหม่ เพราะนั่นคือเหตุการณ์ใหม่ที่คนอ่าน log ควรเห็น
+let lastSeedComplaint = null;
+function complainOnce(msg) {
+  if (msg === lastSeedComplaint) return;
+  lastSeedComplaint = msg;
+  console.error(msg);
+}
+
 // อ่าน seed แบบไม่มีทางทำให้ผู้เรียกล้ม: ทุกความผิดพลาดแปลว่า "ถือว่าไม่มี seed"
 // readUsers() เรียกฟังก์ชันนี้ทางอ้อมแทบทุก request ⇒ ห้าม throw ออกไปข้างนอกเด็ดขาด
 function readSeed(seedStore) {
@@ -61,19 +73,20 @@ function readSeed(seedStore) {
   try {
     raw = seedStore.read();
   } catch (e) {
-    console.error('[SYSTEM] superadmin seed unreadable — ignoring:', e.message);
+    complainOnce('[SYSTEM] superadmin seed unreadable — ignoring: ' + e.message);
     return null;
   }
   if (!raw || typeof raw !== 'object') return null;
   if (raw.version !== SEED_VERSION) {
-    console.error('[SYSTEM] superadmin seed has version', raw.version, '— ignoring');
+    complainOnce('[SYSTEM] superadmin seed has version ' + raw.version + ' — ignoring');
     return null;
   }
   const hash = typeof raw.password === 'string' ? raw.password : '';
   if (!BCRYPT_HASH_RE.test(hash)) {
-    console.error('[SYSTEM] superadmin seed does not hold a bcrypt hash — ignoring');
+    complainOnce('[SYSTEM] superadmin seed does not hold a bcrypt hash — ignoring');
     return null;
   }
+  lastSeedComplaint = null;   // อ่านสำเร็จ = สถานะกลับมาปกติ ครั้งหน้าที่เสียให้บ่นได้อีก
   return {
     password: hash,
     tokenVersion: Number.isFinite(raw.tokenVersion) ? raw.tokenVersion : 0,
@@ -194,6 +207,22 @@ function ensureSystemAccounts(users, bcrypt, rounds, seedStore) {
       console.log('[SYSTEM] Created superadmin system account (password from SUPERADMIN_PASSWORD env)');
       changed = true;
     }
+  }
+
+  // พบจากการรีวิวโค้ดตัวเอง 2026-11-05: การกู้คืนด้านบนทำงานเฉพาะเมื่อ "ไม่มีเรคอร์ด" แต่โจทย์
+  // ของเจ้าของคือ "บัญชีนี้จะต้องไม่มีปัญหาในการใช้งาน" · เรคอร์ดที่ยังอยู่แต่แฮชใช้ไม่ได้ (ว่าง
+  // หรือไม่ใช่รูป bcrypt จากการเขียนไม่ครบหรือการแก้มือ) คือบัญชีที่ล็อกอินไม่ได้ และไม่มีอะไร
+  // ซ่อมมันเลย ทั้งที่ seed ถือแฮชที่ใช้ได้อยู่ ⇒ ซ่อมให้ด้วย ไม่ต้องรอให้เรคอร์ดหายทั้งอัน
+  if (seed && !BCRYPT_HASH_RE.test(String(kept.password || ''))) {
+    const keptTokenVersion = Number.isFinite(kept.tokenVersion) ? kept.tokenVersion : 0;
+    kept = Object.assign({}, kept, {
+      password: seed.password,
+      // รหัสผ่านของบัญชีเปลี่ยนไปจริง ⇒ token ทุกใบที่ออกไปก่อนหน้านี้ต้องใช้ไม่ได้ ไม่ว่าจะออก
+      // ตอน tokenVersion ของฝั่งเรคอร์ดหรือฝั่ง seed จึงใช้ค่าที่สูงกว่าแล้วบวกหนึ่ง
+      tokenVersion: Math.max(keptTokenVersion, seed.tokenVersion) + 1,
+    });
+    console.warn('[SYSTEM] superadmin password hash was unusable — repaired from seed');
+    changed = true;
   }
 
   const canonical = buildSystemAccountRecord(kept.password);
