@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 182;
+const APP_BUILD = 183;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -2101,6 +2101,46 @@ function morningReviewWindowOf(allowances) {
   // them. Settings-driven like the rest; 0 counts any later pass at all.
   const minGap = Number.isFinite(a.morningReviewMinGapMin) ? a.morningReviewMinGapMin : 30;
   return { start, end, minGap };
+}
+// 2026-11-05 (เจ้าของตัดสิน): ห้าช่องนี้เป็นตัวเลขที่ค่า 0 ใช้ไม่ได้ และต้องถูกปฏิเสธตอนบันทึก
+// **ของเดิมพังตรงไหน:** `fi()` ในหน้าตั้งค่าคือ `parseInt(...) || 0` ⇒ **ช่องว่างกลายเป็น 0**
+// ไม่ใช่ "ไม่เปลี่ยนค่า" · ใครลบเลขในช่องออกเพราะจะพิมพ์ใหม่ แล้วเผลอกดบันทึกก่อน ค่าจะเป็น 0
+// ทันที · แต่ฝั่งที่เอาค่าไปใช้ดักด้วย `|| <ค่าปริยาย>` ทุกที่ (`sso.minSalary` → 1650 ·
+// `allowances.longDistanceThresholdKm` → 250 · `sso.maxSalary` → 17500 ในไฟล์ส่งประกันสังคม)
+// ⇒ หน้าตั้งค่าและ FAQ จะโชว์ 0 ให้คนอ่าน แต่เครื่องคิดเงินใช้ค่าปริยายต่อไป และตัวเลขเงินที่
+// ออกมายังถูกเหมือนเดิม ⇒ ไม่มีอะไรดูผิด จับได้ยากมาก
+// **ทางที่เจ้าของเลือกคือ "ปฏิเสธตอนบันทึก" ไม่ใช่ "ให้ 0 มีความหมายจริง"** เพราะทางหลังทำให้
+// การพิมพ์ 0 ผิดมือกลายเป็นการเปลี่ยนเงินของพนักงานจริง · ทางนี้ไม่แตะสูตรเงินเลย
+// `sso.rate` กับ `sso.maxAmount` ถูกปฏิเสธอยู่แล้วก่อนหน้านี้ด้วยด่านแยกสองบรรทัดใน
+// saveSettingsPage() ⇒ ย้ายมารวมที่นี่ทั้งห้าช่อง ข้อความของสองช่องเดิมคงเดิมทุกตัวอักษร
+// **เงียบเมื่อช่องนั้นไม่มีอยู่** (undefined/null) ตามกฎเดียวกับ review finding 5 ของ 2026-10-02
+// ฝั่งเซิร์ฟเวอร์: ไฟล์ตั้งค่าที่ไม่มีคีย์นั้นไม่ได้ "ผิด" มันแค่ไม่มีอะไรให้ตรวจ
+// คู่แฝดฝั่งเซิร์ฟเวอร์คือ `appSettingsPositiveError()` ใน server.js (เพดาน 100 ของอัตรา SSO
+// อยู่ฝั่งนั้นมาตลอด ที่นี่ไม่ได้ตรวจ) · ยาม `tests/settings-positive-fields.test.js` บังคับว่า
+// สองฝั่งต้องตรวจชุดช่องเดียวกัน และทุกข้อความต้องมีคำแปลญี่ปุ่นใน lang/ja.js
+// คืน {id, en, th} ของช่องแรกที่ใช้ไม่ได้ หรือ null เมื่อไม่มีปัญหา
+function settingsPositiveFieldError(appSettings) {
+  const s = appSettings || {};
+  const sso = s.sso || {};
+  const al = s.allowances || {};
+  const bad = v => v !== undefined && v !== null
+    && !(typeof v === 'number' && Number.isFinite(v) && v > 0);
+  if (bad(sso.rate)) {
+    return { id: 'set-sso-rate', en: '⚠️ SSO rate must be greater than 0', th: '⚠️ อัตรา SSO ต้องมากกว่า 0' };
+  }
+  if (bad(sso.maxAmount)) {
+    return { id: 'set-sso-max', en: '⚠️ SSO max amount must be greater than 0', th: '⚠️ จำนวนสูงสุด SSO ต้องมากกว่า 0' };
+  }
+  if (bad(sso.minSalary)) {
+    return { id: 'set-sso-min-sal', en: '⚠️ Min salary threshold must be greater than 0', th: '⚠️ เงินเดือนขั้นต่ำที่ต้องหักต้องมากกว่า 0' };
+  }
+  if (bad(sso.maxSalary)) {
+    return { id: 'set-sso-max-sal', en: '⚠️ Max salary ceiling must be greater than 0', th: '⚠️ เพดานเงินเดือนต้องมากกว่า 0' };
+  }
+  if (bad(al.longDistanceThresholdKm)) {
+    return { id: 'set-longdistance-threshold', en: '⚠️ Minimum distance must be greater than 0', th: '⚠️ ระยะทางขั้นต่ำต้องมากกว่า 0' };
+  }
+  return null;
 }
 // A day Accounting has to look at before the Early Morning allowance is paid: a device check-in
 // early enough to earn it, and a later door pass inside the review window. `doorScans` is that
@@ -7707,8 +7747,12 @@ async function saveSettingsPage() {
 
   APP_SETTINGS.payslipEmailEnabled = document.getElementById('set-payslip-email-enabled')?.checked || false;
 
-  if (!(APP_SETTINGS.sso.rate > 0)) { settingsFieldError('set-sso-rate', L('⚠️ SSO rate must be greater than 0', '⚠️ อัตรา SSO ต้องมากกว่า 0'), 'warning'); return; }
-  if (!(APP_SETTINGS.sso.maxAmount > 0)) { settingsFieldError('set-sso-max', L('⚠️ SSO max amount must be greater than 0', '⚠️ จำนวนสูงสุด SSO ต้องมากกว่า 0'), 'warning'); return; }
+  // 2026-11-05 (เจ้าของตัดสิน): เดิมที่นี่ตรวจแค่ sso.rate กับ sso.maxAmount ทีละบรรทัด ตอนนี้
+  // กฎทั้งห้าช่องอยู่ใน settingsPositiveFieldError() ที่เดียวและมีเทสต์คุม (ดูคอมเมนต์ที่ฟังก์ชันนั้น
+  // ว่าทำไมช่องว่างที่กลายเป็น 0 เป็นเรื่องใหญ่) · settingsFieldError() สลับแท็บไปหาช่องที่ผิด
+  // ไฮไลต์ และโฟกัสให้ด้วย ⇒ คนกดบันทึกเห็นทันทีว่าช่องไหน
+  const _posErr = settingsPositiveFieldError(APP_SETTINGS);
+  if (_posErr) { settingsFieldError(_posErr.id, L(_posErr.en, _posErr.th), 'warning'); return; }
 
   const payrollSave = await savePayrollSettings();
   if (!payrollSave || payrollSave.success !== true) {
