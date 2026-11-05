@@ -43,15 +43,41 @@ test('the start goes through run_sudo(), not a plain run()', () => {
   assert.ok(!/started\s*=\s*run\(/.test(CODE), 'the non-sudo start is back');
 });
 
-test('the start command still carries the same working directory, HOME and nohup as the boot script', () => {
+test('the start command still carries the same working directory, HOME, stdio and env prefix', () => {
   const m = CODE.match(/start_sh\s*=\s*\(([\s\S]*?)\)\nstarted/);
   assert.ok(m, 'start_sh is not built where this guard expects it');
   const built = m[1];
   ['cd "/volume1/web/Time_Attendance/attendance-server/backend"',
    'HOME="/volume1/web/Time_Attendance/attendance-server"',
-   'nohup', 'server.js', 'server.log'].forEach(bit =>
+   'server.js', 'server.log', '< /dev/null'].forEach(bit =>
     assert.ok(built.includes(bit), `the start command no longer contains: ${bit}`));
   assert.ok(built.includes('env_prefix'), 'SUPERADMIN_PASSWORD would stop being passed through');
+});
+
+// 2026-11-05 (ตามขั้นต่อไปที่เขียนไว้ใน STATUS.md หลังการวัดรอบ 17:04 ของ 2026-11-03):
+// สคริปต์นี้สตาร์ต backend ไม่สำเร็จเลยตั้งแต่ 530e03a — ทุกครั้งที่รัน ตัวเฝ้า rc.d เป็นคนกู้ให้
+// ภายใน 5 นาที (หลักฐาน: `backend down, restarting` เพิ่มใน watchdog.log ทุกรอบ)
+// สิ่งที่ถูกตัดออกด้วยการวัดบน NAS จริงแล้ว: กลไกปล่อยงานของ run_sudo (`sleep` ที่ background ใต้
+// sudo+PTY รอดทั้ง 4 แบบ) · node เอง (`node --version` ใต้ sudo ด้วย cd/HOME/env เดียวกัน เขียนผลได้) ·
+// env_prefix · การเขียนต่อท้าย server.log · สิทธิ์ไฟล์ (777 ทั้งคู่)
+// หลักฐานชี้ขาด: สตาร์ตด้วย `sudo sh -c 'cd … && HOME=… exec node server.js'` **แบบไม่ nohup ไม่ &**
+// ขึ้นปกติ พิมพ์ `[HTTP] port 3000` / `[HTTPS] port 3443 ready` และโปรเซสรอดหลังปิดช่อง SSH
+// ⇒ ข้อแตกต่างเดียวที่เหลือระหว่างแบบที่ได้ผลกับแบบที่ไม่ได้ผลคือการ background (`&`) เอง
+// ยามนี้จึงกันการ "แก้กลับ" ไปใส่ nohup/setsid/`&` ซึ่งเป็นสิ่งเดียวที่วัดแล้วว่าทำให้สตาร์ตไม่ขึ้น
+test('node is started in the foreground: no nohup, no setsid, no backgrounding &', () => {
+  const m = CODE.match(/start_sh\s*=\s*\(([\s\S]*?)\)\nstarted/);
+  assert.ok(m, 'start_sh is not built where this guard expects it');
+  const built = m[1];
+  ['nohup', 'setsid'].forEach(bit =>
+    assert.ok(!built.includes(bit),
+      `the start command puts \`${bit}\` back -- measured on the NAS as the one shape that never `
+      + 'starts, while the plain foreground `exec` starts and survives the channel closing'));
+  // `2>&1` และตัวเชื่อม `&&` ก็มี & เหมือนกัน เอาสองอย่างนั้นออกก่อน แล้วค่อยดูว่ามี `&` ที่เป็น
+  // การ background เหลืออยู่ไหม — ยามรุ่นแรกของข้อนี้ลืมตัด `&&` แล้วรายงานโค้ดที่ถูกว่าผิด
+  assert.ok(!built.replace(/2>&1/g, '').replace(/&&/g, '').includes('&'),
+    'the start command backgrounds node again (a bare `&`) -- that is the shape that never starts');
+  assert.ok(/\bexec\b/.test(built),
+    'the start must `exec` node so the pid the shell reports is node itself, not a wrapper shell');
 });
 
 test('the command is wrapped for sh -c with quote-safe escaping', () => {

@@ -217,15 +217,28 @@ def _single_quoted(s):
 # Nothing about that was specific to what was being deployed -- any deploy would have done it.
 # Starting as root removes the mismatch instead of papering over it, and matches what the watchdog
 # would do on its own minutes later anyway. Checked against the real rc.d script, not from memory.
-# 2026-11-03: `setsid` was added on the (since DISPROVEN) theory that sudo's pty teardown killed
-# the backgrounded node -- see run_sudo() above for what was actually measured. It is kept only
-# because detaching a daemon from the launching terminal is correct on its own and was measured
-# not to break anything; it does NOT fix the restart bug. **สคริปต์นี้ยังสตาร์ต backend ไม่สำเร็จ**
-# ทุกครั้งที่รัน ตัวเฝ้า rc.d เป็นคนกู้ให้ภายใน 5 นาที (ดู STATUS.md หัวข้อเปิดอยู่)
-# Verified present on this NAS at /usr/bin/setsid before relying on it.
+# 2026-11-05: node is started in the FOREGROUND -- no `nohup`, no `setsid`, no `&`.
+# From 530e03a until now this script never once started the backend successfully: every run left it
+# down and the rc.d watchdog was what brought it back within 5 minutes (evidence: a fresh
+# `backend down, restarting` line in watchdog.log after every single run; a successful self-start
+# leaves none). Ruled out by measuring on the real NAS on 2026-11-03, component by component:
+# run_sudo()'s release mechanism is fine (a backgrounded `sleep` through this exact helper survived
+# all four ways: with and without setsid, channel closed after 1.5s and left open), node itself is
+# fine (`node --version` as root with the same cd/HOME/env wrote its output), env_prefix is fine,
+# appending to server.log is fine, file permissions are fine (777 both).
+# The decisive measurement, 17:04 on 2026-11-03: `sudo sh -c 'cd … && HOME=… exec node server.js'`
+# with no nohup and no `&` started normally, printed `[HTTP] port 3000` / `[HTTPS] port 3443 ready`,
+# AND the process survived the SSH channel closing. So the pty-teardown theory is dead and
+# server.js is not crashing on startup -- the only remaining difference between the shape that
+# works and the shape that never works is the backgrounding itself.
+# `exec` also means the pid is node's own, not a wrapper shell's, so FIND_PID and the owner check
+# below are looking at the real process. run_sudo() blocks for its timeout and then closes the
+# channel, which the 17:04 run measured as survivable; the pid/health polling below is what decides
+# whether it actually came up. Do NOT put nohup/setsid/`&` back without new measurement --
+# tests/deploy-starts-as-root.test.js fails if they come back, and says why.
 start_sh = (f'cd "/volume1/web/Time_Attendance/attendance-server/backend" && '
             f'HOME="/volume1/web/Time_Attendance/attendance-server" {env_prefix}'
-            f'setsid nohup {NODE} server.js < /dev/null >> server.log 2>&1 & echo pid:$!')
+            f'exec {NODE} server.js < /dev/null >> server.log 2>&1')
 started = run_sudo(f'sh -c {_single_quoted(start_sh)}')
 print('[START]', (started or '').strip() or '(no output -- verifying below)')
 
