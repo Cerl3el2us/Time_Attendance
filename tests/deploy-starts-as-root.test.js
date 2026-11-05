@@ -49,35 +49,58 @@ test('the start command still carries the same working directory, HOME, stdio an
   const built = m[1];
   ['cd "/volume1/web/Time_Attendance/attendance-server/backend"',
    'HOME="/volume1/web/Time_Attendance/attendance-server"',
-   'server.js', 'server.log', '< /dev/null'].forEach(bit =>
+   'nohup', 'server.js', 'server.log', '< /dev/null'].forEach(bit =>
     assert.ok(built.includes(bit), `the start command no longer contains: ${bit}`));
   assert.ok(built.includes('env_prefix'), 'SUPERADMIN_PASSWORD would stop being passed through');
 });
 
-// 2026-11-05 (ตามขั้นต่อไปที่เขียนไว้ใน STATUS.md หลังการวัดรอบ 17:04 ของ 2026-11-03):
-// สคริปต์นี้สตาร์ต backend ไม่สำเร็จเลยตั้งแต่ 530e03a — ทุกครั้งที่รัน ตัวเฝ้า rc.d เป็นคนกู้ให้
-// ภายใน 5 นาที (หลักฐาน: `backend down, restarting` เพิ่มใน watchdog.log ทุกรอบ)
-// สิ่งที่ถูกตัดออกด้วยการวัดบน NAS จริงแล้ว: กลไกปล่อยงานของ run_sudo (`sleep` ที่ background ใต้
-// sudo+PTY รอดทั้ง 4 แบบ) · node เอง (`node --version` ใต้ sudo ด้วย cd/HOME/env เดียวกัน เขียนผลได้) ·
-// env_prefix · การเขียนต่อท้าย server.log · สิทธิ์ไฟล์ (777 ทั้งคู่)
-// หลักฐานชี้ขาด: สตาร์ตด้วย `sudo sh -c 'cd … && HOME=… exec node server.js'` **แบบไม่ nohup ไม่ &**
-// ขึ้นปกติ พิมพ์ `[HTTP] port 3000` / `[HTTPS] port 3443 ready` และโปรเซสรอดหลังปิดช่อง SSH
-// ⇒ ข้อแตกต่างเดียวที่เหลือระหว่างแบบที่ได้ผลกับแบบที่ไม่ได้ผลคือการ background (`&`) เอง
-// ยามนี้จึงกันการ "แก้กลับ" ไปใส่ nohup/setsid/`&` ซึ่งเป็นสิ่งเดียวที่วัดแล้วว่าทำให้สตาร์ตไม่ขึ้น
-test('node is started in the foreground: no nohup, no setsid, no backgrounding &', () => {
+// ยามข้อนี้คุมต้นเหตุจริงของบั๊ก "สคริปต์ deploy สตาร์ต backend ไม่ขึ้นเลยตั้งแต่ 530e03a"
+// ซึ่งหาเจอเมื่อ 2026-11-05: **run_sudo() เปิด pty** แล้วเมื่อช่องถูกปิด pty ถูกรื้อ และลาก
+// โปรเซสที่เพิ่งถูกสตาร์ตไปด้วย · `sudo -S` อ่านรหัสผ่านจาก stdin ได้ ไม่ต้องมี pty เลย
+//
+// วัดบน NAS จริง 2026-11-05 ด้วยสคริปต์ทดสอบใน /tmp ที่ไม่จับพอร์ต (เว็บไม่ดับแม้วินาทีเดียว)
+// ตรวจสถานะ 14 วินาทีหลังปิดช่องทุกเคส:
+//   D  ไม่มี pty + `nohup … &`        -> รอด (ppid 1)   <- รูปแบบที่ตัวเฝ้า rc.d ใช้
+//   E  ไม่มี pty + `setsid --fork`    -> รอด (ppid 1)
+//   F  มี pty   + `exec` foreground   -> **ตาย** log หยุดที่วินาทีที่ปิดช่องพอดี
+//   G  มี pty   + `nohup … &` แต่ถือช่องไว้ 5 วิก่อนปิด -> รอด
+// เทียบ G กับรอบที่ปิดช่องทันทีที่ `sh` จบ (ไม่ถึง 1 วินาที) ซึ่งรูปแบบเดียวกันเป๊ะแต่ตาย และ
+// **ไม่มีไฟล์ log เกิดขึ้นเลย** ⇒ pty ถูกรื้อก่อนที่เชลล์ลูกจะได้ตั้ง redirect ด้วยซ้ำ นั่นคือเหตุที่
+// server.log ไม่เคยมีร่องรอยของการสตาร์ตจากสคริปต์นี้มาตลอด
+//
+// ของที่ถูกตัดออกไปก่อนหน้าแล้ว (อย่าไล่ซ้ำ): node เอง · env_prefix · การเขียนต่อท้าย server.log ·
+// สิทธิ์ไฟล์ · และ `server.js` พังตอนเริ่ม (รอบ 2026-11-05 09:22 มันขึ้นจริง พิมพ์ `[HTTP] port 3000`
+// `[HTTPS] port 3443 ready` รับ WebSocket ได้ 2 ราย แล้วค่อยตายตอนช่องถูกปิด)
+//
+// ⇒ สองข้อนี้คือสิ่งที่ห้ามแก้กลับ: ไม่เปิด pty · และสตาร์ตแบบ background ด้วย nohup เหมือนตัวเฝ้า
+test('run_sudo() does not allocate a pty -- tearing one down is what killed every start', () => {
+  const m = CODE.match(/def run_sudo\(([\s\S]*?)\ndef /);
+  assert.ok(m, 'run_sudo() is not where this guard expects it');
+  const body = m[1];
+  assert.ok(!/get_pty\(\)/.test(body),
+    'run_sudo() allocates a pty again -- when the channel closes, the pty is torn down and takes '
+    + 'the freshly started backend with it. That is the measured cause of every failed restart '
+    + 'from 530e03a to 2026-11-05. `sudo -S` reads the password from stdin, so no pty is needed.');
+  assert.ok(/sudo -S/.test(body), 'the password must still go to `sudo -S`, not a prompt on a tty');
+  assert.ok(/shutdown_write\(\)/.test(body),
+    'stdin must be closed after the password, or sudo may keep waiting for more input');
+});
+
+test('the start is backgrounded with nohup, the shape the NAS boot script itself uses', () => {
   const m = CODE.match(/start_sh\s*=\s*\(([\s\S]*?)\)\nstarted/);
   assert.ok(m, 'start_sh is not built where this guard expects it');
   const built = m[1];
-  ['nohup', 'setsid'].forEach(bit =>
-    assert.ok(!built.includes(bit),
-      `the start command puts \`${bit}\` back -- measured on the NAS as the one shape that never `
-      + 'starts, while the plain foreground `exec` starts and survives the channel closing'));
-  // `2>&1` และตัวเชื่อม `&&` ก็มี & เหมือนกัน เอาสองอย่างนั้นออกก่อน แล้วค่อยดูว่ามี `&` ที่เป็น
-  // การ background เหลืออยู่ไหม — ยามรุ่นแรกของข้อนี้ลืมตัด `&&` แล้วรายงานโค้ดที่ถูกว่าผิด
-  assert.ok(!built.replace(/2>&1/g, '').replace(/&&/g, '').includes('&'),
-    'the start command backgrounds node again (a bare `&`) -- that is the shape that never starts');
-  assert.ok(/\bexec\b/.test(built),
-    'the start must `exec` node so the pid the shell reports is node itself, not a wrapper shell');
+  assert.ok(!/\bexec\b/.test(built),
+    'the start runs node in the foreground again -- measured 2026-11-05 as the one shape that dies '
+    + 'when the channel closes (case F), and it took the site down for ~5 minutes');
+  assert.ok(!built.includes('setsid'),
+    'setsid is back -- it was added on a disproven theory and is not needed once no pty is opened');
+  // `2>&1` และตัวเชื่อม `&&` ก็มี & เหมือนกัน เอาสองอย่างนั้นออกก่อน จึงจะเหลือ & ที่เป็นการ
+  // background จริง — ยามรุ่นก่อนลืมตัด `&&` แล้วรายงานโค้ดที่ถูกว่าผิด
+  assert.ok(built.replace(/2>&1/g, '').replace(/&&/g, '').includes('&'),
+    'the start must be backgrounded like the rc.d boot script does, or the deploy blocks on it');
+  assert.ok(built.includes('echo pid:$!'),
+    'the started pid should come back, so [START] says something a human can check');
 });
 
 test('the command is wrapped for sh -c with quote-safe escaping', () => {
