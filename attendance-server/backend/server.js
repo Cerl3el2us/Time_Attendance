@@ -11971,7 +11971,9 @@ app.post('/api/send-payslip', requireRole('md', 'accounting'), blockSuperAdminPa
   }
 });
 
-const STAFF_ROLES = ['user', 'driver', 'manager', 'marketing'];
+// 2026-11-05: STAFF_ROLES ถูกลบออกจากที่นี่ · มันเคยถูกใช้ตัดสินด่านของ /api/payslip-xlsx ด้วย
+// **ส่วนเติมเต็ม** ของมัน (ไม่อยู่ในลิสต์ = เป็นผู้บริหาร = ดูสลิปของใครก็ได้) ซึ่ง fail-open
+// เมื่อมี role ใหม่ · ด่านนั้นใช้ isPrivilegedAdmin() ที่เป็น allowlist ระบุชื่อแล้ว
 
 // GET /api/payslip-xlsx?userId=&periodIndex=
 // Real .xlsx export (SUM/IF formulas, not hardcoded numbers) built server-side via exceljs --
@@ -12001,13 +12003,24 @@ app.get('/api/payslip-xlsx', async (req, res) => {
     const users = readUsers() || [];
     const live = users.find(u => u.id === req.user.sub);
     if (!live) return res.status(403).json({ success:false, message:'Forbidden: user record not found' });
-    const role = live.role;
-    const isStaff = STAFF_ROLES.includes(role);
+    // SECURITY FIX 2026-11-05 (พบจากการกวาดหาบั๊ก): ด่านนี้เคยตัดสินด้วย
+    // `STAFF_ROLES.includes(role)` แล้วให้ "ทุกอย่างที่ไม่อยู่ในลิสต์พนักงาน" ดาวน์โหลดสลิปของ
+    // ใครก็ได้ ⇒ **fail-open** · วันนั้นยังไม่เป็นช่องโหว่เพราะส่วนที่เหลือคือ md/accounting/
+    // superadmin จริงๆ แต่ถ้าวันหน้าเพิ่ม role ใหม่เข้า ROLE_ENUM (~บรรทัด 2401) แล้วลืมเพิ่มใน
+    // STAFF_ROLES role นั้นจะดาวน์โหลดเงินเดือน เบี้ยเลี้ยง และยอดสุทธิของพนักงานทุกคนได้ทันที
+    // โดยไม่มีใครแก้ด่านนี้เลย — ความผิดแบบ "ลืมแก้อีกที่" ที่ไฟล์นี้มีประวัติมาแล้วหลายครั้ง
+    // เปลี่ยนมาใช้ isPrivilegedAdmin() ซึ่งเป็น allowlist ที่ระบุชื่อชัดและมีอยู่ในไฟล์นี้ก่อนแล้ว
+    // (['md','accounting'] + superadmin) ⇒ role ใหม่ได้สิทธิ์แค่ของตัวเองโดยปริยาย
+    // เทียบขั้วกับทุก role ที่มีอยู่วันนี้แล้วเท่ากันเป๊ะ: user/driver/manager/marketing เคยได้
+    // isStaff=true และตอนนี้ได้ canSeeOtherPeople=false · md/accounting/superadmin เคยได้
+    // isStaff=false และตอนนี้ได้ true ⇒ **พฤติกรรมของวันนี้ไม่เปลี่ยน** เปลี่ยนแต่ค่าปริยาย
+    // ยาม: tests/role-lists-consistent.test.js
+    const canSeeOtherPeople = isPrivilegedAdmin(live);
 
-    if (isStaff && userId !== req.user.sub) {
+    if (!canSeeOtherPeople && userId !== req.user.sub) {
       return res.status(403).json({ success:false, message:'Forbidden' });
     }
-    if (!isStaff && (live.isObserver || live.active === false)) {
+    if (canSeeOtherPeople && (live.isObserver || live.active === false)) {
       return res.status(403).json({ success:false, message:'Forbidden: observer or inactive account' });
     }
 
@@ -12016,7 +12029,7 @@ app.get('/api/payslip-xlsx', async (req, res) => {
 
     const { start, end } = getPeriodBounds(periodIndex);
 
-    // Read regardless of isStaff (not just inside the gate check below) -- MD/accounting
+    // Read regardless of who is asking (not just inside the gate check below) -- MD/accounting
     // fetching someone else's payslip skip the gate entirely, but still need mdApproval.approvedBy
     // for the "Paid by" signature name.
     const mdKey = getMdApprovalKey(start, userId);
@@ -12024,7 +12037,7 @@ app.get('/api/payslip-xlsx', async (req, res) => {
     if (finForXlsx === null) return res.status(503).json({ success:false, message:'Service temporarily unavailable' });
     const mdApproval = finForXlsx[mdKey];
 
-    if (isStaff) {
+    if (!canSeeOtherPeople) {
       const mdApproved = !!(mdApproval?.approved);
       const payDay = getPayDay(end);
       const today = bangkokTodayDate();
