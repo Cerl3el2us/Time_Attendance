@@ -16,6 +16,7 @@
 'use strict';
 const assert = require('assert');
 const path = require('path');
+const fs = require('fs');
 
 const systemAccount = require(path.join(__dirname, '..', 'attendance-server/backend/systemAccount.js'));
 
@@ -190,6 +191,102 @@ test('9. ไม่ส่ง seedStore มาเลย -> พฤติกรร�
 
   const out3 = withEnv('envOnly', () => systemAccount.ensureSystemAccounts([employee(1)], bcrypt, ROUNDS));
   assert.ok(findSuper(out3.users), 'ทางเดิมที่สร้างจาก env ต้องยังใช้ได้');
+});
+
+// ข้อ 10-11 มาจากการรีวิวโค้ดตัวเองเมื่อ 2026-11-05: การกู้คืนทำงานเฉพาะเมื่อ "ไม่มีเรคอร์ด"
+// แต่โจทย์ของเจ้าของคือ "บัญชีนี้จะต้องไม่มีปัญหาในการใช้งาน" ⇒ เรคอร์ดที่ยังอยู่แต่แฮชใช้ไม่ได้
+// (ว่าง หรือไม่ใช่รูป bcrypt จากการเขียนไม่ครบ/แก้มือ) คือบัญชีที่ล็อกอินไม่ได้และไม่มีอะไรซ่อมมัน
+// ทั้งที่ seed ถือแฮชที่ใช้ได้อยู่ · ต้องซ่อมให้ด้วย ไม่ใช่รอให้เรคอร์ดหายทั้งอัน
+test('10. บัญชีอยู่แต่แฮชใช้ไม่ได้ + มี seed -> ซ่อมแฮชจาก seed และดัน tokenVersion ขึ้น', () => {
+  const good = bcrypt.hashSync('rememberedPassword');
+  const seed = fakeSeedStore({ version: 1, password: good, tokenVersion: 4, mustChangePassword: false, updatedAt: 'x' });
+  const input = [employee(1), superadminRecord('', { tokenVersion: 9 })];
+  const out = withEnv(undefined, () => systemAccount.ensureSystemAccounts(input, bcrypt, ROUNDS, seed));
+
+  const su = findSuper(out.users);
+  assert.ok(su, 'บัญชีต้องยังอยู่');
+  assert.strictEqual(su.password, good, 'แฮชต้องถูกซ่อมจาก seed ⇒ ล็อกอินด้วยรหัสเดิมได้');
+  assert.strictEqual(out.changed, true, 'ต้องบอกให้ผู้เรียกเขียน users.json กลับลงไฟล์');
+  // ใช้ค่าที่สูงกว่าระหว่างเรคอร์ดกับ seed แล้วบวกหนึ่ง เพราะรหัสผ่านของบัญชีเปลี่ยนไปจริง
+  // ⇒ token ทุกใบที่ออกไปก่อนหน้านี้ต้องใช้ไม่ได้ ไม่ว่าจะออกตอน tokenVersion ของฝั่งไหน
+  assert.strictEqual(su.tokenVersion, 10, 'tokenVersion ต้องเป็น max(9, 4) + 1 = 10');
+  assert.strictEqual(seed.writes.length, 0, 'seed ถูกอยู่แล้ว ไม่ต้องเขียนทับ');
+});
+
+test('11. บัญชีอยู่ แฮชใช้ไม่ได้ และไม่มี seed -> ไม่แกล้งซ่อม ไม่ล้ม', () => {
+  const seed = fakeSeedStore();
+  const input = [superadminRecord('', { tokenVersion: 2 })];
+  let out;
+  assert.doesNotThrow(() => {
+    out = withEnv(undefined, () => systemAccount.ensureSystemAccounts(input, bcrypt, ROUNDS, seed));
+  });
+  assert.strictEqual(findSuper(out.users).password, '', 'ไม่มีแฮชที่ใช้ได้ให้เอามาใส่ จึงต้องไม่แตะ');
+  assert.strictEqual(seed.writes.length, 0, 'ห้ามเขียนแฮชที่ใช้ไม่ได้ลง seed (จะทำลาย seed ที่ดี)');
+});
+
+// ข้อ 12 มาจากการรีวิวเดียวกัน: ฝั่ง server.js แคชไฟล์ seed ไว้ในหน่วยความจำ ⇒ readSeed() จะ
+// ตรวจ "ของเสียชิ้นเดิม" ซ้ำทุก request และเดิมพิมพ์ error ทุกครั้ง ⇒ server.log บวมหนึ่งบรรทัด
+// ต่อหนึ่ง request ตลอดไปเมื่อ seed เสียและบัญชีหายพร้อมกัน (เส้นทางนั้นคืนค่าออกก่อนถึงจุดซ่อม)
+test('12. seed ที่ใช้ไม่ได้ต้องบ่นครั้งเดียว ไม่ใช่ทุกครั้งที่ถูกเรียก', () => {
+  const store = fakeSeedStore({ version: 2, password: '$2b$10$abc' });
+  const origErr = console.error;
+  const seen = [];
+  console.error = (...a) => seen.push(a.join(' '));
+  try {
+    withEnv(undefined, () => {
+      for (let i = 0; i < 5; i++) systemAccount.ensureSystemAccounts([employee(1)], bcrypt, ROUNDS, store);
+    });
+  } finally { console.error = origErr; }
+  const aboutVersion = seen.filter(l => l.includes('seed has version'));
+  assert.strictEqual(aboutVersion.length, 1,
+    `เรียก 5 ครั้ง ควรบ่นเรื่องเดิมครั้งเดียว แต่บ่น ${aboutVersion.length} ครั้ง`);
+});
+
+test('13. บ่นซ้ำได้ถ้าเคยกลับมาปกติแล้วเสียอีก (ไม่ใช่เงียบถาวร)', () => {
+  const good = bcrypt.hashSync('ok');
+  const goodSeed = () => fakeSeedStore({ version: 1, password: good, tokenVersion: 0, mustChangePassword: false, updatedAt: 'x' });
+  const badSeed = () => fakeSeedStore({ version: 2, password: good });
+  const origErr = console.error;
+  const seen = [];
+  // สถานะ "เคยบ่นเรื่องนี้แล้ว" เป็นตัวแปรระดับโมดูล ⇒ เทสต์ข้ออื่นทิ้งค่าไว้ได้
+  // จึงเริ่มด้วยการอ่าน seed ที่ใช้ได้หนึ่งครั้งเพื่อรีเซ็ต แล้วค่อยเริ่มนับ
+  withEnv(undefined, () => systemAccount.ensureSystemAccounts([employee(1)], bcrypt, ROUNDS, goodSeed()));
+  console.error = (...a) => seen.push(a.join(' '));
+  try {
+    withEnv(undefined, () => {
+      systemAccount.ensureSystemAccounts([employee(1)], bcrypt, ROUNDS, badSeed());   // บ่นครั้งที่ 1
+      systemAccount.ensureSystemAccounts([employee(1)], bcrypt, ROUNDS, goodSeed());  // กลับมาปกติ -> รีเซ็ต
+      systemAccount.ensureSystemAccounts([employee(1)], bcrypt, ROUNDS, badSeed());   // บ่นครั้งที่ 2
+    });
+  } finally { console.error = origErr; }
+  assert.strictEqual(seen.filter(l => l.includes('seed has version')).length, 2,
+    'เสีย -> ปกติ -> เสีย ต้องได้ 2 บรรทัด');
+});
+
+// ---------------------------------------------------------------------------------------------
+// ยามสำหรับฝั่ง server.js · **ยามนี้อ่านตัวอักษร ไม่ได้รันโค้ด** เพราะ require('server.js')
+// จะเปิดเซิร์ฟเวอร์จริงและจับพอร์ต ⇒ รันในเทสต์ไม่ได้ · มันกันได้แค่การ "แก้กลับ" สองข้อที่
+// เจอจากการรีวิวโค้ดตัวเองเมื่อ 2026-11-05 ไม่ได้พิสูจน์ว่าพฤติกรรมถูก
+// (บทเรียนของโปรเจกต์: การจับข้อความไม่ใช่ความครบถ้วน)
+const SERVER_SRC = fs.readFileSync(path.join(__dirname, '..', 'attendance-server/backend/server.js'), 'utf8');
+const STORE_SRC = (SERVER_SRC.match(/const superadminSeedStore = \{[\s\S]*?\n\};/) || [''])[0];
+
+test('server.js: ที่เก็บ seed ต้องไม่อัปเดตแคชตอน dry-run', () => {
+  assert.ok(STORE_SRC, 'หาบล็อก superadminSeedStore ใน server.js ไม่เจอ');
+  assert.ok(/isDryRun\(\)/.test(STORE_SRC),
+    'write() ไม่ตรวจ isDryRun() อีกแล้ว · atomicWrite() ไม่เขียนอะไรตอน dry-run แต่ถ้ายังอัปเดต '
+    + 'แคช โปรเซสนี้จะเชื่อว่ามี seed ทั้งที่ไฟล์ยังไม่เกิด แล้วจะไม่เขียนอีกเลยจนรีสตาร์ต '
+    + '(server.js ~บรรทัด 101 เตือนไว้เองว่าสถานะข้ามรีเควสต์ทำให้ dry-run ไม่ปลอดภัย)');
+});
+
+test('server.js: เขียน seed ไม่สำเร็จต้องไม่ลองใหม่ทุก request', () => {
+  assert.ok(STORE_SRC, 'หาบล็อก superadminSeedStore ใน server.js ไม่เจอ');
+  assert.ok(/catch[\s\S]*superadminSeedCache = obj/.test(STORE_SRC),
+    'เมื่อ atomicWrite() โยน error แล้วไม่จำ seed ไว้ในหน่วยความจำ แคชจะค้างเป็น null ⇒ '
+    + 'ทุก request ถัดไปจะลองเขียนใหม่และพิมพ์ error ซ้ำไม่สิ้นสุด เพราะ readUsers() วิ่งแทบทุก request');
+  assert.ok(/atomicWrite\(SUPERADMIN_SEED_FILE[\s\S]*?,\s*true\s*\)/.test(STORE_SRC),
+    'ธง sensitive หายไป ⇒ ไฟล์ seed จะกลายเป็น 644 ทุกครั้งที่เขียน (atomicWrite rename ทับ '
+    + 'ปลายทางจึงรับ mode ของไฟล์ชั่วคราว) ⇒ แฮชของบัญชีหลังบ้านจะอ่านได้ทุกบัญชีบนเครื่อง');
 });
 
 console.log(`\nsuperadmin-seed: ${passed} passed`);
