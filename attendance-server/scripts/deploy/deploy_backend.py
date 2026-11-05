@@ -52,7 +52,15 @@ if not NAS_PASSWORD:
         '  The account must be in the DSM administrators group (the restart step uses sudo).\n'
         '  See attendance-server/DEVELOPER_HANDOFF.md for the full handover checklist.')
 
-SUPERADMIN_PASSWORD = os.environ.get('SUPERADMIN_PASSWORD', '')
+# 2026-11-05: this script no longer touches SUPERADMIN_PASSWORD at all.
+# It used to read it from the developer's machine and prepend it to the start command, which put
+# the password into argv on the NAS -- readable by any local account via `ps aux`, and (after the
+# pty fix in 1380ccd) readable until the next restart, because the `sh -c` wrapper now lingers.
+# The backend keeps its own durable copy of the account's bcrypt HASH in
+# backend/data/superadmin-seed.json and rebuilds the account from that if it ever goes missing,
+# so nothing needs to be handed over here. A fresh install with neither the account nor the seed
+# is the only case that still needs the env var, and it is a one-off done on the NAS --
+# see attendance-server/DEVELOPER_HANDOFF.md.
 
 # 2026-09-24 (owner): the account was hard-coded to 'Teerawat', so only that one person could
 # deploy -- if the account were disabled the deploy path was dead until someone edited this file.
@@ -113,35 +121,57 @@ def run(cmd, timeout=20):
         return None
 
 def run_sudo(cmd, timeout=20):
-    """For commands that need root (killing a root-owned process). Pipes the NAS password
-    over a PTY, matching the pattern this project already uses for root file writes.
+    """For commands that need root (killing a root-owned process, and starting the backend).
+    Feeds the NAS password to `sudo -S` on the channel's STDIN, with NO pty.
 
-    2026-11-03: used to sleep a flat 1.5s and then chan.close(). Waiting for the command to
-    finish is simply more correct than a timer, so it stays -- but do NOT read it as the fix for
-    the restart bug below. It was changed while chasing a theory that a closing pty made sudo
-    kill the backgrounded process, and that theory was then DISPROVEN by measurement: a
-    backgrounded `sleep` launched through this exact helper survives, with and without setsid,
-    with the channel closed after 1.5s and with it left open. node itself also runs fine through
-    it (`node --version` as root, with the same cd, HOME and env prefix, writes its output), and
-    so does appending to backend/server.log. Every component works in isolation; only
-    `node server.js` fails, and it leaves no line in server.log at all.
+    2026-11-05: **the missing pty is the fix for the restart bug.** From 530e03a until now this
+    script never once started the backend successfully -- every run left it down and the rc.d
+    watchdog brought it back within 5 minutes. The cause was this helper opening a pty: when the
+    channel is closed, that pty is torn down, and the teardown takes the process the command just
+    started with it. The backgrounded start returns immediately, so the close landed under a
+    second after the fork -- early enough that the child died before even setting up its
+    `>> server.log` redirection, which is why a failed start left NO line in server.log at all
+    and looked like node had never run.
+
+    Measured on the real NAS on 2026-11-05 with a probe script in /tmp that binds no port, so the
+    live backend was never touched. State checked 14 seconds after closing the channel:
+      no pty + `nohup … &`       -> survives (ppid 1)   <- what the rc.d boot script does
+      no pty + `setsid --fork`   -> survives (ppid 1)
+      pty    + `exec` foreground -> DIES, log stops at the exact second the channel closed
+      pty    + `nohup … &` held open 5s before closing -> survives
+    The same `pty + nohup &` shape closed immediately instead dies with no log file at all, which
+    is the production symptom reproduced exactly.
+
+    Earlier rounds ruled out, so do not chase them again: node itself, env_prefix, appending to
+    backend/server.log, file permissions, and `server.js` crashing on startup -- on 2026-11-05
+    09:22 it really did come up, printed `[HTTP] port 3000` and `[HTTPS] port 3443 ready` and
+    served two WebSocket clients, and only then died when the channel closed.
     """
     chan = client.get_transport().open_session()
     chan.settimeout(timeout)
-    chan.get_pty()
+    # NO chan.get_pty() -- see above. tests/deploy-starts-as-root.test.js fails if it comes back.
     chan.exec_command(f'sudo -S {cmd}')
-    time.sleep(0.5)
-    chan.send(NAS_PASSWORD + '\n')
+    time.sleep(0.4)
+    chan.sendall(NAS_PASSWORD + '\n')
+    # sudo would otherwise keep reading stdin; also lets a command that reads stdin see EOF.
+    try:
+        chan.shutdown_write()
+    except Exception:
+        pass
     out = b''
     deadline = time.time() + timeout
     while time.time() < deadline:
         while chan.recv_ready():
             out += chan.recv(4096)
+        while chan.recv_stderr_ready():      # no pty => sudo's prompt and errors arrive here
+            out += chan.recv_stderr(4096)
         if chan.exit_status_ready():
             break
         time.sleep(0.1)
     while chan.recv_ready():
         out += chan.recv(4096)
+    while chan.recv_stderr_ready():
+        out += chan.recv_stderr(4096)
     chan.close()
     return out.decode(errors='replace')
 
@@ -186,17 +216,6 @@ if old_pid:
         kill_pids(still_alive.split())
         time.sleep(2)
 
-# Escape for a double-quoted shell string on the NAS (Synology sh/bash).
-def _sh_escape(s):
-    return s.replace('\\', '\\\\').replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
-
-env_bits = []
-if SUPERADMIN_PASSWORD:
-    env_bits.append(f'SUPERADMIN_PASSWORD="{_sh_escape(SUPERADMIN_PASSWORD)}"')
-env_prefix = (' '.join(env_bits) + ' ') if env_bits else ''
-if not SUPERADMIN_PASSWORD:
-    print('[NOTE] SUPERADMIN_PASSWORD not set on this machine — superadmin account will NOT be created until you set it (see DEVELOPER_HANDOFF.md)')
-
 # Wrap a whole command for `sh -c '<here>'`, closing and reopening the quote around any
 # single quote inside it, so a password or value containing ' cannot end the string early.
 def _single_quoted(s):
@@ -217,15 +236,20 @@ def _single_quoted(s):
 # Nothing about that was specific to what was being deployed -- any deploy would have done it.
 # Starting as root removes the mismatch instead of papering over it, and matches what the watchdog
 # would do on its own minutes later anyway. Checked against the real rc.d script, not from memory.
-# 2026-11-03: `setsid` was added on the (since DISPROVEN) theory that sudo's pty teardown killed
-# the backgrounded node -- see run_sudo() above for what was actually measured. It is kept only
-# because detaching a daemon from the launching terminal is correct on its own and was measured
-# not to break anything; it does NOT fix the restart bug. **สคริปต์นี้ยังสตาร์ต backend ไม่สำเร็จ**
-# ทุกครั้งที่รัน ตัวเฝ้า rc.d เป็นคนกู้ให้ภายใน 5 นาที (ดู STATUS.md หัวข้อเปิดอยู่)
-# Verified present on this NAS at /usr/bin/setsid before relying on it.
+# 2026-11-05: this is now character-for-character the start the NAS's own boot script runs
+# (/usr/local/etc/rc.d/attendance-autostart.sh -> start_backend()), which has kept the backend
+# alive for months, including every automatic recovery:
+#     cd "$BACKEND_DIR" && HOME="$BASE_DIR" nohup "$NODE" server.js < /dev/null >> server.log 2>&1 &
+# What used to break this script was never the shape of this command -- it was run_sudo() opening a
+# pty (see its docstring for the 2026-11-05 measurements). With no pty there is nothing to tear
+# down, and a backgrounded start measured as surviving with ppid 1.
+# A `setsid` sat here from 2026-11-03 on a theory that was disproven; it is gone because it is not
+# needed, not because it hurt. A foreground `exec` was tried on 2026-11-05 and is the one shape
+# that reliably DIES when the channel closes -- it took the site down for ~5 minutes. Do not
+# reintroduce either; tests/deploy-starts-as-root.test.js fails if they come back, and says why.
 start_sh = (f'cd "/volume1/web/Time_Attendance/attendance-server/backend" && '
-            f'HOME="/volume1/web/Time_Attendance/attendance-server" {env_prefix}'
-            f'setsid nohup {NODE} server.js < /dev/null >> server.log 2>&1 & echo pid:$!')
+            f'HOME="/volume1/web/Time_Attendance/attendance-server" '
+            f'nohup {NODE} server.js < /dev/null >> server.log 2>&1 & echo pid:$!')
 started = run_sudo(f'sh -c {_single_quoted(start_sh)}')
 print('[START]', (started or '').strip() or '(no output -- verifying below)')
 

@@ -290,8 +290,9 @@ appear in employee lists, payslips, reports, or the login page hint text.
 | Item | Detail |
 |---|---|
 | Username | `superadmin` (fixed — cannot be renamed or deleted via API) |
-| Password | Set on your **Windows dev machine** via `setx SUPERADMIN_PASSWORD "..."` in **cmd.exe** (not PowerShell), then restart backend with `deploy_backend.py` — the deploy script forwards this env var to the NAS Node process. Change later only by logging in as `superadmin` → Profile → Change Password |
-| Protection | `backend/systemAccount.js` — re-created on every backend start if removed from `users.json`; API blocks role/password/admin edits by others |
+| Password | Change it by logging in as `superadmin` → Profile → Change Password. Nothing else sets it, and **no machine needs to hold it** — see "Recovery" below. (Until 2026-11-05 the deploy script forwarded a `SUPERADMIN_PASSWORD` env var from the developer's PC; it no longer does, because that put the password into `ps aux` on the NAS.) |
+| Recovery | Automatic. `backend/data/superadmin-seed.json` (mode 600) holds the account's **bcrypt hash**, never the password. If the account disappears from `users.json`, the backend rebuilds it from that hash — **with the same password as before** — on the next read of `users.json`, which happens within seconds and needs no restart. The seed refreshes itself whenever the password is changed through the UI. Because it lives next to the data on the NAS, replacing the developer's PC changes nothing. |
+| Protection | `backend/systemAccount.js` — re-created from the seed if removed from `users.json`; API blocks role/password/admin edits by others |
 | Can do | View every page (incl. Finalize + 50 ทวิ), export payslip/50-Tawi xlsx, approve requests (with CONFIRM prompt), edit employees/settings, role preview dropdown |
 | Cannot do, acting as itself | Finalize confirm, MD payroll approve, email payslip, save 50-Tawi overrides |
 | Can exercise while writing nothing | Since 2026-10-05 it can impersonate a **specific employee**, not just a role. While impersonating, the pages closed to superadmin itself — check-in and Leave — open, because the page gate reads the impersonated person's role. Every write is then refused by the server and turned into a dry run that reports what would have happened. So check-in and submitting leave can be walked end to end without one row changing. (This row replaces an older one that listed check-in and submitting leave as flatly impossible.) |
@@ -336,8 +337,20 @@ can. Exempting a page means listing it as personal to the viewer, with a reason.
 Full detail: `AGENTS.md` § 7a.
 
 **Do not delete `systemAccount.js` or remove its hooks in `server.js`.** If an AI
-or another developer removes the account from `users.json`, restart the backend
-(with `SUPERADMIN_PASSWORD` still set) to restore it.
+or another developer removes the account from `users.json`, it comes back on its own
+from `backend/data/superadmin-seed.json` within seconds — no restart, no env var, no
+password typed anywhere. Watch for `[SYSTEM] Restored superadmin from seed` in
+`server.log`. Do not delete that seed file either; it is the only copy of the hash
+outside `users.json`.
 
-To set the password on the NAS process, add `SUPERADMIN_PASSWORD` to whatever
-environment the backend starts with, then restart via `deploy_backend.py`.
+**A brand-new install, with neither the account nor the seed** (new NAS, empty
+`data/`), is the one case that still needs the password typed once. Do it on the NAS,
+not from a developer PC: put `SUPERADMIN_PASSWORD=...` in front of the `node server.js`
+line in `/usr/local/etc/rc.d/attendance-autostart.sh`, start the backend, confirm
+`[SYSTEM] Created superadmin system account` and that `superadmin-seed.json` now
+exists with mode 600, then take the variable back out and restart. From then on the
+seed carries it. Never put the password on a command line that `ps aux` can show —
+that is the bug this design exists to avoid, found on 2026-11-05.
+
+Design and the measurements behind it:
+`docs/superpowers/specs/2026-11-05-superadmin-account-durability-design.md`

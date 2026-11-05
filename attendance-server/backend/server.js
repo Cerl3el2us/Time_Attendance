@@ -940,10 +940,48 @@ const DEFAULT_USERS = [];
 function readUsersRaw() {
   try { return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')); } catch(e) { return null; }
 }
+
+// 2026-11-05 (เจ้าของสั่งเรื่องบัญชี superadmin มาโดยตรง ซึ่งเป็นเงื่อนไขที่ AI POLICY ใน
+// systemAccount.js กำหนดไว้ว่าจึงจะแก้ไฟล์กลุ่มนี้ได้): ที่เก็บ "เมล็ด" ของบัญชี superadmin
+// เก็บเฉพาะ **แฮช bcrypt ไม่เก็บรหัสจริง** เพื่อให้บัญชีกลับมาเองได้ด้วยรหัสเดิมถ้ามันหายไป
+// จาก users.json · แฮชอยู่ข้างข้อมูลบน NAS ไม่ได้อยู่ในคอมของใคร ⇒ เปลี่ยนเครื่องใหม่ก็ยังกู้ได้
+// ของเดิมพึ่ง SUPERADMIN_PASSWORD ใน env ของเครื่องที่สั่ง deploy ซึ่งตัวเฝ้า rc.d ไม่เคยส่งให้
+// (ตรวจบน NAS แล้ว grep ไม่เจอคำนี้ในสคริปต์) ⇒ การกู้อัตโนมัติไม่ได้ทำงานจริงมาตลอด
+// ตารางพฤติกรรมและเหตุผลอยู่ใน systemAccount.js และ
+// docs/superpowers/specs/2026-11-05-superadmin-account-durability-design.md
+const SUPERADMIN_SEED_FILE = path.join(DATA_DIR, 'superadmin-seed.json');
+// แคชในหน่วยความจำ: ensureSystemAccounts() ถูกเรียกจาก readUsers() ซึ่งวิ่งแทบทุก request
+// ⇒ ถ้าอ่านไฟล์ทุกครั้งจะเป็น I/O ต่อ request โดยไม่ได้อะไรเพิ่ม · เขียนเมื่อไรอัปเดตแคชตามไปด้วย
+// undefined = ยังไม่เคยอ่าน · null = ไม่มีไฟล์ หรืออ่านไม่ออก
+let superadminSeedCache;
+const superadminSeedStore = {
+  read() {
+    if (superadminSeedCache === undefined) {
+      try {
+        superadminSeedCache = JSON.parse(fs.readFileSync(SUPERADMIN_SEED_FILE, 'utf8'));
+      } catch (e) {
+        // ไฟล์ยังไม่มีเป็นเรื่องปกติ (ยังไม่เคยเขียน) จึงเงียบ · ไฟล์พังต้องดังแต่ **ดังครั้งเดียว**
+        // ไม่ใช่ทุก request จึงแคช null ไว้ ไม่ปล่อยให้โยนซ้ำทุกครั้งที่อ่านผู้ใช้
+        if (e.code !== 'ENOENT') {
+          console.error('[SYSTEM] superadmin seed file unreadable —', e.message,
+            '— treating as absent until the next restart');
+        }
+        superadminSeedCache = null;
+      }
+    }
+    return superadminSeedCache;
+  },
+  write(obj) {
+    // sensitive:true จำเป็น ไม่ใช่ของแถม — atomicWrite() เขียนไฟล์ชั่วคราวแล้ว rename ทับ
+    // ปลายทางจึงรับ mode ของไฟล์ชั่วคราว (644) ทุกครั้งที่เขียน ถ้าไม่ส่งธงนี้
+    atomicWrite(SUPERADMIN_SEED_FILE, JSON.stringify(obj, null, 2), true);
+    superadminSeedCache = obj;
+  },
+};
 function readUsers() {
   const raw = readUsersRaw();
   if (raw === null) return null;
-  const { users, changed } = systemAccount.ensureSystemAccounts(raw, bcrypt, BCRYPT_ROUNDS);
+  const { users, changed } = systemAccount.ensureSystemAccounts(raw, bcrypt, BCRYPT_ROUNDS, superadminSeedStore);
   if (changed) {
     try {
       atomicWrite(USERS_FILE, JSON.stringify(users, null, 2), true);
@@ -955,7 +993,7 @@ function readUsers() {
   return users;
 }
 function saveUsers(u) {
-  const ensured = systemAccount.ensureSystemAccounts(u, bcrypt, BCRYPT_ROUNDS);
+  const ensured = systemAccount.ensureSystemAccounts(u, bcrypt, BCRYPT_ROUNDS, superadminSeedStore);
   atomicWrite(USERS_FILE, JSON.stringify(ensured.users, null, 2), true);
 }
 
@@ -973,7 +1011,7 @@ if (!fs.existsSync(USERS_FILE)) {
 (function bootstrapSystemAccount() {
   const raw = readUsersRaw();
   if (!raw) return;
-  const { users, changed } = systemAccount.ensureSystemAccounts(raw, bcrypt, BCRYPT_ROUNDS);
+  const { users, changed } = systemAccount.ensureSystemAccounts(raw, bcrypt, BCRYPT_ROUNDS, superadminSeedStore);
   if (changed) {
     atomicWrite(USERS_FILE, JSON.stringify(users, null, 2), true);
     console.log('[SYSTEM] Restored superadmin system account in users.json');

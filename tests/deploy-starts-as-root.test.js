@@ -43,15 +43,83 @@ test('the start goes through run_sudo(), not a plain run()', () => {
   assert.ok(!/started\s*=\s*run\(/.test(CODE), 'the non-sudo start is back');
 });
 
-test('the start command still carries the same working directory, HOME and nohup as the boot script', () => {
+test('the start command still carries the same working directory, HOME and stdio', () => {
   const m = CODE.match(/start_sh\s*=\s*\(([\s\S]*?)\)\nstarted/);
   assert.ok(m, 'start_sh is not built where this guard expects it');
   const built = m[1];
   ['cd "/volume1/web/Time_Attendance/attendance-server/backend"',
    'HOME="/volume1/web/Time_Attendance/attendance-server"',
-   'nohup', 'server.js', 'server.log'].forEach(bit =>
+   'nohup', 'server.js', 'server.log', '< /dev/null'].forEach(bit =>
     assert.ok(built.includes(bit), `the start command no longer contains: ${bit}`));
-  assert.ok(built.includes('env_prefix'), 'SUPERADMIN_PASSWORD would stop being passed through');
+});
+
+// 2026-11-05: กลับด้านจากยามเดิมที่บังคับว่า start ต้องมี `env_prefix` (= ส่ง SUPERADMIN_PASSWORD
+// ไปให้ node) · ตอนนี้ต้อง **ไม่มี** เพราะค่านั้นไปโผล่เป็นข้อความเปิดใน `ps aux` บน NAS:
+// เชลล์ห่อ `sh -c` ค้างอยู่ถาวร (ppid 1) หลังคอมมิต 1380ccd เพราะไม่มี pty ให้รื้อ ⇒ บัญชีใด
+// บนเครื่องที่สั่ง ps aux ได้ อ่านรหัส superadmin ได้ทันที · เป็นบั๊กประเภทเดียวกับที่
+// attendance-autostart.sh เคยแก้ให้โทเคน Cloudflare เมื่อ 2026-08-13
+// แทนที่ด้วยไฟล์ seed ที่เก็บแฮช (ดู systemAccount.js) ⇒ ไม่ต้องส่งรหัสผ่าน CLI อีกเลย
+// ฝั่ง server.js ยังอ่าน process.env.SUPERADMIN_PASSWORD ต่อ สำหรับทางติดตั้งใหม่หมดเท่านั้น
+test('the start command never carries the superadmin password on the command line', () => {
+  const m = CODE.match(/start_sh\s*=\s*\(([\s\S]*?)\)\nstarted/);
+  assert.ok(m, 'start_sh is not built where this guard expects it');
+  const built = m[1];
+  ['env_prefix', 'SUPERADMIN_PASSWORD', 'env_bits'].forEach(bit =>
+    assert.ok(!built.includes(bit),
+      `the start command carries \`${bit}\` again -- the password lands in argv, and the lingering `
+      + '`sh -c` wrapper keeps it readable in `ps aux` until the next restart. The seed file in '
+      + 'backend/data holds the bcrypt hash instead, so nothing needs to be passed here.'));
+  assert.ok(!/SUPERADMIN_PASSWORD/.test(CODE),
+    'deploy_backend.py reads SUPERADMIN_PASSWORD again -- it has no job here any more');
+});
+
+// ยามข้อนี้คุมต้นเหตุจริงของบั๊ก "สคริปต์ deploy สตาร์ต backend ไม่ขึ้นเลยตั้งแต่ 530e03a"
+// ซึ่งหาเจอเมื่อ 2026-11-05: **run_sudo() เปิด pty** แล้วเมื่อช่องถูกปิด pty ถูกรื้อ และลาก
+// โปรเซสที่เพิ่งถูกสตาร์ตไปด้วย · `sudo -S` อ่านรหัสผ่านจาก stdin ได้ ไม่ต้องมี pty เลย
+//
+// วัดบน NAS จริง 2026-11-05 ด้วยสคริปต์ทดสอบใน /tmp ที่ไม่จับพอร์ต (เว็บไม่ดับแม้วินาทีเดียว)
+// ตรวจสถานะ 14 วินาทีหลังปิดช่องทุกเคส:
+//   D  ไม่มี pty + `nohup … &`        -> รอด (ppid 1)   <- รูปแบบที่ตัวเฝ้า rc.d ใช้
+//   E  ไม่มี pty + `setsid --fork`    -> รอด (ppid 1)
+//   F  มี pty   + `exec` foreground   -> **ตาย** log หยุดที่วินาทีที่ปิดช่องพอดี
+//   G  มี pty   + `nohup … &` แต่ถือช่องไว้ 5 วิก่อนปิด -> รอด
+// เทียบ G กับรอบที่ปิดช่องทันทีที่ `sh` จบ (ไม่ถึง 1 วินาที) ซึ่งรูปแบบเดียวกันเป๊ะแต่ตาย และ
+// **ไม่มีไฟล์ log เกิดขึ้นเลย** ⇒ pty ถูกรื้อก่อนที่เชลล์ลูกจะได้ตั้ง redirect ด้วยซ้ำ นั่นคือเหตุที่
+// server.log ไม่เคยมีร่องรอยของการสตาร์ตจากสคริปต์นี้มาตลอด
+//
+// ของที่ถูกตัดออกไปก่อนหน้าแล้ว (อย่าไล่ซ้ำ): node เอง · env_prefix · การเขียนต่อท้าย server.log ·
+// สิทธิ์ไฟล์ · และ `server.js` พังตอนเริ่ม (รอบ 2026-11-05 09:22 มันขึ้นจริง พิมพ์ `[HTTP] port 3000`
+// `[HTTPS] port 3443 ready` รับ WebSocket ได้ 2 ราย แล้วค่อยตายตอนช่องถูกปิด)
+//
+// ⇒ สองข้อนี้คือสิ่งที่ห้ามแก้กลับ: ไม่เปิด pty · และสตาร์ตแบบ background ด้วย nohup เหมือนตัวเฝ้า
+test('run_sudo() does not allocate a pty -- tearing one down is what killed every start', () => {
+  const m = CODE.match(/def run_sudo\(([\s\S]*?)\ndef /);
+  assert.ok(m, 'run_sudo() is not where this guard expects it');
+  const body = m[1];
+  assert.ok(!/get_pty\(\)/.test(body),
+    'run_sudo() allocates a pty again -- when the channel closes, the pty is torn down and takes '
+    + 'the freshly started backend with it. That is the measured cause of every failed restart '
+    + 'from 530e03a to 2026-11-05. `sudo -S` reads the password from stdin, so no pty is needed.');
+  assert.ok(/sudo -S/.test(body), 'the password must still go to `sudo -S`, not a prompt on a tty');
+  assert.ok(/shutdown_write\(\)/.test(body),
+    'stdin must be closed after the password, or sudo may keep waiting for more input');
+});
+
+test('the start is backgrounded with nohup, the shape the NAS boot script itself uses', () => {
+  const m = CODE.match(/start_sh\s*=\s*\(([\s\S]*?)\)\nstarted/);
+  assert.ok(m, 'start_sh is not built where this guard expects it');
+  const built = m[1];
+  assert.ok(!/\bexec\b/.test(built),
+    'the start runs node in the foreground again -- measured 2026-11-05 as the one shape that dies '
+    + 'when the channel closes (case F), and it took the site down for ~5 minutes');
+  assert.ok(!built.includes('setsid'),
+    'setsid is back -- it was added on a disproven theory and is not needed once no pty is opened');
+  // `2>&1` และตัวเชื่อม `&&` ก็มี & เหมือนกัน เอาสองอย่างนั้นออกก่อน จึงจะเหลือ & ที่เป็นการ
+  // background จริง — ยามรุ่นก่อนลืมตัด `&&` แล้วรายงานโค้ดที่ถูกว่าผิด
+  assert.ok(built.replace(/2>&1/g, '').replace(/&&/g, '').includes('&'),
+    'the start must be backgrounded like the rc.d boot script does, or the deploy blocks on it');
+  assert.ok(built.includes('echo pid:$!'),
+    'the started pid should come back, so [START] says something a human can check');
 });
 
 test('the command is wrapped for sh -c with quote-safe escaping', () => {
