@@ -2286,9 +2286,14 @@ table tbody tr:last-child td { border-bottom: none; }
    this view alone so other print buttons (payslip, reports) keep the browser's default portrait. */
 .print-only { display: none; }
 
+/* 2026-11-25 (เจ้าของสั่ง): แนวตั้ง และต้องเห็นข้อมูลทั้งรอบใน A4 หน้าเดียว
+   ของเดิมเป็นแนวนอน · ขอบลดจาก 10/12mm เหลือ 8/10mm เพื่อเอาความสูงคืนมาให้ตาราง
+   งบความสูง: A4 สูง 297mm ลบขอบ 16mm = 281mm ~ 1,060px · หัวเอกสาร+สรุป+สัญลักษณ์+ท้าย ~150px
+   ⇒ เหลือให้ตาราง ~910px · 31 วัน + หัวตาราง = 32 แถว ⇒ ต้องไม่เกิน ~28px/แถว
+   ค่าที่ตั้งด้านล่างให้ราว 18px/แถว เพื่อเผื่อแถวที่มีโน้ตการลาซึ่งสูงขึ้นอีกบรรทัด */
 @page att-print-page {
-  size: A4 landscape;
-  margin: 10mm 12mm;
+  size: A4 portrait;
+  margin: 8mm 10mm;
 }
 
 @media print {
@@ -2312,46 +2317,58 @@ table tbody tr:last-child td { border-bottom: none; }
 
 .att-print-header {
   display: grid;
-  grid-template-columns: minmax(120px, 200px) 1fr minmax(120px, 200px);
+  grid-template-columns: minmax(90px, 150px) 1fr minmax(100px, 160px);
   align-items: center;
-  border-bottom: 2.5px solid #1e3a5f;
-  padding-bottom: 16px;
-  margin-bottom: 18px;
+  border-bottom: 2px solid #1e3a5f;
+  padding-bottom: 8px;
+  margin-bottom: 9px;
 }
-.att-print-logo { height: 48px; display: block; }
+.att-print-logo { height: 34px; display: block; }
 .att-print-header-center { text-align: center; }
 .att-print-title {
-  font-size: 26px;
+  font-size: 17px;
   font-weight: 800;
   color: #1e3a5f;
   text-transform: uppercase;
-  letter-spacing: .06em;
+  letter-spacing: .05em;
 }
-.att-print-emp { font-size: 13px; font-weight: 600; color: #475569; margin-top: 4px; }
-.att-print-period { text-align: right; font-size: 11px; color: #334155; line-height: 1.9; }
+.att-print-emp { font-size: 11px; font-weight: 600; color: #475569; margin-top: 2px; }
+.att-print-period { text-align: right; font-size: 9px; color: #334155; line-height: 1.6; }
 .att-print-period-label { color: #94a3b8; font-weight: 600; text-transform: uppercase; font-size: 9px; letter-spacing: .04em; margin-right: 5px; }
 
-.att-print-table { width: 100%; border-collapse: collapse; font-size: 10.5px; table-layout: fixed; }
+.att-print-table { width: 100%; border-collapse: collapse; font-size: 9px; table-layout: fixed; }
 .att-print-table th {
   background: #1e3a5f;
   color: #fff;
-  padding: 7px 10px;
+  padding: 4px 5px;
   text-align: left;
   font-weight: 600;
-  font-size: 9px;
+  font-size: 7.5px;
   text-transform: uppercase;
-  letter-spacing: .06em;
+  letter-spacing: .04em;
 }
-.att-print-table th:nth-child(1) { width: 17%; }
-.att-print-table th:nth-child(2) { width: 10%; }
-.att-print-table th:nth-child(3) { width: 13%; }
-.att-print-table th:nth-child(4) { width: 15%; }
-.att-print-table th:nth-child(5) { width: 15%; }
+/* 2026-11-25: สัดส่วนคอลัมน์ของแนวตั้ง — กว้างใช้ได้ราว 190mm (~718px) แคบกว่าแนวนอนมาก
+   ช่องสถานะกว้างขึ้นเป็น 24% เพราะตอนนี้มีโน้ตการลาอยู่ใต้ป้ายสถานะ และยอมให้ตัดบรรทัดได้
+   ช่องวันที่/วัน/เวลายัง nowrap อยู่ จึงไม่แตกบรรทัด */
+.att-print-table th:nth-child(1) { width: 18%; }
+.att-print-table th:nth-child(2) { width: 8%; }
+.att-print-table th:nth-child(3) { width: 24%; }
+.att-print-table th:nth-child(4) { width: 14%; }
+.att-print-table th:nth-child(5) { width: 14%; }
 .att-print-table td {
-  padding: 6px 10px;
+  padding: 2.5px 5px;
   border-bottom: 1px solid #eef1f5;
   vertical-align: middle;
-  line-height: 1.5;
+  line-height: 1.35;
+}
+/* โน้ตการลาครึ่งวันใต้ป้ายสถานะ — เหตุผลที่ต้องมีอยู่ในคอมเมนต์ของ buildAttendancePrintView() */
+.att-print-leave {
+  font-size: 7.5px;
+  color: #6d28d9;
+  line-height: 1.3;
+  margin-top: 1px;
+  white-space: normal;
+  word-break: break-word;
 }
 .att-print-table tbody tr:nth-child(even) td { background: #fafbfc; }
 .att-print-table tr.att-print-weekend td { background: #f1f5f9; color: #64748b; }
@@ -2359,13 +2376,18 @@ table tbody tr:last-child td { border-bottom: none; }
 .att-print-date { white-space: nowrap; font-weight: 600; color: #1e293b; }
 .att-print-day { white-space: nowrap; color: #64748b; }
 .att-print-time { white-space: nowrap; font-variant-numeric: tabular-nums; }
-.att-print-badges { letter-spacing: 3px; white-space: nowrap; }
+/* 2026-11-25: เดิมเป็น nowrap เพราะช่องนี้มีแต่ไอคอน แต่วันหยุดราชการใส่ "ชื่อวันหยุด" ลงช่อง
+   เดียวกัน พอเป็นแนวตั้งช่องแคบลงเหลือ ~158px ชื่ออย่าง "Chulalongkorn the Great Memorial Day"
+   ต้องการ 332px ⇒ ล้นออกนอกขอบกระดาษแล้วโดนตัดตอนพิมพ์ (วัดเจอในเบราว์เซอร์ ไม่ใช่เดา)
+   ปล่อยให้ตัดบรรทัดได้ · ไอคอนจะขึ้นบรรทัดใหม่บ้างในวันที่มีหลายเบี้ย ซึ่งยังอ่านออกและไม่หาย */
+.att-print-badges { letter-spacing: 3px; white-space: normal; overflow-wrap: anywhere; }
+.att-print-holiday-name { letter-spacing: normal; }
 
 .att-print-status {
   display: inline-block;
-  padding: 2px 9px;
+  padding: 1px 6px;
   border-radius: 20px;
-  font-size: 9px;
+  font-size: 7.5px;
   font-weight: 600;
   white-space: nowrap;
 }
@@ -2377,20 +2399,20 @@ table tbody tr:last-child td { border-bottom: none; }
 .att-print-status-muted   { background: #f1f5f9; color: #64748b; }
 
 .att-print-summary {
-  margin-top: 12px;
+  margin-top: 7px;
   display: flex;
-  gap: 8px;
-  max-width: 460px;
+  gap: 6px;
+  max-width: 380px;
 }
 .att-print-stat {
   flex: 1;
   text-align: center;
-  padding: 6px 6px 5px;
+  padding: 3px 5px 2px;
   border: 1px solid #e2e8f0;
-  border-radius: 7px;
+  border-radius: 6px;
   background: #f8fafc;
 }
-.att-print-stat-num { font-size: 15px; font-weight: 800; color: #1e3a5f; line-height: 1.2; }
+.att-print-stat-num { font-size: 12px; font-weight: 800; color: #1e3a5f; line-height: 1.15; }
 .att-print-stat-label {
   margin-top: 2px;
   font-size: 8px;
@@ -2401,19 +2423,19 @@ table tbody tr:last-child td { border-bottom: none; }
 }
 
 .att-print-legend {
-  margin-top: 14px;
-  padding-top: 10px;
+  margin-top: 7px;
+  padding-top: 5px;
   border-top: 1px solid #e2e8f0;
-  font-size: 9px;
+  font-size: 7.5px;
   color: #64748b;
   display: flex;
-  gap: 18px;
+  gap: 10px;
   flex-wrap: wrap;
 }
 
 .att-print-footer {
-  margin-top: 20px;
-  font-size: 9px;
+  margin-top: 8px;
+  font-size: 7.5px;
   color: #94a3b8;
   text-align: center;
 }

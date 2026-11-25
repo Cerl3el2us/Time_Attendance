@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 183;
+const APP_BUILD = 184;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -11949,6 +11949,37 @@ if (typeof window !== 'undefined') {
   });
 }
 
+// 2026-11-25 (owner): การลาครึ่งวันต้องเห็นได้ "ทุกที่ที่วันนั้นถูกแสดง" -- ของเดิมป้ายสองชุดนี้
+// เป็น const อยู่ข้างใน renderAttendanceTable() จึงไปถึงแค่แถวบนจอ ส่วนเอกสารพิมพ์และป๊อปอัป
+// รายละเอียดมองไม่เห็นเลย · เจ้าของเปิดวันที่ 13 พ.ย. 2026 (ลาป่วยครึ่งวันเช้า แล้วสแกนเข้า 11:41)
+// กระดาษไม่เขียนอะไร และป๊อปอัปขึ้นว่า "ไม่มีรายการพิเศษ" ทั้งที่แถวบนจอบอกว่าลาป่วย
+// นี่คือบั๊กประเภทเดียวกับที่ buildPartialNoteHtml() ถูกเขียนขึ้นมาแก้เมื่อ 2026-08-06 --
+// การแก้รอบนั้นไปถึงแค่แถวบนจอ ไม่ได้ไปถึงอีกสองจอ
+// **เป็นฟังก์ชัน ไม่ใช่ const ระดับไฟล์** เพราะ L() อ่าน currentLang ตอนเรียก ถ้าทำเป็น const
+// ป้ายจะถูกแช่ภาษาที่โหลดหน้าไว้ถาวร แล้วปุ่มสลับภาษาจะไม่เปลี่ยนป้ายพวกนี้
+// ญี่ปุ่นมาเองผ่าน window.LANG_JA (ตรวจแล้วว่ามีคำแปลครบทั้ง 6 คำ)
+function partialLeaveTypeLabel(type) {
+  return ({
+    annual: L('🏖️ Annual Leave', '🏖️ ลาพักร้อน'),
+    sick: L('🤒 Sick Leave', '🤒 ลาป่วย'),
+    business: L('📋 Business Leave', '📋 ลากิจ'),
+  })[type] || type;
+}
+function partialLeaveCoverageLabel(coverage) {
+  return ({
+    am: L('morning half-day', 'ลาครึ่งวันเช้า'),
+    pm: L('afternoon half-day', 'ลาครึ่งวันบ่าย'),
+    partial: L('partial day', 'ลาบางส่วนของวัน'),
+  })[coverage] || coverage;
+}
+// ข้อความล้วน ยังไม่ผ่าน escape -- ผู้เรียกที่ต่อเข้า innerHTML ต้อง escapeHtml() เอง เพราะ
+// hourlyStart/hourlyEnd มาจาก POST body ตรงๆ ไม่เคยถูกตรวจรูปแบบ (Opus audit 2026-08-06)
+function partialLeaveSummaryText(pl) {
+  if (!pl) return '';
+  const range = [pl.hourlyStart, pl.hourlyEnd].filter(Boolean).join('-');
+  return partialLeaveTypeLabel(pl.type) + ' (' + partialLeaveCoverageLabel(pl.coverage) + ')' + (range ? ' ' + range : '');
+}
+
 function renderAttendanceTable() {
   const tbody = document.getElementById('attendance-tbody');
   if (!tbody) return;
@@ -12100,22 +12131,15 @@ function renderAttendanceTable() {
   // sets row.partialLeave = {type, coverage, hourlyStart, hourlyEnd} WITHOUT touching the real
   // checkIn/checkOut scan data (see leaveDayCoverage()). Renders as a small chip on whichever
   // side of the day the leave actually covers, so the real scan on the other side stays visible.
-  const partialLeaveTypeLabel = {
-    annual: L('🏖️ Annual Leave', '🏖️ ลาพักร้อน'),
-    sick: L('🤒 Sick Leave', '🤒 ลาป่วย'),
-    business: L('📋 Business Leave', '📋 ลากิจ'),
-  };
-  const partialLeaveCoverageSuffix = {
-    am: L('morning half-day', 'ลาครึ่งวันเช้า'),
-    pm: L('afternoon half-day', 'ลาครึ่งวันบ่าย'),
-    partial: L('partial day', 'ลาบางส่วนของวัน'),
-  };
+  // 2026-11-25: สองชุดนี้ย้ายออกไปเป็นฟังก์ชันกลาง partialLeaveTypeLabel() /
+  // partialLeaveCoverageLabel() เหนือฟังก์ชันนี้ เพื่อให้เอกสารพิมพ์และป๊อปอัปรายละเอียด
+  // ถามแหล่งเดียวกัน ไม่ใช่ต่างคนต่างมีสำเนาของตัวเอง
   // SECURITY FIX 2026-08-06 (Opus audit): hourlyStart/hourlyEnd come straight from the leave
   // request POST body with no format validation anywhere -- escapeHtml() them before interpolating
   // (pl.type/pl.coverage are safe: leaveDayCoverage() only ever sets partialLeave when l.type is
   // one of the 3 known enum values, and coverage is always one of leaveDayCoverage()'s own fixed
   // return strings, so both dict lookups below always hit and never fall through to raw input).
-  const buildPartialLeaveChip = pl => `<span class="badge badge-info" style="display:block;width:fit-content;margin-bottom:2px;font-size:10px" title="${escapeHtml(pl.hourlyStart)}-${escapeHtml(pl.hourlyEnd)}">${partialLeaveTypeLabel[pl.type] || pl.type} (${partialLeaveCoverageSuffix[pl.coverage] || pl.coverage})</span>`;
+  const buildPartialLeaveChip = pl => `<span class="badge badge-info" style="display:block;width:fit-content;margin-bottom:2px;font-size:10px" title="${escapeHtml(pl.hourlyStart)}-${escapeHtml(pl.hourlyEnd)}">${partialLeaveTypeLabel(pl.type)} (${partialLeaveCoverageLabel(pl.coverage)})</span>`;
   const buildReturnSubline = row => (row.partialLeave && row.partialLeave.coverage === 'am' && row.firstScanAfterCutoff)
     ? `<div style="font-size:10px;color:#64748b;margin-top:2px">↩️ ${L('Returned at', 'กลับมาเวลา')} ${escapeHtml(row.firstScanAfterCutoff)}</div>` : '';
   // 2026-08-06 (Opus audit finding 3): used to only show for 'partial' coverage. But when the
@@ -12126,7 +12150,7 @@ function renderAttendanceTable() {
   const buildPartialNoteHtml = row => {
     const pl = row.partialLeave;
     if (!pl) return '';
-    return `<div style="font-size:10px;color:#7c3aed;margin-top:2px">${partialLeaveTypeLabel[pl.type] || pl.type} (${partialLeaveCoverageSuffix[pl.coverage] || pl.coverage}) ${escapeHtml(pl.hourlyStart)}-${escapeHtml(pl.hourlyEnd)}</div>`;
+    return `<div style="font-size:10px;color:#7c3aed;margin-top:2px">${escapeHtml(partialLeaveSummaryText(pl))}</div>`;
   };
   const getStatusBadge = row => {
     if (row.status === 'company-trip') {
@@ -12503,6 +12527,13 @@ function buildAttendancePrintView({ targetUser, days, start, end, workDays, late
       : row.isWeekend ? 'att-print-weekend' : '';
     const d = new Date(row.date + 'T12:00:00');
     const st = statusText(row);
+    // 2026-11-25 (owner): เดิมการลาครึ่งวันโผล่บนกระดาษเฉพาะตอน "ไม่มีเวลาเข้า/ออก" (ดู inCell/
+    // outCell ข้างล่าง) ⇒ วันที่ลาครึ่งเช้าแล้วกลับมาสแกนเข้าเอง กระดาษไม่เขียนอะไรเลย อ่านแล้ว
+    // เหมือนมาทำงานปกติ ทั้งที่เหตุผลที่วันนั้นไม่ขึ้นว่า "สาย" คือการลานั้นเอง · กระดาษคือสิ่งที่
+    // ถูกเซ็นและใช้เคลียร์ข้อพิพาทเงินเดือน ⇒ โชว์เสมอ ใต้สถานะ เหมือนแถวบนจอ
+    const plNote = row.partialLeave
+      ? `<div class="att-print-leave">${escapeHtml(partialLeaveSummaryText(row.partialLeave))}</div>`
+      : '';
 
     const srcIcon = src => src === 'web' ? '🌐' : '📷';
     const plAbbrev = { annual: L('Leave', 'ลา'), sick: L('Sick', 'ป่วย'), business: L('Biz', 'กิจ') };
@@ -12549,14 +12580,17 @@ function buildAttendancePrintView({ targetUser, days, start, end, workDays, late
     const excusedNote = row.excused
       ? `⛑️ ${currentLang === 'ja' ? '出勤免除' : L('Excused', 'ยกเว้น')}${row.excusedReason ? `: ${escapeHtml(row.excusedReason)}` : ''}`
       : '';
+    // 2026-11-25: ชื่อวันหยุดอยู่ช่องเดียวกับไอคอนเบี้ย ซึ่งตั้ง letter-spacing: 3px ไว้ให้ไอคอน
+    // ⇒ ชื่อยาวๆ ถูกยืดจนกินสามบรรทัดบนกระดาษแนวตั้ง (เห็นจากภาพจริง ไม่ใช่จากการวัดตัวเลข)
+    // ห่อด้วยคลาสของตัวเองเพื่อคืนระยะห่างตัวอักษรเป็นปกติ
     const notesCell = row.status === 'holiday'
-      ? escapeHtml(row.holidayName || L('Public Holiday', 'วันหยุดราชการ'))
+      ? `<span class="att-print-holiday-name">${escapeHtml(row.holidayName || L('Public Holiday', 'วันหยุดราชการ'))}</span>`
       : ([excusedNote, badges.join(' ')].filter(Boolean).join(' · ') || '—');
 
     return `<tr class="${rowCls}">
       <td class="att-print-date">${fmtDateLong(row.date)}</td>
       <td class="att-print-day">${dayNameArr[d.getDay()]}</td>
-      <td><span class="att-print-status att-print-status-${st.cls}">${st.text}</span></td>
+      <td><span class="att-print-status att-print-status-${st.cls}">${st.text}</span>${plNote}</td>
       <td class="att-print-time">${inCell}</td>
       <td class="att-print-time">${outCell}</td>
       <td class="att-print-badges">${notesCell}</td>
@@ -23651,6 +23685,15 @@ function showAttendanceDetail(date) {
   tagsEl.innerHTML = '';
   if (row.status === 'company-trip') {
     tagsEl.innerHTML = `<span class="badge" style="background:#e0f2fe;color:#0369a1">🚌 Company Trip — ${L('no bonuses apply this day', 'ไม่มีการคิดเงินพิเศษใดๆ ในวันนี้')}</span>`;
+  }
+  // 2026-11-25 (owner): การลาครึ่งวันต้องขึ้นที่นี่ด้วย · เดิมส่วนนี้สร้างจาก "เบี้ยเลี้ยงและใบเคลม"
+  // ล้วนๆ และการลาไม่ใช่เบี้ยเลี้ยง ⇒ ไม่มีสาขาไหนในฟังก์ชันนี้อ่าน row.partialLeave เลย
+  // วันที่ลาป่วยครึ่งเช้าจึงขึ้นว่า "ไม่มีรายการพิเศษ" ทั้งที่แถวบนจอบอกว่าลาป่วย
+  // **ต้องอยู่หลังบล็อก company-trip** เพราะบล็อกนั้นใช้ `tagsEl.innerHTML =` (ทับ) ไม่ใช่ `+=`
+  // ถ้าวางไว้ก่อน ป้ายนี้จะถูกลบทิ้งเงียบๆ เฉพาะวัน Company Trip ซึ่งหาสาเหตุยากมาก
+  // ไม่มีด่าน role: การลาไม่ใช่เงิน ใครที่เห็นวันนั้นได้ ต้องเห็นเหตุผลที่วันนั้นไม่นับว่าสาย
+  if (row.partialLeave) {
+    tagsEl.innerHTML += `<span class="badge badge-info">${escapeHtml(partialLeaveSummaryText(row.partialLeave))}</span>`;
   }
   // Early Morning is automatic from checkIn time (no approval needed) — computed the same
   // way as the table's earlyBadge, not from row.earlyIn/earlyApproved (those fields are never
