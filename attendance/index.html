@@ -21,7 +21,7 @@
   <meta name="theme-color" content="#2563eb">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/style.css?v=20261028f">
+  <link rel="stylesheet" href="css/style.css?v=20261125e">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css" integrity="sha384-MinO0mNliZ3vwppuPOUnGa+iq619pfMhLVUXfC4LHwSCvF9H+6P/KO4Q7qBOYV5V" crossorigin="anonymous"/>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css" integrity="sha384-RkASv+6KfBMW9eknReJIJ6b3UnjKOKC5bOUaNgIY778NFbQ8MtWq9Lr/khUgqtTt" crossorigin="anonymous">
 </head>
@@ -486,14 +486,10 @@
               </tbody>
             </table>
           </div>
-          <div style="padding:14px 22px;background:#f8fafc;border-top:1px solid #e2e8f0;font-size:12px;color:#718096;display:flex;gap:20px;flex-wrap:wrap">
-            <span data-en="🌐 = via Web App">🌐 = ลงผ่าน Web App</span>
-            <span data-en="📷 = via Hikvision scanner">📷 = ลงผ่านเครื่องสแกน Hikvision</span>
-            <span data-en="⏳ = pending approval">⏳ = รออนุมัติ</span>
-            <span id="att-legend-early">🌅 Early Morning</span>
-            <span id="att-legend-late">🌙 Late Night</span>
-            <span id="att-legend-personalcar">🚙 Personal car used</span>
-          </div>
+          <!-- 2026-11-25 (เจ้าของสั่งว่าคำอธิบายไม่ครอบคลุม): ไอคอนทั้งแถววาดจาก
+               attendanceLegendItems() ใน app.js เพื่อให้หน้าจอกับใบพิมพ์ใช้รายการเดียวกัน
+               ห้ามเขียนไอคอนมือกลับเข้ามาที่นี่ ไม่งั้นสองจอจะหลุดจากกันอีก -->
+          <div id="att-legend-row" style="padding:14px 22px;background:#f8fafc;border-top:1px solid #e2e8f0;font-size:12px;color:#718096;display:flex;gap:20px;flex-wrap:wrap"></div>
         </div>
       <div class="no-print" style="padding:10px 4px;font-size:11px;color:#94a3b8">
         <span data-en="📌 The ⏱️ and 🚗 buttons appear on days with a check-in; 🌙 needs a scan-out after the late-night threshold. If you forgot to clock in or out, submit a ✏️ time correction first and they will appear.">📌 ปุ่ม ⏱️ และ 🚗 จะขึ้นในวันที่มีเวลาเข้างาน ส่วน 🌙 ต้องมีการสแกนออกหลังเวลาที่กำหนด ถ้าลืมตอกบัตรเข้าหรือออก ให้กด ✏️ ขอแก้ไขเวลาก่อน แล้วปุ่มจะปรากฏ</span>
@@ -2883,10 +2879,10 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js" integrity="sha384-SYKAG6cglRMN0RVvhNeBY0r3FYKNOJtznwA0v7B5Vp9tr31xAHsZC0DqkQ/pZDmj" crossorigin="anonymous"></script>
-<script src="lang/ja.js?v=20261125abroad3"></script>  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js" integrity="sha384-5JqMv4L/Xa0hfvtF06qboNdhvuYXUku9ZrhZh3bSk8VXF0A/RuSLHpLsSV9Zqhl6" crossorigin="anonymous"></script>
+<script src="lang/ja.js?v=20261125f"></script>  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js" integrity="sha384-5JqMv4L/Xa0hfvtF06qboNdhvuYXUku9ZrhZh3bSk8VXF0A/RuSLHpLsSV9Zqhl6" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ja.js" integrity="sha384-mKor8U8jwukUkfxaFPCsxKF9S62PXq4gG7zcZ5yQ2x3KL1msprJZeFlKFEDeeb5V" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/th.js" integrity="sha384-E6OVFg1zUc/pckGxry0YZ6VeZ1E17l7Jl8ZQx58jbEfxxkz9LqknQhiIrA9zg/8b" crossorigin="anonymous"></script>
 
-<script src="js/app.js?v=20261125abroad3"></script>
+<script src="js/app.js?v=20261125f"></script>
 </body>
 </html>
