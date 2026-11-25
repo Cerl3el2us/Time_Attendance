@@ -525,27 +525,50 @@ test('the in-form pay preview quotes the form employee\'s rate, not the viewer\'
 });
 
 // ---- the legend and the FAQ ----
-test('the legend is built after targetUser exists', () => {
+// 2026-11-25: คำอธิบายสัญลักษณ์ย้ายออกจาก renderAttendanceTable ไปเป็นรายการกลาง
+// attendanceLegendItems() ซึ่งหน้าจอและใบพิมพ์ใช้ร่วมกัน (เจ้าของสั่งว่าคำอธิบายไม่ครอบคลุม
+// และสองจอขาดไอคอนคนละตัว) ⇒ ยามสามตัวนี้ถูกชี้ไปที่โครงใหม่ **กฎที่คุ้มครองเหมือนเดิมทุกข้อ**
+test('the legend is built after the row owner role exists', () => {
   const fn = extractFunction(APP_SRC, 'renderAttendanceTable');
   const tgt = fn.indexOf('const targetUser ');
-  const legend = fn.indexOf('att-legend-early');
-  assert.ok(tgt > -1 && legend > -1, 'renderAttendanceTable changed shape -- re-point this test');
-  assert.ok(tgt < legend, 'targetUser must be declared BEFORE the legend reads its role (TDZ: the legend used to run first, and ESLint does not catch this)');
+  const role = fn.indexOf('const _attOwnerRole');
+  const legend = fn.indexOf('att-legend-row');
+  assert.ok(tgt > -1 && role > -1 && legend > -1, 'renderAttendanceTable changed shape -- re-point this test');
+  assert.ok(tgt < legend && role < legend,
+    'targetUser and the owner role must be declared BEFORE the legend reads them (TDZ: the legend used to run first, and ESLint does not catch this)');
 });
 
 test('the legend labels the table it sits above, so it uses the viewed employee\'s rate', () => {
   const fn = extractFunction(APP_SRC, 'renderAttendanceTable');
-  const legend = fn.slice(fn.indexOf('att-legend-early') - 500, fn.indexOf('att-legend-late') + 700);
-  assert.ok(/_elRateLegend\(|earlyLateRateFor\(\s*targetUser\.role/.test(legend),
-    'the legend must use the viewed employee\'s rate');
-  assert.ok(!/_legA\.(earlyMorning1|earlyMorning2|lateNight1|lateNight2)\b/.test(legend),
+  assert.ok(/attendanceLegendItems\(\s*_legA\s*,\s*_attOwnerRole\s*,/.test(fn),
+    'the legend must be handed the ROW OWNER role, never the viewer role');
+  const items = extractFunction(APP_SRC, 'attendanceLegendItems');
+  assert.ok(/earlyLateRateFor\(role,/.test(items),
+    'the legend must price itself from the role it was handed');
+  assert.ok(!/\bA\.(earlyMorning1|earlyMorning2|lateNight1|lateNight2)\b/.test(items),
     'the legend still reads the company-wide amount directly');
 });
 
 test('the legend still reads thresholds (times) centrally -- only money is per role', () => {
-  const fn = extractFunction(APP_SRC, 'renderAttendanceTable');
-  const legend = fn.slice(fn.indexOf('att-legend-early') - 500, fn.indexOf('att-legend-late') + 700);
-  assert.ok(/_legA\.earlyThreshold2Min/.test(legend), 'thresholds are company-wide and must stay so');
+  const items = extractFunction(APP_SRC, 'attendanceLegendItems');
+  assert.ok(/A\.earlyThreshold2Min/.test(items) && /A\.earlyThreshold1Min/.test(items),
+    'thresholds are company-wide and must stay so');
+  assert.ok(/A\.lateNightThreshold2Hour/.test(items) && /A\.lateNightThreshold1Hour/.test(items),
+    'late-night thresholds are company-wide and must stay so');
+});
+
+// 2026-11-25 (เจ้าของสั่ง): คำอธิบายต้องครอบคลุมไอคอนที่แถวปล่อยออกมาจริง ทั้งบนจอและบนกระดาษ
+// ยามนี้มีเพราะของเดิมขาดคนละตัวในสองจอ และไม่มีอะไรเตือนเลยว่าขาด
+test('every icon the printed row can emit has a line in the legend', () => {
+  const printFn = extractFunction(APP_SRC, 'buildAttendancePrintView');
+  const items = extractFunction(APP_SRC, 'attendanceLegendItems');
+  // ไอคอนที่ "แถว" ปล่อยออกมา -- ไม่รวมส่วนที่เป็นตัวคำอธิบายเอง
+  const rowPart = printFn.slice(0, printFn.indexOf('att-print-legend'));
+  const ICONS = ['🌐', '📷', '🌅', '🌙', '🔄', '⏱️', '🗺️', '🚗', '🚙', '⛑️', '🎌'];
+  for (const ic of ICONS) {
+    if (!rowPart.includes(ic)) continue;
+    assert.ok(items.includes(ic), `the printed row can show ${ic} but the legend never explains it`);
+  }
 });
 
 // 2026-10-13 (test-quality review): the old version of this test asserted that three language

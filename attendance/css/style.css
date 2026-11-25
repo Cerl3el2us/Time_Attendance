@@ -2280,10 +2280,12 @@ table tbody tr:last-child td { border-bottom: none; }
 }
 
 /* ===== ATTENDANCE TABLE — PRINT VIEW =====
-   A separate, compact landscape document instead of printing the live on-screen table
+   A separate, compact PORTRAIT document instead of printing the live on-screen table
    (which carries GPS links, verify buttons, source badges — too noisy on paper). Built by
-   buildAttendancePrintView() in app.js, only shown to print. Named @page scopes landscape to
-   this view alone so other print buttons (payslip, reports) keep the browser's default portrait. */
+   buildAttendancePrintView() in app.js, only shown to print. The named @page scopes this
+   view's own page size and margins to itself, so other print buttons (payslip, reports)
+   keep the browser's defaults.
+   2026-11-25 (owner): was landscape until the owner asked for portrait, one page per period. */
 .print-only { display: none; }
 
 /* 2026-11-25 (เจ้าของสั่ง): แนวตั้ง และต้องเห็นข้อมูลทั้งรอบใน A4 หน้าเดียว
@@ -2380,7 +2382,11 @@ table tbody tr:last-child td { border-bottom: none; }
    เดียวกัน พอเป็นแนวตั้งช่องแคบลงเหลือ ~158px ชื่ออย่าง "Chulalongkorn the Great Memorial Day"
    ต้องการ 332px ⇒ ล้นออกนอกขอบกระดาษแล้วโดนตัดตอนพิมพ์ (วัดเจอในเบราว์เซอร์ ไม่ใช่เดา)
    ปล่อยให้ตัดบรรทัดได้ · ไอคอนจะขึ้นบรรทัดใหม่บ้างในวันที่มีหลายเบี้ย ซึ่งยังอ่านออกและไม่หาย */
-.att-print-badges { letter-spacing: 3px; white-space: normal; overflow-wrap: anywhere; }
+/* 2026-11-25: letter-spacing อยู่ "ระหว่างไอคอน" ไม่ใช่ "ในไอคอน" แล้ว -- ของเดิมตั้งไว้ที่ช่อง
+   ทั้งช่อง จึงดันเลขขั้น (🌅¹ 🌙²) ให้หลุดห่างจากไอคอนของมันเอง */
+.att-print-badges { letter-spacing: normal; white-space: normal; overflow-wrap: anywhere; }
+.att-print-badge { display: inline-block; margin-right: 5px; letter-spacing: normal; }
+.att-print-badge:last-child { margin-right: 0; }
 /* ชื่อวันหยุดอยู่ใต้ป้ายสถานะ (ไม่ใช่ช่องเบี้ยเลี้ยง) -- letter-spacing ต้องกลับเป็นปกติ
    เพราะช่องไอคอนเบี้ยตั้งไว้ 3px ซึ่งเคยยืดชื่อวันหยุดจนกินสามบรรทัด */
 .att-print-holiday-name {
