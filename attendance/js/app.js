@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 183;
+const APP_BUILD = 188;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -11360,6 +11360,71 @@ function onPeriodChange(val) {
 function attAllowIcon(emoji, title) {
   return `<span class="att-allow-icon" title="${escapeHtml(title)}">${emoji}</span>`;
 }
+// 2026-11-25 (owner): ไอคอน 🌅 / 🌙 เคยมีแบบเดียว ทั้งที่เบี้ยมีสองขั้นที่จ่ายต่างกันเท่าตัว
+// ⇒ คนเข้างาน 06:00 กับ 07:20 เห็นไอคอนเดียวกันเป๊ะบนทั้งจอและกระดาษ · เลขยกกำลังต่อท้าย
+// บอก "ขั้น" ไม่ใช่ "จำนวนครั้ง" — ขั้น 1 คืออัตรา earlyMorning1/lateNight1 (ค่าตั้งต้น ฿240)
+// ขั้น 2 คืออัตราที่สูงกว่า (ค่าตั้งต้น ฿480) · อัตราจริงตั้งได้ต่อตำแหน่งงานใน Settings
+// จึงห้ามฝังตัวเลขเงินลงในไอคอน ให้คำอธิบายท้ายตารางอ่านจากค่าจริงแทน
+// **สองขั้นนี้ได้อย่างใดอย่างหนึ่งเสมอ ไม่เคยได้ทั้งคู่** — computePayroll เขียนว่า
+// `ถ้าเข้าขั้น 2 จ่ายขั้น 2 ไม่งั้นถ้าเข้าขั้น 1 จ่ายขั้น 1` · ที่ตัวนับในรายงานนับวันขั้น 2
+// เป็น 2 ครั้ง เป็นตัวเลขไว้ดูเฉยๆ ไม่มีผลกับเงิน (คอมเมนต์เดิมที่ computePayroll ยืนยันไว้)
+const ALLOWANCE_TIER_MARK = { 1: '¹', 2: '²' };
+function allowanceTierMark(tier) { return ALLOWANCE_TIER_MARK[tier] || ''; }
+// ขั้นของเบี้ยมาเช้าจากเวลาเข้างาน · 0 = ไม่เข้าเกณฑ์เลย
+// ใช้เกณฑ์ชุดเดียวกับที่ computePayroll ใช้ตัดสินจ่ายเงิน ไม่มีเกณฑ์ของตัวเอง
+// 2026-11-25 (เจ้าของสั่ง): "คำอธิบายไม่ครอบคลุม ทำให้ครอบคลุมด้วย และเวลาปริ้นก็ยังไม่ครอบคลุม"
+// เดิมคำอธิบายสัญลักษณ์มีสองชุด เขียนมือคนละที่ -- ชุดบนจอฝังอยู่ใน index.html ส่วนชุดบนกระดาษ
+// อยู่ใน buildAttendancePrintView() ⇒ ต่างคนต่างขาดไอคอนคนละตัว และไม่มีใครรู้ว่าขาด:
+//   บนจอขาด 🔄 ⏱️ 🗺️ 🚗 ⛑️ 🎌 และไอคอนการลา · บนกระดาษขาด 🔄 ⛑️ 🎌 และไอคอนการลา
+// (รายการนี้ได้จากการไล่ไอคอนที่โค้ดปล่อยออกมาจริงในสองฟังก์ชันนั้น ไม่ใช่จากการนึกเอา)
+// ⇒ รายการเดียว ทั้งสองจอวาดจากตัวนี้ · screenOnly = สิ่งที่ไม่มีทางโผล่บนกระดาษ เพราะใบพิมพ์
+// แสดงเฉพาะรายการที่อนุมัติแล้ว จึงไม่มี ⏳
+// อัตราเงินอ่านจากค่าจริงของ role เจ้าของแถว ไม่ใช่ของคนที่กำลังดู (เหตุผลเดียวกับ legend เดิม)
+function attendanceLegendItems(allowances, role, settings) {
+  const A = allowances || {};
+  const rate = key => earlyLateRateFor(role, key, settings);
+  const ln1 = String(A.lateNightThreshold1Hour ?? 19).padStart(2, '0') + ':00';
+  const ln2 = String(A.lateNightThreshold2Hour ?? 20).padStart(2, '0') + ':00';
+  const em1 = minsToTime(A.earlyThreshold1Min);
+  const em2 = minsToTime(A.earlyThreshold2Min);
+  const ja = currentLang === 'ja';
+  const pc = (A.personalCar || 0).toLocaleString();
+  return [
+    { icon: '🌐', text: L('via Web App', 'ลงผ่าน Web App') },
+    { icon: '📷', text: L('via Hikvision scanner', 'ลงผ่านเครื่องสแกน Hikvision') },
+    { icon: '⏳', text: L('pending approval', 'รออนุมัติ'), screenOnly: true },
+    { icon: `🌅${allowanceTierMark(2)}`,
+      text: ja ? `早朝手当 ${em2}前 = ฿${rate('earlyMorning2')}`
+        : L(`Early Morning before ${em2} = ฿${rate('earlyMorning2')}`, `มาเช้า ก่อน ${em2} = ฿${rate('earlyMorning2')}`) },
+    { icon: `🌅${allowanceTierMark(1)}`,
+      text: ja ? `早朝手当 ${em1}前 = ฿${rate('earlyMorning1')}`
+        : L(`Early Morning before ${em1} = ฿${rate('earlyMorning1')}`, `มาเช้า ก่อน ${em1} = ฿${rate('earlyMorning1')}`) },
+    { icon: `🌙${allowanceTierMark(2)}`,
+      text: ja ? `深夜手当 ${ln2}以降 = ฿${rate('lateNight2')}`
+        : L(`Late Night after ${ln2} = ฿${rate('lateNight2')}`, `กลับดึก หลัง ${ln2} = ฿${rate('lateNight2')}`) },
+    { icon: `🌙${allowanceTierMark(1)}`,
+      text: ja ? `深夜手当 ${ln1}以降 = ฿${rate('lateNight1')}`
+        : L(`Late Night after ${ln1} = ฿${rate('lateNight1')}`, `กลับดึก หลัง ${ln1} = ฿${rate('lateNight1')}`) },
+    { icon: '🔄', text: L('Holiday Work', 'ทำงานวันหยุด') },
+    { icon: '⏱️', text: L('OT', 'OT') },
+    { icon: '🗺️', text: L('Upcountry', 'เบี้ยต่างจังหวัด') },
+    { icon: '🚗', text: L('Long Distance', 'เดินทางไกล') },
+    { icon: '🚙', text: ja ? `自家用車使用 (฿${pc}/回)`
+      : L(`Personal car used (฿${pc}/time)`, `ใช้รถส่วนตัว (฿${pc}/ครั้ง)`) },
+    { icon: '⛑️', text: L('Excused', 'ได้รับการยกเว้น') },
+    { icon: '🎌', text: L('Public Holiday', 'วันหยุดราชการ') },
+    { icon: '🏖️🤒📋', text: L('Leave (half-day / partial)', 'การลา (ครึ่งวัน/บางช่วง)') },
+  ];
+}
+function earlyMorningTierOfCheckIn(checkIn, allowances) {
+  if (!checkIn) return 0;
+  const [h, m] = String(checkIn).split(':').map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return 0;
+  const mins = h * 60 + m;
+  if (mins <= earlyThresholdMinsOf(allowances, 2)) return 2;
+  if (mins <= earlyThresholdMinsOf(allowances, 1)) return 1;
+  return 0;
+}
 // 2026-10-22 (owner): the clickable twin of attAllowIcon -- same look in the row, but it opens
 // something. A <button> rather than a <span onclick> so it is reachable by keyboard and reads as
 // an action to a screen reader; the class is shared so the icon row keeps its single layout rule.
@@ -11949,6 +12014,37 @@ if (typeof window !== 'undefined') {
   });
 }
 
+// 2026-11-25 (owner): การลาครึ่งวันต้องเห็นได้ "ทุกที่ที่วันนั้นถูกแสดง" -- ของเดิมป้ายสองชุดนี้
+// เป็น const อยู่ข้างใน renderAttendanceTable() จึงไปถึงแค่แถวบนจอ ส่วนเอกสารพิมพ์และป๊อปอัป
+// รายละเอียดมองไม่เห็นเลย · เจ้าของเปิดวันที่ 13 พ.ย. 2026 (ลาป่วยครึ่งวันเช้า แล้วสแกนเข้า 11:41)
+// กระดาษไม่เขียนอะไร และป๊อปอัปขึ้นว่า "ไม่มีรายการพิเศษ" ทั้งที่แถวบนจอบอกว่าลาป่วย
+// นี่คือบั๊กประเภทเดียวกับที่ buildPartialNoteHtml() ถูกเขียนขึ้นมาแก้เมื่อ 2026-08-06 --
+// การแก้รอบนั้นไปถึงแค่แถวบนจอ ไม่ได้ไปถึงอีกสองจอ
+// **เป็นฟังก์ชัน ไม่ใช่ const ระดับไฟล์** เพราะ L() อ่าน currentLang ตอนเรียก ถ้าทำเป็น const
+// ป้ายจะถูกแช่ภาษาที่โหลดหน้าไว้ถาวร แล้วปุ่มสลับภาษาจะไม่เปลี่ยนป้ายพวกนี้
+// ญี่ปุ่นมาเองผ่าน window.LANG_JA (ตรวจแล้วว่ามีคำแปลครบทั้ง 6 คำ)
+function partialLeaveTypeLabel(type) {
+  return ({
+    annual: L('🏖️ Annual Leave', '🏖️ ลาพักร้อน'),
+    sick: L('🤒 Sick Leave', '🤒 ลาป่วย'),
+    business: L('📋 Business Leave', '📋 ลากิจ'),
+  })[type] || type;
+}
+function partialLeaveCoverageLabel(coverage) {
+  return ({
+    am: L('morning half-day', 'ลาครึ่งวันเช้า'),
+    pm: L('afternoon half-day', 'ลาครึ่งวันบ่าย'),
+    partial: L('partial day', 'ลาบางส่วนของวัน'),
+  })[coverage] || coverage;
+}
+// ข้อความล้วน ยังไม่ผ่าน escape -- ผู้เรียกที่ต่อเข้า innerHTML ต้อง escapeHtml() เอง เพราะ
+// hourlyStart/hourlyEnd มาจาก POST body ตรงๆ ไม่เคยถูกตรวจรูปแบบ (Opus audit 2026-08-06)
+function partialLeaveSummaryText(pl) {
+  if (!pl) return '';
+  const range = [pl.hourlyStart, pl.hourlyEnd].filter(Boolean).join('-');
+  return partialLeaveTypeLabel(pl.type) + ' (' + partialLeaveCoverageLabel(pl.coverage) + ')' + (range ? ' ' + range : '');
+}
+
 function renderAttendanceTable() {
   const tbody = document.getElementById('attendance-tbody');
   if (!tbody) return;
@@ -11984,23 +12080,15 @@ function renderAttendanceTable() {
   const _legA = APP_SETTINGS.allowances;
   // 2026-10-28: `_attOwnerRole` ไม่ใช่ `targetUser.role` — legend นี้บอก "อัตราของพนักงานคนนี้"
   // เป็นจำนวนเงิน ⇒ ห้ามคิดจาก role ของคนที่กำลังดู (ดูเหตุผลที่จุดประกาศ)
-  const _elRateLegend = (key) => earlyLateRateFor(_attOwnerRole, key, APP_SETTINGS);
-  const elEarly = document.getElementById('att-legend-early');
-  if (elEarly) elEarly.textContent = currentLang === 'ja'
-    ? `🌅 早朝手当 ${_legA.earlyThreshold2Min}分前=฿${_elRateLegend('earlyMorning2')} | ${_legA.earlyThreshold1Min}分前=฿${_elRateLegend('earlyMorning1')}`
-    : L(`🌅 Early Morning before ${minsToTime(_legA.earlyThreshold2Min)} = ฿${_elRateLegend('earlyMorning2')} | before ${minsToTime(_legA.earlyThreshold1Min)} = ฿${_elRateLegend('earlyMorning1')}`,
-        `🌅 Early Morning ก่อน ${minsToTime(_legA.earlyThreshold2Min)} = ฿${_elRateLegend('earlyMorning2')} | ก่อน ${minsToTime(_legA.earlyThreshold1Min)} = ฿${_elRateLegend('earlyMorning1')}`);
-  const elLate = document.getElementById('att-legend-late');
-  const _ln1 = String(_legA.lateNightThreshold1Hour ?? 19).padStart(2,'0') + ':00';
-  const _ln2 = String(_legA.lateNightThreshold2Hour ?? 20).padStart(2,'0') + ':00';
-  if (elLate) elLate.textContent = currentLang === 'ja'
-    ? `🌙 深夜手当 ${_ln2}以降=฿${_elRateLegend('lateNight2')} | ${_ln1}以降=฿${_elRateLegend('lateNight1')}`
-    : L(`🌙 Late Night after ${_ln2} = ฿${_elRateLegend('lateNight2')} | after ${_ln1} = ฿${_elRateLegend('lateNight1')}`,
-        `🌙 Late Night หลัง ${_ln2} = ฿${_elRateLegend('lateNight2')} | หลัง ${_ln1} = ฿${_elRateLegend('lateNight1')}`);
-  const elPc = document.getElementById('att-legend-personalcar');
-  if (elPc) elPc.textContent = currentLang === 'ja'
-    ? `🚙 自家用車使用 (฿${(_legA.personalCar||0).toLocaleString()}/回)`
-    : L(`🚙 Personal car used (฿${(_legA.personalCar||0).toLocaleString()}/time)`, `🚙 ใช้รถส่วนตัว (฿${(_legA.personalCar||0).toLocaleString()}/ครั้ง)`);
+  // 2026-11-25 (เจ้าของสั่ง): คำอธิบายทั้งแถววาดจากรายการกลาง attendanceLegendItems()
+  // แทนของเดิมที่เขียนไอคอนมือไว้ใน index.html สามช่อง แล้วเติมอีกสามช่องจากที่นี่
+  // เหตุผลเรื่อง "ต้องใช้ role ของเจ้าของแถว ไม่ใช่ของคนที่กำลังดู" ย้ายไปอยู่ในฟังก์ชันนั้นแล้ว
+  const _legendRow = document.getElementById('att-legend-row');
+  if (_legendRow) {
+    _legendRow.innerHTML = attendanceLegendItems(_legA, _attOwnerRole, APP_SETTINGS)
+      .map(it => `<span>${it.icon} ${escapeHtml(it.text)}</span>`).join('');
+  }
+
 
   // อัพเดท header column ให้ตรงกับ role ของพนักงานที่กำลังแสดง (ไม่ใช่ผู้ login)
   // 2026-07-31: replaced the isDriverView/isTargetAcctMkt exclusive fork -- same bug already
@@ -12100,22 +12188,15 @@ function renderAttendanceTable() {
   // sets row.partialLeave = {type, coverage, hourlyStart, hourlyEnd} WITHOUT touching the real
   // checkIn/checkOut scan data (see leaveDayCoverage()). Renders as a small chip on whichever
   // side of the day the leave actually covers, so the real scan on the other side stays visible.
-  const partialLeaveTypeLabel = {
-    annual: L('🏖️ Annual Leave', '🏖️ ลาพักร้อน'),
-    sick: L('🤒 Sick Leave', '🤒 ลาป่วย'),
-    business: L('📋 Business Leave', '📋 ลากิจ'),
-  };
-  const partialLeaveCoverageSuffix = {
-    am: L('morning half-day', 'ลาครึ่งวันเช้า'),
-    pm: L('afternoon half-day', 'ลาครึ่งวันบ่าย'),
-    partial: L('partial day', 'ลาบางส่วนของวัน'),
-  };
+  // 2026-11-25: สองชุดนี้ย้ายออกไปเป็นฟังก์ชันกลาง partialLeaveTypeLabel() /
+  // partialLeaveCoverageLabel() เหนือฟังก์ชันนี้ เพื่อให้เอกสารพิมพ์และป๊อปอัปรายละเอียด
+  // ถามแหล่งเดียวกัน ไม่ใช่ต่างคนต่างมีสำเนาของตัวเอง
   // SECURITY FIX 2026-08-06 (Opus audit): hourlyStart/hourlyEnd come straight from the leave
   // request POST body with no format validation anywhere -- escapeHtml() them before interpolating
   // (pl.type/pl.coverage are safe: leaveDayCoverage() only ever sets partialLeave when l.type is
   // one of the 3 known enum values, and coverage is always one of leaveDayCoverage()'s own fixed
   // return strings, so both dict lookups below always hit and never fall through to raw input).
-  const buildPartialLeaveChip = pl => `<span class="badge badge-info" style="display:block;width:fit-content;margin-bottom:2px;font-size:10px" title="${escapeHtml(pl.hourlyStart)}-${escapeHtml(pl.hourlyEnd)}">${partialLeaveTypeLabel[pl.type] || pl.type} (${partialLeaveCoverageSuffix[pl.coverage] || pl.coverage})</span>`;
+  const buildPartialLeaveChip = pl => `<span class="badge badge-info" style="display:block;width:fit-content;margin-bottom:2px;font-size:10px" title="${escapeHtml(pl.hourlyStart)}-${escapeHtml(pl.hourlyEnd)}">${partialLeaveTypeLabel(pl.type)} (${partialLeaveCoverageLabel(pl.coverage)})</span>`;
   const buildReturnSubline = row => (row.partialLeave && row.partialLeave.coverage === 'am' && row.firstScanAfterCutoff)
     ? `<div style="font-size:10px;color:#64748b;margin-top:2px">↩️ ${L('Returned at', 'กลับมาเวลา')} ${escapeHtml(row.firstScanAfterCutoff)}</div>` : '';
   // 2026-08-06 (Opus audit finding 3): used to only show for 'partial' coverage. But when the
@@ -12126,7 +12207,7 @@ function renderAttendanceTable() {
   const buildPartialNoteHtml = row => {
     const pl = row.partialLeave;
     if (!pl) return '';
-    return `<div style="font-size:10px;color:#7c3aed;margin-top:2px">${partialLeaveTypeLabel[pl.type] || pl.type} (${partialLeaveCoverageSuffix[pl.coverage] || pl.coverage}) ${escapeHtml(pl.hourlyStart)}-${escapeHtml(pl.hourlyEnd)}</div>`;
+    return `<div style="font-size:10px;color:#7c3aed;margin-top:2px">${escapeHtml(partialLeaveSummaryText(pl))}</div>`;
   };
   const getStatusBadge = row => {
     if (row.status === 'company-trip') {
@@ -12180,7 +12261,11 @@ function renderAttendanceTable() {
       const mins = h * 60 + m;
       if (mins <= earlyThresholdMinsOf(_ATallowances, 1) && isDeviceScanSource(row.checkInSource)
           && (!isRestAttendanceDay(row) || hasHolidayWorkClaimOnDate(row.date, targetUserId, false))) {
-        const bonus = mins <= earlyThresholdMinsOf(_ATallowances, 2)
+        // 2026-11-25 (owner): ถามขั้นครั้งเดียว แล้วใช้ทั้งกับจำนวนเงินและกับเครื่องหมายบนไอคอน
+        // จะได้ไม่มีทางที่ไอคอนกับ tooltip พูดคนละขั้นบนแถวเดียวกัน
+        const _emTier = earlyMorningTierOfCheckIn(row.checkIn, _ATallowances);
+        const _emIcon = `🌅${allowanceTierMark(_emTier)}`;
+        const bonus = _emTier === 2
           ? `฿${_elRateTarget('earlyMorning2')}`
           : `฿${_elRateTarget('earlyMorning1')}`;
         // 2026-10-02 (owner): the 🌅 kept its normal look while the money behind it was being
@@ -12193,10 +12278,10 @@ function renderAttendanceTable() {
         // state nobody meets is a third state to understand for nothing. Held or paid.
         if (row.morningReviewNeeded && row.morningReview !== 'allow') {
           const _tip = `${L('Early Morning', 'Early Morning')} ${row.checkIn} (${bonus}) — ${L('held until reviewed', 'พักไว้จนกว่าจะตรวจสอบ')}`;
-          earlyBadge = `<span class="att-allow-icon" style="opacity:.45" title="${escapeHtml(_tip)}">🌅</span>` +
+          earlyBadge = `<span class="att-allow-icon" style="opacity:.45" title="${escapeHtml(_tip)}">${_emIcon}</span>` +
             `<span style="font-size:10px;color:#92400e;margin-left:2px;white-space:nowrap">(${escapeHtml(L('Awaiting Review', 'รอตรวจสอบ'))})</span>`;
         } else {
-          earlyBadge = attAllowIcon('🌅', `${L('Early Morning', 'Early Morning')} ${row.checkIn} (${bonus})`);
+          earlyBadge = attAllowIcon(_emIcon, `${L('Early Morning', 'Early Morning')} ${L('tier', 'ขั้น')} ${_emTier} — ${row.checkIn} (${bonus})`);
         }
       }
       // Check-in before 06:00 is often a false read (e.g. a door scan while someone lingered
@@ -12240,8 +12325,10 @@ function renderAttendanceTable() {
     const _lnHwDates = holidayWorkUnlockDates(targetUserId, _attOwnerRole, APP_SETTINGS);
     if (canEarlyLateTarget && deviceScanQualifiesForLateNight(row, _lnHwDates)) {
       const _ln2Thr = lateNightThresholdHourOf(_ATallowances, 2);
-      const bonus = lateNightPoints(row.lateOut, _ln2Thr) === 2 ? `฿${_elRateTarget('lateNight2')}` : `฿${_elRateTarget('lateNight1')}`;
-      lateBadge = attAllowIcon('🌙', `${L('Late Night', 'Late Night')} ${row.lateOut} (${bonus})`);
+      // 2026-11-25 (owner): ขั้นเดียวกับที่ใช้เลือกจำนวนเงิน ไปอยู่บนไอคอนด้วย
+      const _lnTier = lateNightPoints(row.lateOut, _ln2Thr);
+      const bonus = _lnTier === 2 ? `฿${_elRateTarget('lateNight2')}` : `฿${_elRateTarget('lateNight1')}`;
+      lateBadge = attAllowIcon(`🌙${allowanceTierMark(_lnTier)}`, `${L('Late Night', 'Late Night')} ${L('tier', 'ขั้น')} ${_lnTier} — ${row.lateOut} (${bonus})`);
     }
 
     let otBadge = '';
@@ -12465,7 +12552,8 @@ function renderAttendanceTable() {
   syncAttendanceStickyHead();
 }
 
-// สำหรับปุ่ม 🖨 พิมพ์ — เอกสารพิมพ์แยกต่างหาก (แนวนอน, ตัดข้อมูลที่ไม่จำเป็นสำหรับหน้าจอออก
+// สำหรับปุ่ม 🖨 พิมพ์ — เอกสารพิมพ์แยกต่างหาก (2026-11-25 เจ้าของสั่งเปลี่ยนเป็น **A4 แนวตั้ง
+// หน้าเดียว** จากเดิมแนวนอน, ตัดข้อมูลที่ไม่จำเป็นสำหรับหน้าจอออก
 // เช่นปุ่ม/ลิงก์ GPS/badge ตรวจสอบ) แทนการ print ตารางบนหน้าจอตรงๆ — สร้างใหม่ทุกครั้งที่
 // ตารางเรนเดอร์ ให้ข้อมูลตรงกับที่กำลังดูอยู่เสมอ (เปลี่ยนรอบ/เปลี่ยนพนักงานแล้วพิมพ์ได้ทันที)
 // 2026-08-02: rebuilt on feedback — plain "28 July 2026" date (fmtDateLong, no Thai
@@ -12503,6 +12591,13 @@ function buildAttendancePrintView({ targetUser, days, start, end, workDays, late
       : row.isWeekend ? 'att-print-weekend' : '';
     const d = new Date(row.date + 'T12:00:00');
     const st = statusText(row);
+    // 2026-11-25 (owner): เดิมการลาครึ่งวันโผล่บนกระดาษเฉพาะตอน "ไม่มีเวลาเข้า/ออก" (ดู inCell/
+    // outCell ข้างล่าง) ⇒ วันที่ลาครึ่งเช้าแล้วกลับมาสแกนเข้าเอง กระดาษไม่เขียนอะไรเลย อ่านแล้ว
+    // เหมือนมาทำงานปกติ ทั้งที่เหตุผลที่วันนั้นไม่ขึ้นว่า "สาย" คือการลานั้นเอง · กระดาษคือสิ่งที่
+    // ถูกเซ็นและใช้เคลียร์ข้อพิพาทเงินเดือน ⇒ โชว์เสมอ ใต้สถานะ เหมือนแถวบนจอ
+    const plNote = row.partialLeave
+      ? `<div class="att-print-leave">${escapeHtml(partialLeaveSummaryText(row.partialLeave))}</div>`
+      : '';
 
     const srcIcon = src => src === 'web' ? '🌐' : '📷';
     const plAbbrev = { annual: L('Leave', 'ลา'), sick: L('Sick', 'ป่วย'), business: L('Biz', 'กิจ') };
@@ -12520,11 +12615,15 @@ function buildAttendancePrintView({ targetUser, days, start, end, workDays, late
     const badges = [];
     if (canEarlyLateTarget && row.checkIn && row.status !== 'company-trip' && isDeviceScanSource(row.checkInSource)
         && (!isRestAttendanceDay(row) || hasHolidayWorkClaimOnDate(row.date, ownerUserId, false))) {
-      const [h, m] = row.checkIn.split(':').map(Number);
-      if (h * 60 + m <= earlyThresholdMinsOf(_pA, 1)) badges.push('🌅');
+      // 2026-11-25 (owner): กระดาษเคยเช็กแค่เส้นขั้น 1 ⇒ คนเข้า 06:00 กับ 07:20 ได้ 🌅 เหมือนกัน
+      // ทั้งที่เงินต่างกันเท่าตัว · ถามฟังก์ชันกลางตัวเดียวกับแถวบนจอ แล้วติดเลขขั้นไปด้วย
+      const _emTierP = earlyMorningTierOfCheckIn(row.checkIn, _pA);
+      if (_emTierP) badges.push(`🌅${allowanceTierMark(_emTierP)}`);
     }
     if (canEarlyLateTarget && deviceScanQualifiesForLateNight(row,
-      holidayWorkUnlockDates(ownerUserId, ownerRole, APP_SETTINGS))) badges.push('🌙');
+      holidayWorkUnlockDates(ownerUserId, ownerRole, APP_SETTINGS))) {
+      badges.push(`🌙${allowanceTierMark(lateNightPoints(row.lateOut, lateNightThresholdHourOf(_pA, 2)))}`);
+    }
     // 2026-10-08 (review): this carried the old `type === 'ot'` filter verbatim and had no 🔄 at
     // all, so the printout contradicted the screen beside it on an approved Holiday Work day. The
     // paper is what gets filed and signed, and a payroll dispute is settled from the paper.
@@ -12549,14 +12648,24 @@ function buildAttendancePrintView({ targetUser, days, start, end, workDays, late
     const excusedNote = row.excused
       ? `⛑️ ${currentLang === 'ja' ? '出勤免除' : L('Excused', 'ยกเว้น')}${row.excusedReason ? `: ${escapeHtml(row.excusedReason)}` : ''}`
       : '';
-    const notesCell = row.status === 'holiday'
-      ? escapeHtml(row.holidayName || L('Public Holiday', 'วันหยุดราชการ'))
-      : ([excusedNote, badges.join(' ')].filter(Boolean).join(' · ') || '—');
+    // 2026-11-25 (เจ้าของทักเอง): ชื่อวันหยุดเคยอยู่ช่องสุดท้าย ซึ่งหัวตารางเขียนว่า "เบี้ยเลี้ยงที่
+    // ได้รับการอนุมัติ" -- ผิดความหมายของช่อง และไม่ตรงกับตารางบนจอ ซึ่งใส่ชื่อวันหยุดไว้ใน
+    // ป้ายสถานะ (getStatusBadge: `🎌 <ชื่อวันหยุด>`) ⇒ ย้ายมาอยู่ใต้สถานะ เหมือนโน้ตการลา
+    // ผลพลอยได้: ของเดิมชื่อวันหยุด "แทนที่" ไอคอนเบี้ยทั้งช่อง ⇒ วันหยุดที่มีใบทำงานวันหยุด
+    // ไอคอนจะไม่เคยขึ้นบนกระดาษเลย · ย้ายแล้วช่องนั้นกลับมาทำหน้าที่ของมันตามหัวตาราง
+    const holidayNote = row.status === 'holiday'
+      ? `<div class="att-print-holiday-name">🎌 ${escapeHtml(row.holidayName || L('Public Holiday', 'วันหยุดราชการ'))}</div>`
+      : '';
+    // 2026-11-25: ห่อไอคอนทีละตัว เพราะช่องนี้ตั้ง letter-spacing ไว้แยกอีโมจิที่ติดกัน
+    // ซึ่งไปดันเลขขั้นให้หลุดห่างจากไอคอนของมันเอง อ่านเป็น "🌙 ²" แทน "🌙²" (เห็นจากใบพิมพ์จริง)
+    const notesCell = [excusedNote,
+      badges.map(b => `<span class="att-print-badge">${b}</span>`).join('')
+    ].filter(Boolean).join(' · ') || '—';
 
     return `<tr class="${rowCls}">
       <td class="att-print-date">${fmtDateLong(row.date)}</td>
       <td class="att-print-day">${dayNameArr[d.getDay()]}</td>
-      <td><span class="att-print-status att-print-status-${st.cls}">${st.text}</span></td>
+      <td><span class="att-print-status att-print-status-${st.cls}">${st.text}</span>${holidayNote}${plNote}</td>
       <td class="att-print-time">${inCell}</td>
       <td class="att-print-time">${outCell}</td>
       <td class="att-print-badges">${notesCell}</td>
@@ -12594,16 +12703,9 @@ function buildAttendancePrintView({ targetUser, days, start, end, workDays, late
       ${stat(annualDays, L('Annual Leave', 'ลาพักร้อน'))}
       ${stat(sickDays, L('Sick Leave', 'ลาป่วย'))}
     </div>
-    <div class="att-print-legend">
-      <span>🌐 ${L('Web App', 'Web App')}</span>
-      <span>📷 ${L('Scanner', 'เครื่องสแกน')}</span>
-      <span>🌅 ${L('Early Morning', 'Early Morning')}</span>
-      <span>🌙 ${L('Late Night', 'Late Night')}</span>
-      <span>⏱️ ${L('OT', 'OT')}</span>
-      <span>🗺️ ${L('Upcountry', 'Upcountry')}</span>
-      <span>🚗 ${L('Long Distance', 'Long Distance')}</span>
-      <span>🚙 ${L('Personal Car', 'รถส่วนตัว')}</span>
-    </div>
+    <div class="att-print-legend">${attendanceLegendItems(_pA, ownerRole, APP_SETTINGS)
+      .filter(it => !it.screenOnly)
+      .map(it => `<span>${it.icon} ${escapeHtml(it.text)}</span>`).join('')}</div>
     <div class="att-print-footer">Tozai Boeki Kaisha (Thailand) Ltd. — ${L('Time Attendance System', 'ระบบ Time Attendance')}</div>`;
 }
 
@@ -23652,6 +23754,15 @@ function showAttendanceDetail(date) {
   if (row.status === 'company-trip') {
     tagsEl.innerHTML = `<span class="badge" style="background:#e0f2fe;color:#0369a1">🚌 Company Trip — ${L('no bonuses apply this day', 'ไม่มีการคิดเงินพิเศษใดๆ ในวันนี้')}</span>`;
   }
+  // 2026-11-25 (owner): การลาครึ่งวันต้องขึ้นที่นี่ด้วย · เดิมส่วนนี้สร้างจาก "เบี้ยเลี้ยงและใบเคลม"
+  // ล้วนๆ และการลาไม่ใช่เบี้ยเลี้ยง ⇒ ไม่มีสาขาไหนในฟังก์ชันนี้อ่าน row.partialLeave เลย
+  // วันที่ลาป่วยครึ่งเช้าจึงขึ้นว่า "ไม่มีรายการพิเศษ" ทั้งที่แถวบนจอบอกว่าลาป่วย
+  // **ต้องอยู่หลังบล็อก company-trip** เพราะบล็อกนั้นใช้ `tagsEl.innerHTML =` (ทับ) ไม่ใช่ `+=`
+  // ถ้าวางไว้ก่อน ป้ายนี้จะถูกลบทิ้งเงียบๆ เฉพาะวัน Company Trip ซึ่งหาสาเหตุยากมาก
+  // ไม่มีด่าน role: การลาไม่ใช่เงิน ใครที่เห็นวันนั้นได้ ต้องเห็นเหตุผลที่วันนั้นไม่นับว่าสาย
+  if (row.partialLeave) {
+    tagsEl.innerHTML += `<span class="badge badge-info">${escapeHtml(partialLeaveSummaryText(row.partialLeave))}</span>`;
+  }
   // Early Morning is automatic from checkIn time (no approval needed) — computed the same
   // way as the table's earlyBadge, not from row.earlyIn/earlyApproved (those fields are never
   // populated anywhere in the codebase, so the old check here never fired).
@@ -23670,8 +23781,12 @@ function showAttendanceDetail(date) {
       // 2026-10-28 (เจ้าของสั่ง "ไล่แก้ต่อ"): **คอมเมนต์บรรทัดบนไม่จริง** — `targetRole`
       // มาจาก `targetUserObj` ที่ถอยไปเป็น `currentUser` เมื่อหาเจ้าของไม่เจอ (รอบ 4 พิสูจน์แล้ว)
       // ⇒ ใช้ `_ownerRole` ตัวเดียวกับทุกด่านเงินอื่นในป๊อปอัปนี้
-      const bonus = `฿${mins <= (_dA.earlyThreshold2Min ?? 390) ? earlyLateRateFor(_ownerRole, 'earlyMorning2', APP_SETTINGS) : earlyLateRateFor(_ownerRole, 'earlyMorning1', APP_SETTINGS)}`;
-      tagsEl.innerHTML += `<span class="badge badge-success">🌅 ${L('Early In', 'เข้าเช้า')} ${escapeHtml(row.checkIn)} (+${bonus})</span>`;
+      // 2026-11-25 (owner): ป๊อปอัปเคยมีสำเนากฎขั้นของตัวเอง (`_dA.earlyThreshold2Min ?? 390`)
+      // ซึ่งเป็นสำเนาที่สามของกฎเดียวกัน และสำเนาคือวิธีที่สามจอหลุดจากกันมาแล้วหลายรอบในไฟล์นี้
+      // ⇒ ถามฟังก์ชันกลางตัวเดียวกับแถวและใบพิมพ์ แล้วติดเลขขั้นบนไอคอนให้ตรงกันทั้งสามจอ
+      const _emTierD = earlyMorningTierOfCheckIn(row.checkIn, _dA);
+      const bonus = `฿${_emTierD === 2 ? earlyLateRateFor(_ownerRole, 'earlyMorning2', APP_SETTINGS) : earlyLateRateFor(_ownerRole, 'earlyMorning1', APP_SETTINGS)}`;
+      tagsEl.innerHTML += `<span class="badge badge-success">🌅${allowanceTierMark(_emTierD)} ${L('Early In', 'เข้าเช้า')} ${escapeHtml(row.checkIn)} (+${bonus})</span>`;
     }
   }
   // 2026-10-28: ด่านเงิน ⇒ `_ownerRole` · เหตุเดียวกันกับ badge เข้าเช้า
@@ -23680,9 +23795,11 @@ function showAttendanceDetail(date) {
       && (!isRestAttendanceDay(row) || hasHolidayWorkClaimOnDate(row.date, targetUserId, false))) {
     const _ln2Thr = lateNightThresholdHourOf(_dA, 2);
     // 2026-10-28: `_ownerRole` ไม่ใช่ `targetRole` — เหตุเดียวกับ badge เข้าเช้าข้างบน
-    const bonus = `฿${lateNightPoints(row.lateOut, _ln2Thr) === 2 ? earlyLateRateFor(_ownerRole, 'lateNight2', APP_SETTINGS) : earlyLateRateFor(_ownerRole, 'lateNight1', APP_SETTINGS)}`;
+    // 2026-11-25 (owner): เลขขั้นบนไอคอน ใช้ขั้นเดียวกับที่เลือกจำนวนเงินบรรทัดถัดไป
+    const _lnTierD = lateNightPoints(row.lateOut, _ln2Thr);
+    const bonus = `฿${_lnTierD === 2 ? earlyLateRateFor(_ownerRole, 'lateNight2', APP_SETTINGS) : earlyLateRateFor(_ownerRole, 'lateNight1', APP_SETTINGS)}`;
     const approved = row.lateApproved;
-    tagsEl.innerHTML += `<span class="badge ${approved?'badge-success':'badge-warning'}">🌙 ${L('Late Night', 'ทำงานดึก')} ${escapeHtml(row.lateOut)} (+${bonus}) ${approved?L('✓ Approved','✓ อนุมัติแล้ว'):L('⏳ Pending','⏳ รออนุมัติ')}</span>`;
+    tagsEl.innerHTML += `<span class="badge ${approved?'badge-success':'badge-warning'}">🌙${allowanceTierMark(_lnTierD)} ${L('Late Night', 'ทำงานดึก')} ${escapeHtml(row.lateOut)} (+${bonus}) ${approved?L('✓ Approved','✓ อนุมัติแล้ว'):L('⏳ Pending','⏳ รออนุมัติ')}</span>`;
   }
   const _crTag = buildCheckoutReviewHtml(row, targetUserObj, false);
   if (_crTag) tagsEl.innerHTML += _crTag;
@@ -26851,12 +26968,12 @@ function _faqHowToItems() {
     { icon: '🖨️', q: _faq('How do I print my Attendance record?', 'พิมพ์ตารางเวลาทำงานยังไง?', '勤怠記録の印刷はどうしますか？'),
       a: _faq('Go to the Attendance Table page, pick the period from the dropdown, then click "🖨 Print":', 'ไปที่หน้า "ตารางเวลาทำงาน" เลือกรอบจาก dropdown แล้วกด "🖨 พิมพ์":', '「勤怠テーブル」ページに移動し、ドロップダウンから期間を選択して「🖨印刷」をクリックします：')
       + ul(
-        _faq('This opens a separate, clean landscape A4 document — not a print of the on-screen table — with your name, the pay period, and per-day rows (date, day of week, status, check-in/out with a 🌐 web-app or 📷 device-scanner icon).',
-             'ระบบจะเปิดเอกสารแยกต่างหาก แนวนอน A4 สะอาดตา — ไม่ใช่การพิมพ์ตารางบนหน้าจอตรงๆ — มีชื่อคุณ, รอบเงินเดือน, และแถวรายวัน (วันที่, วัน, สถานะ, เวลาเข้า-ออกพร้อมไอคอน 🌐 Web App หรือ 📷 เครื่องสแกน)',
-             '画面上の表をそのまま印刷するのではなく、氏名・給与期間・日別の行（日付、曜日、ステータス、🌐Web Appまたは📷スキャナーのアイコン付き出退勤時刻）を含む、専用のクリーンなA4横向き文書が開きます。'),
-        _faq('Each day also shows icons for any Early Morning / Late Night / OT / Upcountry / Holiday Work / Personal Car that applied — only for allowance types you\'re actually eligible for — plus a summary of Work Days, Late count, Annual Leave, and Sick Leave for the period. A legend at the bottom explains every icon.',
-             'แต่ละวันจะมีไอคอนบอกด้วยถ้ามี Early Morning / Late Night / OT / Upcountry / ขอทำงานวันหยุด / รถส่วนตัว — แสดงเฉพาะประเภทเบี้ยเลี้ยงที่คุณมีสิทธิ์จริงเท่านั้น — พร้อมสรุปวันทำงาน, จำนวนครั้งมาสาย, ลาพักร้อน, ลาป่วยของรอบนั้น มีคำอธิบายไอคอนอยู่ท้ายเอกสาร',
-             '各日には該当する早出／深夜／OT／出張／休日出勤／自家用車のアイコンも表示されます — 実際に対象となる手当のみ表示されます — さらにその期間の出勤日数、遅刻回数、年次休暇、病気休暇の集計も表示されます。すべてのアイコンの説明は文書下部の凡例にあります。'),
+        _faq('This opens a separate, clean portrait A4 document — not a print of the on-screen table — sized so the whole period fits on ONE page, with your name, the pay period, and per-day rows (date, day of week, status, check-in/out with a 🌐 web-app or 📷 device-scanner icon). A half-day or partial leave appears under that day\'s status, so a day that is not counted late says why.',
+             'ระบบจะเปิดเอกสารแยกต่างหาก A4 แนวตั้ง สะอาดตา — ไม่ใช่การพิมพ์ตารางบนหน้าจอตรงๆ — ย่อให้ทั้งรอบอยู่ในหน้าเดียว มีชื่อคุณ, รอบเงินเดือน, และแถวรายวัน (วันที่, วัน, สถานะ, เวลาเข้า-ออกพร้อมไอคอน 🌐 Web App หรือ 📷 เครื่องสแกน) · ถ้าวันนั้นลาครึ่งวันหรือลาบางช่วง จะขึ้นไว้ใต้สถานะของวันนั้น วันที่ไม่ถูกนับว่าสายจึงบอกเหตุผลในตัวเอง',
+             '画面上の表をそのまま印刷するのではなく、氏名・給与期間・日別の行（日付、曜日、ステータス、🌐Web Appまたは📷スキャナーのアイコン付き出退勤時刻）を含む、専用のクリーンなA4縦向き文書が開きます。期間全体が1ページに収まるよう調整されています。半休や一部休暇はその日のステータスの下に表示されるため、遅刻として扱われない理由がその場で分かります。'),
+        _faq('Each day also shows icons for any Early Morning / Late Night / OT / Upcountry / Holiday Work / Personal Car that applied — only for allowance types you\'re actually eligible for — plus a summary of Work Days, Late count, Annual Leave, and Sick Leave for the period. The 🌅 and 🌙 icons carry a small ¹ or ² for which tier was earned (² is the higher-paying one); a day earns one tier or the other, never both. A legend at the bottom explains every icon.',
+             'แต่ละวันจะมีไอคอนบอกด้วยถ้ามี Early Morning / Late Night / OT / Upcountry / ขอทำงานวันหยุด / รถส่วนตัว — แสดงเฉพาะประเภทเบี้ยเลี้ยงที่คุณมีสิทธิ์จริงเท่านั้น — พร้อมสรุปวันทำงาน, จำนวนครั้งมาสาย, ลาพักร้อน, ลาป่วยของรอบนั้น · ไอคอน 🌅 และ 🌙 มีเลขเล็ก ¹ หรือ ² บอกว่าได้ขั้นไหน (² คือขั้นที่จ่ายสูงกว่า) หนึ่งวันได้ขั้นใดขั้นหนึ่งเท่านั้น ไม่เคยได้ทั้งสองขั้น · มีคำอธิบายไอคอนทุกตัวอยู่ท้ายเอกสาร',
+             '各日には該当する早出／深夜／OT／出張／休日出勤／自家用車のアイコンも表示されます — 実際に対象となる手当のみ表示されます — さらにその期間の出勤日数、遅刻回数、年次休暇、病気休暇の集計も表示されます。🌅と🌙のアイコンには、どの段階が適用されたかを示す小さな¹または²が付きます（²が高額の段階です）。1日につきどちらか一方のみで、両方が同時に付くことはありません。すべてのアイコンの説明は文書下部の凡例にあります。'),
         _faq('Managing Director/Accounting viewing another employee\'s attendance (via the employee selector at the top) can print that employee\'s record the same way.',
              'ถ้า Managing Director/Accounting กำลังดูข้อมูลของพนักงานคนอื่นอยู่ (ผ่านตัวเลือกพนักงานด้านบน) ก็พิมพ์ของพนักงานคนนั้นได้แบบเดียวกัน',
              'Managing Director/Accountingが（上部の従業員選択で）他の従業員の勤怠を閲覧している場合も、同じ方法でその従業員の記録を印刷できます。')

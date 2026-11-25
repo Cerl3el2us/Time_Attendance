@@ -1628,4 +1628,10 @@ window.LANG_JA = {
   "lunch": "昼休み",
   "The hours in these rows and the hours the payslip pays for this day no longer match. Check this record before approving or paying it.": "これらの行の時間と、この日に給与明細が支給する時間が一致しなくなっています。承認または支払いの前にこの記録を確認してください。",
   "Estimate — OT is paid on the period total, so the payslip can differ by satang": "概算 — 残業代は給与計算期間の合計に対して支給されるため、給与明細とは数サタン異なる場合があります",
+  // 2026-11-25: คำอธิบายสัญลักษณ์ของหน้าตารางเวลา วาดจาก attendanceLegendItems() ใน app.js
+  "via Web App": "Webアプリから打刻",
+  "via Hikvision scanner": "Hikvision顔認証端末から打刻",
+  "pending approval": "承認待ち",
+  "Leave (half-day / partial)": "休暇（半休・一部）",
+  "tier": "段階",
 };
