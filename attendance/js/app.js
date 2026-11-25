@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 184;
+const APP_BUILD = 185;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -21283,6 +21283,10 @@ async function submitOT() {
     return;
   }
   if (blockIfCompanyTrip(date)) return;
+  // 2026-11-25 (owner): ไปทำงานต่างประเทศไม่มี OT -- ด่านนี้ไม่เคยมีที่นี่ เพราะเดิม 'ot' ถูกเว้น
+  // ออกจาก ABROAD_NO_CLAIM_TYPES โดยเจตนา (ฝั่ง server ครอบให้เองเมื่อเพิ่มชนิดเข้า set แล้ว
+  // แต่ฝั่งเว็บต้องมีด่านของตัวเอง ไม่งั้นผู้ใช้กดยื่นแล้วเพิ่งมารู้ว่าถูกปฏิเสธตอนเซิร์ฟเวอร์ตอบ)
+  if (blockIfAbroadDay(date, 'ot')) return;
   if (!editingLeaveId) {
     const dup = DATA_LEAVES.find(l => l.userId === currentUser.id && l.type === 'ot' && l.dateFrom === date && !isVoidLeaveStatus(l.status));
     if (dup) {
@@ -21403,6 +21407,9 @@ async function submitDriverOT() {
     return;
   }
   if (blockIfCompanyTrip(date)) return;
+  // 2026-11-25 (owner): "ไม่มี OT" รวม Driver OT ด้วย (เจ้าของตอบเองเมื่อถูกถาม)
+  // Driver OT คือใบ type 'ot' ที่ติดธง isDriverOT จึงใช้ด่านชนิดเดียวกัน
+  if (blockIfAbroadDay(date, 'ot')) return;
   const officeOt = DATA_LEAVES.find(l =>
     l.userId === currentUser.id && l.type === 'ot' && !l.isDriverOT &&
     l.dateFrom === date && !isVoidLeaveStatus(l.status) && l.id !== editingLeaveId
@@ -24094,7 +24101,13 @@ function blockIfObserver(silent = false) {
 // abroad (user-confirmed); the flat daily allowance covers everything else. Dual-sync twin of
 // server.js's ABROAD_NO_CLAIM_TYPES / isAbroadClaimBlocked().
 // 2026-09-23 (owner): 'holiday-work' removed -- allowed on an abroad day without a scan, paid OT only.
-const ABROAD_NO_CLAIM_TYPES = new Set(['upcountry', 'late-out', 'long-distance', 'personal-car', 'early-morning']);
+// 2026-11-25 (owner): กลับทิศคำตัดสินสองข้อข้างบน -- "การไปทำงานต่างประเทศ จะไม่มี OT ด้วย
+// ไม่มี early morning late night" และวันหยุดที่ทับทริปได้เป็นวันลาอัตโนมัติอย่างเดียว ไม่มีทางเลือก
+// รับเป็นเงิน ⇒ 'ot' และ 'holiday-work' กลับเข้ารายการนี้ ทำให้วัน abroad เคลมอะไรไม่ได้เลย
+// เหมือนวัน Company Trip · 'ot' ครอบ Driver OT ให้เองเพราะ Driver OT คือ type 'ot' + ธง isDriverOT
+// เจ้าของรับทราบผลแล้วว่า คนที่ทำงานจริงในวันนักขัตฤกษ์ที่ต่างประเทศจะได้ +1 วันลา เท่ากับคนที่
+// ไม่ได้ทำงานวันนั้น -- เขายอมรับ ไม่ใช่ช่องโหว่ ห้ามเสนอแก้ซ้ำ
+const ABROAD_NO_CLAIM_TYPES = new Set(['upcountry', 'late-out', 'long-distance', 'personal-car', 'early-morning', 'ot', 'holiday-work']);
 function isApprovedAbroadDate(dateStr, userId) {
   if (!dateStr) return false;
   const uid = userId || (currentUser ? currentUser.id : null);
@@ -24160,10 +24173,11 @@ function abroadLocalTimeHtml(row, side) {
 function blockIfAbroadDay(dateStr, type, silent = false) {
   if (!ABROAD_NO_CLAIM_TYPES.has(type)) return false;
   if (!isApprovedAbroadDate(dateStr)) return false;
+  // 2026-11-25 (owner): ข้อความเดิมบอกว่ายังเคลม OT กับทำงานวันหยุดได้ ซึ่งไม่จริงอีกแล้ว
   if (!silent) showToast(currentLang === 'ja'
-    ? '✈️ この日は海外勤務として承認済みです — 申請できるのはOTと休日出勤のみです'
-    : L('✈️ This day is an approved Abroad day — only OT and Holiday Work can be claimed',
-        '✈️ วันนี้เป็นวันทำงานต่างประเทศที่อนุมัติแล้ว — เคลมได้เฉพาะ OT และทำงานวันหยุด'), 'warning');
+    ? '✈️ この日は海外勤務として承認済みです — 手当やOTは申請できません。出張期間中のタイの祝日は年次有給休暇が自動で加算されます'
+    : L('✈️ This day is an approved Abroad day — nothing can be claimed; a Thai public holiday inside the trip adds annual leave automatically',
+        '✈️ วันนี้เป็นวันทำงานต่างประเทศที่อนุมัติแล้ว — เคลมอะไรไม่ได้ วันหยุดนักขัตฤกษ์ที่ทับช่วงทริปจะเพิ่มวันลาพักร้อนให้อัตโนมัติ'), 'warning');
   return true;
 }
 function blockIfCompanyTrip(dateStr, silent = false) {

@@ -10692,9 +10692,15 @@ function isFullDayPersonalLeaveClaimBlocked(type, user, dateFrom) {
 // one claim that still applies while abroad; the flat daily allowance covers everything else.
 // Dual-sync twin in app.js.
 // 2026-09-23 (owner): 'holiday-work' removed -- allowed on an abroad day without a scan, paid OT only.
-const ABROAD_NO_CLAIM_TYPES = new Set(['upcountry', 'late-out', 'long-distance', 'personal-car', 'early-morning']);
+// 2026-11-25 (owner): กลับทิศคำตัดสินสองข้อข้างบน -- "การไปทำงานต่างประเทศ จะไม่มี OT ด้วย
+// ไม่มี early morning late night" และวันหยุดที่ทับทริปได้เป็นวันลาอัตโนมัติอย่างเดียว ไม่มีทางเลือก
+// รับเป็นเงิน ⇒ 'ot' และ 'holiday-work' กลับเข้ารายการนี้ ทำให้วัน abroad เคลมอะไรไม่ได้เลย
+// เหมือนวัน Company Trip · 'ot' ครอบ Driver OT ให้เองเพราะ Driver OT คือ type 'ot' + ธง isDriverOT
+// เจ้าของรับทราบผลแล้วว่า คนที่ทำงานจริงในวันนักขัตฤกษ์ที่ต่างประเทศจะได้ +1 วันลา เท่ากับคนที่
+// ไม่ได้ทำงานวันนั้น -- เขายอมรับ ไม่ใช่ช่องโหว่ ห้ามเสนอแก้ซ้ำ
+const ABROAD_NO_CLAIM_TYPES = new Set(['upcountry', 'late-out', 'long-distance', 'personal-car', 'early-morning', 'ot', 'holiday-work']);
 function abroadNoClaimMessage() {
-  return 'This day is covered by an approved Abroad request -- only OT and Holiday Work can be claimed';
+  return 'This day is covered by an approved Abroad request -- nothing can be claimed for it; a Thai public holiday inside the trip adds annual leave automatically';
 }
 function isAbroadClaimBlocked(type, user, dateFrom) {
   if (!ABROAD_NO_CLAIM_TYPES.has(type) || !user || !dateFrom) return false;
