@@ -56,8 +56,14 @@ function makeClient(w) {
     attendanceLog: w.log || {}, DEFAULT_ANNUAL_LEAVE_TIERS: TIERS, DEFAULT_TZ: 'Asia/Bangkok',
     currentLang: w.lang || 'en', L: (en, th) => (w.lang === 'th' ? th : en),
     bangkokDateStr: () => w.today, businessDateStr: () => w.today, bangkokYear: () => Number(w.today.slice(0, 4)),
-    isPublicHoliday: () => false, isCompanyTripDay: () => false,
-    isNonWorkDayForComp: d => { const x = new Date(d + 'T12:00:00').getDay(); return x === 0 || x === 6; },
+    // 2026-11-25: สตับเดิมตรึง isPublicHoliday เป็น false ไว้ จึงเขียนเทสต์นักขัตฤกษ์ไม่ได้เลย
+    // world เดิมที่ไม่มี holidays/companyTrips ยังได้ false เหมือนเดิม เทสต์เก่าจึงไม่กระทบ
+    isPublicHoliday: d => !!(w.holidays && w.holidays.includes(d)),
+    isCompanyTripDay: d => !!(w.companyTrips && w.companyTrips.includes(d)),
+    isNonWorkDayForComp: d => {
+      const x = new Date(d + 'T12:00:00').getDay();
+      return x === 0 || x === 6 || !!(w.holidays && w.holidays.includes(d));
+    },
   };
   ctx.BUSINESS_DAY_START_MINS = BUSINESS_DAY_START_MINS;
   vm.createContext(ctx);
@@ -70,8 +76,14 @@ function makeServer(w) {
     getAppSettings: () => ({ leave: w.leave, lateDeductPolicy: w.latePolicy || { enabled: false }, workSchedule: { standardStartHour: 8, standardStartMinute: 30 } }),
     readSettings: () => ({ leaveCarryForward: w.cf, leaveOpeningUsed: w.openingUsed }),
     bangkokDateStr: () => w.today,
-    isPublicHoliday: () => false, isCompanyTripDay: () => false,
-    isNonWorkDayForComp: d => { const x = new Date(d + 'T12:00:00').getDay(); return x === 0 || x === 6; },
+    // 2026-11-25: สตับเดิมตรึง isPublicHoliday เป็น false ไว้ จึงเขียนเทสต์นักขัตฤกษ์ไม่ได้เลย
+    // world เดิมที่ไม่มี holidays/companyTrips ยังได้ false เหมือนเดิม เทสต์เก่าจึงไม่กระทบ
+    isPublicHoliday: d => !!(w.holidays && w.holidays.includes(d)),
+    isCompanyTripDay: d => !!(w.companyTrips && w.companyTrips.includes(d)),
+    isNonWorkDayForComp: d => {
+      const x = new Date(d + 'T12:00:00').getDay();
+      return x === 0 || x === 6 || !!(w.holidays && w.holidays.includes(d));
+    },
     businessLeaveEntitlementDays: () => 3,
     buildAttendanceLogForUser: u => {
       const out = {};
@@ -280,6 +292,55 @@ test('manual run records the name; unreadable settings -> 503, nothing written',
   const bad = { writes: 0, settings: null };
   assert.strictEqual(makeRunner(w, bad).runYearEndCarryForward(2026, null).status, 503);
   assert.strictEqual(bad.writes, 0);
+});
+
+
+console.log('T3 วันหยุดที่ทับทริปต่างประเทศ -> วันลาพักร้อนอัตโนมัติ (เจ้าของสั่ง 2026-11-25)');
+// วันเดินทางไป/กลับ: ได้เมื่อตรงเสาร์-อาทิตย์ "หรือ" นักขัตฤกษ์ · วันกลางทริป: นักขัตฤกษ์เท่านั้น
+// ตัวช่วยนี้ยืนยัน dual-sync ให้เองทุกเคส -- ถ้า app.js กับ server.js ให้ค่าต่างกัน เทสต์แดงทันที
+function creditBoth(over, leaves, yStart, yEnd) {
+  const w = { today: '2026-12-31', leaves: [], users: [], leave: leaveSettings(),
+    cf: {}, openingUsed: {}, ...over };
+  const c = makeClient(w).abroadTravelCreditDays(leaves, yStart, yEnd);
+  const s = makeServer(w).abroadTravelCreditDays(leaves, yStart, yEnd);
+  assert.strictEqual(c, s, 'dual-sync แตก: app.js กับ server.js ให้ค่าต่างกัน');
+  return c;
+}
+const trip = (dateFrom, dateTo) => [{ dateFrom, dateTo }];
+const Y26 = ['2026-01-01', '2026-12-31'];
+// วันจริงยืนยันแล้ว: 2026-03-02 จ · 03-06 ศ · 03-07 ส · 03-08 อา · 03-09 จ · 03-15 อา
+test('นักขัตฤกษ์กลางทริปได้คืน 1 วัน', () => {
+  assert.strictEqual(creditBoth({ holidays: ['2026-03-04'] }, trip('2026-03-02', '2026-03-06'), ...Y26), 1);
+});
+test('นักขัตฤกษ์กลางทริป 2 วันได้คืน 2 วัน', () => {
+  assert.strictEqual(creditBoth({ holidays: ['2026-03-04', '2026-03-05'] }, trip('2026-03-02', '2026-03-06'), ...Y26), 2);
+});
+test('เสาร์-อาทิตย์กลางทริปไม่ได้คืน', () => {
+  assert.strictEqual(creditBoth({}, trip('2026-03-02', '2026-03-09'), ...Y26), 0);
+});
+test('วันเดินทางไปตรงเสาร์ได้ 1 กลับตรงอาทิตย์ได้อีก 1', () => {
+  assert.strictEqual(creditBoth({}, trip('2026-03-07', '2026-03-15'), ...Y26), 2);
+});
+test('วันเดินทางที่เป็นทั้งเสาร์และนักขัตฤกษ์ได้ 1 ไม่ใช่ 2', () => {
+  assert.strictEqual(creditBoth({ holidays: ['2026-03-07'] }, trip('2026-03-07', '2026-03-09'), ...Y26), 1);
+});
+test('ทริปวันเดียวที่ตรงนักขัตฤกษ์ได้ 1 ครั้งเดียว', () => {
+  assert.strictEqual(creditBoth({ holidays: ['2026-03-04'] }, trip('2026-03-04', '2026-03-04'), ...Y26), 1);
+});
+test('วันที่ยังไม่มาถึงไม่ได้เครดิต', () => {
+  assert.strictEqual(creditBoth({ today: '2026-03-03', holidays: ['2026-03-04'] },
+    trip('2026-03-02', '2026-03-06'), ...Y26), 0);
+});
+test('นักขัตฤกษ์ที่เป็น Company Trip ด้วย ไม่ได้เครดิต', () => {
+  assert.strictEqual(creditBoth({ holidays: ['2026-03-04'], companyTrips: ['2026-03-04'] },
+    trip('2026-03-02', '2026-03-06'), ...Y26), 0);
+});
+test('ทริปคาบปี นับเฉพาะวันที่อยู่ในปีที่ถาม', () => {
+  // 2026-12-31 พฤ · 2027-01-01 ศ (นักขัตฤกษ์ทั้งคู่) · ทริป 2026-12-30 พ -> 2027-01-02 ส
+  const t = trip('2026-12-30', '2027-01-02');
+  const w = { today: '2027-12-31', holidays: ['2026-12-31', '2027-01-01'] };
+  assert.strictEqual(creditBoth(w, t, ...Y26), 1);
+  assert.strictEqual(creditBoth(w, t, '2027-01-01', '2027-12-31'), 2);
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ', 0 failed'}`);

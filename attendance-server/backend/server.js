@@ -5833,13 +5833,38 @@ function earlyMorningSubmitBlockReason(user, dateStr) {
 // the travel day. Travel days cannot also carry Holiday Work. Dual-sync with the other file.
 // Owner decision 2026-09-23: a travel day counts only once it has ARRIVED (<= today, Bangkok),
 // so cancelling a future trip can never take back leave that was already spent.
+// 2026-11-25 (owner): ขอบเขตกว้างขึ้น -- ของเดิม (2026-09-23) ให้เครดิตเฉพาะวันเดินทาง คือวันเริ่ม
+// กับวันจบทริปเท่านั้น วันหยุดที่อยู่กลางทริปไม่ได้อะไรเลย เจ้าของสั่งเปลี่ยนเป็น:
+//   วันเดินทางไป/กลับ -> ได้เมื่อตรงเสาร์-อาทิตย์ "หรือ" นักขัตฤกษ์ (เหมือนเดิม)
+//   วันกลางทริป       -> ได้เมื่อตรงนักขัตฤกษ์เท่านั้น (เสาร์-อาทิตย์กลางทริปไม่ได้คืน)
+// เจ้าของพูดเองว่า "หากเป็นการเดินทางยาว วันเสาร์อาทิตย์จะไม่ได้คืน เสาร์อาทิตย์จะได้คืนแค่เฉพาะ
+// เป็นกรณีของวันเดินทางเท่านั้น" · ไม่มีเพดานต่อทริป (เจ้าของยืนยัน 2026-11-25)
+// `credited` เป็น Set ต่อหนึ่งทริป จึงกันการนับซ้ำเมื่อวันเดินทางตรงนักขัตฤกษ์ด้วย และกันทริป
+// วันเดียวนับสองครั้งไปในตัว · Dual-sync กับอีกไฟล์ ต้องเหมือนกันตัวอักษรต่อตัวอักษร
 function abroadTravelCreditDays(abroadLeaves, yStart, yEnd) {
   const today = bangkokDateStr();
+  const pad2 = v => String(v).padStart(2, '0');
+  const ymd = dt => `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`;
   let n = 0;
   abroadLeaves.forEach(l => {
-    new Set([l.dateFrom, l.dateTo || l.dateFrom]).forEach(d => {
-      if (d && d >= yStart && d <= yEnd && d <= today && isNonWorkDayForComp(d) && !isCompanyTripDay(d)) n++;
-    });
+    if (!l || !l.dateFrom) return;
+    const from = l.dateFrom;
+    const to = l.dateTo || l.dateFrom;
+    if (to < from) return;
+    const travel = new Set([from, to]);
+    const credited = new Set();
+    // ความยาวทริปถูกจำกัดด้วย ABROAD_SPAN_MAX_DAYS อยู่แล้ว เพดาน 400 รอบนี้กันเฉพาะกรณีข้อมูล
+    // เสียหาย (dateTo ห่างผิดปกติ) ไม่ให้ลูปวิ่งไม่สิ้นสุด
+    let guard = 0;
+    for (let dt = new Date(from + 'T12:00:00'); guard < 400; dt.setDate(dt.getDate() + 1)) {
+      guard++;
+      const d = ymd(dt);
+      if (d > to) break;
+      if (d < yStart || d > yEnd || d > today) continue;
+      if (isCompanyTripDay(d)) continue;
+      if (travel.has(d) ? isNonWorkDayForComp(d) : isPublicHoliday(d)) credited.add(d);
+    }
+    n += credited.size;
   });
   return n;
 }
