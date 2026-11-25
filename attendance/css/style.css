@@ -2381,7 +2381,17 @@ table tbody tr:last-child td { border-bottom: none; }
    ต้องการ 332px ⇒ ล้นออกนอกขอบกระดาษแล้วโดนตัดตอนพิมพ์ (วัดเจอในเบราว์เซอร์ ไม่ใช่เดา)
    ปล่อยให้ตัดบรรทัดได้ · ไอคอนจะขึ้นบรรทัดใหม่บ้างในวันที่มีหลายเบี้ย ซึ่งยังอ่านออกและไม่หาย */
 .att-print-badges { letter-spacing: 3px; white-space: normal; overflow-wrap: anywhere; }
-.att-print-holiday-name { letter-spacing: normal; }
+/* ชื่อวันหยุดอยู่ใต้ป้ายสถานะ (ไม่ใช่ช่องเบี้ยเลี้ยง) -- letter-spacing ต้องกลับเป็นปกติ
+   เพราะช่องไอคอนเบี้ยตั้งไว้ 3px ซึ่งเคยยืดชื่อวันหยุดจนกินสามบรรทัด */
+.att-print-holiday-name {
+  letter-spacing: normal;
+  font-size: 7.5px;
+  color: #b45309;
+  line-height: 1.3;
+  margin-top: 1px;
+  white-space: normal;
+  word-break: break-word;
+}
 
 .att-print-status {
   display: inline-block;

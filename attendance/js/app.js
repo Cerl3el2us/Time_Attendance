@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 184;
+const APP_BUILD = 185;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -12580,17 +12580,20 @@ function buildAttendancePrintView({ targetUser, days, start, end, workDays, late
     const excusedNote = row.excused
       ? `⛑️ ${currentLang === 'ja' ? '出勤免除' : L('Excused', 'ยกเว้น')}${row.excusedReason ? `: ${escapeHtml(row.excusedReason)}` : ''}`
       : '';
-    // 2026-11-25: ชื่อวันหยุดอยู่ช่องเดียวกับไอคอนเบี้ย ซึ่งตั้ง letter-spacing: 3px ไว้ให้ไอคอน
-    // ⇒ ชื่อยาวๆ ถูกยืดจนกินสามบรรทัดบนกระดาษแนวตั้ง (เห็นจากภาพจริง ไม่ใช่จากการวัดตัวเลข)
-    // ห่อด้วยคลาสของตัวเองเพื่อคืนระยะห่างตัวอักษรเป็นปกติ
-    const notesCell = row.status === 'holiday'
-      ? `<span class="att-print-holiday-name">${escapeHtml(row.holidayName || L('Public Holiday', 'วันหยุดราชการ'))}</span>`
-      : ([excusedNote, badges.join(' ')].filter(Boolean).join(' · ') || '—');
+    // 2026-11-25 (เจ้าของทักเอง): ชื่อวันหยุดเคยอยู่ช่องสุดท้าย ซึ่งหัวตารางเขียนว่า "เบี้ยเลี้ยงที่
+    // ได้รับการอนุมัติ" -- ผิดความหมายของช่อง และไม่ตรงกับตารางบนจอ ซึ่งใส่ชื่อวันหยุดไว้ใน
+    // ป้ายสถานะ (getStatusBadge: `🎌 <ชื่อวันหยุด>`) ⇒ ย้ายมาอยู่ใต้สถานะ เหมือนโน้ตการลา
+    // ผลพลอยได้: ของเดิมชื่อวันหยุด "แทนที่" ไอคอนเบี้ยทั้งช่อง ⇒ วันหยุดที่มีใบทำงานวันหยุด
+    // ไอคอนจะไม่เคยขึ้นบนกระดาษเลย · ย้ายแล้วช่องนั้นกลับมาทำหน้าที่ของมันตามหัวตาราง
+    const holidayNote = row.status === 'holiday'
+      ? `<div class="att-print-holiday-name">🎌 ${escapeHtml(row.holidayName || L('Public Holiday', 'วันหยุดราชการ'))}</div>`
+      : '';
+    const notesCell = [excusedNote, badges.join(' ')].filter(Boolean).join(' · ') || '—';
 
     return `<tr class="${rowCls}">
       <td class="att-print-date">${fmtDateLong(row.date)}</td>
       <td class="att-print-day">${dayNameArr[d.getDay()]}</td>
-      <td><span class="att-print-status att-print-status-${st.cls}">${st.text}</span>${plNote}</td>
+      <td><span class="att-print-status att-print-status-${st.cls}">${st.text}</span>${holidayNote}${plNote}</td>
       <td class="att-print-time">${inCell}</td>
       <td class="att-print-time">${outCell}</td>
       <td class="att-print-badges">${notesCell}</td>
