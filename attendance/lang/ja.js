@@ -1443,7 +1443,7 @@ window.LANG_JA = {
   "📌 On these days only OT and Holiday Work can still be claimed.": "📌 これらの日に申請できるのはOTと休日出勤のみです。",
   "This is a travel day of your Abroad trip — the annual-leave day is credited automatically, so holiday work cannot be submitted": "この日は海外勤務の移動日です — 年次休暇が自動で加算されるため、休日出勤は申請できません",
   "Holiday work can only be submitted for a day that has already started": "休日出勤はすでに始まった日のみ申請できます",
-  "⚠️ A holiday work request exists on this trip's start or end date — travel days earn annual leave automatically; cancel that holiday work first": "⚠️ 出発日または帰着日に休日出勤の申請があります — 移動日は年次休暇が自動加算されるため、先にその休日出勤を取り消してください",
+  "⚠️ An OT or holiday work request exists inside this trip's dates — an Abroad day pays none of them; cancel that request first": "⚠️ この出張期間内にOTまたは休日出勤の申請があります — 海外勤務日はいずれも支給されません。先にその申請を取り消してください",
   "Abroad day: pays OT ×2/×3 from start–end times only — no holiday transport, no Upcountry. No scan needed.": "海外勤務日：開始〜終了時刻からのOT×2/×3のみ支給 — 休日交通費・出張手当なし。打刻不要。",
   "Abroad day: adds 1 annual-leave day only — no holiday transport, no Upcountry, no OT. No scan needed.": "海外勤務日：年次休暇1日加算のみ — 休日交通費・出張手当・OTなし。打刻不要。",
   "✈️ Abroad": "✈️ 海外勤務手当",
@@ -1494,7 +1494,7 @@ window.LANG_JA = {
   "next day": "翌日",
   "This date is a Company Trip day — no allowance of any kind is paid, so Holiday Work cannot be filed": "この日は社員旅行日です — 手当は一切支給されないため、休日出勤は申請できません",
   "Holiday Work": "休日出勤",
-  "Holiday work already exists on this trip's start or end date, and a travel day cannot also carry holiday work. Reject this trip (the employee can resubmit it with other dates), or reject that holiday work first if it is still pending": "この出張の出発日または帰着日にすでに休日出勤があり、移動日に休日出勤を重ねることはできません。この出張を却下する（社員は別の日程で再申請できます）か、その休日出勤がまだ承認待ちであれば先に却下してください",
+  "An OT or holiday work request already exists inside this trip's dates, and an Abroad day pays none of them. Reject this trip (the employee can resubmit it with other dates), or reject that request first if it is still pending": "この出張期間内にすでにOTまたは休日出勤の申請があり、海外勤務日はいずれも支給されません。この出張を却下してください（従業員は別の日程で再申請できます）。その申請がまだ承認待ちであれば、先にそちらを却下してください。",
   // 2026-09-24: web check-out review box — Awaiting / Reviewed tabs (Approvals page)
   "Web check-out review": "Web退勤の確認",
   // 2026-10-02 (owner): the morning review -- the twin of the Web check-out review above.

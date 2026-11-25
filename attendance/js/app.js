@@ -70,7 +70,7 @@
 // is already bumped on every deploy that touches the front-end -- so this is the deploy round,
 // not a semantic version. The old code set a hardcoded 'v1.0.0' into `.sidebar-footer > div`,
 // an element that does not exist in index.html, so no version was ever actually displayed.
-const APP_BUILD = 185;
+const APP_BUILD = 186;
 function renderBuildLabel() {
   const el = document.getElementById('sidebar-build');
   if (el) el.textContent = 'Build ' + APP_BUILD;
@@ -15794,19 +15794,26 @@ function computePayroll(user, start, end, periodIndex) {
   const periodStartStr = `${start.getFullYear()}-${pad2(start.getMonth()+1)}-${pad2(start.getDate())}`;
   const periodEndStr   = `${end.getFullYear()}-${pad2(end.getMonth()+1)}-${pad2(end.getDate())}`;
 
+  // 2026-11-25 (owner): วัน abroad ไม่จ่ายอะไรเลย ⇒ ต้องรู้ว่าวันไหนเป็น abroad ตั้งแต่ตรงนี้
+  // ของเดิมประกาศไว้ "ใต้" approvedHolidayWork (เหตุผลเดิม 2026-09-23: Holiday Work บนวัน abroad
+  // จ่าย OT x2/x3 อย่างเดียว ไม่มี Upcountry ไม่มีค่าเดินทาง) · ย้ายขึ้นมาเพราะตอนนี้สองรายการ
+  // ข้างล่างต้องใช้มันเป็นตัวกรอง ถ้าปล่อยไว้ที่เดิมจะเป็น ReferenceError ตอนรันจริง (TDZ)
+  // ซึ่ง lint จับไม่ได้ · Dual-sync with the other file's computePayroll.
+  const abroadDates = new Set(pDays.filter(d => d.status === 'abroad').map(d => d.date));
+
+  // 2026-11-25 (owner): ใบที่อนุมัติไว้ "ก่อน" ทริปถูกอนุมัติ ยังอยู่ในระบบและยัง approved
+  // ด่านตอนยื่นไม่ได้แตะมันเลย ⇒ ถ้าไม่กรองที่นี่ เงินยังออกทั้งที่กฎใหม่บอกว่าวัน abroad ไม่จ่าย
   const approvedHolidayWork = canHolidayWork ? DATA_LEAVES.filter(l =>
     l.userId === user.id && l.type === 'holiday-work' && l.status === 'approved' &&
     l.dateFrom >= periodStartStr && l.dateFrom <= periodEndStr &&
-    !isCompanyTripDay(l.dateFrom)
+    !isCompanyTripDay(l.dateFrom) &&
+    !abroadDates.has(l.dateFrom)
   ) : [];
   const holidayWorkDates = new Set(approvedHolidayWork.map(l => l.dateFrom));
   const fullLeaveDates = new Set(
     pDays.filter(d => isFullDayPersonalLeaveStatus(d.status)).map(d => d.date)
   );
-  // 2026-09-23 (owner): Holiday Work on an approved Abroad day pays its OT (x2/x3) only -- no
-  // Upcountry and no holiday transport, the Abroad allowance already covers the day.
-  // Dual-sync with the other file's computePayroll.
-  const abroadDates = new Set(pDays.filter(d => d.status === 'abroad').map(d => d.date));
+  // (ย้ายขึ้นไปประกาศก่อน approvedHolidayWork เมื่อ 2026-11-25 ดูเหตุผลที่จุดประกาศใหม่)
 
   // 2026-09-24 (owner: a Company Trip day pays no allowance of any kind): a web Early Morning
   // approved before the date was declared a Company Trip is no longer paid. Dual-sync with server.js.
@@ -15882,10 +15889,12 @@ function computePayroll(user, start, end, periodIndex) {
     });
   }
 
+  // 2026-11-25 (owner): ไปทำงานต่างประเทศไม่มี OT ทุกชนิด รวม Driver OT ซึ่งเป็น type 'ot' เหมือนกัน
   const approvedOTs = canOT ? DATA_LEAVES.filter(l =>
     l.userId === user.id && l.type === 'ot' && l.status === 'approved' &&
     l.dateFrom >= periodStartStr && l.dateFrom <= periodEndStr &&
-    !isCompanyTripDay(l.dateFrom)
+    !isCompanyTripDay(l.dateFrom) &&
+    !abroadDates.has(l.dateFrom)
   ) : [];
 
   // 2026-07-31: now role-gated at the calc layer (previously ungated here -- only hidden
@@ -18292,8 +18301,8 @@ async function approveMockLeaveInternal(id) {
   const data = await res.json();
   // 2026-09-24 (review M-2): the travel-day conflict refusal gets a translated, actionable message.
   if (!data.success && data.code === 'abroad-travel-hw-conflict') {
-    throw new Error(L("Holiday work already exists on this trip's start or end date, and a travel day cannot also carry holiday work. Reject this trip (the employee can resubmit it with other dates), or reject that holiday work first if it is still pending",
-      'มีคำขอทำงานวันหยุดอยู่แล้วในวันเริ่มหรือวันสิ้นสุดทริป และวันเดินทางจะมีทำงานวันหยุดด้วยไม่ได้ — ให้ปฏิเสธทริปนี้ (พนักงานยื่นใหม่ด้วยวันที่อื่นได้) หรือปฏิเสธคำขอทำงานวันหยุดนั้นก่อนหากยังรออนุมัติอยู่'));
+    throw new Error(L("An OT or holiday work request already exists inside this trip's dates, and an Abroad day pays none of them. Reject this trip (the employee can resubmit it with other dates), or reject that request first if it is still pending",
+      'มีคำขอ OT หรือทำงานวันหยุดอยู่แล้วในช่วงวันของทริปนี้ และวันทำงานต่างประเทศไม่จ่ายทั้งสองอย่าง — ให้ปฏิเสธทริปนี้ (พนักงานยื่นใหม่ด้วยวันที่อื่นได้) หรือปฏิเสธคำขอนั้นก่อนหากยังรออนุมัติอยู่'));
   }
   if (!data.success) throw new Error(data.message);
   Object.assign(l, data.leave);
@@ -21942,11 +21951,14 @@ async function submitAbroad() {
   // Holiday Work (they earn annual leave automatically).
   // 2026-09-24 (review L-4): dropped `l.id !== editingLeaveId` -- editingLeaveId is this Abroad
   // record's id, never a Holiday Work id, so that comparison could never exclude anything.
-  if (DATA_LEAVES.some(l => l.userId === currentUser.id && l.type === 'holiday-work' &&
+  // 2026-11-25 (owner): ดูทุกวันในช่วง และดูใบ ot ด้วย -- dual-sync กับ server
+  // abroadTravelDayHolidayWorkConflict() · ของเดิมดูแค่วันเริ่ม/วันจบ และดูแค่ holiday-work
+  if (DATA_LEAVES.some(l => l.userId === currentUser.id &&
+      (l.type === 'holiday-work' || l.type === 'ot') &&
       !isVoidLeaveStatus(l.status) &&
-      (l.dateFrom === dateFrom || l.dateFrom === dateTo))) {
-    showToast(L("⚠️ A holiday work request exists on this trip's start or end date — travel days earn annual leave automatically; cancel that holiday work first",
-      '⚠️ มีคำขอทำงานวันหยุดในวันเริ่มหรือวันสิ้นสุดทริป — วันเดินทางได้วันลาพักร้อนอัตโนมัติ กรุณายกเลิกคำขอทำงานวันหยุดนั้นก่อน'), 'warning');
+      l.dateFrom >= dateFrom && l.dateFrom <= dateTo)) {
+    showToast(L("⚠️ An OT or holiday work request exists inside this trip's dates — an Abroad day pays none of them; cancel that request first",
+      '⚠️ มีคำขอ OT หรือทำงานวันหยุดอยู่ในช่วงทริปนี้ — วันทำงานต่างประเทศไม่จ่ายทั้งสองอย่าง กรุณายกเลิกคำขอนั้นก่อน'), 'warning');
     return;
   }
   if (!reason) { showToast(L('⚠️ Please specify the reason', '⚠️ กรุณาระบุเหตุผล'), 'warning'); return; }

@@ -6828,15 +6828,20 @@ function validateAbroadRecord({ dateFrom, dateTo, location, reason }) {
 // silently mark its days as worked instead of absent.
 // 2026-09-23 (owner): a trip's start/end dates are travel days that earn annual leave
 // automatically and cannot carry Holiday Work -- refuse a trip whose travel day already has one.
-const ABROAD_TRAVEL_HW_CONFLICT_MSG = "A holiday work request exists on this trip's start or end date — travel days earn annual leave automatically; cancel that holiday work first";
+// 2026-11-25 (owner): ขยายจาก "วันเดินทาง + holiday-work" เป็น "ทุกวันในช่วง + holiday-work และ ot"
+// เพราะกฎใหม่ห้ามทั้ง OT และ Holiday Work บนวัน abroad ทุกวัน ไม่ใช่แค่วันเดินทาง
+// ถ้าไม่ขยาย จะยื่นทริปทับใบที่มีอยู่ได้ แล้วใบนั้นกลายเป็นไม่จ่ายเงียบๆ โดยพนักงานไม่รู้ตัว
+const ABROAD_TRAVEL_HW_CONFLICT_MSG = "An OT or holiday work request exists inside this trip's dates — an Abroad day pays none of them, and a Thai public holiday inside the trip adds annual leave automatically; cancel that request first";
 // Shown to the APPROVER (who cannot cancel the employee's holiday work). Client maps code
 // 'abroad-travel-hw-conflict' to its own TH/EN/JA text.
-const ABROAD_TRAVEL_HW_CONFLICT_APPROVAL_MSG = "Holiday work already exists on this trip's start or end date, and a travel day cannot also carry holiday work. Reject this trip (the employee can resubmit it with other dates), or reject that holiday work first if it is still pending";
+const ABROAD_TRAVEL_HW_CONFLICT_APPROVAL_MSG = "An OT or holiday work request already exists inside this trip's dates, and an Abroad day pays none of them. Reject this trip (the employee can resubmit it with other dates), or reject that request first if it is still pending";
+// ชื่อฟังก์ชันยังเป็นชื่อเดิมเพราะโค้ดเรียกมันหลายที่และโค้ดข้อผิดพลาดที่ไคลเอนต์แปล
+// ('abroad-travel-hw-conflict') ถูกตรึงไว้แล้ว · ขอบเขตที่มันตรวจคือทั้งช่วงทริปแล้ว ไม่ใช่วันเดินทาง
 function abroadTravelDayHolidayWorkConflict(leaves, userId, dateFrom, dateTo) {
-  const travel = new Set([dateFrom, dateTo || dateFrom]);
+  const to = dateTo || dateFrom;
   return leaves.some(l =>
-    l.userId === userId && l.type === 'holiday-work' &&
-    !isVoidLeaveStatus(l.status) && travel.has(l.dateFrom));
+    l.userId === userId && (l.type === 'holiday-work' || l.type === 'ot') &&
+    !isVoidLeaveStatus(l.status) && l.dateFrom >= dateFrom && l.dateFrom <= to);
 }
 function abroadSubmitBlockReason(user) {
   if (!user) return 'You are not eligible to submit abroad requests';
@@ -11441,19 +11446,26 @@ function computePayroll(user, start, end, periodIndex) {
   const periodStartStr = `${start.getFullYear()}-${pad2(start.getMonth() + 1)}-${pad2(start.getDate())}`;
   const periodEndStr   = `${end.getFullYear()}-${pad2(end.getMonth() + 1)}-${pad2(end.getDate())}`;
 
+  // 2026-11-25 (owner): วัน abroad ไม่จ่ายอะไรเลย ⇒ ต้องรู้ว่าวันไหนเป็น abroad ตั้งแต่ตรงนี้
+  // ของเดิมประกาศไว้ "ใต้" approvedHolidayWork (เหตุผลเดิม 2026-09-23: Holiday Work บนวัน abroad
+  // จ่าย OT x2/x3 อย่างเดียว ไม่มี Upcountry ไม่มีค่าเดินทาง) · ย้ายขึ้นมาเพราะตอนนี้สองรายการ
+  // ข้างล่างต้องใช้มันเป็นตัวกรอง ถ้าปล่อยไว้ที่เดิมจะเป็น ReferenceError ตอนรันจริง (TDZ)
+  // ซึ่ง lint จับไม่ได้ · Dual-sync with the other file's computePayroll.
+  const abroadDates = new Set(pDays.filter(d => d.status === 'abroad').map(d => d.date));
+
+  // 2026-11-25 (owner): ใบที่อนุมัติไว้ "ก่อน" ทริปถูกอนุมัติ ยังอยู่ในระบบและยัง approved
+  // ด่านตอนยื่นไม่ได้แตะมันเลย ⇒ ถ้าไม่กรองที่นี่ เงินยังออกทั้งที่กฎใหม่บอกว่าวัน abroad ไม่จ่าย
   const approvedHolidayWork = canHolidayWork ? leaves.filter(l =>
     l.userId === user.id && l.type === 'holiday-work' && l.status === 'approved' &&
     l.dateFrom >= periodStartStr && l.dateFrom <= periodEndStr &&
-    !isCompanyTripDay(l.dateFrom)
+    !isCompanyTripDay(l.dateFrom) &&
+    !abroadDates.has(l.dateFrom)
   ) : [];
   const holidayWorkDates = new Set(approvedHolidayWork.map(l => l.dateFrom));
   const fullLeaveDates = new Set(
     pDays.filter(d => isFullDayPersonalLeaveStatus(d.status)).map(d => d.date)
   );
-  // 2026-09-23 (owner): Holiday Work on an approved Abroad day pays its OT (x2/x3) only -- no
-  // Upcountry and no holiday transport, the Abroad allowance already covers the day.
-  // Dual-sync with the other file's computePayroll.
-  const abroadDates = new Set(pDays.filter(d => d.status === 'abroad').map(d => d.date));
+  // (ย้ายขึ้นไปประกาศก่อน approvedHolidayWork เมื่อ 2026-11-25 ดูเหตุผลที่จุดประกาศใหม่)
 
   // 2026-09-24 (owner: a Company Trip day pays no allowance of any kind): a web Early Morning
   // approved before the date was declared a Company Trip is no longer paid. Dual-sync with app.js.
@@ -11508,10 +11520,12 @@ function computePayroll(user, start, end, periodIndex) {
 
   const hourlyRate = base / 30 / 8;
 
+  // 2026-11-25 (owner): ไปทำงานต่างประเทศไม่มี OT ทุกชนิด รวม Driver OT ซึ่งเป็น type 'ot' เหมือนกัน
   const approvedOTs = canOT ? leaves.filter(l =>
     l.userId === user.id && l.type === 'ot' && l.status === 'approved' &&
     l.dateFrom >= periodStartStr && l.dateFrom <= periodEndStr &&
-    !isCompanyTripDay(l.dateFrom)
+    !isCompanyTripDay(l.dateFrom) &&
+    !abroadDates.has(l.dateFrom)
   ) : [];
 
   // 2026-07-31: now role-gated at the calc layer (previously ungated here -- only hidden
